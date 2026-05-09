@@ -36,10 +36,7 @@ impl<'a> Expr<'a> {
     }
 
     pub fn pow(self, exponent: Self) -> Self {
-        let id = self
-            .arena
-            .borrow_mut()
-            .push(ExprNode::Pow(self.id, exponent.id));
+        let id = self.arena.borrow_mut().push(ExprNode::Pow(self.id, exponent.id));
         Self::new(id, self.arena)
     }
 

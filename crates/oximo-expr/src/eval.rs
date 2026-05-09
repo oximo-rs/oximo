@@ -35,12 +35,12 @@ pub fn evaluate<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Resul
         ExprNode::Const(c) => *c,
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v))?,
         ExprNode::Param(p) => ctx.param(*p).ok_or(EvalError::UnboundParam(*p))?,
-        ExprNode::Add(children) => children.iter().try_fold(0.0, |acc, c| {
-            Ok::<_, EvalError>(acc + evaluate(arena, *c, ctx)?)
-        })?,
-        ExprNode::Mul(children) => children.iter().try_fold(1.0, |acc, c| {
-            Ok::<_, EvalError>(acc * evaluate(arena, *c, ctx)?)
-        })?,
+        ExprNode::Add(children) => children
+            .iter()
+            .try_fold(0.0, |acc, c| Ok::<_, EvalError>(acc + evaluate(arena, *c, ctx)?))?,
+        ExprNode::Mul(children) => children
+            .iter()
+            .try_fold(1.0, |acc, c| Ok::<_, EvalError>(acc * evaluate(arena, *c, ctx)?))?,
         ExprNode::Neg(inner) => -evaluate(arena, *inner, ctx)?,
         ExprNode::Pow(base, exp) => evaluate(arena, *base, ctx)?.powf(evaluate(arena, *exp, ctx)?),
         ExprNode::Sin(inner) => evaluate(arena, *inner, ctx)?.sin(),

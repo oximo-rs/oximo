@@ -49,10 +49,7 @@ pub enum ExprNode {
     Cos(ExprId),
     Exp(ExprId),
     Log(ExprId),
-    Linear {
-        coeffs: Vec<(VarId, f64)>,
-        constant: f64,
-    },
+    Linear { coeffs: Vec<(VarId, f64)>, constant: f64 },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -66,9 +63,7 @@ impl ExprArena {
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            nodes: Vec::with_capacity(cap),
-        }
+        Self { nodes: Vec::with_capacity(cap) }
     }
 
     #[inline]

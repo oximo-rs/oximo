@@ -14,14 +14,8 @@ pub struct LinearTerms {
 /// nonlinear node (Mul of two non-constants, Pow, transcendentals, ...).
 fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
     match arena.get(id).clone() {
-        ExprNode::Const(c) => Some(LinearTerms {
-            coeffs: Vec::new(),
-            constant: c,
-        }),
-        ExprNode::Var(v) => Some(LinearTerms {
-            coeffs: vec![(v, 1.0)],
-            constant: 0.0,
-        }),
+        ExprNode::Const(c) => Some(LinearTerms { coeffs: Vec::new(), constant: c }),
+        ExprNode::Var(v) => Some(LinearTerms { coeffs: vec![(v, 1.0)], constant: 0.0 }),
         ExprNode::Linear { coeffs, constant } => Some(LinearTerms { coeffs, constant }),
         ExprNode::Neg(inner) => as_linear(arena, inner).map(|t| LinearTerms {
             coeffs: t.coeffs.into_iter().map(|(v, c)| (v, -c)).collect(),
@@ -54,10 +48,7 @@ fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
                 }
             }
             Some(match linear {
-                None => LinearTerms {
-                    coeffs: Vec::new(),
-                    constant: scalar,
-                },
+                None => LinearTerms { coeffs: Vec::new(), constant: scalar },
                 Some(t) => LinearTerms {
                     coeffs: t.coeffs.into_iter().map(|(v, c)| (v, c * scalar)).collect(),
                     constant: t.constant * scalar,
@@ -71,10 +62,7 @@ fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
 /// Materialize a linear-terms struct into a fresh `Linear` node in the arena.
 fn push_linear(arena: &mut ExprArena, mut t: LinearTerms) -> ExprId {
     t.coeffs.retain(|(_, c)| *c != 0.0);
-    arena.push(ExprNode::Linear {
-        coeffs: t.coeffs,
-        constant: t.constant,
-    })
+    arena.push(ExprNode::Linear { coeffs: t.coeffs, constant: t.constant })
 }
 
 /// Build `lhs + rhs`, preserving the linear fast-path when both sides are
@@ -87,10 +75,7 @@ pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
         }
         return push_linear(
             arena,
-            LinearTerms {
-                coeffs: map.into_iter().collect(),
-                constant: lt.constant + rt.constant,
-            },
+            LinearTerms { coeffs: map.into_iter().collect(), constant: lt.constant + rt.constant },
         );
     }
     arena.push(ExprNode::Add(smallvec![lhs, rhs]))

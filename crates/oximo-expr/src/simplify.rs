@@ -5,8 +5,8 @@ use crate::arena::{ExprArena, ExprId, ExprNode};
 ///
 /// Current rules: constant folding for unary nodes and `Pow`. The linear
 /// fast-path is already canonical, so we leave `Linear` and n-ary `Add`/`Mul`
-/// alone. 
-/// 
+/// alone.
+///
 /// TODO: Extend this once we add a CSE pass.
 pub fn simplify(arena: &mut ExprArena, id: ExprId) -> ExprId {
     let folded = match arena.get(id).clone() {
