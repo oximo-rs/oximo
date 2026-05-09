@@ -1,0 +1,19 @@
+[package]
+name = "oximo-solver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Solver-trait abstraction for oximo backends"
+
+[dependencies]
+oximo-expr.workspace = true
+oximo-core.workspace = true
+smol_str.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
