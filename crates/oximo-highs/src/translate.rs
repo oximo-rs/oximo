@@ -3,9 +3,10 @@ use std::time::Instant;
 use highs::{HighsModelStatus, RowProblem, Sense as HighsSense};
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId};
 use oximo_expr::extract_linear;
-use oximo_solver::{SolverError, SolverOptions, SolverResult, SolverStatus};
+use oximo_solver::{SolverError, SolverResult, SolverStatus};
 use rustc_hash::FxHashMap;
 
+use crate::HighsOptions;
 use crate::options::apply as apply_options;
 
 /// Translate `model` into a HiGHS [`RowProblem`], solve, and return the
@@ -21,7 +22,7 @@ use crate::options::apply as apply_options;
 /// # Panics
 ///
 /// Panics if model variable IDs overflow `u32`.
-pub fn solve(model: &Model, opts: &SolverOptions) -> Result<SolverResult, SolverError> {
+pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
     if !matches!(kind, ModelKind::LP | ModelKind::MILP) {
         return Err(SolverError::UnsupportedKind(kind));
