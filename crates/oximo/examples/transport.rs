@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     m.maximize(3.0 * x + 4.0 * y);
 
     let mut solver = Highs;
-    let result = solver.solve(&m, &SolverOptions::default())?;
+    let result = solver.solve(&m, &HighsOptions::default().verbose(true))?;
 
     println!("status    = {:?}", result.status);
     println!("objective = {:?}", result.objective);
