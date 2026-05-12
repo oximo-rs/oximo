@@ -106,6 +106,74 @@ fn method_str(m: HighsMethod) -> &'static str {
         HighsMethod::PdLp => "pdlp",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use highs::{RowProblem, Sense as HighsSense};
+    use oximo_solver::{MipOptionsExt, Presolve, UniversalOptionsExt};
+
+    use super::*;
+
+    fn empty_highs_model() -> HighsModel {
+        RowProblem::default().optimise(HighsSense::Minimise)
+    }
+
+    #[test]
+    fn builder_sets_all_fields() {
+        let o = HighsOptions::default()
+            .time_limit(Duration::from_secs(30))
+            .threads(8)
+            .verbose(true)
+            .mip_gap(0.01)
+            .presolve(Presolve::Off)
+            .method(HighsMethod::Ipm)
+            .parallel(true);
+        assert_eq!(o.universal.time_limit, Some(Duration::from_secs(30)));
+        assert_eq!(o.universal.threads, Some(8));
+        assert_eq!(o.universal.verbose, Some(true));
+        assert_eq!(o.mip.mip_gap, Some(0.01));
+        assert_eq!(o.mip.presolve, Some(Presolve::Off));
+        assert_eq!(o.method, Some(HighsMethod::Ipm));
+        assert_eq!(o.parallel, Some(true));
+    }
+
+    #[test]
+    fn apply_default_does_not_panic() {
+        let mut m = empty_highs_model();
+        apply(&mut m, &HighsOptions::default());
+    }
+
+    #[test]
+    fn apply_all_options_does_not_panic() {
+        let mut m = empty_highs_model();
+        let o = HighsOptions::default()
+            .time_limit(Duration::from_secs(10))
+            .threads(1)
+            .verbose(false)
+            .mip_gap(0.01)
+            .presolve(Presolve::Off)
+            .method(HighsMethod::Simplex)
+            .parallel(false);
+        apply(&mut m, &o);
+    }
+
+    #[test]
+    fn apply_every_method_variant() {
+        for method in
+            [HighsMethod::Choose, HighsMethod::Simplex, HighsMethod::Ipm, HighsMethod::PdLp]
+        {
+            let mut m = empty_highs_model();
+            apply(&mut m, &HighsOptions::default().method(method));
+        }
+    }
+
+    #[test]
+    fn apply_every_presolve_variant() {
+        for presolve in [Presolve::Off, Presolve::On, Presolve::Auto] {
+            let mut m = empty_highs_model();
+            apply(&mut m, &HighsOptions::default().presolve(presolve));
         }
     }
 }
