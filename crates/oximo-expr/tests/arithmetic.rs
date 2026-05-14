@@ -73,3 +73,16 @@ fn negation_flips_coefficients() {
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted, vec![(VarId(0), -2.0), (VarId(1), -3.0)]);
 }
+
+#[test]
+fn large_sum_extracts_correctly() {
+    let arena = RefCell::new(ExprArena::new());
+    let vars: Vec<_> = (0..100).map(|i| make_var(&arena, i)).collect();
+    let total = oximo_expr::sum(vars.iter().copied());
+    let terms = extract_linear(&arena.borrow(), total.id).expect("linear");
+    assert_eq!(terms.constant, 0.0);
+    assert_eq!(terms.coeffs.len(), 100);
+    for (_, c) in &terms.coeffs {
+        assert!((*c - 1.0).abs() < f64::EPSILON);
+    }
+}
