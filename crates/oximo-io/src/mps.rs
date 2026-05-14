@@ -15,7 +15,8 @@
 use std::io::Write;
 
 use oximo_core::{Model, ObjectiveSense, Sense};
-use oximo_expr::extract_linear;
+use oximo_expr::{LinearTerms, VarId, extract_linear};
+use rustc_hash::FxHashMap;
 
 use crate::error::IoError;
 
@@ -37,9 +38,23 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
     let obj_terms = extract_linear(&arena, objective.expr).ok_or(IoError::Nonlinear)?;
-    let mut obj_row: Vec<(usize, f64)> =
-        obj_terms.coeffs.iter().map(|(v, c)| (v.index(), *c)).collect();
-    obj_row.sort_by_key(|t| t.0);
+
+    // Pre-compute constraint linear terms once, reused for COLUMNS and RHS.
+    let con_terms: Vec<LinearTerms> = constraints
+        .iter()
+        .map(|c| extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear))
+        .collect::<Result<_, _>>()?;
+
+    // Build column index: VarId to [(row_name, coef)] in row order (OBJ first, then constraints).
+    let mut col_index: FxHashMap<VarId, Vec<(&str, f64)>> = FxHashMap::default();
+    for (v, c) in &obj_terms.coeffs {
+        col_index.entry(*v).or_default().push(("OBJ", *c));
+    }
+    for (constr, terms) in constraints.iter().zip(con_terms.iter()) {
+        for (v, coef) in &terms.coeffs {
+            col_index.entry(*v).or_default().push((constr.name.as_str(), *coef));
+        }
+    }
 
     // Per the MPS spec, max problems are negated, since most solvers assume
     // minimization. Tag the sense in a comment so re-importers can recover it.
@@ -76,19 +91,10 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             writeln!(out, "    MARKER                 'MARKER'                 'INTEND'")?;
             int_open = false;
         }
-
-        let mut entries: Vec<(String, f64)> = Vec::new();
-        if let Some((_, coef)) = obj_row.iter().find(|(idx, _)| *idx == v.id.index()) {
-            entries.push(("OBJ".to_owned(), *coef));
-        }
-        for c in constraints.iter() {
-            let t = extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear)?;
-            if let Some((_, coef)) = t.coeffs.iter().find(|(vid, _)| *vid == v.id) {
-                entries.push((c.name.to_string(), *coef));
+        if let Some(entries) = col_index.get(&v.id) {
+            for (row_name, coef) in entries {
+                writeln!(out, "    {:<10}{:<10}{}", v.name, row_name, coef)?;
             }
-        }
-        for (row_name, coef) in entries {
-            writeln!(out, "    {:<10}{:<10}{}", v.name, row_name, coef)?;
         }
     }
     if int_open {
@@ -100,8 +106,7 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if obj_constant != 0.0 {
         writeln!(out, "    RHS       OBJ       {}", -obj_constant)?;
     }
-    for c in constraints.iter() {
-        let t = extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear)?;
+    for (c, t) in constraints.iter().zip(con_terms.iter()) {
         let adjusted = c.rhs - t.constant;
         if adjusted != 0.0 {
             writeln!(out, "    RHS       {:<10}{}", c.name, adjusted)?;

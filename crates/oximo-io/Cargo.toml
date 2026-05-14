@@ -12,6 +12,7 @@ description = "Model I/O (MPS writer, LP writer) for oximo"
 oximo-expr.workspace = true
 oximo-core.workspace = true
 thiserror.workspace = true
+rustc-hash.workspace = true
 
 [lints]
 workspace = true
