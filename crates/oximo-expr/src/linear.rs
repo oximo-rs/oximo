@@ -13,15 +13,22 @@ pub struct LinearTerms {
 /// Try to interpret `id` as a linear expression. Returns `None` for any
 /// nonlinear node (Mul of two non-constants, Pow, transcendentals, ...).
 fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
-    match arena.get(id).clone() {
-        ExprNode::Const(c) => Some(LinearTerms { coeffs: Vec::new(), constant: c }),
-        ExprNode::Var(v) => Some(LinearTerms { coeffs: vec![(v, 1.0)], constant: 0.0 }),
-        ExprNode::Linear { coeffs, constant } => Some(LinearTerms { coeffs, constant }),
-        ExprNode::Neg(inner) => as_linear(arena, inner).map(|t| LinearTerms {
-            coeffs: t.coeffs.into_iter().map(|(v, c)| (v, -c)).collect(),
-            constant: -t.constant,
-        }),
+    match arena.get(id) {
+        ExprNode::Const(c) => Some(LinearTerms { coeffs: Vec::new(), constant: *c }),
+        ExprNode::Var(v) => Some(LinearTerms { coeffs: vec![(*v, 1.0)], constant: 0.0 }),
+        ExprNode::Linear { coeffs, constant } => {
+            Some(LinearTerms { coeffs: coeffs.clone(), constant: *constant })
+        }
+        ExprNode::Neg(inner) => {
+            let inner = *inner;
+            as_linear(arena, inner).map(|mut t| {
+                t.coeffs.iter_mut().for_each(|(_, c)| *c = -*c);
+                t.constant = -t.constant;
+                t
+            })
+        }
         ExprNode::Add(children) => {
+            let children: smallvec::SmallVec<[ExprId; 4]> = children.iter().copied().collect();
             let mut acc = LinearTerms::default();
             let mut map: FxHashMap<VarId, f64> = FxHashMap::default();
             for child in children {
@@ -36,6 +43,7 @@ fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
         }
         ExprNode::Mul(children) => {
             // Linear if and only if exactly one non-const child is linear and the rest are constants.
+            let children: smallvec::SmallVec<[ExprId; 4]> = children.iter().copied().collect();
             let mut scalar = 1.0;
             let mut linear: Option<LinearTerms> = None;
             for child in children {
@@ -49,10 +57,11 @@ fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
             }
             Some(match linear {
                 None => LinearTerms { coeffs: Vec::new(), constant: scalar },
-                Some(t) => LinearTerms {
-                    coeffs: t.coeffs.into_iter().map(|(v, c)| (v, c * scalar)).collect(),
-                    constant: t.constant * scalar,
-                },
+                Some(mut t) => {
+                    t.coeffs.iter_mut().for_each(|(_, c)| *c *= scalar);
+                    t.constant *= scalar;
+                    t
+                }
             })
         }
         _ => None,
