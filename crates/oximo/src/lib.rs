@@ -23,23 +23,23 @@ pub use oximo_solver as solver;
 pub use oximo_io as io;
 
 #[cfg(feature = "highs")]
-pub use oximo_highs::{HighsMethod, HighsOptions};
+pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
 
 #[cfg(feature = "gurobi")]
-pub use oximo_gurobi::GurobiOptions;
+pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
 pub mod prelude {
     //! Glob-import target. Brings the modeling and solver surface into scope.
     pub use oximo_core::prelude::*;
     pub use oximo_solver::{
-        HasMip, HasUniversal, MipOptions, MipOptionsExt, Presolve, Solver, SolverError,
-        SolverResult, SolverStatus, UniversalOptions, UniversalOptionsExt,
+        HasUniversal, Solver, SolverError, SolverResult, SolverStatus, UniversalOptions,
+        UniversalOptionsExt,
     };
 
     #[cfg(feature = "highs")]
-    pub use oximo_highs::{HighsMethod, HighsOptions};
+    pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
 
     #[cfg(feature = "gurobi")]
-    pub use oximo_gurobi::GurobiOptions;
+    pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
 }
 
 pub mod solvers {
