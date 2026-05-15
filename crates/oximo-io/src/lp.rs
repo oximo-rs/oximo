@@ -44,7 +44,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     let obj_terms = extract_linear(&arena, objective.expr).ok_or(IoError::Nonlinear)?;
 
-    writeln!(out, "\\* OXIMO LP export — model: {} *\\", model.name)?;
+    writeln!(out, "\\* OXIMO LP export - model: {} *\\", model.name)?;
 
     let sense_kw = match objective.sense {
         ObjectiveSense::Minimize => "Minimize",
@@ -72,7 +72,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         writeln!(out, " {op} {adjusted_rhs}")?;
     }
 
-    let mut bounds_lines: Vec<String> = Vec::new();
+    let mut wrote_bounds_header = false;
     for v in vars.iter() {
         if matches!(v.domain, Domain::Binary) {
             continue;
@@ -82,20 +82,18 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         if lb_default && ub_default {
             continue;
         }
-        if v.lb == f64::NEG_INFINITY && ub_default {
-            bounds_lines.push(format!(" {} free", v.name));
-        } else if v.lb == f64::NEG_INFINITY {
-            bounds_lines.push(format!(" -inf <= {} <= {}", v.name, v.ub));
-        } else if ub_default {
-            bounds_lines.push(format!(" {} >= {}", v.name, v.lb));
-        } else {
-            bounds_lines.push(format!(" {} <= {} <= {}", v.lb, v.name, v.ub));
+        if !wrote_bounds_header {
+            writeln!(out, "Bounds")?;
+            wrote_bounds_header = true;
         }
-    }
-    if !bounds_lines.is_empty() {
-        writeln!(out, "Bounds")?;
-        for line in &bounds_lines {
-            writeln!(out, "{line}")?;
+        if v.lb == f64::NEG_INFINITY && ub_default {
+            writeln!(out, " {} free", v.name)?;
+        } else if v.lb == f64::NEG_INFINITY {
+            writeln!(out, " -inf <= {} <= {}", v.name, v.ub)?;
+        } else if ub_default {
+            writeln!(out, " {} >= {}", v.name, v.lb)?;
+        } else {
+            writeln!(out, " {} <= {} <= {}", v.lb, v.name, v.ub)?;
         }
     }
 
