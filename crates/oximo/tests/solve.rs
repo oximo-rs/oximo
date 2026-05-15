@@ -53,7 +53,7 @@ fn presolve_off_gives_correct_result() {
     m.constraint("c2", (3.0 * x - y).ge(0.0));
     m.constraint("c3", (x - y).le(2.0));
     m.maximize(3.0 * x + 4.0 * y);
-    let result = Highs.solve(&m, &HighsOptions::default().presolve(Presolve::Off)).unwrap();
+    let result = Highs.solve(&m, &HighsOptions::default().presolve(HighsPresolve::Off)).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
     assert!((result.objective.unwrap() - 34.0).abs() < 1e-6);
     assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-6);
