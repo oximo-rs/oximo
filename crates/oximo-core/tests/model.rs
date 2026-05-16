@@ -46,6 +46,22 @@ fn indexed_var_creates_named_scalars() {
 }
 
 #[test]
+fn kind_caches_and_invalidates() {
+    let m = Model::new("cache");
+    let x = m.var("x").lb(0.0).build();
+    m.minimize(x);
+    // First call computes, second call must return same value without traversal
+    assert_eq!(m.kind(), ModelKind::LP);
+    assert_eq!(m.kind(), ModelKind::LP);
+    // Adding an integer variable invalidates the cache
+    let _ = m.var("y").lb(0.0).integer().build();
+    assert_eq!(m.kind(), ModelKind::MILP);
+    // Adding a constraint invalidates again
+    m.constraint("c", x.le(10.0));
+    assert_eq!(m.kind(), ModelKind::MILP);
+}
+
+#[test]
 fn rhs_expr_folded_into_lhs() {
     use oximo_expr::extract_linear;
     let m = Model::new("rhs");
