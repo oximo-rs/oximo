@@ -821,3 +821,200 @@ impl GamsXpressOptions {
         n > 0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::GamsSolver;
+
+    #[test]
+    fn baron_writes_space_separated() {
+        let cfg = GamsSolverConfig::Baron(GamsBaronOptions {
+            threads: Some(4),
+            eps_r: Some(0.01),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("Threads 4\n"), "got: {buf}");
+        assert!(buf.contains("EpsR 0.01\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn highs_writes_eq_separated() {
+        let cfg = GamsSolverConfig::Highs(GamsHighsOptions {
+            mip_rel_gap: Some(0.05),
+            threads: Some(2),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("mip_rel_gap = 0.05\n"), "got: {buf}");
+        assert!(buf.contains("threads = 2\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn highs_presolve_and_solver_enum() {
+        let cfg = GamsSolverConfig::Highs(GamsHighsOptions {
+            presolve: Some(GamsHighsPresolve::Off),
+            solver: Some(GamsHighsSolver::Simplex),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("presolve = off\n"), "got: {buf}");
+        assert!(buf.contains("solver = simplex\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn scip_writes_eq_separated() {
+        let cfg = GamsSolverConfig::Scip(GamsScipOptions {
+            mip_rel_gap: Some(0.01),
+            node_limit: Some(1000),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("limits/gap = 0.01\n"), "got: {buf}");
+        assert!(buf.contains("limits/nodes = 1000\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn gurobi_writes_space_separated() {
+        let cfg = GamsSolverConfig::Gurobi(GamsGurobiOptions {
+            threads: Some(8),
+            mip_focus: Some(GamsGurobiMipFocus::Feasibility),
+            presolve: Some(2),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("threads 8\n"), "got: {buf}");
+        assert!(buf.contains("mipfocus 1\n"), "got: {buf}");
+        assert!(buf.contains("presolve 2\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn cplex_bool_as_int_and_emphasis() {
+        let cfg = GamsSolverConfig::Cplex(GamsCplexOptions {
+            presolve: Some(false),
+            mip_emphasis: Some(GamsCplexMipEmphasis::Feasibility),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("preind 0\n"), "got: {buf}");
+        assert!(buf.contains("mipemphasis 1\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn cbc_enum_options() {
+        let cfg = GamsSolverConfig::Cbc(GamsCbcOptions {
+            presolve: Some(GamsCbcPresolve::On),
+            cuts: Some(GamsCbcCuts::Root),
+            heuristics: Some(true),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("presolve on\n"), "got: {buf}");
+        assert!(buf.contains("cuts root\n"), "got: {buf}");
+        assert!(buf.contains("heuristics 1\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn ipopt_string_options() {
+        let cfg = GamsSolverConfig::Ipopt(GamsIpoptOptions {
+            linear_solver: Some(GamsIpoptLinearSolver::Ma57),
+            mu_strategy: Some(GamsIpoptMuStrategy::Adaptive),
+            max_iter: Some(500),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("linear_solver ma57\n"), "got: {buf}");
+        assert!(buf.contains("mu_strategy adaptive\n"), "got: {buf}");
+        assert!(buf.contains("max_iter 500\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn knitro_algorithm_enum() {
+        let cfg = GamsSolverConfig::Knitro(GamsKnitroOptions {
+            algorithm: Some(GamsKnitroAlgorithm::Sqp),
+            mip_rel_gap: Some(0.001),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("nlp_algorithm 4\n"), "got: {buf}");
+        assert!(buf.contains("mip_opt_gap_rel 0.001\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn mosek_long_key_names() {
+        let cfg = GamsSolverConfig::Mosek(GamsMosekOptions {
+            threads: Some(2),
+            mip_rel_gap: Some(1e-4),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("MSK_IPAR_NUM_THREADS 2\n"), "got: {buf}");
+        assert!(buf.contains("MSK_DPAR_MIO_TOL_REL_GAP 0.0001\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn xpress_bool_presolve_and_gap() {
+        let cfg = GamsSolverConfig::Xpress(GamsXpressOptions {
+            presolve: Some(false),
+            mip_rel_gap: Some(0.02),
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("presolve 0\n"), "got: {buf}");
+        assert!(buf.contains("mipRelStop 0.02\n"), "got: {buf}");
+    }
+
+    #[test]
+    fn empty_options_writes_nothing() {
+        let cfg = GamsSolverConfig::Baron(GamsBaronOptions::default());
+        let mut buf = String::new();
+        assert!(!cfg.write_opt_file(&mut buf));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn named_writes_nothing() {
+        let cfg = GamsSolverConfig::Named(GamsSolver::Baron);
+        let mut buf = String::new();
+        assert!(!cfg.write_opt_file(&mut buf));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn gams_name_matches_variant() {
+        assert_eq!(GamsSolverConfig::Baron(GamsBaronOptions::default()).gams_name(), "BARON");
+        assert_eq!(GamsSolverConfig::Cbc(GamsCbcOptions::default()).gams_name(), "CBC");
+        assert_eq!(GamsSolverConfig::Cplex(GamsCplexOptions::default()).gams_name(), "CPLEX");
+        assert_eq!(GamsSolverConfig::Gurobi(GamsGurobiOptions::default()).gams_name(), "GUROBI");
+        assert_eq!(GamsSolverConfig::Highs(GamsHighsOptions::default()).gams_name(), "HIGHS");
+        assert_eq!(GamsSolverConfig::Ipopt(GamsIpoptOptions::default()).gams_name(), "IPOPT");
+        assert_eq!(GamsSolverConfig::Knitro(GamsKnitroOptions::default()).gams_name(), "KNITRO");
+        assert_eq!(GamsSolverConfig::Mosek(GamsMosekOptions::default()).gams_name(), "MOSEK");
+        assert_eq!(GamsSolverConfig::Scip(GamsScipOptions::default()).gams_name(), "SCIP");
+        assert_eq!(GamsSolverConfig::Xpress(GamsXpressOptions::default()).gams_name(), "XPRESS");
+        assert_eq!(GamsSolverConfig::Named(GamsSolver::Cplex).gams_name(), "CPLEX");
+        assert_eq!(
+            GamsSolverConfig::Named(GamsSolver::Custom("MYMIP".into())).gams_name(),
+            "MYMIP"
+        );
+    }
+
+    #[test]
+    fn from_gams_solver_becomes_named() {
+        let cfg: GamsSolverConfig = GamsSolver::Gurobi.into();
+        assert!(matches!(cfg, GamsSolverConfig::Named(GamsSolver::Gurobi)));
+        assert_eq!(cfg.gams_name(), "GUROBI");
+    }
+}
