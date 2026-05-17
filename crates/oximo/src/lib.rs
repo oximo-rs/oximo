@@ -27,6 +27,22 @@ pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
 
 #[cfg(feature = "gurobi")]
 pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
+
+#[cfg(feature = "gams")]
+pub use oximo_gams::{GamsOptions, GamsSolver};
+
+/// GAMS backend types: sub-solver selection and per-solver option structs.
+#[cfg(feature = "gams")]
+pub mod gams {
+    pub use oximo_gams::{
+        GamsBaronOptions, GamsCbcCuts, GamsCbcOptions, GamsCbcPresolve, GamsCplexMipEmphasis,
+        GamsCplexOptions, GamsGurobiMipFocus, GamsGurobiOptions, GamsHighsOptions,
+        GamsHighsPresolve, GamsHighsSolver, GamsIpoptLinearSolver, GamsIpoptMuStrategy,
+        GamsIpoptOptions, GamsKnitroAlgorithm, GamsKnitroOptions, GamsMosekOptions, GamsOptions,
+        GamsScipOptions, GamsSolver, GamsSolverConfig, GamsXpressOptions,
+    };
+}
+
 pub mod prelude {
     //! Glob-import target. Brings the modeling and solver surface into scope.
     pub use oximo_core::prelude::*;
@@ -40,6 +56,9 @@ pub mod prelude {
 
     #[cfg(feature = "gurobi")]
     pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
+
+    #[cfg(feature = "gams")]
+    pub use oximo_gams::{GamsOptions, GamsSolver};
 }
 
 pub mod solvers {
