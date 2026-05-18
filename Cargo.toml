@@ -7,6 +7,7 @@ members = [
     "crates/oximo-highs",
     "crates/oximo-io",
     "crates/oximo-gurobi",
+    "crates/oximo-gams",
     "crates/oximo",
 ]
 
@@ -29,6 +30,7 @@ oximo-solver = { path = "crates/oximo-solver", version = "0.1.0" }
 oximo-highs  = { path = "crates/oximo-highs",  version = "0.1.0" }
 oximo-io     = { path = "crates/oximo-io",     version = "0.1.0" }
 oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.1.0" }
+oximo-gams   = { path = "crates/oximo-gams",   version = "0.1.0" }
 
 rayon        = "1.12"
 smallvec     = "1.15"
