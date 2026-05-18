@@ -82,23 +82,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("rxn22", 33, &[13, 27]),      // y34 <- y14 + y28
     ];
 
-    // y02, y03, y05, y10, y12, y13, y17, y22, y25, y26, y28, y31, y33: fixed to 1 via lb=ub=1.
+    // y02, y03, y05, y10, y12, y13, y17, y22, y25, y26, y28, y31, y33: fixed to 1.
     let available: &[usize] = &[1, 2, 4, 9, 11, 12, 16, 21, 24, 25, 27, 30, 32];
-    // y16, y19: fixed to 0 via ub=0.
+    // y16, y19: fixed to 0.
     let unavailable: &[usize] = &[15, 18];
 
     let m = Model::new("reaction_path");
 
-    // TODO: Improve this when we add the `.fix()` method for fixing variables.
     let y: Vec<_> = CHEMICALS
         .iter()
         .enumerate()
         .map(|(i, name)| {
             let b = m.var(*name).binary();
             if available.contains(&i) {
-                b.lb(1.0).ub(1.0).build()
+                b.fix(1.0).build()
             } else if unavailable.contains(&i) {
-                b.ub(0.0).build()
+                b.fix(0.0).build()
             } else {
                 b.build()
             }
