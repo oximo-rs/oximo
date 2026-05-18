@@ -2,7 +2,7 @@
 //!
 //! These tests shell out to a GAMS installation and are therefore
 //! compiled and run only when `--features gams` is passed.  Each test
-//! mirrors the corresponding HiGHS test in `solve.rs` so that regressions 
+//! mirrors the corresponding HiGHS test in `solve.rs` so that regressions
 //! are caught on both backends.
 //!
 //! Run with:
