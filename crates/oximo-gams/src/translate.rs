@@ -122,10 +122,21 @@ pub fn solve(
 
     // Bounds
     for v in vars.iter() {
+        let i = v.id.index();
         if matches!(v.domain, Domain::Binary) {
+            // Default binary bounds are [0, 1], only emit when overridden.
+            if (v.lb - v.ub).abs() < f64::EPSILON {
+                writeln!(gms, "v{i}.fx = {};", fmt(v.lb)).unwrap();
+            } else {
+                if v.lb.abs() > f64::EPSILON {
+                    writeln!(gms, "v{i}.lo = {};", fmt(v.lb)).unwrap();
+                }
+                if (v.ub - 1.0).abs() > f64::EPSILON {
+                    writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
+                }
+            }
             continue;
         }
-        let i = v.id.index();
         // Lower bound
         if v.lb == f64::NEG_INFINITY {
             writeln!(gms, "v{i}.lo = -Inf;").unwrap();
