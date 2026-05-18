@@ -132,6 +132,23 @@ impl Model {
         self.variables.borrow().len()
     }
 
+    /// Fix variable `id` to `value` by setting `lb = ub = value`.
+    pub fn fix_var(&self, id: VarId, value: f64) {
+        let mut vars = self.variables.borrow_mut();
+        let v = &mut vars[id.index()];
+        v.lb = value;
+        v.ub = value;
+    }
+
+    /// Restore bounds on variable `id`. Pass `f64::NEG_INFINITY` / `f64::INFINITY`
+    /// to restore an unbounded direction.
+    pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
+        let mut vars = self.variables.borrow_mut();
+        let v = &mut vars[id.index()];
+        v.lb = lb;
+        v.ub = ub;
+    }
+
     // Constraints
 
     /// Register a new constraint.

@@ -57,6 +57,10 @@ impl<'a> VarBuilder<'a> {
         self
     }
 
+    pub fn fix(self, value: f64) -> Self {
+        self.bounds(value, value)
+    }
+
     pub fn domain(mut self, d: Domain) -> Self {
         self.domain = d;
         self
