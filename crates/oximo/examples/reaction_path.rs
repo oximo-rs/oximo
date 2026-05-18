@@ -140,7 +140,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .enumerate()
         .filter_map(|(i, var)| {
-            if (result.value_of(*var).unwrap_or(0.0) - 1.0).abs() < 1e-6 { Some(CHEMICALS[i]) } else { None }
+            if (result.value_of(*var).unwrap_or(0.0) - 1.0).abs() < 1e-6 {
+                Some(CHEMICALS[i])
+            } else {
+                None
+            }
         })
         .collect();
     if !synthesizable.is_empty() {
