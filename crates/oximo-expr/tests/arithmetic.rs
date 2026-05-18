@@ -1,3 +1,5 @@
+#![allow(clippy::float_cmp)]
+
 use std::cell::RefCell;
 
 use oximo_expr::{Expr, ExprArena, ExprNode, VarId, evaluate, extract_linear};
