@@ -96,6 +96,16 @@ fn unfix_var_restores_bounds() {
 }
 
 #[test]
+fn initial_value_stored_on_variable() {
+    let m = Model::new("init");
+    let _ = m.var("x").lb(0.0).initial(3.5).build();
+    let _ = m.var("y").lb(0.0).build();
+    let vars = m.variables();
+    assert_eq!(vars[0].initial, Some(3.5));
+    assert_eq!(vars[1].initial, None);
+}
+
+#[test]
 fn rhs_expr_folded_into_lhs() {
     use oximo_expr::extract_linear;
     let m = Model::new("rhs");
