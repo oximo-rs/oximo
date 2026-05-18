@@ -64,6 +64,38 @@ fn kind_caches_and_invalidates() {
 }
 
 #[test]
+fn fix_builder_sets_equal_bounds() {
+    let m = Model::new("fix_builder");
+    let _ = m.var("x").lb(0.0).ub(10.0).fix(3.5).build();
+    let vars = m.variables();
+    assert_eq!(vars[0].lb, 3.5);
+    assert_eq!(vars[0].ub, 3.5);
+}
+
+#[test]
+fn fix_var_mutates_bounds_post_build() {
+    let m = Model::new("fix_post");
+    let _ = m.var("x").lb(0.0).ub(10.0).build();
+    let id = m.variable_id("x").unwrap();
+    m.fix_var(id, 7.0);
+    let vars = m.variables();
+    assert_eq!(vars[0].lb, 7.0);
+    assert_eq!(vars[0].ub, 7.0);
+}
+
+#[test]
+fn unfix_var_restores_bounds() {
+    let m = Model::new("unfix");
+    let _ = m.var("x").lb(0.0).ub(10.0).build();
+    let id = m.variable_id("x").unwrap();
+    m.fix_var(id, 7.0);
+    m.unfix_var(id, 0.0, 10.0);
+    let vars = m.variables();
+    assert_eq!(vars[0].lb, 0.0);
+    assert_eq!(vars[0].ub, 10.0);
+}
+
+#[test]
 fn rhs_expr_folded_into_lhs() {
     use oximo_expr::extract_linear;
     let m = Model::new("rhs");
