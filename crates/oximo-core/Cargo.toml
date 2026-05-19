@@ -15,6 +15,7 @@ smallvec.workspace = true
 smol_str.workspace = true
 rustc-hash.workspace = true
 ndarray.workspace = true
+num-traits.workspace = true
 thiserror.workspace = true
 
 [lints]
