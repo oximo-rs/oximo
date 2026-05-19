@@ -38,6 +38,7 @@ smol_str     = "0.3.6"
 rustc-hash   = "2.1"
 ndarray      = "0.17"
 thiserror    = "2.0"
+num-traits   = "0.2"
 highs        = "2.1"
 grb          = "3.0"
 
