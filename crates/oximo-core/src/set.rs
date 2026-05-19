@@ -235,8 +235,8 @@ where
     }
 }
 
-/// Typed projection of an [`IndexKey`]. Implementations panic when the 
-/// key's shape does not match the target type, the same contract as 
+/// Typed projection of an [`IndexKey`]. Implementations panic when the
+/// key's shape does not match the target type, the same contract as
 /// [`crate::indexed::IndexedVar`] indexing on a missing key.
 ///
 /// Used by [`crate::model::Model::add_constraints_over`] (and similar rule
