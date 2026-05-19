@@ -42,7 +42,7 @@
 //! "The capacitated lot sizing problem: a review of models
 //! and algorithms", Omega, 31(5), 365-378, 2003.
 
-#![allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(clippy::many_single_char_names)]
 
 #[cfg(any(feature = "gurobi", feature = "highs"))]
 use oximo::prelude::*;
@@ -67,24 +67,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let safety_stock = 30.0;
 
     let m = Model::new("lot_sizing");
-    let periods = Set::range(0..T as i64);
+    let periods = Set::range(0..T);
 
     let x = m.indexed_var("x", &periods).lb(0.0).ub(capacity).build();
     let h = m.indexed_var("h", &periods).lb(0.0).build();
     let s = m.indexed_var("s", &periods).binary().build();
 
-    m.constraint("inv_bal_0", (h[0i64] - x[0i64]).eq(initial_inventory - demand[0]));
-    for t in 1..T as i64 {
-        m.constraint(format!("inv_bal_{t}"), (h[t] - h[t - 1] - x[t]).eq(-demand[t as usize]));
-    }
-    for t in 0..T as i64 {
-        m.constraint(format!("setup_{t}"), (x[t] - capacity * s[t]).le(0.0));
-    }
-    m.constraint("safety_stock", h[T as i64 - 1].ge(safety_stock));
+    m.constraint("inv_bal[0]", (h[0] - x[0]).eq(initial_inventory - demand[0]));
+    m.add_constraints_over("inv_bal", &periods.filter(|k| k.as_i64().unwrap() > 0), |t: usize| {
+        (h[t] - h[t - 1] - x[t]).eq(-demand[t])
+    });
+    m.add_constraints_over("setup", &periods, |t: usize| (x[t] - capacity * s[t]).le(0.0));
+    m.constraint("safety_stock", h[T - 1].ge(safety_stock));
 
-    let cost =
-        sum((0..T as i64)
-            .map(|t| prod_cost[t as usize] * x[t] + setup_cost * s[t] + hold_cost * h[t]));
+    let cost = sum(periods.iter().map(|k| {
+        let t: usize = FromIndexKey::from_index_key(&k);
+        prod_cost[t] * x[t] + setup_cost * s[t] + hold_cost * h[t]
+    }));
     m.minimize(cost);
 
     #[cfg(feature = "gurobi")]
@@ -118,11 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "-".repeat(55));
 
     let mut total_check = 0.0;
-    for t in 0..T as i64 {
+    for t in 0..T {
         let xt = result.value_of(x[t]).unwrap_or(0.0);
         let ht = result.value_of(h[t]).unwrap_or(0.0);
         let st = result.value_of(s[t]).unwrap_or(0.0);
-        let period_cost = prod_cost[t as usize] * xt + setup_cost * st + hold_cost * ht;
+        let period_cost = prod_cost[t] * xt + setup_cost * st + hold_cost * ht;
         total_check += period_cost;
         println!(
             "{:<8} {:>10.1} {:>10.1} {:>8} {:>12.2}",

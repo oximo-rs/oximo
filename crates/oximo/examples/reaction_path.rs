@@ -88,31 +88,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let unavailable: &[usize] = &[15, 18];
 
     let m = Model::new("reaction_path");
+    let chemicals = Set::strings(CHEMICALS);
 
-    let y: Vec<_> = CHEMICALS
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let b = m.var(*name).binary();
-            if available.contains(&i) {
-                b.fix(1.0).build()
-            } else if unavailable.contains(&i) {
-                b.fix(0.0).build()
-            } else {
-                b.build()
-            }
+    let y = m
+        .indexed_var("y", &chemicals)
+        .binary()
+        .lb_by(|k| {
+            let name = k.as_str().unwrap();
+            if available.iter().any(|&i| CHEMICALS[i] == name) { 1.0 } else { 0.0 }
         })
-        .collect();
+        .ub_by(|k| {
+            let name = k.as_str().unwrap();
+            if unavailable.iter().any(|&i| CHEMICALS[i] == name) { 0.0 } else { 1.0 }
+        })
+        .build();
 
     // sum_vv (1 - y[vv]) >= 1 - y[v]
     //    <=>  y[v] - sum_vv y[vv] >= 1 - |reactants|
     for &(rx, prod, reactants) in logicc {
         let n = reactants.len() as f64;
-        let reactant_sum = sum(reactants.iter().map(|&vv| y[vv]));
-        m.constraint(format!("leq_{rx}"), (y[prod] - reactant_sum).ge(1.0 - n));
+        let reactant_sum = sum(reactants.iter().map(|&vv| y[CHEMICALS[vv]]));
+        m.constraint(format!("leq_{rx}"), (y[CHEMICALS[prod]] - reactant_sum).ge(1.0 - n));
     }
 
-    m.minimize(y[5]); // y06 = acetone
+    m.minimize(y["y06"]); // acetone
 
     #[cfg(feature = "gams")]
     let result = {
@@ -135,16 +134,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let synthesizable: Vec<&str> = y
+    let synthesizable: Vec<&str> = CHEMICALS
         .iter()
-        .enumerate()
-        .filter_map(|(i, var)| {
-            if (result.value_of(*var).unwrap_or(0.0) - 1.0).abs() < 1e-6 {
-                Some(CHEMICALS[i])
-            } else {
-                None
-            }
-        })
+        .copied()
+        .filter(|name| (result.value_of(y[*name]).unwrap_or(0.0) - 1.0).abs() < 1e-6)
         .collect();
     if !synthesizable.is_empty() {
         println!("Synthesizable chemicals: {}", synthesizable.join(", "));
