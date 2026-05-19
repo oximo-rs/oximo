@@ -9,7 +9,7 @@ use crate::domain::Domain;
 use crate::error::{Error, Result};
 use crate::indexed::IndexedVar;
 use crate::objective::{Objective, ObjectiveSense};
-use crate::set::{IndexKey, Set};
+use crate::set::{FromIndexKey, IndexKey, Set};
 use crate::var::{VarBuilder, Variable};
 
 /// The kind of mathematical program a `Model` represents.
@@ -112,6 +112,8 @@ impl Model {
             keys: set.iter().collect(),
             lb: f64::NEG_INFINITY,
             ub: f64::INFINITY,
+            lb_by: None,
+            ub_by: None,
             domain: Domain::Real,
         }
     }
@@ -182,6 +184,36 @@ impl Model {
         I: IntoIterator<Item = (SmolStr, ConstraintExpr<'a>)>,
     {
         for (name, c) in items {
+            self.constraint(name, c);
+        }
+    }
+
+    /// Rule-style bulk constraint registration.
+    ///
+    /// The closure receives the index as a typed value `K`. Any type
+    /// implementing [`FromIndexKey`] is accepted. Built-in impls cover `i64`,
+    /// `i32`, `usize`, `String`, raw `IndexKey`, and tuples up to arity 4.
+    /// The user states the expected shape via the closure-arg annotation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Scalar set: closure receives a usize directly.
+    /// m.add_constraints_over("upper", &i, |i: usize| x[i as i64].le(b[i]));
+    ///
+    /// // Tuple set: destructure inline.
+    /// m.add_constraints_over("blo", &(&tasks * &events), |(t, n): (usize, usize)| {
+    ///     (b[(t, n)] - b_min[t] * w[(t, n)]).ge(0.0)
+    /// });
+    /// ```
+    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, mut rule: F)
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> ConstraintExpr<'a>,
+    {
+        for key in set {
+            let typed = K::from_index_key(&key);
+            let c = rule(typed);
+            let name: SmolStr = format_index_name(name_prefix, &key).into();
             self.constraint(name, c);
         }
     }
@@ -280,6 +312,8 @@ fn has_nonlinear(arena: &ExprArena, id: oximo_expr::ExprId) -> bool {
 /// `flow[2]` as separate scalar variables in the model. Call `.build()` to get
 /// an [`IndexedVar`] that maps each key to its [`Expr`] handle. Bounds and
 /// domain set here apply uniformly to every scalar in the collection.
+type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> f64 + 'a>;
+
 #[must_use = "IndexedVarBuilder does nothing until you call .build()"]
 pub struct IndexedVarBuilder<'a> {
     model: &'a Model,
@@ -287,6 +321,8 @@ pub struct IndexedVarBuilder<'a> {
     keys: Vec<IndexKey>,
     lb: f64,
     ub: f64,
+    lb_by: Option<BoundFn<'a>>,
+    ub_by: Option<BoundFn<'a>>,
     domain: Domain,
 }
 
@@ -297,6 +333,8 @@ impl<'a> std::fmt::Debug for IndexedVarBuilder<'a> {
             .field("keys", &self.keys.len())
             .field("lb", &self.lb)
             .field("ub", &self.ub)
+            .field("per_key_lb", &self.lb_by.is_some())
+            .field("per_key_ub", &self.ub_by.is_some())
             .field("domain", &self.domain)
             .finish()
     }
@@ -314,6 +352,22 @@ impl<'a> IndexedVarBuilder<'a> {
     pub fn bounds(mut self, lb: f64, ub: f64) -> Self {
         self.lb = lb;
         self.ub = ub;
+        self
+    }
+    /// Per-key lower bound. Overrides [`Self::lb`] when both are set.
+    pub fn lb_by<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&IndexKey) -> f64 + 'a,
+    {
+        self.lb_by = Some(Box::new(f));
+        self
+    }
+    /// Per-key upper bound. Overrides [`Self::ub`] when both are set.
+    pub fn ub_by<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&IndexKey) -> f64 + 'a,
+    {
+        self.ub_by = Some(Box::new(f));
         self
     }
     pub fn domain(mut self, d: Domain) -> Self {
@@ -335,8 +389,9 @@ impl<'a> IndexedVarBuilder<'a> {
         let mut entries = FxHashMap::default();
         for key in self.keys {
             let scalar_name: SmolStr = format_index_name(&self.base_name, &key).into();
-            let expr =
-                self.model.var(scalar_name).lb(self.lb).ub(self.ub).domain(self.domain).build();
+            let lb = self.lb_by.as_ref().map_or(self.lb, |f| f(&key));
+            let ub = self.ub_by.as_ref().map_or(self.ub, |f| f(&key));
+            let expr = self.model.var(scalar_name).lb(lb).ub(ub).domain(self.domain).build();
             entries.insert(key, expr);
         }
         IndexedVar { entries }
@@ -344,8 +399,34 @@ impl<'a> IndexedVarBuilder<'a> {
 }
 
 fn format_index_name(base: &str, key: &IndexKey) -> String {
+    let mut out = String::with_capacity(base.len() + 4);
+    out.push_str(base);
+    out.push('[');
+    write_key_parts(&mut out, key);
+    out.push(']');
+    out
+}
+
+fn write_key_parts(out: &mut String, key: &IndexKey) {
+    use std::fmt::Write;
     match key {
-        IndexKey::Int(i) => format!("{base}[{i}]"),
-        IndexKey::Str(s) => format!("{base}[{s}]"),
+        IndexKey::Int(i) => write!(out, "{i}").unwrap(),
+        IndexKey::Str(s) => out.push_str(s),
+        IndexKey::Tuple(parts) => {
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_key_parts(out, p);
+            }
+        }
     }
+}
+
+/// Public render of an `IndexKey`'s textual form, used by helpers like
+/// [`Model::add_constraints_over`] to derive constraint names.
+pub fn display_index_key(key: &IndexKey) -> String {
+    let mut out = String::new();
+    write_key_parts(&mut out, key);
+    out
 }
