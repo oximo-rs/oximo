@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Solver-trait abstraction for oximo backends"
+readme = "README.md"
 
 [dependencies]
 oximo-expr.workspace = true
