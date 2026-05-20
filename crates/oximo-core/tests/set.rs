@@ -136,10 +136,11 @@ fn indexed_var_per_key_bounds() {
     let _x = m
         .indexed_var("x", &set)
         .lb(0.0)
-        .ub_by(|k| {
+        .ub_by(|k: i64| {
             #[allow(clippy::cast_precision_loss)]
-            let v = k.as_i64().unwrap() as f64;
-            v
+            {
+                k as f64
+            }
         })
         .build();
     let vars = m.variables();
@@ -236,8 +237,8 @@ fn lb_by_ub_by_override_binary_defaults() {
     let _x = m
         .indexed_var("x", &set)
         .binary()
-        .lb_by(|k| if k.as_i64().unwrap() == 0 { 1.0 } else { 0.0 })
-        .ub_by(|k| if k.as_i64().unwrap() == 2 { 0.0 } else { 1.0 })
+        .lb_by(|k: i64| if k == 0 { 1.0 } else { 0.0 })
+        .ub_by(|k: i64| if k == 2 { 0.0 } else { 1.0 })
         .build();
     let vars = m.variables();
     assert_eq!(vars[0].lb, 1.0); // fixed to 1
