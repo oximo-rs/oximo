@@ -198,7 +198,7 @@ impl Model {
     /// # Example
     /// ```ignore
     /// // Scalar set: closure receives a usize directly.
-    /// m.add_constraints_over("upper", &i, |i: usize| x[i as i64].le(b[i]));
+    /// m.add_constraints_over("upper", &i, |i: usize| x[i].le(b[i]));
     ///
     /// // Tuple set: destructure inline.
     /// m.add_constraints_over("blo", &(&tasks * &events), |(t, n): (usize, usize)| {
