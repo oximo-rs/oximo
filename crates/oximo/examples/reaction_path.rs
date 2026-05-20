@@ -93,14 +93,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let y = m
         .indexed_var("y", &chemicals)
         .binary()
-        .lb_by(|k| {
-            let name = k.as_str().unwrap();
-            if available.iter().any(|&i| CHEMICALS[i] == name) { 1.0 } else { 0.0 }
-        })
-        .ub_by(|k| {
-            let name = k.as_str().unwrap();
-            if unavailable.iter().any(|&i| CHEMICALS[i] == name) { 0.0 } else { 1.0 }
-        })
+        .lb_by(
+            |name: String| {
+                if available.iter().any(|&i| CHEMICALS[i] == name) { 1.0 } else { 0.0 }
+            },
+        )
+        .ub_by(
+            |name: String| {
+                if unavailable.iter().any(|&i| CHEMICALS[i] == name) { 0.0 } else { 1.0 }
+            },
+        )
         .build();
 
     // sum_vv (1 - y[vv]) >= 1 - y[v]
