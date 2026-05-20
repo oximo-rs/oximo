@@ -355,19 +355,35 @@ impl<'a> IndexedVarBuilder<'a> {
         self
     }
     /// Per-key lower bound. Overrides [`Self::lb`] when both are set.
-    pub fn lb_by<F>(mut self, f: F) -> Self
+    ///
+    /// The closure receives a typed index value via [`FromIndexKey`].
+    /// Annotate the argument to select the projection:
+    /// ```ignore
+    /// .lb_by(|(p, q): (String, String)| floor_for(&p, &q))
+    /// .lb_by(|i: usize| lower_bounds[i])
+    /// ```
+    pub fn lb_by<K, F>(mut self, f: F) -> Self
     where
-        F: Fn(&IndexKey) -> f64 + 'a,
+        K: FromIndexKey,
+        F: Fn(K) -> f64 + 'a,
     {
-        self.lb_by = Some(Box::new(f));
+        self.lb_by = Some(Box::new(move |k: &IndexKey| f(K::from_index_key(k))));
         self
     }
     /// Per-key upper bound. Overrides [`Self::ub`] when both are set.
-    pub fn ub_by<F>(mut self, f: F) -> Self
+    ///
+    /// The closure receives a typed index value via [`FromIndexKey`]; annotate
+    /// the argument to select the projection:
+    /// ```ignore
+    /// .ub_by(|(p, q): (String, String)| capacity_for(&p, &q))
+    /// .ub_by(|i: usize| upper_bounds[i])
+    /// ```
+    pub fn ub_by<K, F>(mut self, f: F) -> Self
     where
-        F: Fn(&IndexKey) -> f64 + 'a,
+        K: FromIndexKey,
+        F: Fn(K) -> f64 + 'a,
     {
-        self.ub_by = Some(Box::new(f));
+        self.ub_by = Some(Box::new(move |k: &IndexKey| f(K::from_index_key(k))));
         self
     }
     pub fn domain(mut self, d: Domain) -> Self {
