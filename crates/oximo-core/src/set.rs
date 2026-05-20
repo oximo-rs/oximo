@@ -294,7 +294,7 @@ impl FromIndexKey for i32 {
 impl FromIndexKey for usize {
     fn from_index_key(k: &IndexKey) -> Self {
         let v = i64::from_index_key(k);
-        usize::try_from(v).unwrap_or_else(|_| panic!("negative key {v} cannot be usize"))
+        usize::try_from(v).unwrap_or_else(|_| panic!("key {v} out of usize range"))
     }
 }
 
