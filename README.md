@@ -67,23 +67,84 @@ m.minimize(3.0 * x + 5.0 * y);
 m.maximize(x + 2.0 * y);
 ```
 
-### Indexed variables
+### Index sets
+
+`Set` is the modeling-layer container for an ordered, finite index set. Build
+one over integers, strings, or arbitrary tuples. You can combine sets with the
+Cartesian product operator `&a * &b`, and filter sparsely.
 
 ```rust
-use oximo::core::Set;
+use oximo::prelude::*;
 
 let items = Set::range(0..5);
-let xs = m.indexed_var("x", &items); // creates x[0] ... x[4]
+let n_items = Set::range(0..weights.len());
+let plants = Set::strings(["seattle", "san-diego"]);
 
-// Access individual variables
-let x0 = xs.get(&0).unwrap();
+// Cartesian product -> tuple keys, flattens automatically across nesting.
+let routes = &plants * &Set::strings(["nyc", "chi", "topeka"]);
+assert_eq!(routes.len(), 6);
+
+// Sparse subsets via filter without self-loops
+let arcs = (&plants * &plants).filter(|k| {
+    let p = k.as_tuple().unwrap();
+    p[0] != p[1]
+});
 ```
 
-### Summing over iterators
+### Indexed variables
+
+`Model::indexed_var(name, &set)` registers one scalar per key with auto-named
+entries like `x[seattle,nyc]`. Bounds apply uniformly by default, you can use
+`lb_by` / `ub_by` for per-key bounds.
 
 ```rust
-let total = sum(xs.iter().zip(weights.iter()).map(|(x, w)| *w * *x));
-m.constraint("cap", total.le(capacity));
+let m = Model::new("transport");
+let x = m.indexed_var("x", &routes).lb(0.0).build();
+
+// Scalar lookup: any type that converts to IndexKey works.
+let e1 = x[("seattle", "nyc")];
+let e2 = x[("san-diego", "chi")];
+
+// Per-key upper bound (e.g. capacity per arc).
+let _y = m.indexed_var("y", &routes)
+    .lb(0.0)
+    .ub_by(|(p, q): (String, String)| capacity_for(&p, &q))
+    .build();
+```
+
+### Rule-style constraints
+
+`Model::add_constraints_over` is a closure that receives the index as a typed
+value via `FromIndexKey`.
+
+Built-in impls cover `i64`, `i32`, `usize`, `String`, raw `IndexKey`, and tuples up to
+arity 4. State the shape in the closure-arg annotation.
+
+```rust
+// Scalar set: one constraint per period.
+let periods = Set::range(0..T);
+m.add_constraints_over("setup", &periods, |t: usize| {
+    (x[t] - capacity * s[t]).le(0.0)
+});
+
+// Tuple set: destructure inline.
+m.add_constraints_over("supply", &plants, |p: String| {
+    sum(markets.iter().map(|q| x[(p.clone(), q)])).le(supply_of(&p))
+});
+
+// Want the raw key? Annotate as IndexKey (clones once per iteration).
+m.add_constraints_over("c", &set, |k: IndexKey| x[&k].le(1.0));
+```
+
+### Summing over sets
+
+```rust
+// Linear-fastpath aware: `sum` collapses to a single Linear arena node.
+let total_weight = sum(items.iter().map(|k| {
+    let i: usize = FromIndexKey::from_index_key(&k);
+    weights[i] * x[i]
+}));
+m.constraint("cap", total_weight.le(capacity));
 ```
 
 ## Solving
