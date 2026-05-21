@@ -48,6 +48,11 @@ result.value_of(expr)        // Option<f64>, primal value for a Var expr
 result.value(var_id)         // Option<f64>, primal value by VarId
 result.dual_of(c_id)         // Option<f64>, dual for a constraint
 result.status.has_solution() // true if Optimal or Feasible
+
+// Indexed variables
+result.value_of_idx(&flow, "nyc")                  // Option<f64>, value at a specific index
+result.values_of(&flow)                            // Iterator<(&IndexKey, f64)>, all entries with a primal value
+result.values_of(&flow).filter(|(_, v)| *v != 0.0) // nonzero only (sparse solutions)
 ```
 
 ## `SolverStatus`
