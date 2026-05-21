@@ -13,8 +13,8 @@ let x = m.var("x").lb(0.0).build();
 let y = m.var("y").lb(0.0).ub(4.0).build();
 
 m.constraint("c1", (x + 2.0 * y).le(14.0));
-m.constraint("c2", (3.0 * x - y).ge(0.0));
-m.constraint("c3", (x - y).le(2.0));
+m.constraint("c2", (3.0 * x).ge(y));
+m.constraint("c3", x.le(y + 2.0));
 m.maximize(3.0 * x + 4.0 * y);
 
 let result = Highs.solve(&m, &HighsOptions::default())?;
