@@ -13,8 +13,8 @@ use crate::status::SolverError;
 /// Each backend defines its own [`Options`](Solver::Options) type so users get
 /// LSP autocomplete and compile-time validation on the options that actually
 /// apply. The `oximo_solver` crate ships shared building blocks
-/// ([`CommonOptions`](crate::CommonOptions),
-/// [`Presolve`](crate::Presolve), [`CommonOptionsExt`](crate::CommonOptionsExt))
+/// ([`UniversalOptions`](crate::UniversalOptions),
+/// [`UniversalOptionsExt`](crate::UniversalOptionsExt))
 /// for backends to compose into their own structs.
 pub trait Solver {
     /// Backend-specific options struct. Use `()` for solvers without any
