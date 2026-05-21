@@ -2,9 +2,9 @@
 
 GAMS LP/MILP backend for [oximo](https://github.com/germanheim/oximo).
 
-Writes an oximo [`Model`] to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP` and `MILP` model kinds. **QP/NLP/MINLP return `SolverError::UnsupportedKind` for now**.
+Writes an oximo`Model`] to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP` and `MILP` model kinds. **QP/NLP/MINLP return `SolverError::UnsupportedKind` for now**.
 
-The sub-solver is determined by the GAMS installation (default) or set explicitly via [`GamsOptions::solver`]. Any solver available in your GAMS distribution can be targeted, see [Sub-solver selection](#sub-solver-selection) below.
+The sub-solver is determined by the GAMS installation (default) or set explicitly via `GamsOptions::solver`. Any solver available in your GAMS distribution can be targeted, see [Sub-solver selection](#sub-solver-selection) below.
 
 ## Requirements
 
@@ -14,11 +14,11 @@ The sub-solver is determined by the GAMS installation (default) or set explicitl
 2. Obtain and activate a GAMS license.
 3. Verify by running `gams` in a terminal.
 
-If `gams` is not on `PATH`, pass an explicit path via [`GamsOptions::gams_path`] or [`Gams::with_exec`]:
+If `gams` is not on `PATH`, pass an explicit path via `GamsOptions::gams_path` or `Gams::with_exec`:
 
 ```rust
 use oximo_gams::Gams;
-let solver = Gams::with_exec("/opt/gams47/gams");
+let solver = Gams::with_exec("/opt/gams53/gams");
 ```
 
 ## Usage
@@ -81,8 +81,8 @@ cargo run -p oximo --example reaction_path --features gams
 
 | Method              | Description                                                    | Default              |
 |---------------------|----------------------------------------------------------------|----------------------|
-| `.mip_gap(f64)`     | `option OptCR = <gap>;` — relative MIP optimality gap          | none                 |
-| `.solver(config)`   | Sub-solver selection; see [below](#sub-solver-selection)       | none                 |
+| `.mip_gap(f64)`     | `option OptCR = <gap>;` relative MIP optimality gap            | none                 |
+| `.solver(config)`   | Sub-solver selection, see [below](#sub-solver-selection)       | none                 |
 | `.gams_path(path)`  | Override path to the `gams` executable                         | `"gams"` from `PATH` |
 
 ```rust
@@ -99,7 +99,7 @@ let opts = GamsOptions::default()
 
 ## Sub-solver selection
 
-Pass a [`GamsSolverConfig`] to `.solver(...)` to select a GAMS sub-solver. This emits
+Pass a `GamsSolverConfig` to `.solver(...)` to select a GAMS sub-solver. This emits
 `option {LP|MIP} = <NAME>;` in the generated `.gms` file.
 
 ```rust
@@ -153,8 +153,8 @@ For any other solver, use `GamsSolverConfig::Named(GamsSolver::Custom("NAME".int
 `SolverResult` fields populated on `Optimal` or `Feasible`:
 
 - `objective` - objective value
-- `primal` - variable values keyed by `VarId`; access via `result.value_of(var)`
-- `status` - mapped from GAMS model-status codes (1=Optimal, 4=Infeasible, 3=Unbounded, ...)
+- `primal` - variable values keyed by `VarId`, access via `result.value_of(var)`
+- `status` - mapped from GAMS model-status codes (`1=Optimal`, `4=Infeasible`, `3=Unbounded`, ...)
 - `solve_time` - wall time around the GAMS process invocation
 - `raw_log` - GAMS stdout/stderr, populated when `verbose(true)` or when GAMS exits non-zero
 
