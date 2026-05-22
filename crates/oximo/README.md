@@ -130,7 +130,7 @@ m.add_constraints_over("setup", &periods, |t: usize| {
 
 // Tuple set: destructure inline.
 m.add_constraints_over("supply", &plants, |p: String| {
-    sum(markets.iter().map(|q| x[(p.clone(), q)])).le(supply_of(&p))
+    sum(markets.iter().map(|q| x[(&p, q)])).le(supply_of(&p))
 });
 
 // Want the raw key? Annotate as IndexKey (clones once per iteration).
