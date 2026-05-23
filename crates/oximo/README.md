@@ -47,11 +47,11 @@ oximo = { version = "0.1", features = ["gams"] }   # add GAMS backend
 ```rust,ignore
 let m = Model::new("my_model");
 
-let x = m.var("x").lb(0.0).build();               // continuous, x >= 0
-let y = m.var("y").lb(0.0).ub(10.0).build();      // continuous, 0 <= y <= 10
-let z = m.var("z").lb(f64::NEG_INFINITY).build(); // free variable
-let b = m.var("b").binary().build();              // binary {0, 1}
-let n = m.var("n").lb(0.0).integer().build();     // general integer
+let x = m.var("x").lb(0.0).build();           // continuous, x >= 0
+let y = m.var("y").lb(0.0).ub(10.0).build();  // continuous, 0 <= y <= 10
+let z = m.var("z").build();                   // free (unbounded by default)
+let b = m.var("b").binary().build();          // binary {0, 1}
+let n = m.var("n").lb(0.0).integer().build(); // general integer
 ```
 
 ### Constraints and objectives
