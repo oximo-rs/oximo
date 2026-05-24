@@ -54,11 +54,7 @@ fn gams_lp_duals_and_reduced_costs() {
     assert!((d.abs() - 1.0).abs() < 1e-6, "dual={d}");
 
     // Only one variable in the model -> VarId(0).
-    let rc = result
-        .reduced_costs
-        .get(&VarId(0))
-        .copied()
-        .expect("reduced cost missing for x");
+    let rc = result.reduced_costs.get(&VarId(0)).copied().expect("reduced cost missing for x");
     assert!(rc.abs() < 1e-6, "reduced_cost(x)={rc}");
     let _ = x;
 }
