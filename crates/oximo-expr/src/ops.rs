@@ -137,12 +137,20 @@ impl<'a, 'b> std::iter::Sum<&'b Expr<'a>> for Expr<'a> {
 
 /// Dot product of expressions with scalar coefficients: `sum_{i} c_i * e_i`.
 ///
+/// Accepts anything that derefs to a slice: `Vec<Expr>`, `[Expr; N]`,
+/// `&[Expr]` for the first argument. `Vec<f64>`, `[f64; N]`, `&[f64]` for
+/// the second.
+///
 /// # Panics
-/// Panics if `exprs` is empty (the result needs an arena handle).
-pub fn dot<'a, I, J>(exprs: I, coeffs: J) -> Expr<'a>
-where
-    I: IntoIterator<Item = Expr<'a>>,
-    J: IntoIterator<Item = f64>,
-{
-    exprs.into_iter().zip(coeffs).map(|(e, c)| c * e).sum()
+/// Panics if `exprs` and `coeffs` have different lengths, or if `exprs`
+/// is empty (the result needs an arena handle).
+pub fn dot<'a>(exprs: &[Expr<'a>], coeffs: &[f64]) -> Expr<'a> {
+    assert_eq!(
+        exprs.len(),
+        coeffs.len(),
+        "dot: length mismatch (exprs.len() = {}, coeffs.len() = {})",
+        exprs.len(),
+        coeffs.len(),
+    );
+    exprs.iter().zip(coeffs).map(|(e, c)| *c * *e).sum()
 }
