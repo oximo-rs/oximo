@@ -137,9 +137,8 @@ impl<'a, 'b> std::iter::Sum<&'b Expr<'a>> for Expr<'a> {
 
 /// Dot product of expressions with scalar coefficients: `sum_{i} c_i * e_i`.
 ///
-/// Accepts anything that derefs to a slice: `Vec<Expr>`, `[Expr; N]`,
-/// `&[Expr]` for the first argument. `Vec<f64>`, `[f64; N]`, `&[f64]` for
-/// the second.
+/// Both arguments are slices. Pass owned containers by reference:
+/// `&vec`, `vec.as_slice()`, or `&array`.
 ///
 /// # Panics
 /// Panics if `exprs` and `coeffs` have different lengths, or if `exprs`
