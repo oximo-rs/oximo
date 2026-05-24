@@ -124,13 +124,35 @@ let _y = m.indexed_var("y", &routes)
     .build();
 ```
 
+### Summing over sets
+
+`sum_over(&set, |k| expr)` reads as `sum_{k in set} expr(k)`. The closure
+receives the index as a typed value via `FromIndexKey`. Built-in impls cover
+`i64`, `i32`, `usize`, `String`, raw `IndexKey`, and tuples up to arity 4.
+State the shape in the closure-arg annotation.
+
+```rust,ignore
+// Single sum: sum_{i in items} weights[i] * x[i]
+let total_weight = sum_over(&items, |i: usize| weights[i] * x[i]);
+m.constraint("cap", total_weight.le(capacity));
+
+// Double sum, flat: sum_{(p,q) in P*M} c[p,q] * x[p,q]
+let total_cost = sum_over(&(&plants * &markets), |(p, q): (String, String)| {
+    c[(&p, &q)] * x[(p, q)]
+});
+
+// Coefficient-weighted sum on paired Vecs: sum_{i} w_i * x_i
+let weight_sum = dot(&xs, &weights);
+
+// Freeform iterator -> use Iterator::sum.
+let active = (0..n).filter(|&i| online[i]).map(|i| x[i]).sum::<Expr>();
+```
+
 ### Rule-style constraints
 
-`Model::add_constraints_over` is a closure that receives the index as a typed
-value via `FromIndexKey`.
-
-Built-in impls cover `i64`, `i32`, `usize`, `String`, raw `IndexKey`, and tuples up to
-arity 4. State the shape in the closure-arg annotation.
+`Model::add_constraints_over` is the constraint equivalent of `sum_over`, a
+closure receives the index as a typed value and returns one constraint per
+set element.
 
 ```rust,ignore
 // Scalar set: one constraint per period.
@@ -139,24 +161,13 @@ m.add_constraints_over("setup", &periods, |t: usize| {
     (x[t] - capacity * s[t]).le(0.0)
 });
 
-// Tuple set: destructure inline.
+// Tuple set: destructure inline. Inner `sum_over` builds the LHS expression.
 m.add_constraints_over("supply", &plants, |p: String| {
-    sum(markets.iter().map(|q| x[(&p, q)])).le(supply_of(&p))
+    sum_over(&markets, |q: String| x[(&p, q)]).le(supply_of(&p))
 });
 
 // Want the raw key? Annotate as IndexKey (clones once per iteration).
 m.add_constraints_over("c", &set, |k: IndexKey| x[&k].le(1.0));
-```
-
-### Summing over sets
-
-```rust,ignore
-// Linear-fastpath aware: `sum` collapses to a single Linear arena node.
-let total_weight = sum(items.iter().map(|k| {
-    let i: usize = FromIndexKey::from_index_key(&k);
-    weights[i] * x[i]
-}));
-m.constraint("cap", total_weight.le(capacity));
 ```
 
 ## Solving
