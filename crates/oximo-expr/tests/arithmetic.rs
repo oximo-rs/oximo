@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 
-use oximo_expr::{Expr, ExprArena, ExprNode, VarId, evaluate, extract_linear};
+use oximo_expr::{Expr, ExprArena, ExprNode, VarId, dot, evaluate, extract_linear};
 
 fn make_var(arena: &RefCell<ExprArena>, idx: u32) -> Expr<'_> {
     Expr::from_var(arena, VarId(idx))
@@ -74,6 +74,35 @@ fn negation_flips_coefficients() {
     let mut sorted = terms.coeffs;
     sorted.sort_by_key(|(v, _)| v.0);
     assert_eq!(sorted, vec![(VarId(0), -2.0), (VarId(1), -3.0)]);
+}
+
+#[test]
+fn dot_computes_weighted_sum() {
+    let arena = RefCell::new(ExprArena::new());
+    let xs: Vec<_> = (0..3).map(|i| make_var(&arena, i)).collect();
+    let weights = [2.0, 3.0, 5.0];
+    let result = dot(&xs, &weights);
+    let terms = extract_linear(&arena.borrow(), result.id).expect("linear");
+    let mut sorted = terms.coeffs;
+    sorted.sort_by_key(|(v, _)| v.0);
+    assert_eq!(sorted, vec![(VarId(0), 2.0), (VarId(1), 3.0), (VarId(2), 5.0)]);
+}
+
+#[test]
+#[should_panic(expected = "dot: length mismatch")]
+fn dot_panics_on_length_mismatch() {
+    let arena = RefCell::new(ExprArena::new());
+    let xs: Vec<_> = (0..3).map(|i| make_var(&arena, i)).collect();
+    let weights = [2.0, 3.0];
+    let _ = dot(&xs, &weights);
+}
+
+#[test]
+#[should_panic(expected = "Expr::sum on empty iterator")]
+fn dot_panics_on_empty() {
+    let xs: Vec<Expr> = Vec::new();
+    let coeffs: Vec<f64> = Vec::new();
+    let _ = dot(&xs, &coeffs);
 }
 
 #[test]
