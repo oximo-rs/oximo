@@ -25,9 +25,8 @@ fn knapsack_milp() {
 
     let m = Model::new("knapsack");
     let xs: Vec<_> = (0..weights.len()).map(|i| m.var(format!("x{i}")).binary().build()).collect();
-    let weight_sum = sum(xs.iter().zip(weights.iter()).map(|(x, w)| *w * *x));
-    m.constraint("cap", weight_sum.le(15.0));
-    m.maximize(sum(xs.iter().zip(values.iter()).map(|(x, v)| *v * *x)));
+    m.constraint("cap", dot(xs.iter().copied(), weights.iter().copied()).le(15.0));
+    m.maximize(dot(xs.iter().copied(), values.iter().copied()));
 
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
@@ -63,9 +62,8 @@ fn milp_warm_start_finds_optimum() {
     let xs: Vec<_> = (0..weights.len())
         .map(|i| m.var(format!("x{i}")).binary().initial(warm_start[i]).build())
         .collect();
-    let weight_sum = sum(xs.iter().zip(weights.iter()).map(|(x, w)| *w * *x));
-    m.constraint("cap", weight_sum.le(15.0));
-    m.maximize(sum(xs.iter().zip(values.iter()).map(|(x, v)| *v * *x)));
+    m.constraint("cap", dot(xs.iter().copied(), weights.iter().copied()).le(15.0));
+    m.maximize(dot(xs.iter().copied(), values.iter().copied()));
 
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
@@ -137,9 +135,8 @@ fn mip_gap_accepted_and_solves() {
     let values = [10.0, 12.0, 5.0, 14.0, 3.0];
     let m = oximo_core::Model::new("ks");
     let xs: Vec<_> = (0..5).map(|i| m.var(format!("x{i}")).binary().build()).collect();
-    let ws = xs.iter().zip(weights.iter()).map(|(x, w)| *w * *x);
-    m.constraint("cap", sum(ws).le(8.0));
-    m.maximize(sum(xs.iter().zip(values.iter()).map(|(x, v)| *v * *x)));
+    m.constraint("cap", dot(xs.iter().copied(), weights.iter().copied()).le(8.0));
+    m.maximize(dot(xs.iter().copied(), values.iter().copied()));
     let opts = HighsOptions::default().mip_gap(0.5).verbose(false);
     let result = Highs.solve(&m, &opts).unwrap();
     assert!(
@@ -339,10 +336,10 @@ fn mps_columns_nonzero_count() {
     let m = Model::new("dense");
     let xs: Vec<_> = (0..5).map(|i| m.var(format!("x{i}")).lb(0.0).build()).collect();
     for i in 0..5usize {
-        let row = oximo::prelude::sum(xs.iter().copied());
+        let row = xs.iter().copied().sum::<Expr>();
         m.constraint(format!("c{i}"), row.le(10.0));
     }
-    m.minimize(oximo::prelude::sum(xs.iter().copied()));
+    m.minimize(xs.iter().copied().sum::<Expr>());
 
     let s = oximo::io::to_mps_string(&m).unwrap();
 
