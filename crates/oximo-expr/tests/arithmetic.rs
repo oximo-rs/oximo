@@ -80,7 +80,7 @@ fn negation_flips_coefficients() {
 fn large_sum_extracts_correctly() {
     let arena = RefCell::new(ExprArena::new());
     let vars: Vec<_> = (0..100).map(|i| make_var(&arena, i)).collect();
-    let total = oximo_expr::sum(vars.iter().copied());
+    let total: Expr = vars.iter().copied().sum();
     let terms = extract_linear(&arena.borrow(), total.id).expect("linear");
     assert_eq!(terms.constant, 0.0);
     assert_eq!(terms.coeffs.len(), 100);
