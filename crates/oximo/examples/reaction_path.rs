@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    <=>  y[v] - sum_vv y[vv] >= 1 - |reactants|
     for &(rx, prod, reactants) in logicc {
         let n = reactants.len() as f64;
-        let reactant_sum = sum(reactants.iter().map(|&vv| y[CHEMICALS[vv]]));
+        let reactant_sum = sum_over(reactants, |vv: usize| y[CHEMICALS[vv]]);
         m.constraint(format!("leq_{rx}"), (y[CHEMICALS[prod]] - reactant_sum).ge(1.0 - n));
     }
 

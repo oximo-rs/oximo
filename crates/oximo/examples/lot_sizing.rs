@@ -80,10 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     m.add_constraints_over("setup", &periods, |t: usize| (x[t] - capacity * s[t]).le(0.0));
     m.constraint("safety_stock", h[T - 1].ge(safety_stock));
 
-    let cost = sum(periods.iter().map(|k| {
-        let t: usize = FromIndexKey::from_index_key(&k);
-        prod_cost[t] * x[t] + setup_cost * s[t] + hold_cost * h[t]
-    }));
+    let cost =
+        sum_over(&periods, |t: usize| prod_cost[t] * x[t] + setup_cost * s[t] + hold_cost * h[t]);
     m.minimize(cost);
 
     #[cfg(feature = "gurobi")]
