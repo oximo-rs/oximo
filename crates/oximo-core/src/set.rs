@@ -74,20 +74,41 @@ impl Set {
 
     /// Cartesian product of two sets. Inner tuple keys are flattened so a
     /// product `(a * b) * c` yields 3-element tuples, not nested 2-tuples.
+    ///
+    /// # Panics
+    /// Panics if `a.len() * b.len()` overflows `usize`.
     pub fn product(a: &Set, b: &Set) -> Self {
-        let mut out = Vec::new();
-        if let Some(capacity) = a.len().checked_mul(b.len()) {
-            // best-effort, fall back to dynamic growth on OOM
-            let _ = out.try_reserve_exact(capacity);
-        }
-        for ka in a {
-            for kb in b {
-                let mut parts: Vec<IndexKey> = Vec::new();
-                push_flat(&mut parts, ka.clone());
-                push_flat(&mut parts, kb);
-                out.push(parts.into_boxed_slice());
+        let a_len = a.len();
+        let b_len = b.len();
+        let total = a_len.checked_mul(b_len).expect("Set::product size overflow");
+
+        // Below this size, rayon dispatch overhead may dominate, so we stay serial.
+        // TODO: benchmark and tune this threshold.
+        const PAR_THRESHOLD: usize = 4096;
+        if total < PAR_THRESHOLD {
+            let mut out = Vec::with_capacity(total);
+            for ka in a {
+                for kb in b {
+                    let mut parts: Vec<IndexKey> = Vec::new();
+                    push_flat(&mut parts, ka.clone());
+                    push_flat(&mut parts, kb);
+                    out.push(parts.into_boxed_slice());
+                }
             }
+            return Self::Tuples(out);
         }
+
+        let a_keys: Vec<IndexKey> = a.iter().collect();
+        let b_keys: Vec<IndexKey> = b.iter().collect();
+        let out: Vec<IndexTuple> = (0..total)
+            .into_par_iter()
+            .map(|i| {
+                let mut parts: Vec<IndexKey> = Vec::new();
+                push_flat(&mut parts, a_keys[i / b_len].clone());
+                push_flat(&mut parts, b_keys[i % b_len].clone());
+                parts.into_boxed_slice()
+            })
+            .collect();
         Self::Tuples(out)
     }
 
