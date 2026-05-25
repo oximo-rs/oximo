@@ -140,28 +140,34 @@ fn collect_solution(
     vars: &[grb::Var],
     constrs: &[grb::Constr],
 ) -> (FxHashMap<VarId, f64>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
-    let mut primal = FxHashMap::default();
-    let mut reduced_costs = FxHashMap::default();
-    let mut dual = FxHashMap::default();
-
-    if status.has_solution() {
-        for (i, gvar) in vars.iter().enumerate() {
-            if let Ok(val) = model.get_obj_attr(attr::X, gvar) {
-                primal.insert(VarId(u32::try_from(i).unwrap()), val);
-            }
-            // Reduced costs
-            if let Ok(val) = model.get_obj_attr(attr::RC, gvar) {
-                reduced_costs.insert(VarId(u32::try_from(i).unwrap()), val);
-            }
-        }
-        for (i, c) in constrs.iter().enumerate() {
-            if let Ok(val) = model.get_obj_attr(attr::Pi, c) {
-                dual.insert(ConstraintId(u32::try_from(i).unwrap()), val);
-            }
-        }
+    if !status.has_solution() {
+        return (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
     }
 
-    (primal, reduced_costs, dual)
+    let primal_vals = model.get_obj_attr_batch(attr::X, vars.iter().copied()).ok();
+    let rc_vals = model.get_obj_attr_batch(attr::RC, vars.iter().copied()).ok();
+    let pi_vals = model.get_obj_attr_batch(attr::Pi, constrs.iter().copied()).ok();
+
+    let to_var_map = |vals: Option<Vec<f64>>| -> FxHashMap<VarId, f64> {
+        vals.map(|v| {
+            v.into_iter()
+                .enumerate()
+                .map(|(i, val)| (VarId(u32::try_from(i).unwrap()), val))
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    let to_constr_map = |vals: Option<Vec<f64>>| -> FxHashMap<ConstraintId, f64> {
+        vals.map(|v| {
+            v.into_iter()
+                .enumerate()
+                .map(|(i, val)| (ConstraintId(u32::try_from(i).unwrap()), val))
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+
+    (to_var_map(primal_vals), to_var_map(rc_vals), to_constr_map(pi_vals))
 }
 
 fn map_status(model: &grb::Model) -> Result<SolverStatus, SolverError> {
