@@ -431,6 +431,7 @@ dependencies = [
  "oximo-core",
  "oximo-expr",
  "oximo-solver",
+ "rayon",
  "rustc-hash",
  "thiserror",
 ]

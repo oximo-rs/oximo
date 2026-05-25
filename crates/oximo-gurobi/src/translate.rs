@@ -3,8 +3,9 @@ use std::time::Instant;
 use grb::expr::LinExpr;
 use grb::prelude::*;
 use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, VarId};
-use oximo_expr::extract_linear;
+use oximo_expr::{ExprArena, LinearTerms, extract_linear};
 use oximo_solver::{SolverError, SolverResult, SolverStatus};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::GurobiOptions;
@@ -68,9 +69,14 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
         }
     }
 
+    let arena_ref: &ExprArena = &arena;
+    let con_terms: Vec<LinearTerms> = constraints
+        .par_iter()
+        .map(|c| extract_linear(arena_ref, c.lhs).ok_or(SolverError::Nonlinear))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut gurobi_constrs = Vec::with_capacity(constraints.len());
-    for (c_id, c) in constraints.iter().enumerate() {
-        let t = extract_linear(&arena, c.lhs).ok_or(SolverError::Nonlinear)?;
+    for (c_id, (c, t)) in constraints.iter().zip(con_terms).enumerate() {
         let adjusted_rhs = c.rhs - t.constant;
 
         let mut expr = LinExpr::new();
