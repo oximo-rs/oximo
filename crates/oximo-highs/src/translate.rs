@@ -2,8 +2,9 @@ use std::time::Instant;
 
 use highs::{HighsModelStatus, RowProblem, Sense as HighsSense};
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId};
-use oximo_expr::extract_linear;
+use oximo_expr::{ExprArena, LinearTerms, extract_linear};
 use oximo_solver::{SolverError, SolverResult, SolverStatus};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::HighsOptions;
@@ -65,8 +66,13 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         }
     }
 
-    for c in constraints.iter() {
-        let t = extract_linear(&arena, c.lhs).ok_or(SolverError::Nonlinear)?;
+    let arena_ref: &ExprArena = &arena;
+    let con_terms: Vec<LinearTerms> = constraints
+        .par_iter()
+        .map(|c| extract_linear(arena_ref, c.lhs).ok_or(SolverError::Nonlinear))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (c, t) in constraints.iter().zip(con_terms) {
         let adjusted_rhs = c.rhs - t.constant;
         let factors: Vec<(highs::Col, f64)> =
             t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co)).collect();
