@@ -50,7 +50,15 @@ impl Solver for Gams {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP)
+        matches!(
+            kind,
+            ModelKind::LP
+                | ModelKind::MILP
+                | ModelKind::QP
+                | ModelKind::MIQP
+                | ModelKind::NLP
+                | ModelKind::MINLP
+        )
     }
 
     fn solve(&mut self, model: &Model, opts: &GamsOptions) -> Result<SolverResult, SolverError> {

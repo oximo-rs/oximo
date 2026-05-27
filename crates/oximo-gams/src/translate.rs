@@ -6,10 +6,12 @@ use std::{fs, io};
 
 static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
-use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, VarId};
-use oximo_expr::{ExprArena, LinearTerms, extract_linear};
+use oximo_core::{
+    Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense, VarId,
+    Variable,
+};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
 use oximo_solver::{SolverError, SolverResult, SolverStatus};
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::GamsOptions;
@@ -36,167 +38,27 @@ pub fn solve(
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
-    if !matches!(kind, ModelKind::LP | ModelKind::MILP) {
-        return Err(SolverError::UnsupportedKind(kind));
-    }
-
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
     let objective = model.try_objective().map_err(SolverError::Core)?;
 
-    let obj_terms = extract_linear(&arena, objective.expr).ok_or(SolverError::Nonlinear)?;
-
-    let arena_ref: &ExprArena = &arena;
-    let con_terms: Vec<LinearTerms> = constraints
-        .par_iter()
-        .map(|c| extract_linear(arena_ref, c.lhs).ok_or(SolverError::Nonlinear))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let solve_type = if matches!(kind, ModelKind::MILP) { "MIP" } else { "LP" };
     let sense_kw = match objective.sense {
         ObjectiveSense::Minimize => "minimizing",
         ObjectiveSense::Maximize => "maximizing",
     };
 
-    // Pre-compute solver opt file content so we know whether to inject optfile=1.
-    let solver_opt: Option<(String, String)> = opts.solver.as_ref().and_then(|cfg| {
-        let mut buf = String::new();
-        if cfg.write_opt_file(&mut buf) {
-            let fname = format!("{}.opt", cfg.gams_name().to_ascii_lowercase());
-            Some((fname, buf))
-        } else {
-            None
-        }
-    });
-
-    // - Build the .gms file
     let mut gms = String::with_capacity(4096);
-
-    writeln!(gms, "$title oximo_model").unwrap();
-    writeln!(gms, "$offSymList").unwrap();
-    writeln!(gms, "$offSymXRef").unwrap();
-    writeln!(gms, "option solprint = off;").unwrap();
-    writeln!(gms, "option limrow = 0;").unwrap();
-    writeln!(gms, "option limcol = 0;").unwrap();
-    writeln!(gms).unwrap();
-
-    // Variable declarations, split by domain
-    let (mut cont_vars, mut bin_vars, mut int_vars) = (Vec::new(), Vec::new(), Vec::new());
-    for v in vars.iter() {
-        match v.domain {
-            Domain::Binary => bin_vars.push(v),
-            Domain::Integer | Domain::SemiInteger { .. } => int_vars.push(v),
-            _ => cont_vars.push(v),
-        }
-    }
-
-    // Continuous + objective variable
-    write!(gms, "Variables\n    v_obj").unwrap();
-    for v in &cont_vars {
-        write!(gms, ", v{}", v.id.index()).unwrap();
-    }
-    writeln!(gms, ";").unwrap();
-
-    if !bin_vars.is_empty() {
-        write!(gms, "Binary Variables").unwrap();
-        for (k, v) in bin_vars.iter().enumerate() {
-            if k == 0 {
-                write!(gms, "\n    v{}", v.id.index()).unwrap();
-            } else {
-                write!(gms, ", v{}", v.id.index()).unwrap();
-            }
-        }
-        writeln!(gms, ";").unwrap();
-    }
-
-    if !int_vars.is_empty() {
-        write!(gms, "Integer Variables").unwrap();
-        for (k, v) in int_vars.iter().enumerate() {
-            if k == 0 {
-                write!(gms, "\n    v{}", v.id.index()).unwrap();
-            } else {
-                write!(gms, ", v{}", v.id.index()).unwrap();
-            }
-        }
-        writeln!(gms, ";").unwrap();
-    }
-    writeln!(gms).unwrap();
-
-    // Bounds
-    for v in vars.iter() {
-        let i = v.id.index();
-        if matches!(v.domain, Domain::Binary) {
-            // Default binary bounds are [0, 1], only emit when overridden.
-            if (v.lb - v.ub).abs() < f64::EPSILON {
-                writeln!(gms, "v{i}.fx = {};", fmt(v.lb)).unwrap();
-            } else {
-                if v.lb.abs() > f64::EPSILON {
-                    writeln!(gms, "v{i}.lo = {};", fmt(v.lb)).unwrap();
-                }
-                if (v.ub - 1.0).abs() > f64::EPSILON {
-                    writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
-                }
-            }
-            continue;
-        }
-        // Lower bound
-        if v.lb == f64::NEG_INFINITY {
-            writeln!(gms, "v{i}.lo = -Inf;").unwrap();
-        } else if v.lb.is_finite() {
-            writeln!(gms, "v{i}.lo = {};", fmt(v.lb)).unwrap();
-        }
-        // Upper bound (+Inf is the GAMS default, only write when finite)
-        if v.ub.is_finite() {
-            writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
-        }
-    }
-
-    // Initial levels (warm start)
-    for v in vars.iter() {
-        if let Some(val) = v.initial {
-            writeln!(gms, "v{}.l = {};", v.id.index(), fmt(val)).unwrap();
-        }
-    }
-    writeln!(gms).unwrap();
-
-    // Equations declaration
-    write!(gms, "Equations\n    eq_obj").unwrap();
-    for i in 0..constraints.len() {
-        write!(gms, ", eq_c{i}").unwrap();
-    }
-    writeln!(gms, ";").unwrap();
-    writeln!(gms).unwrap();
-
-    // Objective equation: v_obj =e= <full expr including constant>
-    write!(gms, "eq_obj..  v_obj =e=").unwrap();
-    write_expr(&mut gms, &obj_terms, true);
-    writeln!(gms, ";").unwrap();
-
-    // Constraint equations: variable terms only, constant folded into RHS
-    for (ci, (c, t)) in constraints.iter().zip(con_terms.iter()).enumerate() {
-        let adjusted_rhs = c.rhs - t.constant;
-        let sense_str = match c.sense {
-            Sense::Le => "=l=",
-            Sense::Ge => "=g=",
-            Sense::Eq => "=e=",
-        };
-        write!(gms, "eq_c{ci}..").unwrap();
-        write_expr(&mut gms, t, false);
-        writeln!(gms, " {sense_str} {};", fmt(adjusted_rhs)).unwrap();
-    }
-    writeln!(gms).unwrap();
-
-    // Options (time limit, MIP gap, sub-solver, etc.)
-    write_options(&mut gms, opts, solve_type);
-
-    // Model and solve statements
-    writeln!(gms, "Model oximo_m / all /;").unwrap();
-    if solver_opt.is_some() {
-        writeln!(gms, "oximo_m.optfile = 1;").unwrap();
-    }
-    writeln!(gms, "Solve oximo_m using {solve_type} {sense_kw} v_obj;").unwrap();
-    writeln!(gms).unwrap();
+    let (solve_type, solver_opt) = build_model_section(
+        &mut gms,
+        kind,
+        &arena,
+        &vars,
+        &constraints,
+        &objective,
+        sense_kw,
+        opts,
+    );
 
     // - Temp directory
     // Combine timestamp with a per-process atomic counter so concurrent
@@ -432,11 +294,212 @@ fn map_status(modelstat: i32, solvestat: i32) -> SolverStatus {
 
 // - Helpers
 
+/// Write the formulation portion of the `.gms` file: title, variables, bounds,
+/// equations, options, model, and solve statement. Returns the solve type
+/// (`"LP"` / `"MIP"` / `"NLP"` / `"MINLP"`) and any solver-options file pair
+/// `(filename, content)` the caller should also persist alongside the `.gms`.
+#[allow(clippy::too_many_arguments)]
+fn build_model_section(
+    gms: &mut String,
+    kind: ModelKind,
+    arena: &ExprArena,
+    vars: &[Variable],
+    constraints: &[Constraint],
+    objective: &Objective,
+    sense_kw: &str,
+    opts: &GamsOptions,
+) -> (&'static str, Option<(String, String)>) {
+    let solve_type = gams_solve_type(kind);
+    let solver_opt = build_solver_opt(opts);
+
+    write_preamble(gms);
+    write_var_declarations(gms, vars);
+    write_bounds_and_initials(gms, vars);
+    write_equations(gms, arena, constraints, objective);
+    write_options(gms, opts, solve_type);
+    write_model_and_solve(gms, solve_type, sense_kw, solver_opt.is_some());
+
+    (solve_type, solver_opt)
+}
+
+fn gams_solve_type(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::LP => "LP",
+        ModelKind::MILP => "MIP",
+        ModelKind::QP | ModelKind::NLP => "NLP",
+        ModelKind::MIQP | ModelKind::MINLP => "MINLP",
+    }
+}
+
+fn build_solver_opt(opts: &GamsOptions) -> Option<(String, String)> {
+    opts.solver.as_ref().and_then(|cfg| {
+        let mut buf = String::new();
+        cfg.write_opt_file(&mut buf)
+            .then(|| (format!("{}.opt", cfg.gams_name().to_ascii_lowercase()), buf))
+    })
+}
+
+fn write_preamble(gms: &mut String) {
+    writeln!(gms, "$title oximo_model").unwrap();
+    writeln!(gms, "$offSymList").unwrap();
+    writeln!(gms, "$offSymXRef").unwrap();
+    writeln!(gms, "option solprint = off;").unwrap();
+    writeln!(gms, "option limrow = 0;").unwrap();
+    writeln!(gms, "option limcol = 0;").unwrap();
+    writeln!(gms).unwrap();
+}
+
+/// Emit `Variables`, `Binary Variables`, `Integer Variables` sections.
+fn write_var_declarations(gms: &mut String, vars: &[Variable]) {
+    let (mut cont, mut bin, mut int) = (Vec::new(), Vec::new(), Vec::new());
+    for v in vars {
+        match v.domain {
+            Domain::Binary => bin.push(v),
+            Domain::Integer | Domain::SemiInteger { .. } => int.push(v),
+            _ => cont.push(v),
+        }
+    }
+
+    write!(gms, "Variables\n    v_obj").unwrap();
+    for v in &cont {
+        write!(gms, ", v{}", v.id.index()).unwrap();
+    }
+    writeln!(gms, ";").unwrap();
+
+    write_typed_var_section(gms, "Binary Variables", &bin);
+    write_typed_var_section(gms, "Integer Variables", &int);
+    writeln!(gms).unwrap();
+}
+
+fn write_typed_var_section(gms: &mut String, header: &str, vars: &[&Variable]) {
+    if vars.is_empty() {
+        return;
+    }
+    write!(gms, "{header}\n    ").unwrap();
+    for (k, v) in vars.iter().enumerate() {
+        if k > 0 {
+            write!(gms, ", ").unwrap();
+        }
+        write!(gms, "v{}", v.id.index()).unwrap();
+    }
+    writeln!(gms, ";").unwrap();
+}
+
+fn write_bounds_and_initials(gms: &mut String, vars: &[Variable]) {
+    for v in vars {
+        write_var_bounds(gms, v);
+    }
+    for v in vars {
+        if let Some(val) = v.initial {
+            writeln!(gms, "v{}.l = {};", v.id.index(), fmt(val)).unwrap();
+        }
+    }
+    writeln!(gms).unwrap();
+}
+
+fn write_var_bounds(gms: &mut String, v: &Variable) {
+    let i = v.id.index();
+    if matches!(v.domain, Domain::Binary) {
+        // Default binary bounds are [0, 1], only emit when overridden or fixed.
+        if (v.lb - v.ub).abs() < f64::EPSILON {
+            writeln!(gms, "v{i}.fx = {};", fmt(v.lb)).unwrap();
+            return;
+        }
+        if v.lb.abs() > f64::EPSILON {
+            writeln!(gms, "v{i}.lo = {};", fmt(v.lb)).unwrap();
+        }
+        if (v.ub - 1.0).abs() > f64::EPSILON {
+            writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
+        }
+        return;
+    }
+    if v.lb == f64::NEG_INFINITY {
+        writeln!(gms, "v{i}.lo = -Inf;").unwrap();
+    } else if v.lb.is_finite() {
+        writeln!(gms, "v{i}.lo = {};", fmt(v.lb)).unwrap();
+    }
+    if v.ub.is_finite() {
+        writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
+    }
+}
+
+fn write_equations(
+    gms: &mut String,
+    arena: &ExprArena,
+    constraints: &[Constraint],
+    objective: &Objective,
+) {
+    write!(gms, "Equations\n    eq_obj").unwrap();
+    for i in 0..constraints.len() {
+        write!(gms, ", eq_c{i}").unwrap();
+    }
+    writeln!(gms, ";").unwrap();
+    writeln!(gms).unwrap();
+
+    let obj_form = ExprForm::from(arena, objective.expr);
+    write!(gms, "eq_obj..  v_obj =e=").unwrap();
+    write_form(gms, arena, &obj_form, true);
+    writeln!(gms, ";").unwrap();
+
+    for (ci, c) in constraints.iter().enumerate() {
+        let sense_str = match c.sense {
+            Sense::Le => "=l=",
+            Sense::Ge => "=g=",
+            Sense::Eq => "=e=",
+        };
+        write!(gms, "eq_c{ci}..").unwrap();
+        match ExprForm::from(arena, c.lhs) {
+            ExprForm::Linear(t) => {
+                let adjusted_rhs = c.rhs - t.constant;
+                write_linear(gms, &t, false);
+                writeln!(gms, " {sense_str} {};", fmt(adjusted_rhs)).unwrap();
+            }
+            ExprForm::Nonlinear(id) => {
+                write_gams_expr(gms, arena, id, true);
+                writeln!(gms, " {sense_str} {};", fmt(c.rhs)).unwrap();
+            }
+        }
+    }
+    writeln!(gms).unwrap();
+}
+
+fn write_model_and_solve(gms: &mut String, solve_type: &str, sense_kw: &str, has_opt: bool) {
+    writeln!(gms, "Model oximo_m / all /;").unwrap();
+    if has_opt {
+        writeln!(gms, "oximo_m.optfile = 1;").unwrap();
+    }
+    writeln!(gms, "Solve oximo_m using {solve_type} {sense_kw} v_obj;").unwrap();
+    writeln!(gms).unwrap();
+}
+
+/// Captured form of an expression for GAMS emission.
+enum ExprForm {
+    Linear(LinearTerms),
+    Nonlinear(ExprId),
+}
+
+impl ExprForm {
+    fn from(arena: &ExprArena, id: ExprId) -> Self {
+        match extract_linear(arena, id) {
+            Some(t) => ExprForm::Linear(t),
+            None => ExprForm::Nonlinear(id),
+        }
+    }
+}
+
+/// Append a captured expression form to `gms`.
+fn write_form(gms: &mut String, arena: &ExprArena, form: &ExprForm, include_constant: bool) {
+    match form {
+        ExprForm::Linear(t) => write_linear(gms, t, include_constant),
+        ExprForm::Nonlinear(id) => write_gams_expr(gms, arena, *id, true),
+    }
+}
+
 /// Append the linear expression `t` to `gms`.
 /// When `include_constant` is true, the constant term is included; otherwise
 /// only variable terms are emitted (used for constraints where the constant is
 /// folded into the RHS).
-fn write_expr(gms: &mut String, t: &LinearTerms, include_constant: bool) {
+fn write_linear(gms: &mut String, t: &LinearTerms, include_constant: bool) {
     let mut first = true;
     for (v, coef) in &t.coeffs {
         if *coef == 0.0 {
@@ -467,6 +530,94 @@ fn write_expr(gms: &mut String, t: &LinearTerms, include_constant: bool) {
     }
 }
 
+/// Recursive infix printer for a GAMS-compatible expression.
+fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_space: bool) {
+    if leading_space {
+        write!(gms, " ").unwrap();
+    }
+    match arena.get(id) {
+        ExprNode::Const(c) => write!(gms, "{}", fmt(*c)).unwrap(),
+        ExprNode::Var(v) => write!(gms, "v{}", v.index()).unwrap(),
+        ExprNode::Param(_) => {
+            // Since params not yet passed into GAMS emission, we emit a placeholder
+            // so downstream errors are clear.
+            write!(gms, "0 /* unsupported: param */").unwrap();
+        }
+        ExprNode::Linear { coeffs, constant } => {
+            let t = LinearTerms { coeffs: coeffs.clone(), constant: *constant };
+            write!(gms, "(").unwrap();
+            write_linear(gms, &t, true);
+            write!(gms, " )").unwrap();
+        }
+        ExprNode::Neg(inner) => {
+            write!(gms, "(-").unwrap();
+            write_gams_expr(gms, arena, *inner, true);
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Add(children) => {
+            write!(gms, "(").unwrap();
+            for (i, c) in children.iter().enumerate() {
+                if i > 0 {
+                    write!(gms, " +").unwrap();
+                }
+                write_gams_expr(gms, arena, *c, true);
+            }
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Mul(children) => {
+            write!(gms, "(").unwrap();
+            for (i, c) in children.iter().enumerate() {
+                if i > 0 {
+                    write!(gms, " *").unwrap();
+                }
+                write_gams_expr(gms, arena, *c, true);
+            }
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Pow(base, exp) => {
+            // GAMS's `**` lowers to `rPower(x, r)`, which rejects negative
+            // bases. For small integer constant exponents emit `power(x, n)`
+            // (accepts any real base), otherwise fall back to `**`.
+            //
+            // The 1e9 cap keeps the cast safe and rejects nonsense huge exponents
+            // that would still satisfy the integer check after f64 rounding.
+            if let ExprNode::Const(c) = arena.get(*exp) {
+                if (c - c.round()).abs() < f64::EPSILON && c.abs() <= 1e9 {
+                    write!(gms, "power(").unwrap();
+                    write_gams_expr(gms, arena, *base, false);
+                    write!(gms, ", {:.0})", c.round()).unwrap();
+                    return;
+                }
+            }
+            write!(gms, "(").unwrap();
+            write_gams_expr(gms, arena, *base, false);
+            write!(gms, " **").unwrap();
+            write_gams_expr(gms, arena, *exp, true);
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Sin(a) => {
+            write!(gms, "sin(").unwrap();
+            write_gams_expr(gms, arena, *a, false);
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Cos(a) => {
+            write!(gms, "cos(").unwrap();
+            write_gams_expr(gms, arena, *a, false);
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Exp(a) => {
+            write!(gms, "exp(").unwrap();
+            write_gams_expr(gms, arena, *a, false);
+            write!(gms, ")").unwrap();
+        }
+        ExprNode::Log(a) => {
+            write!(gms, "log(").unwrap();
+            write_gams_expr(gms, arena, *a, false);
+            write!(gms, ")").unwrap();
+        }
+    }
+}
+
 /// Format an `f64` for use in a GAMS file.
 fn fmt(v: f64) -> String {
     if v == f64::INFINITY {
@@ -481,12 +632,10 @@ fn fmt(v: f64) -> String {
 /// Parse a GAMS-formatted integer (may be written as `"1"` or `"1.000"`).
 fn parse_gams_int(s: &str) -> Option<i32> {
     let trimmed = s.trim();
-    if let Ok(n) = trimmed.parse::<i32>() {
-        return Some(n);
-    }
-    // Fall back through f64 for GAMS formats like "1.000".
-    #[allow(clippy::cast_possible_truncation)]
-    trimmed.parse::<f64>().ok().map(|f| f.round() as i32)
+    // GAMS writes modelstat/solvestat with the `:0:0` PUT format, so we
+    // normally see a bare integer.
+    let head = trimmed.split_once('.').map_or(trimmed, |(int, _)| int);
+    head.parse::<i32>().ok()
 }
 
 /// Parse a GAMS-formatted float, tolerating GAMS special tokens.
@@ -496,5 +645,103 @@ fn parse_gams_float(s: &str) -> Option<f64> {
         "-INF" | "-Inf" => Some(f64::NEG_INFINITY),
         "NA" | "UNDF" | "EPS" => Some(0.0),
         other => other.parse().ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximo_core::prelude::*;
+
+    fn render(model: &Model, opts: &GamsOptions) -> String {
+        let arena = model.arena();
+        let vars = model.variables();
+        let constraints = model.constraints();
+        let objective = model.try_objective().expect("objective set");
+        let sense_kw = match objective.sense {
+            ObjectiveSense::Minimize => "minimizing",
+            ObjectiveSense::Maximize => "maximizing",
+        };
+        let mut gms = String::new();
+        build_model_section(
+            &mut gms,
+            model.kind(),
+            &arena,
+            &vars,
+            &constraints,
+            &objective,
+            sense_kw,
+            opts,
+        );
+        gms
+    }
+
+    #[test]
+    fn linear_objective_uses_lp_solve_type() {
+        let m = Model::new("lp");
+        let x = m.var("x").lb(0.0).ub(10.0).build();
+        let y = m.var("y").lb(0.0).ub(10.0).build();
+        m.constraint("c", (x + y).le(5.0));
+        m.minimize(x + 2.0 * y);
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("Solve oximo_m using LP minimizing v_obj;"), "got:\n{gms}");
+    }
+
+    #[test]
+    fn nlp_uses_transcendental_and_picks_nlp_solve_type() {
+        let m = Model::new("nlp");
+        let x = m.var("x").lb(-std::f64::consts::PI).ub(std::f64::consts::PI).build();
+        m.minimize(x.sin() + x.exp());
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("Solve oximo_m using NLP minimizing v_obj;"), "got:\n{gms}");
+        assert!(gms.contains("sin("), "expected sin(...) in objective:\n{gms}");
+        assert!(gms.contains("exp("), "expected exp(...) in objective:\n{gms}");
+    }
+
+    #[test]
+    fn minlp_nonlinear_knapsack_routes_to_minlp_solve_type() {
+        let m = Model::new("minlp");
+        let x = m.var("x").binary().build();
+        let y = m.var("y").lb(0.0).ub(10.0).build();
+        m.constraint("budget", (x + y).le(8.0));
+        let one = Expr::constant(x.arena, 1.0);
+        m.maximize((one + y).log() + 2.0 * x);
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("Solve oximo_m using MINLP maximizing v_obj;"), "got:\n{gms}");
+        assert!(gms.contains("log("), "expected log(...) in objective:\n{gms}");
+    }
+
+    #[test]
+    fn quadratic_constraint_emits_full_expression_against_rhs() {
+        let m = Model::new("qcp");
+        let x = m.var("x").lb(0.0).ub(5.0).build();
+        let y = m.var("y").lb(0.0).ub(5.0).build();
+        m.constraint("xy", (x * y).le(4.0));
+        m.minimize(x + y);
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("Solve oximo_m using NLP minimizing v_obj;"), "got:\n{gms}");
+        // The product term must appear on the LHS, the user RHS untouched.
+        assert!(gms.contains("v0") && gms.contains("v1"), "vars missing:\n{gms}");
+        assert!(gms.contains("=l= 4"), "expected =l= 4 on the right:\n{gms}");
+    }
+
+    #[test]
+    fn integer_power_uses_power_func() {
+        let m = Model::new("pow");
+        let x = m.var("x").lb(-10.0).ub(10.0).build();
+        m.minimize(x.powi(3));
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("power("), "expected power(...) for int Pow:\n{gms}");
+        assert!(gms.contains(", 3)"), "expected exponent 3:\n{gms}");
+        assert!(gms.contains("Solve oximo_m using NLP minimizing v_obj;"), "got:\n{gms}");
+    }
+
+    #[test]
+    fn real_power_falls_back_to_double_star() {
+        let m = Model::new("rpow");
+        let x = m.var("x").lb(0.1).ub(10.0).build();
+        m.minimize(x.powf(0.5));
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains(" **"), "expected ** for real Pow:\n{gms}");
     }
 }
