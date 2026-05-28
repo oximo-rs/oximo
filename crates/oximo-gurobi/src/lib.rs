@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod nonlinear;
 mod options;
 mod translate;
 
@@ -21,7 +22,15 @@ impl Solver for Gurobi {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP)
+        matches!(
+            kind,
+            ModelKind::LP
+                | ModelKind::MILP
+                | ModelKind::QP
+                | ModelKind::MIQP
+                | ModelKind::NLP
+                | ModelKind::MINLP
+        )
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
