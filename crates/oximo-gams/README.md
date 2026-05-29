@@ -1,8 +1,8 @@
 # oximo-gams
 
-GAMS LP/MILP backend for [oximo](https://github.com/germanheim/oximo).
+GAMS backend for [oximo](https://github.com/germanheim/oximo).
 
-Writes an oximo`Model`] to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP` and `MILP` model kinds. **QP/NLP/MINLP return `SolverError::UnsupportedKind` for now**.
+Writes an oximo `Model` to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP`, `MILP`, `QP`, `MIQP`, `NLP`, and `MINLP` model kinds. Nonlinear nodes (`Pow`, `Sin`, `Cos`, `Exp`, `Log`, bilinear `Mul`) are emitted as GAMS infix. The `Solve` statement picks `LP` / `MIP` / `NLP` / `MINLP` automatically based on `Model::kind()`.
 
 The sub-solver is determined by the GAMS installation (default) or set explicitly via `GamsOptions::solver`. Any solver available in your GAMS distribution can be targeted, see [Sub-solver selection](#sub-solver-selection) below.
 
