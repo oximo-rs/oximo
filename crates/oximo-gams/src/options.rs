@@ -25,15 +25,15 @@ pub struct GamsOptions {
 /// Reference: <https://www.gams.com/latest/docs/S_MAIN.html#SOLVERS_MODEL_TYPES>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GamsSolver {
-    /// ALPHAECP: MINLP
+    /// ALPHAECP: MINLP, MIQCP
     AlphaEcp,
-    /// ANTIGONE: LP, MIP, NLP, MINLP, QCP, MIQCP, Global
+    /// ANTIGONE: NLP, CNS, DNLP, MINLP, QCP, MIQCP, Global
     Antigone,
-    /// BARON: LP, MIP, NLP, MCP, MPEC, CNS, MINLP, QCP, MIQCP, Global
+    /// BARON: LP, MIP, NLP, CNS, DNLP, MINLP, QCP, MIQCP, Global
     Baron,
     /// CBC: LP, MIP
     Cbc,
-    /// CONOPT: NLP, DNLP, CNS, MPEC
+    /// CONOPT: LP, NLP, CNS, DNLP, QCP
     Conopt,
     /// COPT: LP, MIP, QCP, MIQCP
     Copt,
@@ -41,55 +41,55 @@ pub enum GamsSolver {
     Cplex,
     /// DECIS: LP, Stochastic
     Decis,
-    /// DICOPT: MINLP
+    /// DICOPT: MINLP, MIQCP
     Dicopt,
     /// GLPK: LP, MIP (not in GAMS docs but recognized)
     Glpk,
-    /// GUROBI: LP, MIP, NLP, MINLP, QCP, MIQCP, Global
+    /// GUROBI: LP, MIP, NLP, DNLP, MINLP, QCP, MIQCP, Global
     Gurobi,
-    /// GUSS: LP, MIP, NLP, MCP, MPEC, CNS, DNLP, MINLP, QCP, MIQCP
+    /// GUSS: LP, MIP, NLP, MCP, CNS, DNLP, MINLP, QCP, MIQCP
     Guss,
     /// HiGHS: LP, MIP
     Highs,
-    /// IPOPT: NLP, DNLP, CNS, MPEC
+    /// IPOPT: LP, NLP, CNS, DNLP, QCP
     Ipopt,
-    /// JAMS: MPEC
+    /// JAMS: EMP
     Jams,
     /// KESTREL: all model types (remote solver submission)
     Kestrel,
-    /// KNITRO: LP, MIP, NLP, MCP, MPEC, CNS, DNLP, MINLP, QCP, MIQCP
+    /// KNITRO: LP, NLP, MCP, MPEC, CNS, DNLP, MINLP, QCP, MIQCP
     Knitro,
-    /// LINDO: LP, MIP, NLP, MCP, MPEC, CNS, DNLP, MINLP, QCP, Stochastic, Global
+    /// LINDO: LP, MIP, NLP, DNLP, MINLP, QCP, MIQCP, Stochastic, Global
     Lindo,
-    /// LINDOGLOBAL: LP, MIP, NLP, MINLP, QCP, MIQCP, Global
+    /// LINDOGLOBAL: LP, MIP, NLP, DNLP, MINLP, QCP, MIQCP, Global
     LindoGlobal,
     /// MILES: MCP
     Miles,
-    /// MINOS: NLP, DNLP, CNS, MPEC
+    /// MINOS: LP, NLP, CNS, DNLP, QCP
     Minos,
-    /// MOSEK: LP, MIP, NLP, QCP, MIQCP
+    /// MOSEK: LP, MIP, NLP, DNLP, MINLP, QCP, MIQCP
     Mosek,
-    /// NLPEC: NLP, MPEC
+    /// NLPEC: MCP, MPEC
     Nlpec,
-    /// ODHCPLEX: LP, MIP
+    /// ODHCPLEX: MIP, MIQCP
     OdhCplex,
-    /// PATH: MCP, MPEC
+    /// PATH: MCP, CNS
     Path,
-    /// QUADMINOS: NLP
+    /// QUADMINOS: LP
     QuadMinos,
-    /// RESHOP: NLP
+    /// RESHOP: EMP
     Reshop,
-    /// SBB: NLP, MINLP
+    /// SBB: MINLP, MIQCP
     Sbb,
-    /// SCIP: LP, MIP, NLP, MINLP, QCP, MIQCP, Global
+    /// SCIP: MIP, NLP, CNS, DNLP, MINLP, QCP, MIQCP, Global
     Scip,
-    /// SHOT: MINLP
+    /// SHOT: MINLP, MIQCP
     Shot,
-    /// SNOPT: NLP, DNLP, CNS, MPEC
+    /// SNOPT: LP, NLP, CNS, DNLP, QCP
     Snopt,
     /// SOPLEX: LP
     Soplex,
-    /// XPRESS: LP, MIP, NLP, MINLP, QCP, MIQCP, Global
+    /// XPRESS: LP, MIP, NLP, CNS, DNLP, MINLP, QCP, MIQCP, Global
     Xpress,
     /// Any other GAMS-recognized solver name, emitted verbatim.
     Custom(String),
@@ -170,7 +170,8 @@ impl HasUniversal for GamsOptions {
 
 /// Emit GAMS option statements into `gms` before the `Solve` statement.
 ///
-/// `solve_type` is `"LP"` or `"MIP"`, used to scope the `solver` option.
+/// `solve_type` is the GAMS model type (`"LP"` / `"MIP"` / `"NLP"` / `"MINLP"`
+/// / `"QCP"` / `"MIQCP"`), used to scope the `solver` option.
 pub fn write_options(gms: &mut String, o: &GamsOptions, solve_type: &str) {
     if let Some(d) = o.universal.time_limit {
         writeln!(gms, "option ResLim = {};", d.as_secs_f64()).unwrap();
