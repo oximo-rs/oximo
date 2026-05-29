@@ -3,7 +3,10 @@
 
 use std::fmt::Write as FmtWrite;
 
+use oximo_core::ModelKind;
+
 use crate::options::GamsSolver;
+use crate::translate::gams_solve_type;
 
 // - Config enum
 
@@ -73,6 +76,53 @@ impl GamsSolverConfig {
             Self::Named(_) => false,
         }
     }
+
+    /// Whether this solver can handle `kind` under oximo's GAMS translation,
+    /// which emits `QP` as a `QCP` solve and `MIQP` as a `MIQCP` solve.
+    ///
+    /// [`GamsSolver::Custom`] and any unrecognized name return `true`: their
+    /// capabilities are unknown, so they are left for GAMS to accept or reject.
+    #[must_use]
+    pub fn supports(&self, kind: ModelKind) -> bool {
+        solver_supports_type(self.gams_name(), gams_solve_type(kind))
+    }
+}
+
+/// GAMS solve types a named solver supports, restricted to the six oximo can
+/// emit: `LP` / `MIP` / `NLP` / `MINLP` / `QCP` / `MIQCP`. `None` means the
+/// name is unrecognized and cannot be validated.
+///
+/// Transcribed from the GAMS solver/model-type matrix (other model types —
+/// `MCP`, `MPEC`, `CNS`, `DNLP`, `EMP`, stochastic — are omitted because oximo
+/// never emits them):
+/// - "GAMS Solver Manuals," GAMS Development Corporation.
+///   <https://www.gams.com/latest/docs/S_MAIN.html#SOLVERS_MODEL_TYPES> (accessed May 14, 2026).
+fn supported_solve_types(gams_name: &str) -> Option<&'static [&'static str]> {
+    Some(match gams_name {
+        "ALPHAECP" | "DICOPT" | "SBB" | "SHOT" => &["MINLP", "MIQCP"],
+        "CONOPT" | "CONOPT3" | "CONOPT4" | "IPOPT" | "MINOS" | "SNOPT" => &["LP", "NLP", "QCP"],
+        "DECIS" | "SOPLEX" | "QUADMINOS" => &["LP"],
+        "CBC" | "GLPK" | "HIGHS" => &["LP", "MIP"],
+        "ODHCPLEX" => &["MIP", "MIQCP"],
+        "COPT" | "CPLEX" => &["LP", "MIP", "QCP", "MIQCP"],
+        "ANTIGONE" => &["NLP", "MINLP", "QCP", "MIQCP"],
+        "KNITRO" => &["LP", "NLP", "MINLP", "QCP", "MIQCP"],
+        "SCIP" => &["MIP", "NLP", "MINLP", "QCP", "MIQCP"],
+        "BARON" | "GUROBI" | "GUSS" | "KESTREL" | "LINDO" | "LINDOGLOBAL" | "MOSEK" | "XPRESS" => {
+            &["LP", "MIP", "NLP", "MINLP", "QCP", "MIQCP"]
+        }
+        // JAMS (EMP), MILES (MCP), NLPEC (MCP/MPEC), PATH (MCP/MPEC/CNS),
+        // RESHOP (EMP) support none of the model types oximo emits.
+        "JAMS" | "MILES" | "NLPEC" | "PATH" | "RESHOP" => &[],
+        _ => return None,
+    })
+}
+
+/// Whether the GAMS solver named `gams_name` supports `gams_type`
+/// (`"LP"` / `"MIP"` / `"NLP"` / `"MINLP"` / `"QCP"` / `"MIQCP"`). Unrecognized
+/// names return `true`.
+pub(crate) fn solver_supports_type(gams_name: &str, gams_type: &str) -> bool {
+    supported_solve_types(gams_name).is_none_or(|types| types.contains(&gams_type))
 }
 
 impl From<GamsSolver> for GamsSolverConfig {
