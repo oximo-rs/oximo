@@ -38,6 +38,7 @@ pub fn solve(
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
+    validate_solver(opts, kind)?;
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
@@ -322,13 +323,32 @@ fn build_model_section(
     (solve_type, solver_opt)
 }
 
-fn gams_solve_type(kind: ModelKind) -> &'static str {
+pub(crate) fn gams_solve_type(kind: ModelKind) -> &'static str {
     match kind {
         ModelKind::LP => "LP",
         ModelKind::MILP => "MIP",
-        ModelKind::QP | ModelKind::NLP => "NLP",
-        ModelKind::MIQP | ModelKind::MINLP => "MINLP",
+        ModelKind::QP => "QCP",
+        ModelKind::MIQP => "MIQCP",
+        ModelKind::NLP => "NLP",
+        ModelKind::MINLP => "MINLP",
     }
+}
+
+/// Reject an explicitly selected sub-solver that cannot handle `kind` before
+/// invoking GAMS, so the caller gets a clear error naming the solver and model
+/// type instead of a downstream GAMS compilation failure.
+fn validate_solver(opts: &GamsOptions, kind: ModelKind) -> Result<(), SolverError> {
+    if let Some(cfg) = &opts.solver {
+        if !cfg.supports(kind) {
+            let solve_type = gams_solve_type(kind);
+            return Err(SolverError::Backend(format!(
+                "GAMS solver {} does not support {solve_type} models (model kind {kind:?}); \
+                select a solver that supports {solve_type}",
+                cfg.gams_name()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn build_solver_opt(opts: &GamsOptions) -> Option<(String, String)> {
