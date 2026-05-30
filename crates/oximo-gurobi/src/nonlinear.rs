@@ -204,6 +204,7 @@ pub(crate) fn lower(
         }
         ExprNode::Mul(children) => lower_mul(arena, children, ctx),
         ExprNode::Pow(base, exp) => lower_pow(arena, *base, *exp, ctx),
+        ExprNode::Div(num, den) => lower_div(arena, *num, *den, ctx),
         ExprNode::Sin(a) => lower_unary(arena, *a, ctx, UnaryFn::Sin),
         ExprNode::Cos(a) => lower_unary(arena, *a, ctx, UnaryFn::Cos),
         ExprNode::Exp(a) => lower_unary(arena, *a, ctx, UnaryFn::Exp),
@@ -351,6 +352,48 @@ fn lower_pow(
     let exp_name = ctx.next_name("exp");
     ctx.model.add_genconstr_natural_exp(&exp_name, prod, result, "").map_err(map_grb)?;
     Ok(LoweredExpr::Var(result))
+}
+
+/// Lower `num / den` as `num * recip`, introducing a reciprocal variable
+/// `recip` pinned by the bilinear equality `den * recip == 1`.
+///
+/// This avoids a `pow(den, -1)` lowering. Gurobi's `genconstr_pow` has a pole
+/// at 0 and so requires its base to stay in a strictly positive domain,
+/// which rules out negative or zero-straddling denominators. The bilinear pin
+/// carries no such restriction: it is a plain non-convex quadratic
+/// (handled via `NonConvex = 2`) valid for `den` of either sign,
+/// and is infeasible only at `den == 0`.
+fn lower_div(
+    arena: &ExprArena,
+    num: ExprId,
+    den: ExprId,
+    ctx: &mut LoweringCtx<'_>,
+) -> Result<LoweredExpr, SolverError> {
+    // `div_into` folds every nonzero constant denominator into the linear path
+    // at construction, so the only constant `den` that reaches here is a literal
+    // zero.
+    if as_const(arena, den) == Some(0.0) {
+        return Err(SolverError::Backend("division by zero: constant denominator is 0".into()));
+    }
+
+    // recip = 1 / den, pinned by `den * recip == 1`.
+    let den_lowered = lower(arena, den, ctx)?;
+    let x = as_aux_var(den_lowered, ctx)?;
+    let recip = ctx.new_aux("recip", f64::NEG_INFINITY, f64::INFINITY).map_err(map_grb)?;
+    let mut pin = QuadExpr::new();
+    pin.add_qterm(1.0, x, recip);
+    let name = ctx.next_name("recip_eq");
+    ctx.model.add_qconstr(&name, c!(pin == 1.0)).map_err(map_grb)?;
+
+    // Constant numerator stays linear in `recip`, otherwise form `num * recip`.
+    if let Some(k) = as_const(arena, num) {
+        return Ok(lowered_scale(LoweredExpr::Var(recip), k));
+    }
+    let num_lowered = lower(arena, num, ctx)?;
+    let vn = as_aux_var(num_lowered, ctx)?;
+    let mut q = QuadExpr::new();
+    q.add_qterm(1.0, vn, recip);
+    Ok(LoweredExpr::Quadratic(q))
 }
 
 enum UnaryFn {
