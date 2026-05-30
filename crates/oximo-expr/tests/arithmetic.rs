@@ -106,6 +106,66 @@ fn dot_panics_on_empty() {
 }
 
 #[test]
+fn div_by_constant_stays_linear() {
+    let arena = RefCell::new(ExprArena::new());
+    let x = make_var(&arena, 0);
+    let combo = x / 2.0;
+
+    let snapshot = arena.borrow().get(combo.id).clone();
+    match snapshot {
+        ExprNode::Linear { coeffs, constant } => {
+            assert_eq!(constant, 0.0);
+            assert_eq!(coeffs, vec![(VarId(0), 0.5)]);
+        }
+        n => panic!("expected Linear node, got {n:?}"),
+    }
+    assert_eq!(classify(&arena.borrow(), combo.id), ExprClass::Linear);
+}
+
+#[test]
+fn div_two_vars_is_nonlinear() {
+    let arena = RefCell::new(ExprArena::new());
+    let a = make_var(&arena, 0);
+    let b = make_var(&arena, 1);
+    let q = a / b;
+
+    assert!(matches!(arena.borrow().get(q.id), ExprNode::Div(_, _)));
+    assert_eq!(classify(&arena.borrow(), q.id), ExprClass::Nonlinear);
+    assert!(extract_linear(&arena.borrow(), q.id).is_none());
+}
+
+#[test]
+fn scalar_over_var_is_nonlinear() {
+    let arena = RefCell::new(ExprArena::new());
+    let x = make_var(&arena, 0);
+    let recip = 1.0 / x;
+    assert!(matches!(arena.borrow().get(recip.id), ExprNode::Div(_, _)));
+    assert_eq!(classify(&arena.borrow(), recip.id), ExprClass::Nonlinear);
+}
+
+#[test]
+fn evaluate_division() {
+    let arena = RefCell::new(ExprArena::new());
+    let a = make_var(&arena, 0);
+    let b = make_var(&arena, 1);
+    let q = a / b;
+    let values: &[f64] = &[12.0, 4.0];
+    let arena_ref = arena.borrow();
+    assert_eq!(evaluate(&arena_ref, q.id, &values).unwrap(), 3.0);
+}
+
+#[test]
+fn evaluate_division_by_zero_is_infinite() {
+    let arena = RefCell::new(ExprArena::new());
+    let a = make_var(&arena, 0);
+    let b = make_var(&arena, 1);
+    let q = a / b;
+    let values: &[f64] = &[1.0, 0.0];
+    let arena_ref = arena.borrow();
+    assert!(evaluate(&arena_ref, q.id, &values).unwrap().is_infinite());
+}
+
+#[test]
 fn large_sum_extracts_correctly() {
     let arena = RefCell::new(ExprArena::new());
     let vars: Vec<_> = (0..100).map(|i| make_var(&arena, i)).collect();

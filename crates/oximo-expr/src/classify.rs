@@ -158,6 +158,15 @@ mod tests {
     }
 
     #[test]
+    fn nonlinear_div() {
+        let mut a = ExprArena::new();
+        let x = var(&mut a, 0);
+        let y = var(&mut a, 1);
+        let q = a.push(ExprNode::Div(x, y));
+        assert_eq!(classify(&a, q), ExprClass::Nonlinear);
+    }
+
+    #[test]
     fn nonlinear_sin() {
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
