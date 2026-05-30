@@ -28,6 +28,7 @@ Add(Children) // generic n-ary add
 Mul(Children) // generic n-ary mul
 Neg(ExprId)
 Pow(ExprId, ExprId)
+Div(ExprId, ExprId) // numerator / denominator
 Sin(ExprId) / Cos(ExprId) / Exp(ExprId) / Log(ExprId)
 Linear { coeffs: Vec<(VarId, f64)>, constant: f64 } // LP fast-path
 ```
@@ -36,13 +37,14 @@ Linear { coeffs: Vec<(VarId, f64)>, constant: f64 } // LP fast-path
 
 ## Operator overloads
 
-`Expr` implements `Add`, `Sub`, `Mul`, `Neg` against other `Expr` values and against `f64`. All operations that stay linear produce a `Linear` node. For example:
+`Expr` implements `Add`, `Sub`, `Mul`, `Div`, `Neg` against other `Expr` values and against `f64`. All operations that stay linear produce a `Linear` node. For example:
 
 ```rust,ignore
 // All of these produce a single Linear node, not an Add/Mul tree:
 let e = 2.0 * x + 3.0 * y - 1.0;
 let e = x + y;
 let e = -x;
+let e = x / 2.0; // constant denominator: stays linear (x*0.5)
 ```
 
 ## Nonlinear methods on `Expr`
@@ -55,6 +57,7 @@ expr.sin()
 expr.cos()
 expr.exp()
 expr.log()
+expr/expr
 ```
 
 ## Utilities
