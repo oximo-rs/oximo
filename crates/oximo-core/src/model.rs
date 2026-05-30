@@ -300,7 +300,7 @@ fn has_nonlinear(arena: &ExprArena, id: oximo_expr::ExprId) -> bool {
             }
             nonconst >= 2
         }
-        N::Pow(_, _) | N::Sin(_) | N::Cos(_) | N::Exp(_) | N::Log(_) => true,
+        N::Div(_, _) | N::Pow(_, _) | N::Sin(_) | N::Cos(_) | N::Exp(_) | N::Log(_) => true,
     }
 }
 
