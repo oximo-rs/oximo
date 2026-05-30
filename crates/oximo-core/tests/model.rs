@@ -29,6 +29,16 @@ fn classifies_nlp() {
 }
 
 #[test]
+fn classifies_minlp_with_division() {
+    let m = Model::new("minlp_div");
+    let x = m.var("x").lb(1.0).build();
+    let y = m.var("y").lb(0.0).ub(1.0).integer().build();
+    // x / y is nonlinear (non-constant denominator)
+    m.minimize(x / y);
+    assert_eq!(m.kind(), ModelKind::MINLP);
+}
+
+#[test]
 fn variable_count_matches_register() {
     let m = Model::new("vars");
     let _ = m.var("x").build();
