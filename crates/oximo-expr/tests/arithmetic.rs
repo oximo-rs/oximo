@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 
-use oximo_expr::{Expr, ExprArena, ExprNode, VarId, dot, evaluate, extract_linear};
+use oximo_expr::{
+    Expr, ExprArena, ExprClass, ExprNode, VarId, classify, dot, evaluate, extract_linear,
+};
 
 fn make_var(arena: &RefCell<ExprArena>, idx: u32) -> Expr<'_> {
     Expr::from_var(arena, VarId(idx))
