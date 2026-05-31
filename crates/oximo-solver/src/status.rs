@@ -18,7 +18,7 @@ impl SolverStatus {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum SolverError {
     #[error("solver does not support model kind {0:?}")]
     UnsupportedKind(oximo_core::ModelKind),
@@ -30,4 +30,14 @@ pub enum SolverError {
     Backend(String),
     #[error(transparent)]
     Core(#[from] oximo_core::Error),
+}
+
+// Mirror `Display` in `Debug`. When a `main` returning `Result` propagates an
+// error, Rust's `Termination` impl prints it with `{:?}`. The derived `Debug`
+// would escape newlines in `Backend` messages (e.g. multi-line GAMS reports)
+// onto a single line. These messages are human-facing, so render them as-is.
+impl std::fmt::Debug for SolverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
