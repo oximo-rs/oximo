@@ -123,6 +123,37 @@ fn fix_var_mutates_bounds_post_build() {
 }
 
 #[test]
+fn fix_pins_var_expr_and_indexed_entry() {
+    let m = Model::new("fix_expr");
+    let x = m.var("x").lb(0.0).ub(10.0).build();
+    m.fix(x, 3.0);
+    let xid = m.variable_id("x").unwrap();
+    let vars = m.variables();
+    assert_eq!(vars[xid.index()].lb, 3.0);
+    assert_eq!(vars[xid.index()].ub, 3.0);
+    drop(vars);
+
+    let keys = Set::strings(["a", "b"]);
+    let w = m.indexed_var("w", &keys).binary().build();
+    m.fix(w["a"], 1.0);
+    let aid = m.variable_id("w[a]").unwrap();
+    let vars = m.variables();
+    assert_eq!(vars[aid.index()].lb, 1.0);
+    assert_eq!(vars[aid.index()].ub, 1.0);
+}
+
+#[test]
+fn var_id_is_none_for_compound_expr() {
+    let m = Model::new("var_id");
+    let x = m.var("x").build();
+    let y = m.var("y").build();
+    assert!(x.var_id().is_some());
+    assert!((x + 1.0).var_id().is_none());
+    assert!((x + y).var_id().is_none());
+    assert!((2.0 * x).var_id().is_none());
+}
+
+#[test]
 fn unfix_var_restores_bounds() {
     let m = Model::new("unfix");
     let _ = m.var("x").lb(0.0).ub(10.0).build();
