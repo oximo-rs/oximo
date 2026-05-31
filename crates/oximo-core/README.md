@@ -181,7 +181,6 @@ Inferred automatically from variables and expressions, cached and invalidated on
 | `NLP`   | All continuous, `Pow`/`Sin`/`Cos`/`Exp`/`Log`    |
 | `MINLP` | Any integer/binary + nonlinear                   |
 
-
 ## License
 
 MIT OR Apache-2.0
