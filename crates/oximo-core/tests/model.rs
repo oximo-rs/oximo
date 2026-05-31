@@ -21,10 +21,39 @@ fn classifies_milp() {
 }
 
 #[test]
+fn classifies_qp() {
+    let m = Model::new("qp");
+    let x = m.var("x").lb(0.0).build();
+    m.minimize(x.powi(2));
+    assert_eq!(m.kind(), ModelKind::QP);
+}
+
+#[test]
+fn classifies_miqp() {
+    let m = Model::new("miqp");
+    let x = m.var("x").lb(0.0).build();
+    let y = m.var("y").lb(0.0).ub(1.0).integer().build();
+    // Bilinear term keeps it quadratic, the integer var makes QP -> MIQP.
+    m.minimize(x * y);
+    assert_eq!(m.kind(), ModelKind::MIQP);
+}
+
+#[test]
+fn quadratic_constraint_classifies_qp() {
+    let m = Model::new("qp_con");
+    let x = m.var("x").lb(0.0).build();
+    // Linear objective but a quadratic constraint still makes the model a QP.
+    m.constraint("c", x.powi(2).le(4.0));
+    m.minimize(x);
+    assert_eq!(m.kind(), ModelKind::QP);
+}
+
+#[test]
 fn classifies_nlp() {
     let m = Model::new("nlp");
     let x = m.var("x").lb(0.0).build();
-    m.minimize(x.powi(2));
+    // Degree-3, so it falls through to the nonlinear path.
+    m.minimize(x.powi(3));
     assert_eq!(m.kind(), ModelKind::NLP);
 }
 
