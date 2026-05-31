@@ -144,6 +144,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(any(feature = "gams", feature = "gurobi")))]
 fn main() {
     println!("Enable a nonlinear-capable backend feature:");
-    println!("  cargo run --example minlp_process_selection --features gams");
-    println!("  cargo run --example minlp_process_selection --features gurobi");
+    println!("  cargo run --example process_selection --features gams");
+    println!("  cargo run --example process_selection --features gurobi");
 }
