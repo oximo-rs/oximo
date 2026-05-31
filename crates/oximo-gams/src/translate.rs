@@ -170,19 +170,59 @@ pub fn solve(
         // (compilation error, license error, etc.).  Fall back to the listing.
         let listing = fs::read_to_string(tmp_dir.join("model.lst")).unwrap_or_default();
         let _ = fs::remove_dir_all(&tmp_dir);
+        let report = summarize_listing(&listing);
         let detail = if exit_ok {
-            format!(
-                "GAMS did not produce a solution file. \
-                Check the .gms listing for compilation errors.\n{listing}"
-            )
+            format!("GAMS did not produce a solution file.\n{report}")
         } else {
-            format!("GAMS exited with a non-zero exit code.\n{listing}")
+            format!("GAMS exited with a non-zero exit code.\n{report}")
         };
         return Err(SolverError::Backend(detail));
     };
 
     let _ = fs::remove_dir_all(&tmp_dir);
     Ok(result)
+}
+
+/// Extract the compilation-error section from a GAMS `.lst` listing.
+///
+/// A raw listing echoes every source line of the model with the diagnostics
+/// buried among them on lines prefixed by `****`.
+/// This keeps those `****` marker lines word for word, each preceded by the source
+/// line it points at, and drops the unrelated echo. The markers are kept as GAMS
+/// prints them so the `$<code>` carets stay aligned under the offending column,
+/// and the listing's `\r\n` endings are normalized to `\n` so the result renders
+/// across multiple lines instead of collapsing onto one.
+/// If no `****` markers are found (e.g. a license or runtime failure)
+/// the original listing is returned so no detail is lost.
+fn summarize_listing(listing: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut last_src: Option<&str> = None;
+    let mut src_emitted = false;
+
+    for raw in listing.lines() {
+        let line = raw.trim_end();
+        if let Some(rest) = line.strip_prefix("****") {
+            if rest.contains("ERROR(S)") || rest.contains("WARNING(S)") {
+                out.push(line);
+                continue;
+            }
+            if !src_emitted {
+                if let Some(src) = last_src {
+                    out.push(src);
+                }
+                src_emitted = true;
+            }
+            out.push(line);
+        } else if !line.trim().is_empty() {
+            last_src = Some(line);
+            src_emitted = false;
+        }
+    }
+
+    if out.is_empty() {
+        return listing.trim_end().to_string();
+    }
+    out.join("\n")
 }
 
 /// Parse the PUT-generated solution file.
