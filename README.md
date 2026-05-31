@@ -11,9 +11,7 @@
     <img src="https://img.shields.io/github/actions/workflow/status/GermanHeim/oximo/ci.yml?branch=main&label=oximo%20CI&logo=github" alt="CI" />
 </a>
 
-oximo is a Rust algebraic modeling library for mathematical optimization. Build LP and MILP models with a clean builder API, then solve them with bundled or commercial solvers.
-
-> Support for nonlinear programming (NLP) and mixed-integer nonlinear programming (MINLP) is planned.
+oximo is a Rust algebraic modeling library for mathematical optimization. Build LP, MILP, QP/MIQP, NLP, and MINLP models with a clean builder API, then solve them with bundled or commercial solvers.
 
 ```rust,no_run
 use oximo::prelude::*;
@@ -37,12 +35,12 @@ println!("y   = {:?}", result.value_of(y)); // 4.0
 
 ## Features
 
-| Feature  | What it adds                                      | Default |
-|----------|---------------------------------------------------|---------|
-| `highs`  | HiGHS LP/MILP solver (bundled, no install)        | yes     |
-| `io`     | MPS and LP file writers                           | yes     |
-| `gurobi` | Gurobi LP/MILP solver (requires licensed install) | no      |
-| `gams`   | GAMS solver bridge (requires GAMS on PATH)        | no      |
+| Feature  | What it adds                                                          | Default |
+|----------|-----------------------------------------------------------------------|---------|
+| `highs`  | HiGHS - LP/MILP solver (bundled, no install)                          | yes     |
+| `io`     | MPS and LP file writers                                               | yes     |
+| `gurobi` | Gurobi - LP/MILP/QP/MIQP/NLP/MINLP solver (requires licensed install) | no      |
+| `gams`   | GAMS bridge - LP/MILP/QP/MIQP/NLP/MINLP depending on solver           | no      |
 
 ```toml
 [dependencies]
@@ -168,6 +166,23 @@ m.add_constraints_over("supply", &plants, |p: String| {
 
 // Want the raw key? Annotate as IndexKey (clones once per iteration).
 m.add_constraints_over("c", &set, |k: IndexKey| x[&k].le(1.0));
+```
+
+### Nonlinear expressions
+
+`Pow`, `Sin`, `Cos`, `Exp`, `Log`, and bilinear products are first-class. The
+model's kind (`LP`/`MILP`/`QP`/`MIQP`/`NLP`/`MINLP`) is inferred from the
+expressions.
+
+```rust,ignore
+// Rosenbrock NLP
+m.minimize((1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
+
+// Quadratic constraint
+m.constraint("disk", (x.powi(2) + y.powi(2)).le(1.0));
+
+// Transcendental utility (MINLP when any variable is integer/binary)
+m.maximize(sum_over(&items, |i: usize| u[i] * (1.0 + w[i] * x[i]).log()));
 ```
 
 ## Solving
