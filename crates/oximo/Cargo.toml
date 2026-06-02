@@ -17,6 +17,7 @@ highs = ["dep:oximo-highs"]
 io = ["dep:oximo-io"]
 gurobi = ["dep:oximo-gurobi"]
 gams = ["dep:oximo-gams"]
+baron = ["dep:oximo-baron"]
 
 [dependencies]
 oximo-expr.workspace = true
@@ -25,6 +26,7 @@ oximo-solver.workspace = true
 oximo-highs = { workspace = true, optional = true }
 oximo-gurobi = { workspace = true, optional = true }
 oximo-gams = { workspace = true, optional = true }
+oximo-baron = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
 
 [lints]
