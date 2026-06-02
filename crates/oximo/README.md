@@ -41,12 +41,14 @@ println!("y   = {:?}", result.value_of(y)); // 4.0
 | `io`     | MPS and LP file writers                                               | yes     |
 | `gurobi` | Gurobi - LP/MILP/QP/MIQP/NLP/MINLP solver (requires licensed install) | no      |
 | `gams`   | GAMS bridge - LP/MILP/QP/MIQP/NLP/MINLP depending on solver           | no      |
+| `baron`  | BARON  - LP/MILP/QP/MIQP/NLP/MINLP solver (requires licensed install) | no      |
 
 ```toml
 [dependencies]
 oximo = "0.1"                                      # HiGHS + MPS/LP writers
 oximo = { version = "0.1", features = ["gurobi"] } # add Gurobi
 oximo = { version = "0.1", features = ["gams"] }   # add GAMS backend
+oximo = { version = "0.1", features = ["baron"] }  # add BARON backend
 ```
 
 ## Building models
@@ -235,6 +237,17 @@ use oximo::solvers::Gams;
 let result = Gams.solve(&m, &GamsOptions::default())?;
 ```
 
+### BARON
+
+Requires a licensed BARON install on `PATH`. Global solver for nonconvex LP/MILP/QP/MIQP/NLP/MINLP. See [`crates/oximo-baron/README.md`](crates/oximo-baron/README.md).
+
+```rust,ignore
+use oximo::prelude::*;
+use oximo::solvers::Baron;
+
+let result = Baron::new().solve(&m, &BaronOptions::default())?;
+```
+
 ## Reading results
 
 ```rust,ignore
@@ -283,11 +296,13 @@ io::write_lp(&m, "model.lp")?;
 | `oximo-highs`  | HiGHS backend                                         |
 | `oximo-gurobi` | Gurobi backend                                        |
 | `oximo-gams`   | GAMS writer and backend                               |
+| `oximo-baron`  | BARON writer and backend                              |
 
 ## Requirements
 
 - Gurobi feature: Gurobi, `GUROBI_HOME` set, valid license
 - GAMS feature: GAMS on `PATH`, valid license
+- BARON feature: BARON on `PATH`, valid license
 
 ## License
 
