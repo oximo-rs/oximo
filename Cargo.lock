@@ -380,6 +380,7 @@ dependencies = [
 name = "oximo"
 version = "0.1.0"
 dependencies = [
+ "oximo-baron",
  "oximo-core",
  "oximo-expr",
  "oximo-gams",
@@ -387,6 +388,16 @@ dependencies = [
  "oximo-highs",
  "oximo-io",
  "oximo-solver",
+]
+
+[[package]]
+name = "oximo-baron"
+version = "0.1.0"
+dependencies = [
+ "oximo-core",
+ "oximo-expr",
+ "oximo-solver",
+ "rustc-hash",
 ]
 
 [[package]]
