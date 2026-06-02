@@ -2,7 +2,7 @@
 
 Gurobi backend for [oximo](https://github.com/germanheim/oximo).
 
-Wraps the [`grb`](https://crates.io/crates/grb) crate (`gurobi12` feature). Supports `LP`, `MILP`, `QP`, `MIQP`, `NLP`, and `MINLP` model kinds. Nonlinear expressions (`Pow`, `Sin`, `Cos`, `Exp`, `Log`, bilinear `Mul`) are lowered to auxiliary variables wired together with Gurobi's native `add_genconstr_*` and `add_qconstr` APIs. `NonConvex = 2` is enabled automatically when needed.
+Wraps the [`grb`](https://crates.io/crates/grb) crate (`gurobi12` feature). Supports `LP`, `MILP`, `QP`, `MIQP`, `NLP`, and `MINLP` model kinds. Nonlinear expressions (`Pow`, `Sin`, `Cos`, `Exp`, `Log`, `Abs`, bilinear `Mul`) are lowered to auxiliary variables wired together with Gurobi's native `add_genconstr_*` and `add_qconstr` APIs. `NonConvex = 2` is enabled automatically when needed.
 
 Gurobi v13.0+ works with the `gurobi12` feature, which is the default for this crate. For more information see [grb/issue#31](https://github.com/ykrist/rust-grb/issues/31). To use older versions, enable the `gurobi11` feature instead (see [grb docs](https://docs.rs/grb/latest/grb/#features) for details).
 
