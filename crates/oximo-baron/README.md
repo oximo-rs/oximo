@@ -126,7 +126,7 @@ BARON's `.bar` format has no trigonometric intrinsics, so a model whose objectiv
 - `status`: mapped from BARON solver/model status codes
 - `solve_time`: wall time around the BARON process invocation
 - `iterations`: branch-and-reduce iteration count from `tim.lst`
-- `raw_log`: BARON stdout/stderr, populated when `verbose(true)` or when BARON exits non-zero
+- `raw_log`: BARON stdout/stderr, captured when BARON exits non-zero in quiet mode. With `verbose(true)` the output is streamed live to the terminal and not captured (`raw_log` is `None`)
 
 `dual` and `reduced_costs` are not populated by this backend (duals are not generally meaningful for global nonconvex/integer optimization).
 
