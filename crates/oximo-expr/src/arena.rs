@@ -50,6 +50,7 @@ pub enum ExprNode {
     Cos(ExprId),
     Exp(ExprId),
     Log(ExprId),
+    Abs(ExprId),
     Linear { coeffs: Vec<(VarId, f64)>, constant: f64 },
 }
 

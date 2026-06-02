@@ -86,4 +86,9 @@ impl<'a> Expr<'a> {
         let id = self.arena.borrow_mut().push(ExprNode::Log(self.id));
         Self::new(id, self.arena)
     }
+
+    pub fn abs(self) -> Self {
+        let id = self.arena.borrow_mut().push(ExprNode::Abs(self.id));
+        Self::new(id, self.arena)
+    }
 }

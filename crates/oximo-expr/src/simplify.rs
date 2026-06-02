@@ -25,7 +25,8 @@ pub fn simplify(arena: &mut ExprArena, id: ExprId) -> ExprId {
         ExprNode::Sin(inner)
         | ExprNode::Cos(inner)
         | ExprNode::Exp(inner)
-        | ExprNode::Log(inner) => {
+        | ExprNode::Log(inner)
+        | ExprNode::Abs(inner) => {
             let node = arena.get(id).clone();
             if let ExprNode::Const(c) = arena.get(inner) {
                 Some(ExprNode::Const(match node {
@@ -33,6 +34,7 @@ pub fn simplify(arena: &mut ExprArena, id: ExprId) -> ExprId {
                     ExprNode::Cos(_) => c.cos(),
                     ExprNode::Exp(_) => c.exp(),
                     ExprNode::Log(_) => c.ln(),
+                    ExprNode::Abs(_) => c.abs(),
                     _ => unreachable!(),
                 }))
             } else {
@@ -44,5 +46,20 @@ pub fn simplify(arena: &mut ExprArena, id: ExprId) -> ExprId {
     match folded {
         Some(node) => arena.push(node),
         None => id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arena::{ExprArena, ExprNode};
+
+    #[test]
+    fn folds_abs_of_const() {
+        let mut a = ExprArena::new();
+        let c = a.push(ExprNode::Const(-5.0));
+        let abs = a.push(ExprNode::Abs(c));
+        let folded = simplify(&mut a, abs);
+        assert!(matches!(a.get(folded), ExprNode::Const(v) if (*v - 5.0).abs() < f64::EPSILON));
     }
 }

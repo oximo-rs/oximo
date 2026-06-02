@@ -21,7 +21,8 @@ pub fn walk<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
         | ExprNode::Sin(inner)
         | ExprNode::Cos(inner)
         | ExprNode::Exp(inner)
-        | ExprNode::Log(inner) => {
+        | ExprNode::Log(inner)
+        | ExprNode::Abs(inner) => {
             let inner = *inner;
             walk(arena, inner, visitor);
         }

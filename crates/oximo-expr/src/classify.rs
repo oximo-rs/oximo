@@ -100,7 +100,8 @@ fn degree(arena: &ExprArena, id: ExprId) -> Degree {
         | ExprNode::Sin(_)
         | ExprNode::Cos(_)
         | ExprNode::Exp(_)
-        | ExprNode::Log(_) => Degree::Higher,
+        | ExprNode::Log(_)
+        | ExprNode::Abs(_) => Degree::Higher,
     }
 }
 
@@ -175,6 +176,14 @@ mod tests {
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
         let s = a.push(ExprNode::Sin(x));
+        assert_eq!(classify(&a, s), ExprClass::Nonlinear);
+    }
+
+    #[test]
+    fn nonlinear_abs() {
+        let mut a = ExprArena::new();
+        let x = var(&mut a, 0);
+        let s = a.push(ExprNode::Abs(x));
         assert_eq!(classify(&a, s), ExprClass::Nonlinear);
     }
 

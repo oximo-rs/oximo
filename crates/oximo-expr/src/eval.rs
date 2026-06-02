@@ -48,6 +48,7 @@ pub fn evaluate<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Resul
         ExprNode::Cos(inner) => evaluate(arena, *inner, ctx)?.cos(),
         ExprNode::Exp(inner) => evaluate(arena, *inner, ctx)?.exp(),
         ExprNode::Log(inner) => evaluate(arena, *inner, ctx)?.ln(),
+        ExprNode::Abs(inner) => evaluate(arena, *inner, ctx)?.abs(),
         ExprNode::Linear { coeffs, constant } => {
             let mut acc = *constant;
             for (v, c) in coeffs {
