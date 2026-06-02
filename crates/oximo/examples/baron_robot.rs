@@ -23,7 +23,7 @@
 //!   <https://doi.org/10.1115/1.3258708>
 //!
 //! Run (requires a licensed BARON on PATH):
-//!   cargo run -p oximo --example baron-robot --features baron
+//!   cargo run -p oximo --example baron_robot --features baron
 
 // TODO: BARON enumerates the distinct solutions (visible in the verbose log),
 // but oximo's `SolverResult` carries a single primal point, so this example reports
