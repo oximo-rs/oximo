@@ -115,7 +115,7 @@ let opts = BaronOptions::default()
 
 ## Limitations
 
-BARON's `.bar` format has no trigonometric intrinsics, so a model whose objective or constraints contain `sin`/`cos` is rejected with a clear `SolverError::Backend`. A variable-exponent power `x^y` is rewritten to the equivalent `exp(y*log(x))`, as suggested by the BARON manual. Symbolic parameters and semicontinuous/semi-integer variables are not representable in `.bar` and are likewise rejected.
+BARON's `.bar` format has no trigonometric intrinsics, so a model whose objective or constraints contain `sin`/`cos` is rejected with a clear `SolverError::Backend`. A variable-exponent power `x^y` is rewritten to the equivalent `exp(y*log(x))`, and an absolute value `|x|` to `(x^2)^(1/2)`, both as suggested by the BARON manual. Symbolic parameters and semicontinuous/semi-integer variables are not representable in `.bar` and are likewise rejected.
 
 ## Result
 
