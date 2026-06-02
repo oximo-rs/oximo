@@ -32,6 +32,7 @@ oximo-highs  = { path = "crates/oximo-highs",  version = "0.1.0" }
 oximo-io     = { path = "crates/oximo-io",     version = "0.1.0" }
 oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.1.0" }
 oximo-gams   = { path = "crates/oximo-gams",   version = "0.1.0" }
+oximo-baron  = { path = "crates/oximo-baron",  version = "0.1.0" }
 
 rayon        = "1.12"
 smallvec     = "1.15"
