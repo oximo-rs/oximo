@@ -772,6 +772,29 @@ mod tests {
     }
 
     #[test]
+    fn binary_fixed_to_one_emits_lower_bound() {
+        let m = Model::new("fix1");
+        let b = m.var("b").binary().fix(1.0).build();
+        m.minimize(b);
+        let bar = render(&m);
+        assert!(bar.contains("BINARY_VARIABLES x0;"), "{bar}");
+        // lb=1 differs from the binary default 0, so it must be emitted.
+        assert!(bar.contains("LOWER_BOUNDS{"), "{bar}");
+        assert!(bar.contains("x0: 1;"), "fixed-to-1 binary must pin lb:\n{bar}");
+    }
+
+    #[test]
+    fn binary_fixed_to_zero_emits_upper_bound() {
+        let m = Model::new("fix0");
+        let b = m.var("b").binary().fix(0.0).build();
+        m.minimize(b);
+        let bar = render(&m);
+        // ub=0 differs from the binary default 1, so it must be emitted.
+        assert!(bar.contains("UPPER_BOUNDS{"), "{bar}");
+        assert!(bar.contains("x0: 0;"), "fixed-to-0 binary must pin ub:\n{bar}");
+    }
+
+    #[test]
     fn starting_point_emitted_when_initial_set() {
         let m = Model::new("start");
         let x = m.var("x").lb(0.0).ub(10.0).initial(3.5).build();
