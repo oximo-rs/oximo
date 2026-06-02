@@ -17,6 +17,9 @@ pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
 #[cfg(feature = "gams")]
 pub use oximo_gams::{GamsOptions, GamsSolver};
 
+#[cfg(feature = "baron")]
+pub use oximo_baron::BaronOptions;
+
 /// GAMS backend types: sub-solver selection and per-solver option structs.
 #[cfg(feature = "gams")]
 pub mod gams {
@@ -45,6 +48,9 @@ pub mod prelude {
 
     #[cfg(feature = "gams")]
     pub use oximo_gams::{GamsOptions, GamsSolver};
+
+    #[cfg(feature = "baron")]
+    pub use oximo_baron::BaronOptions;
 }
 
 pub mod solvers {
@@ -58,4 +64,7 @@ pub mod solvers {
 
     #[cfg(feature = "gams")]
     pub use oximo_gams::Gams;
+
+    #[cfg(feature = "baron")]
+    pub use oximo_baron::Baron;
 }
