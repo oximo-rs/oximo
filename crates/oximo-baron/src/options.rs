@@ -305,8 +305,11 @@ pub fn write_options(bar: &mut String, o: &BaronOptions, res_name: &str, tim_nam
     writeln!(bar, "TimName: \"{tim_name}\";").unwrap();
 
     // Universal options.
-    if let Some(d) = o.universal.time_limit {
-        writeln!(bar, "MaxTime: {};", d.as_secs_f64()).unwrap();
+    // Emit `-1` (no limit) when the user sets no `time_limit`,
+    // matching the other oximo backends.
+    match o.universal.time_limit {
+        Some(d) => writeln!(bar, "MaxTime: {};", d.as_secs_f64()).unwrap(),
+        None => writeln!(bar, "MaxTime: -1;").unwrap(),
     }
     if let Some(n) = o.universal.threads {
         writeln!(bar, "threads: {n};").unwrap();
@@ -423,6 +426,14 @@ mod tests {
         assert!(bar.contains("seed: 19631963;"), "{bar}");
         assert!(bar.contains("ProName: \"robot\";"), "{bar}");
         assert!(bar.contains("LicName: \"/opt/baron/baronlice.txt\";"), "{bar}");
+    }
+
+    #[test]
+    fn default_disables_baron_time_cap() {
+        // No time_limit => MaxTime: -1 so BARON does not silently stop.
+        assert!(render(&BaronOptions::default()).contains("MaxTime: -1;"));
+        let bar = render(&BaronOptions::default().time_limit(Duration::from_secs(60)));
+        assert!(bar.contains("MaxTime: 60;"), "{bar}");
     }
 
     #[test]
