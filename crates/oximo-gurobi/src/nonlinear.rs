@@ -209,6 +209,7 @@ pub(crate) fn lower(
         ExprNode::Cos(a) => lower_unary(arena, *a, ctx, UnaryFn::Cos),
         ExprNode::Exp(a) => lower_unary(arena, *a, ctx, UnaryFn::Exp),
         ExprNode::Log(a) => lower_unary(arena, *a, ctx, UnaryFn::Log),
+        ExprNode::Abs(a) => lower_unary(arena, *a, ctx, UnaryFn::Abs),
     }
 }
 
@@ -401,6 +402,7 @@ enum UnaryFn {
     Cos,
     Exp,
     Log,
+    Abs,
 }
 
 fn lower_unary(
@@ -415,6 +417,7 @@ fn lower_unary(
         UnaryFn::Sin | UnaryFn::Cos => (-1.0, 1.0, "trig"),
         UnaryFn::Exp => (0.0, f64::INFINITY, "exp"),
         UnaryFn::Log => (f64::NEG_INFINITY, f64::INFINITY, "log"),
+        UnaryFn::Abs => (0.0, f64::INFINITY, "abs"),
     };
     let y = ctx.new_aux(tag, lb, ub).map_err(map_grb)?;
     let name = ctx.next_name(tag);
@@ -423,6 +426,7 @@ fn lower_unary(
         UnaryFn::Cos => ctx.model.add_genconstr_cos(&name, x, y, "").map_err(map_grb)?,
         UnaryFn::Exp => ctx.model.add_genconstr_natural_exp(&name, x, y, "").map_err(map_grb)?,
         UnaryFn::Log => ctx.model.add_genconstr_natural_log(&name, x, y, "").map_err(map_grb)?,
+        UnaryFn::Abs => ctx.model.add_genconstr_abs(&name, y, x).map_err(map_grb)?,
     };
     Ok(LoweredExpr::Var(y))
 }

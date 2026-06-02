@@ -48,6 +48,22 @@ fn nlp_with_sin_objective() {
 }
 
 #[test]
+fn nlp_with_abs_objective() {
+    // min |x - 2| over x in [-10, 10]. Optimum at x = 2, objective = 0.
+    let m = Model::new("nlp_abs");
+    let x = m.var("x").lb(-10.0).ub(10.0).initial(0.5).build();
+    let two = Expr::constant(x.arena, 2.0);
+    m.minimize((x - two).abs());
+
+    let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
+    assert_solved(&r);
+    let primal_x = r.primal.get(&VarId(0)).copied().expect("primal");
+    assert!(close(primal_x, 2.0, 1e-3), "x = {primal_x}");
+    let obj = r.objective.expect("obj");
+    assert!(close(obj, 0.0, 1e-3), "obj = {obj}");
+}
+
+#[test]
 fn minlp_binary_with_log() {
     // Binary b, continuous x in [0.1, 10]. Min (x - 1)^2 + b * log(1 + x).
     // Optimal: b = 0, x = 1, objective = 0.
