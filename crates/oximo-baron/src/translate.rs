@@ -1,0 +1,830 @@
+use std::fmt::Write as FmtWrite;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use std::{fs, io};
+
+use oximo_core::{Constraint, Domain, Model, Objective, ObjectiveSense, Sense, VarId, Variable};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
+use oximo_solver::{SolverError, SolverResult, SolverStatus};
+use rustc_hash::FxHashMap;
+
+use crate::BaronOptions;
+use crate::options::write_options;
+
+static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
+
+const RES_NAME: &str = "res.lst";
+const TIM_NAME: &str = "tim.lst";
+const BAR_NAME: &str = "problem.bar";
+
+/// Write `model` to a temporary BARON `.bar` file, execute the `baron`
+/// executable, and return the parsed [`SolverResult`].
+///
+/// `exec` is an optional override for the BARON executable path. `None` uses
+/// `"baron"` resolved from `PATH`. [`BaronOptions::baron_path`] takes precedence
+/// over `exec`.
+///
+/// # Errors
+///
+/// Returns [`SolverError`] on constructs BARON's `.bar` format cannot represent
+/// (`sin`/`cos`, symbolic parameters, semicontinuous/semi-integer variables), a
+/// missing BARON executable, a BARON run that produced no times file, or I/O
+/// failures.
+///
+/// # Panics
+///
+/// Panics if variable indices overflow `u32`.
+pub fn solve(
+    model: &Model,
+    opts: &BaronOptions,
+    exec: Option<&str>,
+) -> Result<SolverResult, SolverError> {
+    let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
+    let bar = build_bar(model, opts)?;
+
+    // - Temp directory. Combine a timestamp with a per-process atomic counter so
+    //   concurrent invocations never share a directory.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let id = SOLVE_ID.fetch_add(1, Ordering::Relaxed);
+    let tmp_dir = std::env::temp_dir().join(format!("oximo_baron_{ts}_{id}"));
+    fs::create_dir_all(&tmp_dir)
+        .map_err(|e| SolverError::Backend(format!("cannot create temp dir: {e}")))?;
+
+    let bar_path = tmp_dir.join(BAR_NAME);
+    fs::write(&bar_path, &bar)
+        .map_err(|e| SolverError::Backend(format!("cannot write .bar file: {e}")))?;
+
+    // - Execute BARON.
+    let baron_exec =
+        opts.baron_path.as_deref().and_then(std::path::Path::to_str).or(exec).unwrap_or("baron");
+    let verbose = opts.universal.verbose.unwrap_or(false);
+
+    let started = Instant::now();
+    let mut cmd = std::process::Command::new(baron_exec);
+    cmd.arg(BAR_NAME);
+    cmd.current_dir(&tmp_dir);
+
+    let launch_err = |e: io::Error| {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        if e.kind() == io::ErrorKind::NotFound {
+            SolverError::Backend(format!(
+                "BARON executable '{baron_exec}' not found. \
+                Install BARON and ensure it is on PATH, or set the 'baron_path' option."
+            ))
+        } else {
+            SolverError::Backend(format!("failed to launch BARON: {e}"))
+        }
+    };
+
+    // When verbose, stream BARON's output to the terminal. Otherwise capture it
+    // so we can surface it on failure.
+    let (exit_ok, raw_log) = if verbose {
+        let status =
+            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status().map_err(launch_err)?;
+        (status.success(), None)
+    } else {
+        let out = cmd.output().map_err(launch_err)?;
+        let log = if out.status.success() {
+            None
+        } else {
+            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+            if !out.stderr.is_empty() {
+                s.push('\n');
+                s.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            Some(s)
+        };
+        (out.status.success(), log)
+    };
+    let elapsed = started.elapsed();
+
+    // - Parse the times file (status) and results file (primal).
+    let tim_path = tmp_dir.join(TIM_NAME);
+    if !tim_path.exists() {
+        // BARON never reached the solve (syntax/license error). Surface its log.
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let detail = raw_log.unwrap_or_else(|| {
+            if exit_ok {
+                "BARON produced no times file and emitted no output.".to_string()
+            } else {
+                "BARON exited with a non-zero exit code and produced no times file.".to_string()
+            }
+        });
+        return Err(SolverError::Backend(format!("BARON did not produce a solution.\n{detail}")));
+    }
+
+    let tim = fs::read_to_string(&tim_path)
+        .map_err(|e| SolverError::Backend(format!("cannot read times file: {e}")))?;
+    let res = fs::read_to_string(tmp_dir.join(RES_NAME)).unwrap_or_default();
+    let result = parse_solution(&tim, &res, sense, elapsed, raw_log);
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+    Ok(result)
+}
+
+/// Build the full `.bar` file text for `model`.
+fn build_bar(model: &Model, opts: &BaronOptions) -> Result<String, SolverError> {
+    let arena = model.arena();
+    let vars = model.variables();
+    let constraints = model.constraints();
+    let objective = model.objective();
+
+    let mut bar = String::with_capacity(4096);
+    write_options(&mut bar, opts, RES_NAME, TIM_NAME);
+    write_var_declarations(&mut bar, &vars)?;
+    write_bounds(&mut bar, &vars);
+    write_equations(&mut bar, &arena, &constraints)?;
+    write_objective(&mut bar, &arena, objective.as_ref())?;
+    write_starting_point(&mut bar, &vars);
+    Ok(bar)
+}
+
+// - .bar writers
+
+/// Emit the `BINARY_VARIABLES` / `INTEGER_VARIABLES` / `POSITIVE_VARIABLES` /
+/// `VARIABLES` declaration sections.
+fn write_var_declarations(bar: &mut String, vars: &[Variable]) -> Result<(), SolverError> {
+    let (mut bin, mut int, mut pos, mut free) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for v in vars {
+        match v.domain {
+            Domain::Binary => bin.push(v),
+            Domain::Integer => int.push(v),
+            // A continuous variable with a zero lower bound is exactly BARON's
+            // POSITIVE_VARIABLES; everything else (free, negative, finite lb) is
+            // a general VARIABLES with explicit bounds emitted below.
+            Domain::Real if v.lb == 0.0 => pos.push(v),
+            Domain::Real => free.push(v),
+            Domain::SemiContinuous { .. } | Domain::SemiInteger { .. } => {
+                return Err(SolverError::Backend(format!(
+                    "variable x{} has a semicontinuous/semi-integer domain, \
+                    which BARON's .bar format cannot represent",
+                    v.id.index()
+                )));
+            }
+        }
+    }
+    write_var_section(bar, "BINARY_VARIABLES", &bin);
+    write_var_section(bar, "INTEGER_VARIABLES", &int);
+    write_var_section(bar, "POSITIVE_VARIABLES", &pos);
+    write_var_section(bar, "VARIABLES", &free);
+    writeln!(bar).unwrap();
+    Ok(())
+}
+
+fn write_var_section(bar: &mut String, header: &str, vars: &[&Variable]) {
+    if vars.is_empty() {
+        return;
+    }
+    write!(bar, "{header} ").unwrap();
+    for (k, v) in vars.iter().enumerate() {
+        if k > 0 {
+            write!(bar, ", ").unwrap();
+        }
+        write!(bar, "x{}", v.id.index()).unwrap();
+    }
+    writeln!(bar, ";").unwrap();
+}
+
+fn write_bounds(bar: &mut String, vars: &[Variable]) {
+    let mut lo = String::new();
+    let mut hi = String::new();
+    for v in vars {
+        let i = v.id.index();
+        if let Some(lb) = lower_bound_to_emit(v) {
+            writeln!(lo, "x{i}: {};", fmt(lb)).unwrap();
+        }
+        if let Some(ub) = upper_bound_to_emit(v) {
+            writeln!(hi, "x{i}: {};", fmt(ub)).unwrap();
+        }
+    }
+    if !lo.is_empty() {
+        writeln!(bar, "LOWER_BOUNDS{{").unwrap();
+        bar.push_str(&lo);
+        writeln!(bar, "}}").unwrap();
+        writeln!(bar).unwrap();
+    }
+    if !hi.is_empty() {
+        writeln!(bar, "UPPER_BOUNDS{{").unwrap();
+        bar.push_str(&hi);
+        writeln!(bar, "}}").unwrap();
+        writeln!(bar).unwrap();
+    }
+}
+
+/// The lower bound to write, or `None` when it equals the implied default for
+/// the variable's declaration section (so we avoid redundant lines).
+fn lower_bound_to_emit(v: &Variable) -> Option<f64> {
+    if !v.lb.is_finite() {
+        return None;
+    }
+    match v.domain {
+        // Binary defaults to [0, 1]. Real with lb == 0 sits in POSITIVE_VARIABLES.
+        Domain::Binary | Domain::Real if v.lb == 0.0 => None,
+        _ => Some(v.lb),
+    }
+}
+
+fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
+    if !v.ub.is_finite() {
+        return None;
+    }
+    match v.domain {
+        // Binary defaults to an upper bound of 1. Only emit when overridden.
+        Domain::Binary if (v.ub - 1.0).abs() < f64::EPSILON => None,
+        _ => Some(v.ub),
+    }
+}
+
+fn write_equations(
+    bar: &mut String,
+    arena: &ExprArena,
+    constraints: &[Constraint],
+) -> Result<(), SolverError> {
+    if constraints.is_empty() {
+        return Ok(());
+    }
+    write!(bar, "EQUATIONS ").unwrap();
+    for i in 0..constraints.len() {
+        if i > 0 {
+            write!(bar, ", ").unwrap();
+        }
+        write!(bar, "c{i}").unwrap();
+    }
+    writeln!(bar, ";").unwrap();
+
+    for (i, c) in constraints.iter().enumerate() {
+        let op = match c.sense {
+            Sense::Le => "<=",
+            Sense::Ge => ">=",
+            Sense::Eq => "==",
+        };
+        // BARON rejects a constraint whose expression evaluates to a constant,
+        // so surface a clear error instead of emitting an invalid `.bar`.
+        if !expr_has_var(arena, c.lhs) {
+            return Err(SolverError::Backend(format!(
+                "constraint '{}' has no variables (its left-hand side is constant); \
+                BARON requires every constraint to contain at least one variable",
+                c.name
+            )));
+        }
+        write!(bar, "c{i}: ").unwrap();
+        // Linear constraints fold the constant into the RHS, matching the
+        // canonical `lhs <op> rhs` shape; nonlinear ones emit the full LHS.
+        if let Some(t) = extract_linear(arena, c.lhs) {
+            let adjusted_rhs = c.rhs - t.constant;
+            write_linear(bar, &t, false);
+            writeln!(bar, " {op} {};", fmt(adjusted_rhs)).unwrap();
+        } else {
+            write_bar_expr(bar, arena, c.lhs)?;
+            writeln!(bar, " {op} {};", fmt(c.rhs)).unwrap();
+        }
+    }
+    writeln!(bar).unwrap();
+    Ok(())
+}
+
+fn write_objective(
+    bar: &mut String,
+    arena: &ExprArena,
+    objective: Option<&Objective>,
+) -> Result<(), SolverError> {
+    write!(bar, "OBJ: ").unwrap();
+    match objective {
+        // BARON requires an objective. A feasibility problem minimizes a constant.
+        None => writeln!(bar, "minimize 0;").unwrap(),
+        Some(o) => {
+            let kw = match o.sense {
+                ObjectiveSense::Minimize => "minimize",
+                ObjectiveSense::Maximize => "maximize",
+            };
+            write!(bar, "{kw} ").unwrap();
+            if let Some(t) = extract_linear(arena, o.expr) {
+                write_linear(bar, &t, true);
+            } else {
+                write_bar_expr(bar, arena, o.expr)?;
+            }
+            writeln!(bar, ";").unwrap();
+        }
+    }
+    writeln!(bar).unwrap();
+    Ok(())
+}
+
+fn write_starting_point(bar: &mut String, vars: &[Variable]) {
+    if !vars.iter().any(|v| v.initial.is_some()) {
+        return;
+    }
+    writeln!(bar, "STARTING_POINT{{").unwrap();
+    for v in vars {
+        if let Some(val) = v.initial {
+            writeln!(bar, "x{}: {};", v.id.index(), fmt(val)).unwrap();
+        }
+    }
+    writeln!(bar, "}}").unwrap();
+    writeln!(bar).unwrap();
+}
+
+/// Append the linear expression `t` to `bar` as a standalone BARON expression.
+fn write_linear(bar: &mut String, t: &LinearTerms, include_constant: bool) {
+    let mut first = true;
+    for (v, coef) in &t.coeffs {
+        if *coef == 0.0 {
+            continue;
+        }
+        let idx = v.index();
+        if first {
+            write!(bar, "{}*x{idx}", fmt(*coef)).unwrap();
+            first = false;
+        } else if *coef < 0.0 {
+            write!(bar, " - {}*x{idx}", fmt(-coef)).unwrap();
+        } else {
+            write!(bar, " + {}*x{idx}", fmt(*coef)).unwrap();
+        }
+    }
+    if include_constant && t.constant != 0.0 {
+        if first {
+            write!(bar, "{}", fmt(t.constant)).unwrap();
+            first = false;
+        } else if t.constant < 0.0 {
+            write!(bar, " - {}", fmt(-t.constant)).unwrap();
+        } else {
+            write!(bar, " + {}", fmt(t.constant)).unwrap();
+        }
+    }
+    if first {
+        write!(bar, "0").unwrap();
+    }
+}
+
+/// Recursive infix printer for a BARON-compatible expression.
+fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(), SolverError> {
+    match arena.get(id) {
+        ExprNode::Const(c) => write!(bar, "{}", fmt(*c)).unwrap(),
+        ExprNode::Var(v) => write!(bar, "x{}", v.index()).unwrap(),
+        ExprNode::Param(_) => {
+            return Err(SolverError::Backend(
+                "BARON backend does not support symbolic parameters".into(),
+            ));
+        }
+        ExprNode::Linear { coeffs, constant } => {
+            let t = LinearTerms { coeffs: coeffs.clone(), constant: *constant };
+            write!(bar, "(").unwrap();
+            write_linear(bar, &t, true);
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Neg(inner) => {
+            write!(bar, "(-").unwrap();
+            write_bar_expr(bar, arena, *inner)?;
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Add(children) => {
+            write!(bar, "(").unwrap();
+            for (i, c) in children.iter().enumerate() {
+                if i > 0 {
+                    write!(bar, " + ").unwrap();
+                }
+                write_bar_expr(bar, arena, *c)?;
+            }
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Mul(children) => {
+            write!(bar, "(").unwrap();
+            for (i, c) in children.iter().enumerate() {
+                if i > 0 {
+                    write!(bar, " * ").unwrap();
+                }
+                write_bar_expr(bar, arena, *c)?;
+            }
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Pow(base, exp) => {
+            // BARON natively supports `x^a` for a constant exponent `a` and
+            // `b^x` for a constant base `b`. Only a variable-on-variable power
+            // needs the `exp(y*log(x))` rewrite.
+            let exp_is_const = matches!(arena.get(*exp), ExprNode::Const(_));
+            let base_is_const = matches!(arena.get(*base), ExprNode::Const(_));
+            if exp_is_const || base_is_const {
+                write!(bar, "(").unwrap();
+                write_bar_expr(bar, arena, *base)?;
+                write!(bar, " ^ ").unwrap();
+                write_bar_expr(bar, arena, *exp)?;
+                write!(bar, ")").unwrap();
+            } else {
+                write!(bar, "exp((").unwrap();
+                write_bar_expr(bar, arena, *exp)?;
+                write!(bar, ") * log(").unwrap();
+                write_bar_expr(bar, arena, *base)?;
+                write!(bar, "))").unwrap();
+            }
+        }
+        ExprNode::Div(num, den) => {
+            write!(bar, "(").unwrap();
+            write_bar_expr(bar, arena, *num)?;
+            write!(bar, " / ").unwrap();
+            write_bar_expr(bar, arena, *den)?;
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Exp(a) => {
+            write!(bar, "exp(").unwrap();
+            write_bar_expr(bar, arena, *a)?;
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Log(a) => {
+            write!(bar, "log(").unwrap();
+            write_bar_expr(bar, arena, *a)?;
+            write!(bar, ")").unwrap();
+        }
+        ExprNode::Sin(_) => {
+            return Err(SolverError::Backend(
+                "BARON does not support sin(); the .bar format has no trigonometric intrinsics"
+                    .into(),
+            ));
+        }
+        ExprNode::Cos(_) => {
+            return Err(SolverError::Backend(
+                "BARON does not support cos(); the .bar format has no trigonometric intrinsics"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `id` references at least one variable (vs. evaluating to a constant).
+/// Used to enforce BARON's rule that every constraint must contain a non-constant
+/// expression.
+fn expr_has_var(arena: &ExprArena, id: ExprId) -> bool {
+    match arena.get(id) {
+        ExprNode::Var(_) => true,
+        ExprNode::Const(_) | ExprNode::Param(_) => false,
+        ExprNode::Linear { coeffs, .. } => coeffs.iter().any(|(_, c)| *c != 0.0),
+        ExprNode::Neg(a)
+        | ExprNode::Sin(a)
+        | ExprNode::Cos(a)
+        | ExprNode::Exp(a)
+        | ExprNode::Log(a) => expr_has_var(arena, *a),
+        ExprNode::Pow(a, b) | ExprNode::Div(a, b) => {
+            expr_has_var(arena, *a) || expr_has_var(arena, *b)
+        }
+        ExprNode::Add(children) | ExprNode::Mul(children) => {
+            children.iter().any(|c| expr_has_var(arena, *c))
+        }
+    }
+}
+
+/// Format an `f64` for use in a `.bar` file.
+fn fmt(v: f64) -> String {
+    if v == f64::INFINITY {
+        return "1e51".into();
+    }
+    if v == f64::NEG_INFINITY {
+        return "-1e51".into();
+    }
+    format!("{v}")
+}
+
+// - Result parsing
+
+/// Parse BARON's times file (`tim.lst`) and results file (`res.lst`).
+///
+/// The times file is a single whitespace-separated line. Field positions follow
+/// the BARON convention (0-indexed here):
+/// `[5]` lower bound, `[6]` upper bound, `[7]` solver status, `[8]` model status,
+/// `[11]` node where the optimum was found (`-3` => no solution), last = wall time.
+fn parse_solution(
+    tim: &str,
+    res: &str,
+    sense: ObjectiveSense,
+    elapsed: std::time::Duration,
+    raw_log: Option<String>,
+) -> SolverResult {
+    let tokens: Vec<&str> = tim.split_whitespace().collect();
+    let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
+    let float_at = |i: usize| tokens.get(i).and_then(|s| parse_baron_float(s));
+
+    let solver_status = int_at(7).unwrap_or(99);
+    let model_status = int_at(8).unwrap_or(5);
+    let lower = float_at(5);
+    let upper = float_at(6);
+    let nodeopt = int_at(11);
+
+    let status = map_status(solver_status, model_status);
+    let has_sol = status.has_solution();
+
+    // For minimization the incumbent is the upper bound, for maximization the
+    // lower bound (the other field is the dual/relaxation bound).
+    let objective = match sense {
+        ObjectiveSense::Minimize => upper,
+        ObjectiveSense::Maximize => lower,
+    };
+
+    let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
+    if has_sol && nodeopt != Some(-3) {
+        parse_results(res, &mut primal);
+    }
+
+    SolverResult {
+        objective: if has_sol { objective } else { None },
+        primal: if has_sol { primal } else { FxHashMap::default() },
+        dual: FxHashMap::default(),
+        reduced_costs: FxHashMap::default(),
+        status,
+        solve_time: elapsed,
+        iterations: 0,
+        raw_log,
+    }
+}
+
+/// Map BARON solver/model status codes to [`SolverStatus`].
+///
+/// We prefer the model status when it indicates a solution (optimal/feasible) so
+/// a run that hit a time or iteration limit but found an incumbent still reports
+/// `Feasible` and keeps its primal. Status code tables (BARON manual):
+/// Solver `1`=normal, `4`=time limit, `5`=numerical, `11`=licensing. Model
+/// `1`=optimal, `2`=infeasible, `3`=unbounded, `4`=intermediate feasible,
+/// `5`=unknown.
+fn map_status(solver_status: i64, model_status: i64) -> SolverStatus {
+    match model_status {
+        1 => SolverStatus::Optimal,
+        2 => SolverStatus::Infeasible,
+        3 => SolverStatus::Unbounded,
+        4 => SolverStatus::Feasible,
+        // Model status unknown: fall back to the solver-level termination reason.
+        // TODO: This can be improved, we need to redefine SolverStatus.
+        _ => match solver_status {
+            4 => SolverStatus::TimeLimit,
+            5 => SolverStatus::NumericError,
+            3 => SolverStatus::Other("baron_iteration_limit".into()),
+            11 => SolverStatus::Other("baron_license_error".into()),
+            1 => SolverStatus::Other("baron_unknown".into()),
+            n => SolverStatus::Other(format!("baron_solver_status_{n}")),
+        },
+    }
+}
+
+/// Extract the primal solution from BARON's results file.
+///
+/// The variable block follows a `"The best solution found"` header (then two
+/// lines). Each entry line is `name <bound> value ...`; we recover the `VarId`
+/// from the digits in the synthetic `x{i}` name and read the value from the
+/// third whitespace column.
+fn parse_results(res: &str, primal: &mut FxHashMap<VarId, f64>) {
+    let mut lines = res.lines();
+    let mut found = false;
+    for line in lines.by_ref() {
+        if line.trim_start().starts_with("The best solution found") {
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return;
+    }
+    // Skip the two header lines between the banner and the variable rows.
+    lines.next();
+    lines.next();
+    for line in lines {
+        if line.trim().is_empty() {
+            break;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        if let (Some(idx), Some(val)) = (extract_index(parts[0]), parse_baron_float(parts[2])) {
+            primal.insert(VarId(idx), val);
+        }
+    }
+}
+
+/// Recover the variable index from a synthetic `x{i}` name by reading its digits.
+fn extract_index(name: &str) -> Option<u32> {
+    let digits: String =
+        name.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Parse a BARON-formatted float, tolerating its infinity sentinels.
+fn parse_baron_float(s: &str) -> Option<f64> {
+    match s.trim() {
+        "" => None,
+        "inf" | "Inf" | "+inf" | "+Inf" => Some(f64::INFINITY),
+        "-inf" | "-Inf" => Some(f64::NEG_INFINITY),
+        other => other.parse().ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oximo_core::prelude::*;
+
+    use super::*;
+
+    fn render(model: &Model) -> String {
+        build_bar(model, &BaronOptions::default()).expect("build_bar")
+    }
+
+    #[test]
+    fn lp_emits_minimize_and_positive_vars() {
+        let m = Model::new("lp");
+        let x = m.var("x").lb(0.0).ub(10.0).build();
+        let y = m.var("y").lb(0.0).ub(10.0).build();
+        m.constraint("c", (x + y).le(5.0));
+        m.minimize(x + 2.0 * y);
+        let bar = render(&m);
+        assert!(bar.contains("POSITIVE_VARIABLES x0, x1;"), "{bar}");
+        assert!(bar.contains("OBJ: minimize"), "{bar}");
+        assert!(bar.contains("EQUATIONS c0;"), "{bar}");
+        assert!(bar.contains("<= 5"), "{bar}");
+        assert!(bar.contains("UPPER_BOUNDS{"), "{bar}");
+    }
+
+    #[test]
+    fn free_variable_emits_lower_and_upper_bounds() {
+        let m = Model::new("free");
+        let x = m.var("x").lb(-5.0).ub(5.0).build();
+        m.minimize(x * x);
+        let bar = render(&m);
+        assert!(bar.contains("VARIABLES x0;"), "{bar}");
+        assert!(bar.contains("LOWER_BOUNDS{"), "{bar}");
+        assert!(bar.contains("x0: -5;"), "{bar}");
+        assert!(bar.contains("x0: 5;"), "{bar}");
+    }
+
+    #[test]
+    fn nlp_emits_exp_and_log() {
+        let m = Model::new("nlp");
+        let x = m.var("x").lb(0.1).ub(10.0).build();
+        let one = Expr::constant(x.arena, 1.0);
+        m.minimize((one + x).log() + x.exp());
+        let bar = render(&m);
+        assert!(bar.contains("log("), "{bar}");
+        assert!(bar.contains("exp("), "{bar}");
+    }
+
+    #[test]
+    fn minlp_partitions_binary_integer_and_continuous() {
+        let m = Model::new("minlp");
+        let b = m.var("b").binary().build();
+        let n = m.var("n").integer().lb(0.0).ub(5.0).build();
+        let y = m.var("y").lb(0.0).ub(10.0).build();
+        m.constraint("budget", (b + n + y).le(8.0));
+        let one = Expr::constant(y.arena, 1.0);
+        m.maximize((one + y).log() + 2.0 * b + n);
+        let bar = render(&m);
+        assert!(bar.contains("BINARY_VARIABLES x0;"), "{bar}");
+        assert!(bar.contains("INTEGER_VARIABLES x1;"), "{bar}");
+        assert!(bar.contains("POSITIVE_VARIABLES x2;"), "{bar}");
+        assert!(bar.contains("OBJ: maximize"), "{bar}");
+    }
+
+    #[test]
+    fn integer_power_uses_caret() {
+        let m = Model::new("pow");
+        let x = m.var("x").lb(-10.0).ub(10.0).build();
+        m.minimize(x.powi(3));
+        let bar = render(&m);
+        assert!(bar.contains(" ^ 3)"), "expected caret power:\n{bar}");
+    }
+
+    #[test]
+    fn constant_base_uses_native_caret() {
+        let m = Model::new("cbpow");
+        let x = m.var("x").lb(0.0).ub(5.0).build();
+        let two = Expr::constant(x.arena, 2.0);
+        m.minimize(two.pow(x));
+        let bar = render(&m);
+        assert!(bar.contains("2 ^ x0"), "expected native b^x:\n{bar}");
+        assert!(!bar.contains("exp("), "constant base must not rewrite to exp/log:\n{bar}");
+    }
+
+    #[test]
+    fn variable_exponent_rewrites_to_exp_log() {
+        let m = Model::new("vpow");
+        let x = m.var("x").lb(0.1).ub(10.0).build();
+        let y = m.var("y").lb(0.1).ub(10.0).build();
+        m.minimize(x.pow(y));
+        let bar = render(&m);
+        assert!(bar.contains("exp("), "{bar}");
+        assert!(bar.contains("log("), "{bar}");
+        assert!(!bar.contains('^'), "must not emit caret for variable exponent:\n{bar}");
+    }
+
+    #[test]
+    fn quadratic_constraint_keeps_rhs() {
+        let m = Model::new("qcp");
+        let x = m.var("x").lb(0.0).ub(5.0).build();
+        let y = m.var("y").lb(0.0).ub(5.0).build();
+        m.constraint("xy", (x * y).le(4.0));
+        m.minimize(x + y);
+        let bar = render(&m);
+        assert!(bar.contains("x0") && bar.contains("x1"), "{bar}");
+        assert!(bar.contains("<= 4;"), "{bar}");
+    }
+
+    #[test]
+    fn feasibility_problem_minimizes_zero() {
+        let m = Model::new("feas");
+        let x = m.var("x").lb(0.0).ub(1.0).build();
+        m.constraint("c", x.le(1.0));
+        let bar = render(&m);
+        assert!(bar.contains("OBJ: minimize 0;"), "{bar}");
+    }
+
+    #[test]
+    fn sin_is_rejected() {
+        let m = Model::new("trig");
+        let x = m.var("x").lb(-1.0).ub(1.0).build();
+        m.minimize(x.sin());
+        let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
+        match err {
+            SolverError::Backend(msg) => assert!(msg.contains("sin"), "{msg}"),
+            other => panic!("expected Backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn semicontinuous_is_rejected() {
+        let m = Model::new("semi");
+        let x = m.var("x").domain(Domain::SemiContinuous { threshold: 1.0 }).ub(10.0).build();
+        m.minimize(x);
+        let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
+        assert!(matches!(err, SolverError::Backend(_)));
+    }
+
+    #[test]
+    fn constant_constraint_is_rejected() {
+        let m = Model::new("constc");
+        let x = m.var("x").lb(0.0).ub(5.0).build();
+        // x - x folds to a constant left-hand side, which BARON would reject.
+        m.constraint("trivial", (x - x).le(1.0));
+        m.minimize(x);
+        let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
+        match err {
+            SolverError::Backend(msg) => assert!(msg.contains("no variables"), "{msg}"),
+            other => panic!("expected Backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn starting_point_emitted_when_initial_set() {
+        let m = Model::new("start");
+        let x = m.var("x").lb(0.0).ub(10.0).initial(3.5).build();
+        m.minimize(x * x);
+        let bar = render(&m);
+        assert!(bar.contains("STARTING_POINT{"), "{bar}");
+        assert!(bar.contains("x0: 3.5;"), "{bar}");
+    }
+
+    #[test]
+    fn map_status_table() {
+        assert_eq!(map_status(1, 1), SolverStatus::Optimal);
+        assert_eq!(map_status(1, 2), SolverStatus::Infeasible);
+        assert_eq!(map_status(1, 3), SolverStatus::Unbounded);
+        assert_eq!(map_status(4, 4), SolverStatus::Feasible); // time limit but feasible
+        assert_eq!(map_status(4, 5), SolverStatus::TimeLimit);
+        assert_eq!(map_status(5, 5), SolverStatus::NumericError);
+        assert_eq!(map_status(11, 5), SolverStatus::Other("baron_license_error".into()));
+        assert_eq!(map_status(3, 5), SolverStatus::Other("baron_iteration_limit".into()));
+    }
+
+    #[test]
+    fn parse_tim_picks_objective_by_sense() {
+        // name ncon nvar a b lower upper solver model c d nodeopt ... wall
+        let tim = "m 1 2 0 0 1.5 9.5 1 1 0 0 7 0 0 0.42";
+        let r = parse_solution(tim, "", ObjectiveSense::Minimize, std::time::Duration::ZERO, None);
+        assert_eq!(r.status, SolverStatus::Optimal);
+        assert_eq!(r.objective, Some(9.5)); // upper bound for minimize
+        let r = parse_solution(tim, "", ObjectiveSense::Maximize, std::time::Duration::ZERO, None);
+        assert_eq!(r.objective, Some(1.5)); // lower bound for maximize
+    }
+
+    #[test]
+    fn parse_res_extracts_primal() {
+        let mut primal = FxHashMap::default();
+        let res = "\
+junk line
+The best solution found is:
+
+  name        lower        value
+  x0          0.0          1.25
+  x1          0.0          3.50
+
+";
+        parse_results(res, &mut primal);
+        assert_eq!(primal.get(&VarId(0)), Some(&1.25));
+        assert_eq!(primal.get(&VarId(1)), Some(&3.5));
+    }
+
+    #[test]
+    fn no_solution_node_minus_three_leaves_primal_empty() {
+        // solver=1 model=1 (optimal) but nodeopt = -3 => no solution vector.
+        let tim = "m 1 1 0 0 0 0 1 1 0 0 -3 0 0 0.01";
+        let res = "The best solution found is:\n\n\n  x0  0  9.9\n";
+        let r = parse_solution(tim, res, ObjectiveSense::Minimize, std::time::Duration::ZERO, None);
+        assert!(r.primal.is_empty(), "nodeopt -3 must skip primal: {:?}", r.primal);
+    }
+}

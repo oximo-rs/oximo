@@ -1,0 +1,19 @@
+[package]
+name = "oximo-baron"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "BARON writer and backend for oximo"
+readme = "README.md"
+
+[dependencies]
+oximo-expr.workspace = true
+oximo-core.workspace = true
+oximo-solver.workspace = true
+rustc-hash.workspace = true
+
+[lints]
+workspace = true
