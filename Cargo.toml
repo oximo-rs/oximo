@@ -8,6 +8,7 @@ members = [
     "crates/oximo-io",
     "crates/oximo-gurobi",
     "crates/oximo-gams",
+    "crates/oximo-baron",
     "crates/oximo",
 ]
 
