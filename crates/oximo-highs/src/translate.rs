@@ -1,8 +1,10 @@
 use std::time::Instant;
 
-use highs::{HighsModelStatus, RowProblem, Sense as HighsSense};
+use highs::{HessianFormat, HighsModelStatus, RowProblem, Sense as HighsSense};
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId};
-use oximo_expr::{ExprArena, LinearTerms, extract_linear};
+use oximo_expr::{
+    ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
+};
 use oximo_solver::{SolverError, SolverResult, SolverStatus};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
@@ -13,8 +15,15 @@ use crate::options::apply as apply_options;
 /// Translate `model` into a HiGHS [`RowProblem`], solve, and return the
 /// generic [`SolverResult`].
 ///
-/// For now we only support LP and MILP. Nonlinear constraints
-/// or objectives produce [`SolverError::Nonlinear`].
+/// Supports LP, MILP, and (convex, continuous) QP. The quadratic objective
+/// Hessian is passed via `Highs_passHessian`. Nonlinear constraints or
+/// objectives, quadratic constraints (HiGHS has no quadratic constraints), and
+/// integer + quadratic (MIQP) models produce [`SolverError::Nonlinear`] or
+/// [`SolverError::UnsupportedKind`].
+///
+/// HiGHS solves **convex** QPs only and does not verify positive
+/// semidefiniteness of `Q`: on an indefinite Hessian it may return a wrong or
+/// non-optimal solution.
 ///
 /// # Errors
 ///
@@ -25,7 +34,7 @@ use crate::options::apply as apply_options;
 /// Panics if model variable IDs overflow `u32`.
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
-    if !matches!(kind, ModelKind::LP | ModelKind::MILP) {
+    if !matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP) {
         return Err(SolverError::UnsupportedKind(kind));
     }
 
@@ -34,17 +43,9 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let constraints = model.constraints();
     let objective = model.try_objective().map_err(SolverError::Core)?;
 
-    // Objective: extract linear coefficients per variable + constant
-    let mut obj_coeffs: Vec<f64> = vec![0.0; vars.len()];
-    let obj_constant = match extract_linear(&arena, objective.expr) {
-        Some(t) => {
-            for (v, c) in t.coeffs {
-                obj_coeffs[v.index()] = c;
-            }
-            t.constant
-        }
-        None => return Err(SolverError::Nonlinear),
-    };
+    let (obj_coeffs, obj_constant, hessian_cols) =
+        objective_terms(kind, &arena, objective.expr, vars.len())?;
+    let has_hessian = hessian_cols.iter().any(|col| !col.is_empty());
 
     // Build the HiGHS row problem
     let mut pb = RowProblem::new();
@@ -96,12 +97,27 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     };
 
     let started = Instant::now();
-    let mut hmodel = pb.optimise(sense);
-    if has_initial {
-        hmodel.set_solution(Some(&init_vals), None, None, None);
+    let mut hmodel = pb
+        .try_optimise(sense)
+        .map_err(|e| SolverError::Backend(format!("HiGHS model setup failed: {e:?}")))?;
+    if has_hessian {
+        // QP: pass Q for the `c'x + 0.5 x'Q x` objective. Lower triangle only.
+        hmodel
+            .try_pass_hessian(
+                HessianFormat::Triangular,
+                hessian_cols.iter().map(|col| col.iter().copied()),
+            )
+            .map_err(|e| SolverError::Backend(format!("HiGHS Hessian upload failed: {e}")))?;
     }
-    apply_options(&mut hmodel, opts);
-    let solved = hmodel.solve();
+    if has_initial {
+        hmodel
+            .try_set_solution(Some(&init_vals), None, None, None)
+            .map_err(|e| SolverError::Backend(format!("HiGHS initial solution failed: {e:?}")))?;
+    }
+    apply_options(&mut hmodel, opts)?;
+    let solved = hmodel
+        .try_solve()
+        .map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
     let elapsed = started.elapsed();
 
     let status = map_status(solved.status());
@@ -127,6 +143,56 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         iterations: 0,
         raw_log: None,
     })
+}
+
+/// HiGHS Hessian in compressed-sparse-column form: one `(row, value)` list per
+/// model column.
+type HessianCols = Vec<Vec<(usize, f64)>>;
+
+/// Objective decomposition: per-variable linear coefficients, the constant, and
+/// the Hessian columns (empty for non-QP models).
+type ObjectiveTerms = (Vec<f64>, f64, HessianCols);
+
+/// Extract the objective into per-variable linear coefficients, a constant, and
+/// (for QP) the Hessian columns. Only `QP` pays for quadratic extraction,
+/// LP/MILP keep the linear fast path. For non-QP kinds the returned column
+/// vector is empty.
+fn objective_terms(
+    kind: ModelKind,
+    arena: &ExprArena,
+    obj_expr: ExprId,
+    num_vars: usize,
+) -> Result<ObjectiveTerms, SolverError> {
+    let mut coeffs = vec![0.0; num_vars];
+    if matches!(kind, ModelKind::QP) {
+        let quad = extract_quadratic(arena, obj_expr).ok_or(SolverError::Nonlinear)?;
+        for (v, c) in &quad.linear {
+            coeffs[v.index()] = *c;
+        }
+        let cols = hessian_columns(&quad, num_vars);
+        Ok((coeffs, quad.constant, cols))
+    } else {
+        let lin = extract_linear(arena, obj_expr).ok_or(SolverError::Nonlinear)?;
+        for (v, c) in &lin.coeffs {
+            coeffs[v.index()] = *c;
+        }
+        Ok((coeffs, lin.constant, Vec::new()))
+    }
+}
+
+/// Construct the lower-triangle Hessian entries by column for HiGHS'
+/// compressed-sparse-column upload. Each variable yields one (possibly empty)
+/// column, so the Hessian dimension always matches the model's column count.
+/// Row indices within each column are sorted ascending.
+fn hessian_columns(quad: &QuadraticTerms, num_vars: usize) -> HessianCols {
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); num_vars];
+    for (row, col, value) in &quad.hessian {
+        cols[col.index()].push((row.index(), *value));
+    }
+    for col in &mut cols {
+        col.sort_unstable_by_key(|(row, _)| *row);
+    }
+    cols
 }
 
 fn collect_solution(
@@ -197,5 +263,73 @@ fn map_status(s: HighsModelStatus) -> SolverStatus {
         | HighsModelStatus::SolveError
         | HighsModelStatus::PostsolveError => SolverStatus::NumericError,
         _ => SolverStatus::Other("unknown_highs_status".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oximo_core::prelude::*;
+
+    use super::*;
+    use crate::HighsOptions;
+
+    #[test]
+    fn qp_min_sum_of_squares() {
+        // min x^2 + y^2  s.t.  x + y = 1  ->  (0.5, 0.5), objective 0.5.
+        let m = Model::new("sq");
+        let x = m.var("x").lb(-10.0).ub(10.0).build();
+        let y = m.var("y").lb(-10.0).ub(10.0).build();
+        m.constraint("c", (x + y).eq(1.0));
+        m.minimize(x.powi(2) + y.powi(2));
+        assert_eq!(m.kind(), ModelKind::QP);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.status, SolverStatus::Optimal);
+        assert!((res.value_of(x).unwrap() - 0.5).abs() < 1e-6);
+        assert!((res.value_of(y).unwrap() - 0.5).abs() < 1e-6);
+        assert!((res.objective.unwrap() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn qp_cvxopt_quickstart() {
+        // min 2 x0^2 + x0 x1 + x1^2 + x0 + x1  s.t.  x0 + x1 = 1,  x >= 0.
+        // cvxopt reference solution: x = [0.25, 0.75], objective = 1.875.
+        let m = Model::new("cvxopt");
+        let x0 = m.var("x0").lb(0.0).build();
+        let x1 = m.var("x1").lb(0.0).build();
+        m.constraint("eq", (x0 + x1).eq(1.0));
+        m.minimize(2.0 * x0.powi(2) + x0 * x1 + x1.powi(2) + x0 + x1);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.status, SolverStatus::Optimal);
+        assert!((res.value_of(x0).unwrap() - 0.25).abs() < 1e-6);
+        assert!((res.value_of(x1).unwrap() - 0.75).abs() < 1e-6);
+        assert!((res.objective.unwrap() - 1.875).abs() < 1e-6);
+    }
+
+    #[test]
+    fn qp_objective_constant_is_added_back() {
+        // min (x - 1)^2 = x^2 - 2x + 1  ->  x = 1, objective 0 (constant 1).
+        let m = Model::new("shift");
+        let x = m.var("x").lb(-5.0).ub(5.0).build();
+        m.minimize((x - 1.0).powi(2));
+        assert_eq!(m.kind(), ModelKind::QP);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.status, SolverStatus::Optimal);
+        assert!((res.value_of(x).unwrap() - 1.0).abs() < 1e-6);
+        assert!(res.objective.unwrap().abs() < 1e-6);
+    }
+
+    #[test]
+    fn miqp_is_unsupported() {
+        // Integer variable + quadratic objective = MIQP, which HiGHS cannot solve.
+        let m = Model::new("miqp");
+        let x = m.var("x").lb(0.0).ub(5.0).integer().build();
+        m.minimize(x.powi(2));
+        assert_eq!(m.kind(), ModelKind::MIQP);
+
+        let err = solve(&m, &HighsOptions::default()).unwrap_err();
+        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MIQP)));
     }
 }

@@ -25,7 +25,7 @@ impl Solver for Highs {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP)
+        matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
     }
 
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
