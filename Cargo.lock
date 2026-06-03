@@ -247,9 +247,9 @@ dependencies = [
 
 [[package]]
 name = "highs"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5ef3d7c6bd21aaa82a1a3530a5529ba82c9a398b24d626c62de532afeb94ecd"
+checksum = "70b9ad8978ecf9bfb3fd82876814fd11634e64895ea37c40774d0fb437523214"
 dependencies = [
  "highs-sys",
  "log",
