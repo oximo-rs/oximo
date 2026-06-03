@@ -1,5 +1,5 @@
-use highs::Model as HighsModel;
-use oximo_solver::{HasUniversal, UniversalOptions};
+use highs::{HighsOptionValue, Model as HighsModel};
+use oximo_solver::{HasUniversal, SolverError, UniversalOptions};
 
 /// HiGHS-specific solver options.
 #[derive(Clone, Debug, Default)]
@@ -67,30 +67,47 @@ impl HasUniversal for HighsOptions {
     }
 }
 
+/// Set a single HiGHS option through the non-panicking `try_set_option`,
+/// mapping any failure to a [`SolverError::Backend`].
+fn set<V: HighsOptionValue>(
+    model: &mut HighsModel,
+    name: &str,
+    value: V,
+) -> Result<(), SolverError> {
+    model
+        .try_set_option(name, value)
+        .map_err(|e| SolverError::Backend(format!("HiGHS option {name:?}: {e}")))
+}
+
 /// Apply typed [`HighsOptions`] onto a live HiGHS model.
-pub(crate) fn apply(model: &mut HighsModel, o: &HighsOptions) {
+///
+/// # Errors
+///
+/// Returns [`SolverError::Backend`] if HiGHS rejects an option name or value.
+pub(crate) fn apply(model: &mut HighsModel, o: &HighsOptions) -> Result<(), SolverError> {
     if let Some(d) = o.universal.time_limit {
-        model.set_option("time_limit", d.as_secs_f64());
+        set(model, "time_limit", d.as_secs_f64())?;
     }
     if let Some(n) = o.universal.threads {
-        model.set_option("threads", i32::try_from(n).unwrap_or(i32::MAX));
+        set(model, "threads", i32::try_from(n).unwrap_or(i32::MAX))?;
     }
     if let Some(b) = o.universal.verbose {
-        model.set_option("output_flag", b);
-        model.set_option("log_to_console", b);
+        set(model, "output_flag", b)?;
+        set(model, "log_to_console", b)?;
     }
     if let Some(g) = o.mip_gap {
-        model.set_option("mip_rel_gap", g);
+        set(model, "mip_rel_gap", g)?;
     }
     if let Some(p) = o.presolve {
-        model.set_option("presolve", presolve_str(p));
+        set(model, "presolve", presolve_str(p))?;
     }
     if let Some(m) = o.method {
-        model.set_option("solver", method_str(m));
+        set(model, "solver", method_str(m))?;
     }
     if let Some(p) = o.parallel {
-        model.set_option("parallel", if p { "on" } else { "off" });
+        set(model, "parallel", if p { "on" } else { "off" })?;
     }
+    Ok(())
 }
 
 fn presolve_str(p: HighsPresolve) -> &'static str {
@@ -143,13 +160,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_default_does_not_panic() {
+    fn apply_default_succeeds() {
         let mut m = empty_highs_model();
-        apply(&mut m, &HighsOptions::default());
+        apply(&mut m, &HighsOptions::default()).unwrap();
     }
 
     #[test]
-    fn apply_all_options_does_not_panic() {
+    fn apply_all_options_succeeds() {
         let mut m = empty_highs_model();
         let o = HighsOptions::default()
             .time_limit(Duration::from_secs(10))
@@ -159,7 +176,7 @@ mod tests {
             .presolve(HighsPresolve::Off)
             .method(HighsMethod::Simplex)
             .parallel(false);
-        apply(&mut m, &o);
+        apply(&mut m, &o).unwrap();
     }
 
     #[test]
@@ -168,7 +185,7 @@ mod tests {
             [HighsMethod::Choose, HighsMethod::Simplex, HighsMethod::Ipm, HighsMethod::PdLp]
         {
             let mut m = empty_highs_model();
-            apply(&mut m, &HighsOptions::default().method(method));
+            apply(&mut m, &HighsOptions::default().method(method)).unwrap();
         }
     }
 
@@ -176,7 +193,7 @@ mod tests {
     fn apply_every_presolve_variant() {
         for presolve in [HighsPresolve::Off, HighsPresolve::On, HighsPresolve::Auto] {
             let mut m = empty_highs_model();
-            apply(&mut m, &HighsOptions::default().presolve(presolve));
+            apply(&mut m, &HighsOptions::default().presolve(presolve)).unwrap();
         }
     }
 }
