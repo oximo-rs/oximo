@@ -37,7 +37,7 @@ println!("y   = {:?}", result.value_of(y)); // 4.0
 
 | Feature  | What it adds                                                          | Default |
 |----------|-----------------------------------------------------------------------|---------|
-| `highs`  | HiGHS - LP/MILP solver (bundled, no install)                          | yes     |
+| `highs`  | HiGHS - LP/MILP/QP solver (bundled, no install)                       | yes     |
 | `io`     | MPS and LP file writers                                               | yes     |
 | `gurobi` | Gurobi - LP/MILP/QP/MIQP/NLP/MINLP solver (requires licensed install) | no      |
 | `gams`   | GAMS bridge - LP/MILP/QP/MIQP/NLP/MINLP depending on solver           | no      |
