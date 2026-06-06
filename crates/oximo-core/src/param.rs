@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 /// Parameter identity (id + name). Parameters are scalars referenced
 /// symbolically in expressions and re-bound between solves.
 ///
-/// The current numeric value lives in the model's expression arena 
+/// The current numeric value lives in the model's expression arena
 /// (the single source of truth) so re-binding does not have to
 /// keep two copies in sync. Read it with [`Model::param_value`] /
 /// [`Model::param_value_of`].
