@@ -14,7 +14,7 @@
 //! variable sets `nl_vars_c`, `nl_vars_o` only count vars appearing inside the
 //! nonlinear residual.
 
-use oximo_core::{Constraint, Objective, Variable};
+use oximo_core::{Constraint, Domain, Objective, Variable};
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, SignedExpr, VarId, split_linear};
 use rustc_hash::FxHashSet;
 
@@ -46,11 +46,23 @@ pub(crate) struct Analysis {
 impl Analysis {
     pub(crate) fn build(
         arena: &ExprArena,
-        _vars: &[Variable],
+        vars: &[Variable],
         constraints: &[Constraint],
         objective: &Objective,
         nonfinite_strings: bool,
     ) -> Result<Self, IoError> {
+        for v in vars {
+            match v.domain {
+                Domain::Real | Domain::Integer | Domain::Binary => {}
+                Domain::SemiContinuous { .. } => {
+                    return Err(IoError::UnsupportedDomain("SemiContinuous"));
+                }
+                Domain::SemiInteger { .. } => {
+                    return Err(IoError::UnsupportedDomain("SemiInteger"));
+                }
+            }
+        }
+
         let mut nl_vars_c: FxHashSet<VarId> = FxHashSet::default();
         let mut nl_vars_o: FxHashSet<VarId> = FxHashSet::default();
         let mut cons: Vec<Row> = Vec::with_capacity(constraints.len());
