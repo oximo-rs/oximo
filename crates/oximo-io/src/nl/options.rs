@@ -27,7 +27,8 @@ pub enum NlFormat {
 pub struct WriteOptions {
     pub format: NlFormat,
     /// `None` -> shortest round-trip (default Rust `{}` for `f64`).
-    /// `Some(n)` -> `n` significant decimal digits via `{:.*e}` → trimmed.
+    /// `Some(n)` -> `n` significant digits in scientific notation (`{:.*e}`,
+    /// e.g. `3.142e0`).
     pub precision: Option<u32>,
     /// Emit trailing `\t# ...` comments in the header and segment introducers
     /// (ASCII format only). Ignored in binary mode.

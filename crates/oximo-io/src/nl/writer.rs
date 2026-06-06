@@ -191,11 +191,8 @@ impl<'a, W: Write> Writer<'a, W> {
         }
         if let Some(prec) = self.opts.precision {
             let prec = prec.max(1) as usize;
-            // Use a snprintf("%.*g") clone: pick scientific or fixed
-            // based on magnitude. Rust's `{:.*e}` is scientific only; render
-            // both and pick the shorter that round-trips.
-            let sci = format!("{:.*e}", prec.saturating_sub(1), x);
-            return Ok(sci);
+            // `prec` significant digits in scientific notation, e.g. "3.142e0".
+            return Ok(format!("{:.*e}", prec.saturating_sub(1), x));
         }
         Ok(format!("{x}"))
     }
