@@ -16,7 +16,7 @@ use std::process::Command;
 
 use oximo_core::prelude::*;
 use oximo_expr::evaluate;
-use oximo_io::to_nl_string;
+use oximo_io::{WriteOptions, write_nl_files};
 use tempfile::TempDir;
 
 const STUB: &str = "problem";
@@ -31,9 +31,10 @@ fn write_and_solve(m: &Model, expected_obj: f64, tol: f64) {
         return;
     };
     let dir = TempDir::new().expect("tempdir");
-    let nl_path = dir.path().join(format!("{STUB}.nl"));
-    let nl = to_nl_string(m).expect("nl writer");
-    std::fs::write(&nl_path, &nl).expect("write .nl");
+    let stub = dir.path().join(STUB);
+
+    let opts = WriteOptions { aux_files: Some(dir.path().to_path_buf()), ..Default::default() };
+    write_nl_files(m, &stub, &opts).expect("write nl files");
 
     let status = Command::new(&bin)
         .current_dir(dir.path())
@@ -46,12 +47,18 @@ fn write_and_solve(m: &Model, expected_obj: f64, tol: f64) {
     let sol_path = dir.path().join(format!("{STUB}.sol"));
     let sol_text = std::fs::read_to_string(&sol_path).expect("read .sol");
     let parsed = sol::parse_sol(&sol_text).expect("parse sol");
-    eprintln!("solver primals: {:?}", parsed.primals);
+    eprintln!("solver primals (NL order): {:?}", parsed.primals);
+
+    let col = std::fs::read_to_string(dir.path().join(format!("{STUB}.col"))).expect("read .col");
+    let mut primals = vec![0.0; m.num_variables()];
+    for (nl_idx, name) in col.lines().enumerate() {
+        let vid = m.variable_id(name).unwrap_or_else(|| panic!("unknown var {name:?} in .col"));
+        primals[vid.index()] = parsed.primals[nl_idx];
+    }
 
     let arena = m.arena();
     let objective = m.try_objective().expect("objective");
-    let obj_val =
-        evaluate(&arena, objective.expr, &parsed.primals.as_slice()).expect("evaluate obj");
+    let obj_val = evaluate(&arena, objective.expr, &primals.as_slice()).expect("evaluate obj");
     let diff = (obj_val - expected_obj).abs();
     assert!(
         diff <= tol,
