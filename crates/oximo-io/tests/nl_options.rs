@@ -82,6 +82,23 @@ fn nonfinite_constant_in_residual() {
 }
 
 #[test]
+fn rejects_semi_domains() {
+    for (dom, name) in [
+        (Domain::SemiContinuous { threshold: 2.0 }, "SemiContinuous"),
+        (Domain::SemiInteger { threshold: 2.0 }, "SemiInteger"),
+    ] {
+        let m = Model::new("semi");
+        let x = m.var("x").lb(0.0).ub(10.0).domain(dom).build();
+        m.minimize(x);
+        let err = to_nl_string_with(&m, &WriteOptions::default()).unwrap_err();
+        assert!(
+            matches!(err, IoError::UnsupportedDomain(d) if d == name),
+            "expected UnsupportedDomain({name}), got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn binary_header_marker() {
     let m = simple_lp();
     let mut buf = Vec::new();
