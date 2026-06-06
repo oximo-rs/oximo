@@ -99,7 +99,7 @@ write_lp(&model, &mut f)?;
 
 ### NL
 
-The standard format for sharing nonlinear and mixed-integer models. Unlike MPS/LP, it carries full nonlinear expressions, emitted as postfix opcode trees.
+The standard format for sharing nonlinear and mixed-integer models. Unlike MPS/LP, it carries full nonlinear expressions, emitted as prefix (Polish) opcode trees.
 
 | Feature              | Behavior                                                                |
 |----------------------|-------------------------------------------------------------------------|
