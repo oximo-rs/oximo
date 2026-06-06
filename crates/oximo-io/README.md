@@ -1,10 +1,8 @@
 # oximo-io
 
-Model I/O for [oximo](https://github.com/germanheim/oximo): MPS and LP writers.
+Model I/O for [oximo](https://github.com/germanheim/oximo): MPS, LP, and NLP writers.
 
-Converts an oximo [`oximo_core::Model`] to standard text formats for exchanging models with external solvers and tools. Both formats support `LP` and `MILP` only. Nonlinear expressions raise [`IoError::Nonlinear`].
-
-> Support for NL files for nonlinear programming (NLP) and mixed-integer nonlinear programming (MINLP) is planned.
+Converts an oximo [`oximo_core::Model`] to standard text formats for exchanging models with external solvers and tools.
 
 ## Usage
 
@@ -12,7 +10,7 @@ Enabled by default via the `io` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = "0.1"  # io is on by default
+oximo = "0.1" # io is on by default
 ```
 
 To opt out:
@@ -79,12 +77,12 @@ write_mps(&model, &mut f)?;
 
 Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `End`.
 
-| Feature            | Behavior                                                          |
-|--------------------|-------------------------------------------------------------------|
-| Objective sense    | `Minimize` / `Maximize` keyword, no negation needed               |
-| Integer variables  | `General` section (integer/semi-integer), `Binaries` section      |
-| Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted|
-| Objective constant | Written as a comment if non-zero                                  |
+| Feature            | Behavior                                                           |
+|--------------------|--------------------------------------------------------------------|
+| Objective sense    | `Minimize` / `Maximize` keyword, no negation needed                |
+| Integer variables  | `General` section (integer/semi-integer), `Binaries` section       |
+| Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted |
+| Objective constant | Written as a comment if non-zero                                   |
 
 ```rust,ignore
 use oximo_io::{write_lp, to_lp_string};
@@ -99,15 +97,59 @@ let mut f = BufWriter::new(File::create("model.lp")?);
 write_lp(&model, &mut f)?;
 ```
 
+### NL
+
+The standard format for sharing nonlinear and mixed-integer models. Unlike MPS/LP, it carries full nonlinear expressions, emitted as postfix opcode trees.
+
+| Feature              | Behavior                                                                |
+|----------------------|-------------------------------------------------------------------------|
+| Nonlinear bodies     | Linear part goes to `J`/`G`; nonlinear residual to `C`/`O` opcode trees |
+| Supported operators  | `+ - * /`, negation, `pow`, `abs`, `sin`, `cos`, `exp`, `log` (natural) |
+| Output encoding      | ASCII (default) or binary, via `WriteOptions::format`                   |
+| Precision / comments | `precision` and `comments` knobs tune the ASCII output                  |
+| Variable ordering    | Standard ASL order: nonlinear-first (by appearance), then linear        |
+| Name sidecars        | `write_nl_files` also writes `.row` / `.col` name files                 |
+| Optional segments    | `F`/`S`/`V`/`d`/`r` segments supplied via `WriteOptions`                |
+
+```rust,ignore
+use oximo::prelude::*;
+use oximo::io::{to_nl_string, write_nl_with, write_nl_files, WriteOptions};
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
+
+// Rosenbrock: min (1 - x)^2 + 100 (y - x^2)^2
+let m = Model::new("rosen");
+let x = m.var("x").bounds(-5.0, 5.0).build();
+let y = m.var("y").bounds(-5.0, 5.0).build();
+m.minimize((1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
+
+// To string (ASCII only)
+let nl = to_nl_string(&m)?;
+
+// To <stub>.nl plus .row / .col name sidecars
+let opts = WriteOptions { aux_files: Some(".".into()), ..Default::default() };
+write_nl_files(&m, Path::new("rosen"), &opts)?;
+
+// Binary output needs to be written to a byte sink
+let mut f = BufWriter::new(File::create("rosen.nl")?);
+write_nl_with(&m, &mut f, &WriteOptions::binary())?;
+```
+
+Not yet supported: range constraints, Hollerith (string) constants, and `Param` nodes.
+
 ## Errors
 
 All functions return `Result<_, IoError>`:
 
-| Variant                | Cause                                                                                                       |
-|------------------------|-------------------------------------------------------------------------------------------------------------|
-| `IoError::NoObjective` | Model has no objective set                                                                                  |
-| `IoError::Nonlinear`   | Objective or constraint contains nonlinear nodes (`Mul` with two non-constant children, `Pow`, `Sin`, etc.) |
-| `IoError::Io(e)`       | Underlying `std::io::Error` from the writer                                                                 |
+| Variant                       | Cause                                                                      |
+|-------------------------------|----------------------------------------------------------------------------|
+| `IoError::NoObjective`        | Model has no objective set                                                 |
+| `IoError::Nonlinear`          | Nonlinear node in an MPS/LP model (NL supports nonlinear bodies)           |
+| `IoError::UnsupportedNode(n)` | Node not representable in the target format, e.g. `Param` in NL            |
+| `IoError::InvalidNumber`      | Non-finite (NaN/Inf) constant while `nonfinite_strings` is off             |
+| `IoError::BinaryToString`     | `to_nl_string` used with binary output; use `write_nl_with` to a byte sink |
+| `IoError::Io(e)`              | Underlying `std::io::Error` from the writer                                |
 
 ## License
 
