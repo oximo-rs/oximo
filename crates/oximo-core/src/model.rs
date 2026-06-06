@@ -1,6 +1,6 @@
 use std::cell::{Ref, RefCell};
 
-use oximo_expr::{Expr, ExprArena, ExprClass, VarId, classify};
+use oximo_expr::{Expr, ExprArena, ExprClass, ParamId, VarId, classify};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
@@ -9,6 +9,7 @@ use crate::domain::Domain;
 use crate::error::{Error, Result};
 use crate::indexed::IndexedVar;
 use crate::objective::{Objective, ObjectiveSense};
+use crate::param::Parameter;
 use crate::set::{FromIndexKey, IndexKey, Set};
 use crate::var::{VarBuilder, Variable};
 
@@ -39,6 +40,8 @@ pub struct Model {
     pub(crate) arena: RefCell<ExprArena>,
     pub(crate) variables: RefCell<Vec<Variable>>,
     pub(crate) var_names: RefCell<FxHashMap<SmolStr, VarId>>,
+    pub(crate) parameters: RefCell<Vec<Parameter>>,
+    pub(crate) param_names: RefCell<FxHashMap<SmolStr, ParamId>>,
     pub(crate) constraints: RefCell<Vec<Constraint>>,
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
@@ -50,6 +53,7 @@ impl std::fmt::Debug for Model {
         f.debug_struct("Model")
             .field("name", &self.name)
             .field("vars", &self.variables.borrow().len())
+            .field("params", &self.parameters.borrow().len())
             .field("constraints", &self.constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
             .finish()
@@ -63,6 +67,8 @@ impl Model {
             arena: RefCell::new(ExprArena::new()),
             variables: RefCell::new(Vec::new()),
             var_names: RefCell::new(FxHashMap::default()),
+            parameters: RefCell::new(Vec::new()),
+            param_names: RefCell::new(FxHashMap::default()),
             constraints: RefCell::new(Vec::new()),
             constraint_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
@@ -161,6 +167,82 @@ impl Model {
         let v = &mut vars[id.index()];
         v.lb = lb;
         v.ub = ub;
+    }
+
+    // Parameters
+
+    /// Register a named scalar parameter initialized to `value`, returning an
+    /// [`Expr`] handle that references it symbolically.
+    ///
+    /// A parameter behaves like a constant coefficient (`param * var` is linear),
+    /// but stays symbolic in the expression tree so it can be re-bound with
+    /// [`Self::set_param`] / [`Self::set_param_id`] between solves without
+    /// rebuilding the model.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a parameter with the same name is already registered.
+    pub fn param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
+        let name = name.into();
+        assert!(
+            !self.param_names.borrow().contains_key(&name),
+            "parameter name {name:?} already registered"
+        );
+        let (id, node) = {
+            let mut a = self.arena.borrow_mut();
+            let id = a.new_param(value);
+            (id, a.param(id))
+        };
+        self.parameters.borrow_mut().push(Parameter { id, name: name.clone() });
+        self.param_names.borrow_mut().insert(name, id);
+        *self.cached_kind.borrow_mut() = None;
+        Expr::new(node, &self.arena)
+    }
+
+    /// Re-bind the parameter referenced by handle `p` to `value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p` is not a bare parameter handle (see [`Self::param`]).
+    pub fn set_param(&self, p: Expr<'_>, value: f64) {
+        let id = p.param_id().expect("Model::set_param expects a single-parameter expression");
+        self.set_param_id(id, value);
+    }
+
+    /// Re-bind parameter `id` to `value`. Takes effect on the next solve.
+    ///
+    /// The value is stored only in the expression arena (its single source of
+    /// truth); extraction and evaluation read it from there.
+    pub fn set_param_id(&self, id: ParamId, value: f64) {
+        self.arena.borrow_mut().set_param_value(id, value);
+        *self.cached_kind.borrow_mut() = None;
+    }
+
+    /// Current value bound to parameter `id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` was not produced by [`Self::param`] on this model.
+    pub fn param_value(&self, id: ParamId) -> f64 {
+        self.arena.borrow().param_value(id)
+    }
+
+    /// Current value of the parameter referenced by handle `p`, or `None` if
+    /// `p` is not a bare parameter handle.
+    pub fn param_value_of(&self, p: Expr<'_>) -> Option<f64> {
+        p.param_id().map(|id| self.param_value(id))
+    }
+
+    pub fn parameter_id(&self, name: &str) -> Option<ParamId> {
+        self.param_names.borrow().get(name).copied()
+    }
+
+    pub fn parameters(&self) -> Ref<'_, Vec<Parameter>> {
+        self.parameters.borrow()
+    }
+
+    pub fn num_parameters(&self) -> usize {
+        self.parameters.borrow().len()
     }
 
     // Constraints
@@ -449,4 +531,73 @@ pub fn display_index_key(key: &IndexKey) -> String {
     let mut out = String::new();
     write_key_parts(&mut out, key);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use oximo_expr::extract_linear;
+
+    use super::*;
+    use crate::constraint::Relate;
+
+    #[test]
+    fn param_times_var_keeps_model_linear() {
+        let m = Model::new("p");
+        let param = m.param("param", 4.0);
+        let x = m.var("x").lb(0.0).build();
+        m.minimize(param * x);
+        assert_eq!(m.kind(), ModelKind::LP);
+    }
+
+    #[test]
+    fn param_coeff_resolves_and_rebinds() {
+        let m = Model::new("p");
+        let param = m.param("param", 4.0);
+        let x = m.var("x").lb(0.0).build();
+        let obj = param * x;
+
+        let coeff = |m: &Model| {
+            let arena = m.arena();
+            extract_linear(&arena, obj.id).expect("linear").coeffs[0].1
+        };
+        assert!((coeff(&m) - 4.0).abs() < f64::EPSILON);
+
+        m.set_param(param, 9.0);
+        assert!((coeff(&m) - 9.0).abs() < f64::EPSILON);
+        assert_eq!(m.parameter_id("param"), Some(param.param_id().unwrap()));
+    }
+
+    #[test]
+    fn param_value_reads_live_arena_value() {
+        let m = Model::new("p");
+        let param = m.param("param", 4.0);
+        let id = param.param_id().unwrap();
+        assert!((m.param_value(id) - 4.0).abs() < f64::EPSILON);
+        assert!((m.param_value_of(param).unwrap() - 4.0).abs() < f64::EPSILON);
+
+        m.set_param(param, 7.5);
+        assert!((m.param_value(id) - 7.5).abs() < f64::EPSILON);
+
+        let x = m.var("x").build();
+        assert!(m.param_value_of(x).is_none());
+    }
+
+    #[test]
+    fn set_param_invalidates_kind_cache() {
+        let m = Model::new("p");
+        let p = m.param("p", 1.0);
+        let x = m.var("x").lb(0.0).build();
+        m.constraint("c", (p * x).le(10.0));
+        assert_eq!(m.kind(), ModelKind::LP);
+        m.set_param(p, 2.0);
+        assert_eq!(m.kind(), ModelKind::LP);
+    }
+
+    #[test]
+    #[should_panic(expected = "parameter name \"dup\" already registered")]
+    fn duplicate_param_name_panics() {
+        let m = Model::new("p");
+        let _a = m.param("dup", 1.0);
+        let _b = m.param("dup", 2.0);
+    }
 }
