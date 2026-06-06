@@ -27,9 +27,13 @@ impl<'a, W: Write> Writer<'a, W> {
 
     /// Header trailing comment helper. ASCII: writes `\t# {comment}\n`
     /// when `opts.comments`, else just `\n`. Binary: always `\n` (header is
-    /// ASCII even in binary mode).
+    /// ASCII even in binary mode, but carries no comments).
     pub(crate) fn header_eol(&mut self, comment: &str) -> io::Result<()> {
-        if self.opts.comments { writeln!(self.out, "\t# {comment}") } else { writeln!(self.out) }
+        if self.opts.format == NlFormat::Ascii && self.opts.comments {
+            writeln!(self.out, "\t# {comment}")
+        } else {
+            writeln!(self.out)
+        }
     }
 
     /// Opcode token (`o<N>`). ASCII: `o<N>\n`. Binary: `o` byte + 4-byte LE int.
