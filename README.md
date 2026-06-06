@@ -4,7 +4,7 @@
   <img alt="oximo logo" src="https://raw.githubusercontent.com/oximo-rs/oximo/main/media/logo-dark.svg">
 </picture>
 
-<a href="https://github.com/oximo-rs/oximo/tree/main/crates/oximo">
+<a href="https://github.com/oximo-rs/oximo/tree/main/crates/oximo/examples">
     <img src="https://img.shields.io/badge/oximo-examples-orange" alt = "Examples">
 </a>
 <a href="https://crates.io/crates/oximo">
