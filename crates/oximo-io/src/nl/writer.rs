@@ -42,7 +42,7 @@ impl<'a, W: Write> Writer<'a, W> {
             NlFormat::Ascii => writeln!(self.out, "o{code}"),
             NlFormat::Binary => {
                 self.out.write_all(b"o")?;
-                self.out.write_all(&i32::try_from(code).unwrap_or(0).to_le_bytes())
+                self.out.write_all(&nl_i32(code, "opcode")?.to_le_bytes())
             }
         }
     }
@@ -53,7 +53,7 @@ impl<'a, W: Write> Writer<'a, W> {
             NlFormat::Ascii => writeln!(self.out, "v{idx}"),
             NlFormat::Binary => {
                 self.out.write_all(b"v")?;
-                self.out.write_all(&i32::try_from(idx).unwrap_or(0).to_le_bytes())
+                self.out.write_all(&nl_i32(idx, "variable index")?.to_le_bytes())
             }
         }
     }
@@ -95,10 +95,7 @@ impl<'a, W: Write> Writer<'a, W> {
     pub(crate) fn int(&mut self, n: i64) -> io::Result<()> {
         match self.opts.format {
             NlFormat::Ascii => write!(self.out, "{n}"),
-            NlFormat::Binary => {
-                let v = i32::try_from(n).unwrap_or(0);
-                self.out.write_all(&v.to_le_bytes())
-            }
+            NlFormat::Binary => self.out.write_all(&nl_i32(n, "integer field")?.to_le_bytes()),
         }
     }
 
@@ -147,12 +144,10 @@ impl<'a, W: Write> Writer<'a, W> {
             NlFormat::Binary => {
                 self.out.write_all(&[letter])?;
                 for n in ints {
-                    let v = i32::try_from(*n).unwrap_or(0);
-                    self.out.write_all(&v.to_le_bytes())?;
+                    self.out.write_all(&nl_i32(*n, "segment field")?.to_le_bytes())?;
                 }
                 if let Some(s) = name {
-                    let len = i32::try_from(s.len()).unwrap_or(0);
-                    self.out.write_all(&len.to_le_bytes())?;
+                    self.out.write_all(&nl_i32(s.len(), "name length")?.to_le_bytes())?;
                     self.out.write_all(s.as_bytes())?;
                 }
             }
@@ -206,6 +201,21 @@ impl<'a, W: Write> Writer<'a, W> {
     }
 }
 
+/// Convert a count/index/opcode to the 4-byte signed int used by binary NL
+/// records, failing with an error rather than silently truncating a value that
+/// does not fit in `i32`.
+fn nl_i32<T>(value: T, field: &str) -> io::Result<i32>
+where
+    T: TryInto<i32> + Copy + std::fmt::Display,
+{
+    value.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("NL binary {field} {value} does not fit in i32"),
+        )
+    })
+}
+
 fn as_short(x: f64) -> Option<i16> {
     if (x - x.trunc()).abs() == 0.0 && (-32768.0..=32767.0).contains(&x) {
         #[allow(clippy::cast_possible_truncation)]
@@ -223,5 +233,23 @@ fn as_long(x: f64) -> Option<i32> {
         Some(v)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nl_i32;
+
+    #[test]
+    fn nl_i32_accepts_in_range() {
+        assert_eq!(nl_i32(5_i64, "f").unwrap(), 5);
+        assert_eq!(nl_i32(7_u32, "f").unwrap(), 7);
+        assert_eq!(nl_i32(i32::MAX as usize, "f").unwrap(), i32::MAX);
+    }
+
+    #[test]
+    fn nl_i32_rejects_overflow() {
+        assert!(nl_i32(i64::from(i32::MAX) + 1, "f").is_err());
+        assert!(nl_i32(u32::MAX, "f").is_err());
     }
 }
