@@ -599,11 +599,7 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
     match arena.get(id) {
         ExprNode::Const(c) => write!(gms, "{}", fmt(*c)).unwrap(),
         ExprNode::Var(v) => write!(gms, "v{}", v.index()).unwrap(),
-        ExprNode::Param(_) => {
-            // Since params not yet passed into GAMS emission, we emit a placeholder
-            // so downstream errors are clear.
-            write!(gms, "0 /* unsupported: param */").unwrap();
-        }
+        ExprNode::Param(p) => write!(gms, "{}", fmt(arena.param_value(*p))).unwrap(),
         ExprNode::Linear { coeffs, constant } => {
             let t = LinearTerms { coeffs: coeffs.clone(), constant: *constant };
             write!(gms, "(").unwrap();
