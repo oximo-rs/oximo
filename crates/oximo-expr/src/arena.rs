@@ -57,6 +57,7 @@ pub enum ExprNode {
 #[derive(Clone, Debug, Default)]
 pub struct ExprArena {
     nodes: Vec<ExprNode>,
+    param_values: Vec<f64>,
 }
 
 impl ExprArena {
@@ -65,7 +66,7 @@ impl ExprArena {
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { nodes: Vec::with_capacity(cap) }
+        Self { nodes: Vec::with_capacity(cap), param_values: Vec::new() }
     }
 
     #[inline]
@@ -111,6 +112,51 @@ impl ExprArena {
 
     pub fn param(&mut self, p: ParamId) -> ExprId {
         self.push(ExprNode::Param(p))
+    }
+
+    /// Allocate a fresh parameter initialized to `value`, returning its
+    /// [`ParamId`]. Push a [`ExprNode::Param`] with [`Self::param`] to reference
+    /// it inside an expression.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of parameters exceeds `u32::MAX`.
+    pub fn new_param(&mut self, value: f64) -> ParamId {
+        let id = ParamId(u32::try_from(self.param_values.len()).expect("parameter arena overflow"));
+        self.param_values.push(value);
+        id
+    }
+
+    #[inline]
+    pub fn num_params(&self) -> usize {
+        self.param_values.len()
+    }
+
+    /// Current value bound to parameter `p`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p` was not allocated by [`Self::new_param`] on this arena.
+    #[inline]
+    pub fn param_value(&self, p: ParamId) -> f64 {
+        self.param_values[p.index()]
+    }
+
+    /// Look up the value of `p`, returning `None` if `p` is out of range.
+    #[inline]
+    pub fn try_param_value(&self, p: ParamId) -> Option<f64> {
+        self.param_values.get(p.index()).copied()
+    }
+
+    /// Re-bind parameter `p` to `value`. Takes effect on the next extraction or
+    /// evaluation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p` was not allocated by [`Self::new_param`] on this arena.
+    #[inline]
+    pub fn set_param_value(&mut self, p: ParamId, value: f64) {
+        self.param_values[p.index()] = value;
     }
 
     pub fn linear(&mut self, coeffs: Vec<(VarId, f64)>, constant: f64) -> ExprId {

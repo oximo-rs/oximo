@@ -108,7 +108,8 @@ fn mul_linear(a: &Poly, b: &Poly) -> Poly {
 }
 
 /// Recursively interpret `id` as a polynomial of degree `<= 2`. Returns `None`
-/// for anything of higher degree, transcendentals, division, or parameters.
+/// for anything of higher degree, transcendentals, or division. Parameters fold
+/// to their live arena value (a degree-0 constant).
 fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
     match arena.get(id) {
         ExprNode::Const(c) => Some(Poly::constant(*c)),
@@ -163,8 +164,8 @@ fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
                 _ => None,
             }
         }
-        ExprNode::Param(_)
-        | ExprNode::Div(_, _)
+        ExprNode::Param(p) => Some(Poly::constant(arena.param_value(*p))),
+        ExprNode::Div(_, _)
         | ExprNode::Sin(_)
         | ExprNode::Cos(_)
         | ExprNode::Exp(_)
@@ -179,12 +180,10 @@ fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
 ///
 /// `None` is returned for any expression `classify` would call
 /// `Nonlinear` (degree `> 2`, transcendentals, non-integer/negative powers,
-/// division), and also for expressions containing free [`ParamId`]s, which
-/// have no numeric value here.
+/// division). Parameters are folded to their current arena values, so a
+/// polynomial whose coefficients are parameters is still extracted.
 ///
 /// A purely linear (or constant) expression yields an empty `hessian`.
-///
-/// [`ParamId`]: crate::ParamId
 pub fn extract_quadratic(arena: &ExprArena, id: ExprId) -> Option<QuadraticTerms> {
     let poly = as_poly(arena, id)?;
 

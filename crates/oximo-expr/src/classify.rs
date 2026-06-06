@@ -54,8 +54,8 @@ impl Degree {
 
 fn degree(arena: &ExprArena, id: ExprId) -> Degree {
     match arena.get(id) {
-        ExprNode::Const(_) => Degree::Zero,
-        ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => Degree::One,
+        ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
+        ExprNode::Var(_) | ExprNode::Linear { .. } => Degree::One,
         ExprNode::Neg(inner) => degree(arena, *inner),
         ExprNode::Add(children) => {
             let mut d = Degree::Zero;

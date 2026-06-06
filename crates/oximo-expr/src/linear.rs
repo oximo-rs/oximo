@@ -12,16 +12,22 @@ pub struct LinearTerms {
 
 /// Try to interpret `id` as a linear expression. Returns `None` for any
 /// nonlinear node (Mul of two non-constants, Pow, transcendentals, ...).
-fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
+///
+/// When `resolve_params` is set, a [`ExprNode::Param`] folds to its current
+/// arena value and counts as a constant.
+fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<LinearTerms> {
     match arena.get(id) {
         ExprNode::Const(c) => Some(LinearTerms { coeffs: Vec::new(), constant: *c }),
+        ExprNode::Param(p) if resolve_params => {
+            Some(LinearTerms { coeffs: Vec::new(), constant: arena.param_value(*p) })
+        }
         ExprNode::Var(v) => Some(LinearTerms { coeffs: vec![(*v, 1.0)], constant: 0.0 }),
         ExprNode::Linear { coeffs, constant } => {
             Some(LinearTerms { coeffs: coeffs.clone(), constant: *constant })
         }
         ExprNode::Neg(inner) => {
             let inner = *inner;
-            as_linear(arena, inner).map(|mut t| {
+            as_linear(arena, inner, resolve_params).map(|mut t| {
                 t.coeffs.iter_mut().for_each(|(_, c)| *c = -*c);
                 t.constant = -t.constant;
                 t
@@ -33,7 +39,7 @@ fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
             let mut map: FxHashMap<VarId, f64> =
                 FxHashMap::with_capacity_and_hasher(children.len() * 4, FxBuildHasher);
             for child in children {
-                let t = as_linear(arena, child)?;
+                let t = as_linear(arena, child, resolve_params)?;
                 for (v, c) in t.coeffs {
                     *map.entry(v).or_insert(0.0) += c;
                 }
@@ -48,12 +54,13 @@ fn as_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
             let mut scalar = 1.0;
             let mut linear: Option<LinearTerms> = None;
             for child in children {
-                if let ExprNode::Const(c) = arena.get(child) {
-                    scalar *= c;
-                } else if linear.is_none() {
-                    linear = Some(as_linear(arena, child)?);
-                } else {
-                    return None;
+                match arena.get(child) {
+                    ExprNode::Const(c) => scalar *= c,
+                    ExprNode::Param(p) if resolve_params => scalar *= arena.param_value(*p),
+                    _ if linear.is_none() => {
+                        linear = Some(as_linear(arena, child, resolve_params)?);
+                    }
+                    _ => return None,
                 }
             }
             Some(match linear {
@@ -78,7 +85,7 @@ fn push_linear(arena: &mut ExprArena, mut t: LinearTerms) -> ExprId {
 /// Build `lhs + rhs`, preserving the linear fast-path when both sides are
 /// linear. Falls back to an n-ary `Add` node otherwise.
 pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
-    if let (Some(lt), Some(rt)) = (as_linear(arena, lhs), as_linear(arena, rhs)) {
+    if let (Some(lt), Some(rt)) = (as_linear(arena, lhs, false), as_linear(arena, rhs, false)) {
         let mut map: FxHashMap<VarId, f64> =
             FxHashMap::with_capacity_and_hasher(lt.coeffs.len() + rt.coeffs.len(), FxBuildHasher);
         for (v, c) in lt.coeffs.into_iter().chain(rt.coeffs) {
@@ -102,14 +109,14 @@ pub(crate) fn sub_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
 /// stay on the linear fast-path. Otherwise produce a generic n-ary `Mul`.
 pub(crate) fn mul_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(lhs) {
-        if let Some(mut t) = as_linear(arena, rhs) {
+        if let Some(mut t) = as_linear(arena, rhs, false) {
             t.coeffs.iter_mut().for_each(|(_, co)| *co *= c);
             t.constant *= c;
             return push_linear(arena, t);
         }
     }
     if let ExprNode::Const(c) = *arena.get(rhs) {
-        if let Some(mut t) = as_linear(arena, lhs) {
+        if let Some(mut t) = as_linear(arena, lhs, false) {
             t.coeffs.iter_mut().for_each(|(_, co)| *co *= c);
             t.constant *= c;
             return push_linear(arena, t);
@@ -124,7 +131,7 @@ pub(crate) fn mul_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
 pub(crate) fn div_into(arena: &mut ExprArena, num: ExprId, den: ExprId) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(den) {
         if c != 0.0 {
-            if let Some(mut t) = as_linear(arena, num) {
+            if let Some(mut t) = as_linear(arena, num, false) {
                 let inv = 1.0 / c;
                 t.coeffs.iter_mut().for_each(|(_, co)| *co *= inv);
                 t.constant *= inv;
@@ -139,7 +146,7 @@ pub(crate) fn div_into(arena: &mut ExprArena, num: ExprId, den: ExprId) -> ExprI
 
 /// Build `-rhs`, preserving linearity.
 pub(crate) fn neg_into(arena: &mut ExprArena, rhs: ExprId) -> ExprId {
-    if let Some(mut t) = as_linear(arena, rhs) {
+    if let Some(mut t) = as_linear(arena, rhs, false) {
         t.coeffs.iter_mut().for_each(|(_, c)| *c = -*c);
         t.constant = -t.constant;
         return push_linear(arena, t);
@@ -149,8 +156,13 @@ pub(crate) fn neg_into(arena: &mut ExprArena, rhs: ExprId) -> ExprId {
 
 /// Snapshot the linear terms of `id`, if any. Used by solver backends to
 /// extract LP coefficients without walking the tree themselves.
+///
+/// Parameters are folded to their current arena values, so the returned
+/// coefficients reflect the latest [`ExprArena::set_param_value`] binding.
+///
+/// [`ExprArena::set_param_value`]: crate::ExprArena::set_param_value
 pub fn extract_linear(arena: &ExprArena, id: ExprId) -> Option<LinearTerms> {
-    as_linear(arena, id)
+    as_linear(arena, id, true)
 }
 
 /// A nonlinear residual summand: the existing arena node `id`, taken with a
@@ -174,7 +186,7 @@ pub struct SignedExpr {
 /// node, optionally negated). `LinearTerms` may have empty `coeffs` and
 /// `constant == 0.0` when the whole expression is purely nonlinear.
 pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedExpr>) {
-    if let Some(lt) = as_linear(arena, id) {
+    if let Some(lt) = as_linear(arena, id, true) {
         return (lt, Vec::new());
     }
     let mut lin = LinearTerms::default();
@@ -189,7 +201,7 @@ pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedEx
             }
             ExprNode::Neg(inner) => sign_stack.push((*inner, -sign)),
             _ => {
-                if let Some(mut t) = as_linear(arena, cur) {
+                if let Some(mut t) = as_linear(arena, cur, true) {
                     if (sign - 1.0).abs() > 0.0 {
                         t.coeffs.iter_mut().for_each(|(_, c)| *c *= sign);
                         t.constant *= sign;

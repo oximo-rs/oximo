@@ -34,7 +34,10 @@ pub fn evaluate<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Resul
     Ok(match arena.get(id) {
         ExprNode::Const(c) => *c,
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v))?,
-        ExprNode::Param(p) => ctx.param(*p).ok_or(EvalError::UnboundParam(*p))?,
+        ExprNode::Param(p) => ctx
+            .param(*p)
+            .or_else(|| arena.try_param_value(*p))
+            .ok_or(EvalError::UnboundParam(*p))?,
         ExprNode::Add(children) => children
             .iter()
             .try_fold(0.0, |acc, c| Ok::<_, EvalError>(acc + evaluate(arena, *c, ctx)?))?,

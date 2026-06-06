@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use crate::arena::{ExprArena, ExprId, ExprNode, VarId};
+use crate::arena::{ExprArena, ExprId, ExprNode, ParamId, VarId};
 
 /// Lightweight handle to a node in an [`ExprArena`].
 ///
@@ -40,6 +40,15 @@ impl<'a> Expr<'a> {
     pub fn var_id(self) -> Option<VarId> {
         match self.arena.borrow().get(self.id) {
             ExprNode::Var(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// If this handle is a bare parameter, return its [`ParamId`].
+    /// `None` for compound expressions.
+    pub fn param_id(self) -> Option<ParamId> {
+        match self.arena.borrow().get(self.id) {
+            ExprNode::Param(id) => Some(*id),
             _ => None,
         }
     }
