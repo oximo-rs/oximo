@@ -98,7 +98,7 @@ fn knapsack_milp() {
 
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
-    assert!((result.objective.unwrap() - 47.0).abs() < 1e-6);
+    assert!((result.objective().unwrap() - 47.0).abs() < 1e-6);
 }
 
 #[test]
