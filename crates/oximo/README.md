@@ -30,7 +30,7 @@ m.constraint("c3", x.le(y + 2.0));
 m.maximize(3.0 * x + 4.0 * y);
 
 let result = Highs.solve(&m, &HighsOptions::default())?;
-println!("obj = {:?}", result.objective);   // 34.0
+println!("obj = {:?}", result.objective());   // 34.0
 println!("x   = {:?}", result.value_of(x)); // 6.0
 println!("y   = {:?}", result.value_of(y)); // 4.0
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -249,9 +249,9 @@ let result = Baron::new().solve(&m, &BaronOptions::default())?;
 let result = Highs.solve(&m, &HighsOptions::default())?;
 
 match result.status {
-    SolverStatus::Optimal => println!("optimal: {}", result.objective.unwrap()),
+    SolverStatus::Optimal => println!("optimal: {}", result.objective().unwrap()),
     SolverStatus::Infeasible => println!("infeasible"),
-    SolverStatus::TimeLimit => println!("time limit, best = {:?}", result.objective),
+    SolverStatus::TimeLimit => println!("time limit, best = {:?}", result.objective()),
     _ => {}
 }
 
