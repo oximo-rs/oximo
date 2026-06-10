@@ -310,7 +310,11 @@ fn parseoximo_solution(
 /// dumped with `gdxdump` and parsed for the model's `v{i}` variable levels.
 ///
 /// Returns the points best-first by `sense`, empty when no pool was written.
-fn read_solution_pool(tmp_dir: &Path, gams_exec: &str, sense: ObjectiveSense) -> Vec<SolutionPoint> {
+fn read_solution_pool(
+    tmp_dir: &Path,
+    gams_exec: &str,
+    sense: ObjectiveSense,
+) -> Vec<SolutionPoint> {
     let gdxdump = gdxdump_path(gams_exec);
     let Ok(entries) = fs::read_dir(tmp_dir) else {
         return Vec::new();
@@ -342,7 +346,7 @@ fn read_solution_pool(tmp_dir: &Path, gams_exec: &str, sense: ObjectiveSense) ->
     members
 }
 
-/// `gdxdump` lives beside the `gams` executable. 
+/// `gdxdump` lives beside the `gams` executable.
 /// Fall back to `PATH` when only a bare command name is known.
 fn gdxdump_path(gams_exec: &str) -> PathBuf {
     let exe = if cfg!(windows) { "gdxdump.exe" } else { "gdxdump" };

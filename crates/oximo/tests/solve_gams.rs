@@ -164,8 +164,8 @@ fn gams_multi_optima_returns_single_best() {
 #[test]
 fn gams_reads_cplex_solution_pool() {
     // Same multi-optima MILP. When the user enables CPLEX's `solnpool`, the
-    // sub-solver writes a pool of GDX files into the run directory. 
-    // The GAMS backend reads them back and surfaces every point, best first. 
+    // sub-solver writes a pool of GDX files into the run directory.
+    // The GAMS backend reads them back and surfaces every point, best first.
     // Requires a GAMS install with a licensed CPLEX.
     let m = Model::new("multi");
     let items = Set::range(0..4usize);
@@ -174,7 +174,11 @@ fn gams_reads_cplex_solution_pool() {
     m.maximize(sum_over(&items, |i: usize| x[i]));
 
     let cfg = GamsSolverConfig::Cplex(GamsCplexOptions {
-        raw: vec!["solnpool oximo_pool.gdx".into(), "solnpoolpop 2".into(), "populatelim 20".into()],
+        raw: vec![
+            "solnpool oximo_pool.gdx".into(),
+            "solnpoolpop 2".into(),
+            "populatelim 20".into(),
+        ],
         ..Default::default()
     });
     let opts = GamsOptions::default().solver(cfg).time_limit(Duration::from_secs(60));
