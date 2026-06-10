@@ -129,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = Highs.solve(&m, &HighsOptions::default().verbose(true))?;
 
     println!("Status : {:?}", result.status);
-    if let Some(obj) = result.objective {
+    if let Some(obj) = result.objective() {
         println!(
             "Acetone (y06, ch3coch3): {}",
             if (obj - 1.0).abs() < 1e-6 { "Synthesizable" } else { "Not synthesizable" }

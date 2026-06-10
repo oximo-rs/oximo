@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = solver.solve(&m, &HighsOptions::default().verbose(true))?;
 
     println!("status    = {:?}", result.status);
-    println!("objective = {:?}", result.objective);
+    println!("objective = {:?}", result.objective());
     println!("x = {:?}", result.value_of(x));
     println!("y = {:?}", result.value_of(y));
     Ok(())

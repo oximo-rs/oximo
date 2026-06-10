@@ -67,7 +67,7 @@ mod model {
 
         let result = solver.solve(&m, opts)?;
 
-        if let Some(obj) = result.objective {
+        if let Some(obj) = result.objective() {
             println!("--- {label} ---");
             println!("status = {:?}", result.status);
             println!("profit = {obj:.4} M$/yr");
