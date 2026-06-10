@@ -31,7 +31,7 @@ fn gams_lp_canonical() {
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
-    assert!((result.objective.unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective);
+    assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());
     assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-4);
     assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-4);
 }
@@ -48,7 +48,7 @@ fn gams_lp_duals_and_reduced_costs() {
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
-    assert!((result.objective.unwrap() - 5.0).abs() < 1e-6);
+    assert!((result.objective().unwrap() - 5.0).abs() < 1e-6);
 
     let d = result.dual_of(c).expect("dual missing for cap constraint");
     assert!((d.abs() - 1.0).abs() < 1e-6, "dual={d}");
@@ -86,7 +86,7 @@ fn gams_knapsack_milp() {
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
-    assert!((result.objective.unwrap() - 47.0).abs() < 1e-4, "obj={:?}", result.objective);
+    assert!((result.objective().unwrap() - 47.0).abs() < 1e-4, "obj={:?}", result.objective());
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn gams_mip_gap_option() {
         "unexpected status: {:?}",
         result.status
     );
-    assert!(result.objective.unwrap() > 0.0);
+    assert!(result.objective().unwrap() > 0.0);
 }
 
 /// Exercises the typed-options path: a `highs.opt` file is written with
@@ -139,5 +139,5 @@ fn gams_highs_opt_file_simplex() {
     }));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
-    assert!((result.objective.unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective);
+    assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());
 }
