@@ -5,7 +5,7 @@ use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId};
 use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
 };
-use oximo_solver::{SolverError, SolverResult, SolverStatus};
+use oximo_solver::{SolutionPoint, SolverError, SolverResult, SolverStatus};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
@@ -135,10 +135,14 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let objective_value =
         if status.has_solution() { Some(solved.objective_value() + obj_constant) } else { None };
 
+    let solutions = if status.has_solution() {
+        vec![SolutionPoint { primal, objective: objective_value }]
+    } else {
+        Vec::new()
+    };
     Ok(SolverResult {
         status,
-        objective: objective_value,
-        primal,
+        solutions,
         dual,
         reduced_costs,
         solve_time: elapsed,
@@ -289,7 +293,7 @@ mod tests {
         assert_eq!(res.status, SolverStatus::Optimal);
         assert!((res.value_of(x).unwrap() - 0.5).abs() < 1e-6);
         assert!((res.value_of(y).unwrap() - 0.5).abs() < 1e-6);
-        assert!((res.objective.unwrap() - 0.5).abs() < 1e-6);
+        assert!((res.objective().unwrap() - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -306,7 +310,7 @@ mod tests {
         assert_eq!(res.status, SolverStatus::Optimal);
         assert!((res.value_of(x0).unwrap() - 0.25).abs() < 1e-6);
         assert!((res.value_of(x1).unwrap() - 0.75).abs() < 1e-6);
-        assert!((res.objective.unwrap() - 1.875).abs() < 1e-6);
+        assert!((res.objective().unwrap() - 1.875).abs() < 1e-6);
     }
 
     #[test]
@@ -320,7 +324,7 @@ mod tests {
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.status, SolverStatus::Optimal);
         assert!((res.value_of(x).unwrap() - 1.0).abs() < 1e-6);
-        assert!(res.objective.unwrap().abs() < 1e-6);
+        assert!(res.objective().unwrap().abs() < 1e-6);
     }
 
     #[test]
