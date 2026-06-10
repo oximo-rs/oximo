@@ -56,7 +56,7 @@ m.maximize(3.0 * x + 4.0 * y);
 
 let result = Gams::new().solve(&m, &GamsOptions::default())?;
 println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective);
+println!("obj    = {:?}", result.objective());
 ```
 
 Run the bundled example:
