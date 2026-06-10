@@ -36,6 +36,9 @@ pub enum GamsSolverConfig {
     Xpress(GamsXpressOptions),
     /// Any solver selectable by name with no typed option file.
     Named(GamsSolver),
+    /// A solver selected by name with raw option-file lines written verbatim to
+    /// `<solver>.opt`. Use for options oximo has no typed field for.
+    Raw(GamsSolver, Vec<String>),
 }
 
 impl GamsSolverConfig {
@@ -53,7 +56,7 @@ impl GamsSolverConfig {
             Self::Mosek(_) => "MOSEK",
             Self::Scip(_) => "SCIP",
             Self::Xpress(_) => "XPRESS",
-            Self::Named(s) => s.name(),
+            Self::Named(s) | Self::Raw(s, _) => s.name(),
         }
     }
 
@@ -74,6 +77,12 @@ impl GamsSolverConfig {
             Self::Scip(o) => o.write(buf),
             Self::Xpress(o) => o.write(buf),
             Self::Named(_) => false,
+            Self::Raw(_, lines) => {
+                for line in lines {
+                    writeln!(buf, "{line}").unwrap();
+                }
+                !lines.is_empty()
+            }
         }
     }
 
@@ -92,8 +101,8 @@ impl GamsSolverConfig {
 /// emit: `LP` / `MIP` / `NLP` / `MINLP` / `QCP` / `MIQCP`. `None` means the
 /// name is unrecognized and cannot be validated.
 ///
-/// Transcribed from the GAMS solver/model-type matrix (other model types —
-/// `MCP`, `MPEC`, `CNS`, `DNLP`, `EMP`, stochastic — are omitted because oximo
+/// Transcribed from the GAMS solver/model-type matrix (other model types
+/// (`MCP`, `MPEC`, `CNS`, `DNLP`, `EMP`, stochastic) are omitted because oximo
 /// never emits them):
 /// - "GAMS Solver Manuals," GAMS Development Corporation.
 ///   <https://www.gams.com/latest/docs/S_MAIN.html#SOLVERS_MODEL_TYPES> (accessed May 14, 2026).
@@ -141,6 +150,14 @@ fn kv_eq(buf: &mut String, key: &str, val: impl std::fmt::Display) {
     writeln!(buf, "{key} = {val}").unwrap();
 }
 
+/// Append verbatim option-file lines. Returns `true` if any were written.
+fn write_raw(buf: &mut String, raw: &[String]) -> bool {
+    for line in raw {
+        writeln!(buf, "{line}").unwrap();
+    }
+    !raw.is_empty()
+}
+
 // - BARON
 
 /// Options for the BARON global solver.
@@ -148,6 +165,8 @@ fn kv_eq(buf: &mut String, key: &str, val: impl std::fmt::Display) {
 /// Reference: <https://www.gams.com/latest/docs/S_BARON.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsBaronOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     /// Max wall-clock time in seconds (`MaxTime`)
     pub max_time: Option<f64>,
     /// Max branch-and-reduce iterations (`MaxIter`)
@@ -191,7 +210,8 @@ impl GamsBaronOptions {
         w!("NumLoc", self.num_loc);
         w!("NumSol", self.num_sol);
         w!("CutOff", self.cut_off);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -220,6 +240,8 @@ pub enum GamsCbcCuts {
 /// Reference: <https://www.gams.com/latest/docs/S_CBC.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsCbcOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     pub threads: Option<u32>,
     /// Relative MIP gap (`optcr`)
     pub mip_rel_gap: Option<f64>,
@@ -278,7 +300,8 @@ impl GamsCbcOptions {
             kv(buf, "heuristics", i32::from(h));
             n += 1;
         }
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -304,6 +327,8 @@ pub enum GamsCplexMipEmphasis {
 /// Reference: <https://www.gams.com/latest/docs/S_CPLEX.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsCplexOptions {
+    /// Extra option-file lines written verbatim (options without a typed field),
+    pub raw: Vec<String>,
     pub threads: Option<u32>,
     /// Relative MIP gap (`epgap`)
     pub mip_rel_gap: Option<f64>,
@@ -371,7 +396,8 @@ impl GamsCplexOptions {
         w!("eprhs", self.feasibility_tol);
         w!("epopt", self.optimality_tol);
         w!("lpmethod", self.lp_method);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -395,6 +421,8 @@ pub enum GamsGurobiMipFocus {
 /// Reference: <https://www.gams.com/latest/docs/S_GUROBI.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsGurobiOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     pub threads: Option<u32>,
     /// Relative MIP gap (`mipgap`)
     pub mip_rel_gap: Option<f64>,
@@ -455,7 +483,8 @@ impl GamsGurobiOptions {
         w!("feasibilitytol", self.feasibility_tol);
         w!("intfeastol", self.int_feas_tol);
         w!("optimalitytol", self.optimality_tol);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -484,6 +513,8 @@ pub enum GamsHighsSolver {
 /// Reference: <https://www.gams.com/latest/docs/S_HIGHS.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsHighsOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     pub threads: Option<u32>,
     /// Relative MIP gap (`mip_rel_gap`)
     pub mip_rel_gap: Option<f64>,
@@ -542,7 +573,8 @@ impl GamsHighsOptions {
         w!("primal_feasibility_tolerance", self.primal_feasibility_tol);
         w!("dual_feasibility_tolerance", self.dual_feasibility_tol);
         w!("optimality_tolerance", self.optimality_tol);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -571,6 +603,8 @@ pub enum GamsIpoptMuStrategy {
 /// Reference: <https://www.gams.com/latest/docs/S_IPOPT.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsIpoptOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     /// Max iterations (`max_iter`)
     pub max_iter: Option<u32>,
     /// Primary optimality tolerance (`tol`)
@@ -633,7 +667,8 @@ impl GamsIpoptOptions {
             );
             n += 1;
         }
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -659,6 +694,8 @@ pub enum GamsKnitroAlgorithm {
 /// Reference: <https://www.gams.com/latest/docs/S_KNITRO.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsKnitroOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     pub algorithm: Option<GamsKnitroAlgorithm>,
     /// Max iterations (`maxit`)
     pub max_iter: Option<u32>,
@@ -713,7 +750,8 @@ impl GamsKnitroOptions {
         w!("mip_maxnodes", self.mip_max_nodes);
         w!("mip_opt_gap_rel", self.mip_rel_gap);
         w!("mip_opt_gap_abs", self.mip_abs_gap);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -724,6 +762,8 @@ impl GamsKnitroOptions {
 /// Reference: <https://www.gams.com/latest/docs/S_MOSEK.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsMosekOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     /// Threads (`MSK_IPAR_NUM_THREADS`)
     pub threads: Option<u32>,
     /// Relative MIP gap (`MSK_DPAR_MIO_TOL_REL_GAP`)
@@ -764,7 +804,8 @@ impl GamsMosekOptions {
         w!("MSK_DPAR_INTPNT_TOL_DFEAS", self.dual_feas_tol);
         w!("MSK_DPAR_MIO_TOL_FEAS", self.mio_feas_tol);
         w!("MSK_DPAR_MIO_TOL_ABS_RELAX_INT", self.int_relax_tol);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -775,6 +816,8 @@ impl GamsMosekOptions {
 /// Reference: <https://www.gams.com/latest/docs/S_SCIP.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsScipOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     /// Max nodes (`limits/nodes`)
     pub node_limit: Option<i64>,
     /// Relative MIP gap (`limits/gap`)
@@ -812,7 +855,8 @@ impl GamsScipOptions {
         w!("numerics/dualfeastol", self.dual_feas_tol);
         w!("presolving/maxrounds", self.presolve_rounds);
         w!("separating/maxroundsroot", self.sep_rounds_root);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -823,6 +867,8 @@ impl GamsScipOptions {
 /// Reference: <https://www.gams.com/latest/docs/S_XPRESS.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsXpressOptions {
+    /// Extra option-file lines written verbatim (options without a typed field).
+    pub raw: Vec<String>,
     pub threads: Option<u32>,
     /// Relative MIP gap (`mipRelStop`)
     pub mip_rel_gap: Option<f64>,
@@ -868,7 +914,8 @@ impl GamsXpressOptions {
         w!("optimalityTol", self.optimality_tol);
         w!("mipTol", self.mip_tol);
         w!("defaultAlg", self.lp_algorithm);
-        n > 0
+        let extra = write_raw(buf, &self.raw);
+        n > 0 || extra
     }
 }
 
@@ -1040,6 +1087,36 @@ mod tests {
         let mut buf = String::new();
         assert!(!cfg.write_opt_file(&mut buf));
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn raw_lines_are_written_verbatim() {
+        // Per-struct `raw` is appended after the typed options.
+        let cfg = GamsSolverConfig::Cplex(GamsCplexOptions {
+            mip_rel_gap: Some(0.01),
+            raw: vec!["solnpool out.gdx".into(), "solnpoolpop 2".into()],
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("epgap 0.01"), "typed option missing:\n{buf}");
+        assert!(buf.contains("solnpool out.gdx"), "raw line missing:\n{buf}");
+        assert!(buf.contains("solnpoolpop 2"), "raw line missing:\n{buf}");
+
+        // `raw` alone still triggers the option file.
+        let cfg = GamsSolverConfig::Gurobi(GamsGurobiOptions {
+            raw: vec!["solnpool out.gdx".into()],
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert!(buf.contains("solnpool out.gdx"), "raw line missing:\n{buf}");
+
+        // The `Raw` variant writes the same verbatim lines for a named solver.
+        let cfg = GamsSolverConfig::Raw(GamsSolver::Xpress, vec!["miptol 1e-6".into()]);
+        let mut buf = String::new();
+        assert!(cfg.write_opt_file(&mut buf));
+        assert_eq!(buf, "miptol 1e-6\n");
     }
 
     #[test]
