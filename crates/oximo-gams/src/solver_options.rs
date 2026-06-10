@@ -327,7 +327,7 @@ pub enum GamsCplexMipEmphasis {
 /// Reference: <https://www.gams.com/latest/docs/S_CPLEX.html>
 #[derive(Clone, Debug, Default)]
 pub struct GamsCplexOptions {
-    /// Extra option-file lines written verbatim (options without a typed field),
+    /// Extra option-file lines written verbatim (options without a typed field).
     pub raw: Vec<String>,
     pub threads: Option<u32>,
     /// Relative MIP gap (`epgap`)
