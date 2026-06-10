@@ -38,7 +38,7 @@ m.maximize(3.0 * x + 4.0 * y);
 
 let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
 assert_eq!(result.status, SolverStatus::Optimal);
-println!("obj = {}", result.objective.unwrap()); // 34.0
+println!("obj = {}", result.objective().unwrap()); // 34.0
 println!("x   = {}", result.value_of(x).unwrap()); // 6.0
 println!("y   = {}", result.value_of(y).unwrap()); // 4.0
 ```
