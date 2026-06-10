@@ -7,7 +7,7 @@ use crate::status::SolverStatus;
 
 /// A single primal point returned by a solver.
 ///
-/// Most solves yield one point, but a global solver asked to enumerate a
+/// Most solves yield one point, but a global solver asked to enumerate solutions
 /// may returns several. In a [`SolverResult`] the points live in [`SolverResult::solutions`].
 /// Index `0` is always the best/incumbent.
 #[derive(Clone, Debug, Default)]
