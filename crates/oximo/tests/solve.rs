@@ -19,6 +19,24 @@ fn lp_canonical() {
 }
 
 #[test]
+fn highs_multi_optima_returns_single_best() {
+    // A MILP with several optimal solutions.
+    // HiGHS has no solution pool, so the multi-solution API surfaces exactly one optimum.
+    let m = Model::new("multi");
+    let items = Set::range(0..4usize);
+    let x = m.indexed_var("x", &items).binary().build();
+    m.constraint("cap", sum_over(&items, |i: usize| x[i]).le(2.0));
+    m.maximize(sum_over(&items, |i: usize| x[i]));
+
+    let r = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(r.status, SolverStatus::Optimal);
+    assert_eq!(r.result_count(), 1);
+    assert!((r.objective().unwrap() - 2.0).abs() < 1e-6);
+    let chosen: f64 = (0..4).filter_map(|i| r.value_of_idx(&x, i)).sum();
+    assert!((chosen - 2.0).abs() < 1e-6, "best is not an optimum: sum={chosen}");
+}
+
+#[test]
 fn param_coefficient_lp_rebinds_without_rebuild() {
     let m = Model::new("param_lp");
     let price = m.param("price", 3.0);
