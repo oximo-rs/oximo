@@ -2,9 +2,11 @@ use std::time::Instant;
 
 use grb::expr::LinExpr;
 use grb::prelude::*;
-use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, VarId};
-use oximo_expr::{ExprArena, ExprId, LinearTerms, extract_linear};
-use oximo_solver::{SolverError, SolverResult, SolverStatus};
+use oximo_core::{
+    Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable,
+};
+use oximo_expr::{ExprArena, ExprId, extract_linear};
+use oximo_solver::{SolutionPoint, SolverError, SolverResult, SolverStatus};
 use rustc_hash::FxHashMap;
 
 use crate::GurobiOptions;
@@ -40,70 +42,13 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
     let env = Env::new("").map_err(|e| SolverError::Backend(format!("Gurobi env: {e}")))?;
     let mut grb_model = grb::Model::with_env("oximo", &env).map_err(map_grb_err)?;
 
-    let mut gurobi_vars = Vec::with_capacity(vars.len());
-    for (i, v) in vars.iter().enumerate() {
-        let vtype = match v.domain {
-            Domain::Real => VarType::Continuous,
-            Domain::Integer => VarType::Integer,
-            Domain::Binary => VarType::Binary,
-            Domain::SemiContinuous { .. } => VarType::SemiCont,
-            Domain::SemiInteger { .. } => VarType::SemiInt,
-        };
-        // `add_var!` expands the f64 bounds with an `as f64` cast.
-        #[allow(clippy::unnecessary_cast)]
-        let gvar = add_var!(grb_model, vtype, bounds: v.lb..v.ub, name: &format!("x{i}"))
-            .map_err(map_grb_err)?;
-        gurobi_vars.push(gvar);
-        if let Some(val) = v.initial {
-            grb_model.set_obj_attr(attr::Start, &gvar, val).map_err(map_grb_err)?;
-        }
-    }
+    let gurobi_vars = add_variables(&mut grb_model, &vars)?;
 
-    let arena_ref: &ExprArena = &arena;
-
-    // Linear fast path per constraint. We fall back to the general lowering only
-    // for those that need it. Keep linear constraints tracked so duals/Pi can
-    // still be reported in the LP/MILP case.
-    let con_lin_terms: Vec<Option<LinearTerms>> =
-        constraints.iter().map(|c| extract_linear(arena_ref, c.lhs)).collect();
-
-    let mut gurobi_constrs: Vec<Option<grb::Constr>> = Vec::with_capacity(constraints.len());
+    // Aux-variable counter shared by the constraint and objective lowering so the
+    // synthetic variable names stay unique across both.
     let mut aux_counter = 0_u32;
-
-    for (c_id, (c, lin)) in constraints.iter().zip(con_lin_terms).enumerate() {
-        if let Some(t) = lin {
-            let adjusted_rhs = c.rhs - t.constant;
-            let mut expr = LinExpr::new();
-            for (v, co) in t.coeffs {
-                expr.add_term(co, gurobi_vars[v.index()]);
-            }
-            let name = format!("c{c_id}");
-            let constr = match c.sense {
-                Sense::Le => {
-                    grb_model.add_constr(&name, c!(expr <= adjusted_rhs)).map_err(map_grb_err)?
-                }
-                Sense::Ge => {
-                    grb_model.add_constr(&name, c!(expr >= adjusted_rhs)).map_err(map_grb_err)?
-                }
-                Sense::Eq => {
-                    grb_model.add_constr(&name, c!(expr == adjusted_rhs)).map_err(map_grb_err)?
-                }
-            };
-            gurobi_constrs.push(Some(constr));
-        } else {
-            add_nonlinear_constraint(
-                &arena,
-                c.lhs,
-                c.sense,
-                c.rhs,
-                c_id,
-                &mut grb_model,
-                &gurobi_vars,
-                &mut aux_counter,
-            )?;
-            gurobi_constrs.push(None);
-        }
-    }
+    let gurobi_constrs =
+        add_constraints(&arena, &constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
 
     let obj_constant = set_objective(
         &arena,
@@ -129,23 +74,98 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
     let elapsed = started.elapsed();
 
     let status = map_status(&grb_model)?;
-    let (primal, reduced_costs, dual) =
-        collect_solution(&status, kind, &grb_model, &gurobi_vars, &gurobi_constrs);
-
-    let objective_value = grb_model.get_attr(attr::ObjVal).ok().map(|v| v + obj_constant);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = grb_model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
+    let (solutions, reduced_costs, dual) = collect_solution(
+        &status,
+        kind,
+        &mut grb_model,
+        &gurobi_vars,
+        &gurobi_constrs,
+        obj_constant,
+    );
 
     Ok(SolverResult {
         status,
-        objective: objective_value,
-        primal,
+        solutions,
         dual,
         reduced_costs,
         solve_time: elapsed,
         iterations,
         raw_log: None,
     })
+}
+
+/// Add one Gurobi variable per model variable, in `VarId` order, applying its
+/// domain, bounds, and any warm-start value.
+fn add_variables(
+    grb_model: &mut grb::Model,
+    vars: &[Variable],
+) -> Result<Vec<grb::Var>, SolverError> {
+    let mut gurobi_vars = Vec::with_capacity(vars.len());
+    for (i, v) in vars.iter().enumerate() {
+        let vtype = match v.domain {
+            Domain::Real => VarType::Continuous,
+            Domain::Integer => VarType::Integer,
+            Domain::Binary => VarType::Binary,
+            Domain::SemiContinuous { .. } => VarType::SemiCont,
+            Domain::SemiInteger { .. } => VarType::SemiInt,
+        };
+        // `add_var!` expands the f64 bounds with an `as f64` cast.
+        #[allow(clippy::unnecessary_cast)]
+        let gvar = add_var!(grb_model, vtype, bounds: v.lb..v.ub, name: &format!("x{i}"))
+            .map_err(map_grb_err)?;
+        gurobi_vars.push(gvar);
+        if let Some(val) = v.initial {
+            grb_model.set_obj_attr(attr::Start, &gvar, val).map_err(map_grb_err)?;
+        }
+    }
+    Ok(gurobi_vars)
+}
+
+/// Add every model constraint, returning a per-constraint handle:
+/// `Some` for a linear row (whose dual/`Pi` can be reported later),
+/// `None` for one routed through the nonlinear lowering.
+/// Each constraint takes the linear fast path when its LHS is linear
+/// and falls back to the general lowering otherwise.
+fn add_constraints(
+    arena: &ExprArena,
+    constraints: &[Constraint],
+    grb_model: &mut grb::Model,
+    gurobi_vars: &[grb::Var],
+    aux_counter: &mut u32,
+) -> Result<Vec<Option<grb::Constr>>, SolverError> {
+    let mut gurobi_constrs: Vec<Option<grb::Constr>> = Vec::with_capacity(constraints.len());
+    for (c_id, c) in constraints.iter().enumerate() {
+        if let Some(t) = extract_linear(arena, c.lhs) {
+            let adjusted_rhs = c.rhs - t.constant;
+            let mut expr = LinExpr::new();
+            for (v, co) in t.coeffs {
+                expr.add_term(co, gurobi_vars[v.index()]);
+            }
+            let name = format!("c{c_id}");
+            let constr = match c.sense {
+                Sense::Le => grb_model.add_constr(&name, c!(expr <= adjusted_rhs)),
+                Sense::Ge => grb_model.add_constr(&name, c!(expr >= adjusted_rhs)),
+                Sense::Eq => grb_model.add_constr(&name, c!(expr == adjusted_rhs)),
+            }
+            .map_err(map_grb_err)?;
+            gurobi_constrs.push(Some(constr));
+        } else {
+            add_nonlinear_constraint(
+                arena,
+                c.lhs,
+                c.sense,
+                c.rhs,
+                c_id,
+                grb_model,
+                gurobi_vars,
+                aux_counter,
+            )?;
+            gurobi_constrs.push(None);
+        }
+    }
+    Ok(gurobi_constrs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -222,44 +242,40 @@ fn set_objective(
     Ok(0.0)
 }
 
+/// Build `(solutions, reduced_costs, dual)` from a solved Gurobi model.
+///
+/// `solutions` holds every point in Gurobi's solution pool, best first (index 0
+/// is the incumbent). The pool is populated automatically during a MIP solve,
+/// set `PoolSearchMode`/`PoolSolutions` (via [`crate::GurobiOptions`]) to force
+/// Gurobi to enumerate alternative optima. Duals and reduced costs apply to
+/// the single LP optimum and are returned only for `LP` models.
 fn collect_solution(
     status: &SolverStatus,
     kind: ModelKind,
-    model: &grb::Model,
+    model: &mut grb::Model,
     vars: &[grb::Var],
     constrs: &[Option<grb::Constr>],
-) -> (FxHashMap<VarId, f64>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
+    obj_constant: f64,
+) -> (Vec<SolutionPoint>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
     // `has_solution` only flags Optimal/Feasible, but Gurobi often holds an
-    // incumbent on TimeLimit/IterationLimit/NodeLimit too.
+    // incumbent (SolCount > 0) on TimeLimit/IterationLimit/NodeLimit too.
     let sol_count = model.get_attr(attr::SolCount).unwrap_or(0);
-    if sol_count <= 0 && !status.has_solution() {
-        return (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
+    let n = if sol_count > 0 { sol_count } else { i32::from(status.has_solution()) };
+    if n == 0 {
+        return (Vec::new(), FxHashMap::default(), FxHashMap::default());
     }
 
-    let primal_vals = model.get_obj_attr_batch(attr::X, vars.iter().copied()).ok();
-    let primal = primal_vals
-        .map(|v| {
-            v.into_iter()
-                .enumerate()
-                .map(|(i, val)| (VarId(u32::try_from(i).unwrap()), val))
-                .collect()
-        })
-        .unwrap_or_default();
+    let solutions = collect_pool(model, vars, obj_constant, n);
 
     // Skip retrieval of duals and reduced costs for any model
     // class where Gurobi will either return zeros or refuse the attribute.
     if !matches!(kind, ModelKind::LP) {
-        return (primal, FxHashMap::default(), FxHashMap::default());
+        return (solutions, FxHashMap::default(), FxHashMap::default());
     }
 
-    let rc_vals = model.get_obj_attr_batch(attr::RC, vars.iter().copied()).ok();
-    let reduced_costs = rc_vals
-        .map(|v| {
-            v.into_iter()
-                .enumerate()
-                .map(|(i, val)| (VarId(u32::try_from(i).unwrap()), val))
-                .collect()
-        })
+    let reduced_costs = model
+        .get_obj_attr_batch(attr::RC, vars.iter().copied())
+        .map(|v| index_map(&v))
         .unwrap_or_default();
 
     let mut dual = FxHashMap::default();
@@ -271,7 +287,46 @@ fn collect_solution(
         }
     }
 
-    (primal, reduced_costs, dual)
+    (solutions, reduced_costs, dual)
+}
+
+/// Collect the `n` pooled primal points, best first.
+fn collect_pool(
+    model: &mut grb::Model,
+    vars: &[grb::Var],
+    obj_constant: f64,
+    n: i32,
+) -> Vec<SolutionPoint> {
+    // Single point (and the only path for LP/continuous models):
+    // read the incumbent directly via `X` / `ObjVal`.
+    if n <= 1 {
+        let primal = model
+            .get_obj_attr_batch(attr::X, vars.iter().copied())
+            .map(|v| index_map(&v))
+            .unwrap_or_default();
+        let objective = model.get_attr(attr::ObjVal).ok().map(|v| v + obj_constant);
+        return vec![SolutionPoint { primal, objective }];
+    }
+
+    // A MIP solution pool. Gurobi sorts it best-first.
+    // `SolutionNumber` selects which one `Xn` / `PoolObjVal` report.
+    let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+    for k in 0..n {
+        if model.set_param(grb::param::SolutionNumber, k).is_err() {
+            break;
+        }
+        let Ok(vals) = model.get_obj_attr_batch(attr::Xn, vars.iter().copied()) else {
+            break;
+        };
+        let objective = model.get_attr(attr::PoolObjVal).ok().map(|v| v + obj_constant);
+        out.push(SolutionPoint { primal: index_map(&vals), objective });
+    }
+    out
+}
+
+/// Map a dense per-variable value array (in `VarId` order) to a sparse map.
+fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
+    vals.iter().enumerate().map(|(i, &val)| (VarId(u32::try_from(i).unwrap()), val)).collect()
 }
 
 fn map_status(model: &grb::Model) -> Result<SolverStatus, SolverError> {
