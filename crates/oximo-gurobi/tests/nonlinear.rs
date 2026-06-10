@@ -28,7 +28,7 @@ fn qp_min_sum_of_squares() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert!(matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible));
-    let obj = r.objective.expect("obj");
+    let obj = r.objective().expect("obj");
     assert!(close(obj, 0.5, 1e-4), "obj = {obj}");
 }
 
@@ -43,7 +43,7 @@ fn nlp_with_sin_objective() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert!(matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible));
-    let primal_x = r.primal.get(&VarId(0)).copied().expect("primal");
+    let primal_x = r.value(VarId(0)).expect("primal");
     assert!(close(primal_x, 1.0, 0.1), "x = {primal_x}");
 }
 
@@ -57,9 +57,9 @@ fn nlp_with_abs_objective() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert_solved(&r);
-    let primal_x = r.primal.get(&VarId(0)).copied().expect("primal");
+    let primal_x = r.value(VarId(0)).expect("primal");
     assert!(close(primal_x, 2.0, 1e-3), "x = {primal_x}");
-    let obj = r.objective.expect("obj");
+    let obj = r.objective().expect("obj");
     assert!(close(obj, 0.0, 1e-3), "obj = {obj}");
 }
 
@@ -75,7 +75,7 @@ fn minlp_binary_with_log() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert!(matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible));
-    let obj = r.objective.expect("obj");
+    let obj = r.objective().expect("obj");
     assert!(close(obj, 0.0, 1e-3), "obj = {obj}");
 }
 
@@ -93,7 +93,7 @@ fn div_by_linear_denominator() {
 
     let sol = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert_solved(&sol);
-    let yv = sol.primal.get(&VarId(1)).copied().expect("primal y");
+    let yv = sol.value(VarId(1)).expect("primal y");
     assert!(close(yv, 3.0, 1e-4), "y = {yv}");
 }
 
@@ -110,7 +110,7 @@ fn div_by_negative_denominator() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert_solved(&r);
-    let dv = r.primal.get(&VarId(1)).copied().expect("primal d");
+    let dv = r.value(VarId(1)).expect("primal d");
     assert!(close(dv, -4.0, 1e-4), "d = {dv}");
 }
 
@@ -125,7 +125,7 @@ fn div_constant_numerator() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert_solved(&r);
-    let dv = r.primal.get(&VarId(0)).copied().expect("primal d");
+    let dv = r.value(VarId(0)).expect("primal d");
     assert!(close(dv, 3.0, 1e-4), "d = {dv}");
 }
 
@@ -142,7 +142,7 @@ fn div_by_quadratic_denominator() {
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
     assert_solved(&r);
-    let yv = r.primal.get(&VarId(1)).copied().expect("primal y");
+    let yv = r.value(VarId(1)).expect("primal y");
     assert!(close(yv, 2.0, 1e-3), "y = {yv}");
 }
 
