@@ -153,13 +153,14 @@ For any other solver, use `GamsSolverConfig::Named(GamsSolver::Custom("NAME".int
 
 `SolverResult` fields populated on `Optimal` or `Feasible`:
 
-- `objective` - objective value
-- `primal` - variable values keyed by `VarId`, access via `result.value_of(var)`
+- `solutions` - primal points (`Vec<SolutionPoint>`), best first. Each point holds its `primal` values keyed by `VarId` and its `objective`. The vector holds the incumbent, plus any alternative points read from a sub-solver solution pool (e.g. CPLEX `solnpool`). Access the best point via `result.objective()` / `result.value_of(var)` and the rest via `result.solution(i)`
+- `dual` - constraint marginals (GAMS `.m`), keyed by `ConstraintId`, access via `result.dual_of(c)`
+- `reduced_costs` - variable marginals, keyed by `VarId`
 - `status` - mapped from GAMS model-status codes (`1=Optimal`, `4=Infeasible`, `3=Unbounded`, ...)
 - `solve_time` - wall time around the GAMS process invocation
 - `raw_log` - GAMS stdout/stderr, populated when `verbose(true)` or when GAMS exits non-zero
 
-`dual`, `reduced_costs`, and `iterations` are not populated by this backend.
+`dual` and `reduced_costs` are filled with whatever marginals GAMS reports, for every model kind: globally valid duals for LP, locally valid duals at the returned point for QP/NLP, and duals of the integer-fixed problem for MIP/MIQP/MINLP (most GAMS solver links re-solve with integers fixed, e.g. CPLEX `solvefinal`). Entries the solver did not compute (`NA`/`UNDF`) are skipped, so a solver configured to skip the fixed re-solve simply leaves the maps empty. `iterations` is not populated by this backend.
 
 ## License
 
