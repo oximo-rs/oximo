@@ -79,6 +79,7 @@ pub fn solve(
     writeln!(gms, "Put oximo_sol;").unwrap();
     writeln!(gms, "Put 'STATUS=' oximo_m.modelstat:0:0 /;").unwrap();
     writeln!(gms, "Put 'SOLVESTAT=' oximo_m.solvestat:0:0 /;").unwrap();
+    writeln!(gms, "Put 'ITER=' oximo_m.iterusd:0:0 /;").unwrap();
     writeln!(gms, "Put 'OBJVAL=' v_obj.l:0:15 /;").unwrap();
     for i in 0..vars.len() {
         writeln!(gms, "Put '{i}=' v{i}.l:0:15 /;").unwrap();
@@ -244,6 +245,7 @@ fn parseoximo_solution(
     let mut modelstat: Option<i32> = None;
     let mut solvestat: Option<i32> = None;
     let mut obj_val: Option<f64> = None;
+    let mut iterations: u64 = 0;
     let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
     let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
@@ -256,6 +258,10 @@ fn parseoximo_solution(
             solvestat = parse_gams_int(rest);
         } else if let Some(rest) = line.strip_prefix("OBJVAL=") {
             obj_val = parse_gams_float(rest);
+        } else if let Some(rest) = line.strip_prefix("ITER=") {
+            if let Some(n) = parse_gams_u64(rest) {
+                iterations = n;
+            }
         } else if let Some(rest) = line.strip_prefix('R') {
             if let Some(eq) = rest.find('=') {
                 if let Ok(idx) = rest[..eq].parse::<u32>() {
@@ -295,7 +301,7 @@ fn parseoximo_solution(
         reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
         status,
         solve_time: elapsed,
-        iterations: 0,
+        iterations,
         raw_log,
     }
 }
@@ -818,6 +824,14 @@ fn parse_gams_int(s: &str) -> Option<i32> {
     head.parse::<i32>().ok()
 }
 
+/// Parse a non-negative GAMS integer (e.g. `iterusd` under `:0:0`) into `u64`,
+/// tolerating a trailing `.0` fraction.
+fn parse_gams_u64(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    let head = trimmed.split_once('.').map_or(trimmed, |(int, _)| int);
+    head.parse::<u64>().ok()
+}
+
 /// Parse a GAMS-formatted float, tolerating GAMS special tokens.
 fn parse_gams_float(s: &str) -> Option<f64> {
     match s.trim() {
@@ -855,6 +869,22 @@ mod tests {
             opts,
         );
         gms
+    }
+
+    #[test]
+    fn parses_iterations_from_put_file() {
+        // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
+        let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
+        let r = parseoximo_solution(content, std::time::Duration::ZERO, None);
+        assert_eq!(r.status, SolverStatus::Optimal);
+        assert_eq!(r.iterations, 42);
+    }
+
+    #[test]
+    fn parse_gams_u64_tolerates_trailing_fraction() {
+        assert_eq!(parse_gams_u64("1234"), Some(1234));
+        assert_eq!(parse_gams_u64("  88.0 "), Some(88));
+        assert_eq!(parse_gams_u64("NA"), None);
     }
 
     #[test]
