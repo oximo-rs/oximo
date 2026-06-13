@@ -88,7 +88,7 @@ fn gams_nlp_duals_at_local_point() {
 #[test]
 fn gams_mip_duals_at_fixed_point() {
     // max 2a + 3b  s.t.  a + b <= 1,  a, b binary.
-    // GAMS MIP links re-solve with integers fixed, so `.m` carries 
+    // GAMS MIP links re-solve with integers fixed, so `.m` carries
     // the duals of the fixed problem at the optimum (0, 1).
     // The exact split between constraint duals and reduced costs is
     // solver-dependent. We assert presence, not values.
