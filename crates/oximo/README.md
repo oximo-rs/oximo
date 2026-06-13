@@ -255,14 +255,20 @@ match result.status {
     _ => {}
 }
 
-// Variable values
+// Variable values (best solution)
 let x_val = result.value_of(x); // Option<f64>
 
-// Constraint duals (LP only)
-let dual = result.dual.get(&constraint_id);
+// Constraint duals
+let dual = result.dual_of(constraint_id); // Option<f64>
 
-// Reduced costs
-let rc = result.reduced_costs.get(&x.id);
+// Reduced costs, keyed by VarId
+let rc = result.reduced_costs.get(&x.var_id().unwrap());
+
+// Solution pools (e.g. Gurobi, BARON with .num_sol(n)): all points, best first
+for i in 0..result.result_count() {
+    let point = result.solution(i).unwrap();
+    println!("objective {:?}", point.objective);
+}
 ```
 
 ## Model export
