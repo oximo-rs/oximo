@@ -17,11 +17,15 @@ use oximo_solver::{Solver, SolverError, SolverResult};
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Highs;
 
+/// Display name for this backend; the single source for both [`Solver::name`]
+/// and the `solver_name` stamped on every [`SolverResult`].
+pub(crate) const NAME: &str = "HiGHS";
+
 impl Solver for Highs {
     type Options = HighsOptions;
 
     fn name(&self) -> &str {
-        "highs"
+        NAME
     }
 
     fn supports(&self, kind: ModelKind) -> bool {

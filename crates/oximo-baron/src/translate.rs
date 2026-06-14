@@ -565,6 +565,7 @@ fn parse_solution(
         solve_time: elapsed,
         iterations,
         raw_log,
+        solver_name: Some(crate::NAME.into()),
     }
 }
 

@@ -148,6 +148,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         solve_time: elapsed,
         iterations: 0,
         raw_log: None,
+        solver_name: Some(crate::NAME.into()),
     })
 }
 

@@ -42,11 +42,15 @@ impl Gams {
     }
 }
 
+/// Display name for this backend; the single source for both [`Solver::name`]
+/// and the `solver_name` stamped on every [`SolverResult`].
+pub(crate) const NAME: &str = "GAMS";
+
 impl Solver for Gams {
     type Options = GamsOptions;
 
     fn name(&self) -> &str {
-        "gams"
+        NAME
     }
 
     fn supports(&self, kind: ModelKind) -> bool {

@@ -7,6 +7,6 @@ pub mod solver;
 pub mod status;
 
 pub use options::{HasUniversal, UniversalOptions, UniversalOptionsExt};
-pub use result::{SolutionPoint, SolverResult};
+pub use result::{ModelReport, SolutionPoint, SolverResult};
 pub use solver::Solver;
 pub use status::{SolverError, SolverStatus};

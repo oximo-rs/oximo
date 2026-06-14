@@ -93,6 +93,7 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
         solve_time: elapsed,
         iterations,
         raw_log: None,
+        solver_name: Some(crate::NAME.into()),
     })
 }
 

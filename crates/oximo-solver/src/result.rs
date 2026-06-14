@@ -1,6 +1,9 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
-use oximo_core::{ConstraintId, Expr, ExprNode, IndexKey, IndexedVar, VarId};
+use oximo_core::{
+    ConstraintId, Expr, ExprNode, IndexKey, IndexedVar, Model, ObjectiveSense, VarId,
+};
 use rustc_hash::FxHashMap;
 
 use crate::status::SolverStatus;
@@ -69,6 +72,7 @@ pub struct SolverResult {
     pub solve_time: Duration,
     pub iterations: u64,
     pub raw_log: Option<String>,
+    pub solver_name: Option<Cow<'static, str>>,
 }
 
 impl Default for SolverResult {
@@ -81,6 +85,7 @@ impl Default for SolverResult {
             solve_time: Duration::ZERO,
             iterations: 0,
             raw_log: None,
+            solver_name: None,
         }
     }
 }
@@ -142,6 +147,93 @@ impl SolverResult {
     ) -> impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv {
         var.iter().filter_map(|(k, e)| self.value_of(*e).map(|v| (k, v)))
     }
+
+    /// A human-readable, model-aware summary of this result.
+    ///
+    /// It lists the solver, model kind and sense, status,
+    /// objective and work counters, then every variable's value
+    /// (with its reduced cost when the solver returned duals) and every
+    /// constraint's dual.
+    pub fn report<'a>(&'a self, model: &'a Model) -> ModelReport<'a> {
+        ModelReport { result: self, model }
+    }
+}
+
+/// A printable, model-aware summary of a [`SolverResult`]. Created by
+/// [`SolverResult::report`].
+#[derive(Debug)]
+pub struct ModelReport<'a> {
+    result: &'a SolverResult,
+    model: &'a Model,
+}
+
+/// Format a value with up to six decimals, trimming trailing zeros so whole
+/// numbers render as `5` rather than `5.000000`.
+fn num(x: f64) -> String {
+    let s = format!("{x:.6}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-0" { "0".to_owned() } else { trimmed.to_owned() }
+}
+
+impl std::fmt::Display for ModelReport<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let r = self.result;
+        let m = self.model;
+
+        let sense = {
+            let obj = m.objective();
+            match obj.as_ref().map(|o| o.sense) {
+                Some(ObjectiveSense::Minimize) => "minimize",
+                Some(ObjectiveSense::Maximize) => "maximize",
+                None => "no objective",
+            }
+        };
+
+        writeln!(f, "solution summary")?;
+        writeln!(f, "  solver     : {}", r.solver_name.as_deref().unwrap_or("(unknown)"))?;
+        writeln!(f, "  model      : {}  ({:?}, {sense})", m.name, m.kind())?;
+        writeln!(f, "  status     : {:?}", r.status)?;
+        writeln!(f, "  solutions  : {}", r.result_count())?;
+        match r.objective() {
+            Some(v) => writeln!(f, "  objective  : {}", num(v))?,
+            None => writeln!(f, "  objective  : (none)")?,
+        }
+        writeln!(f, "  solve time : {:?}", r.solve_time)?;
+        writeln!(f, "  iterations : {}", r.iterations)?;
+
+        // Variables
+        let vars = m.variables();
+        writeln!(f, "\nvariables ({})", vars.len())?;
+        if let Some(best) = r.best() {
+            let width = vars.iter().map(|v| v.name.len()).max().unwrap_or(0);
+            let show_rc = !r.reduced_costs.is_empty();
+            for v in vars.iter() {
+                let val = best.value(v.id).map_or_else(|| "n/a".to_owned(), num);
+                match (show_rc, r.reduced_costs.get(&v.id)) {
+                    (true, Some(rc)) => {
+                        writeln!(f, "  {:<width$} = {val}   (reduced cost {})", v.name, num(*rc))?;
+                    }
+                    _ => writeln!(f, "  {:<width$} = {val}", v.name)?,
+                }
+            }
+        } else {
+            writeln!(f, "  (no primal solution)")?;
+        }
+
+        // Constraint duals, only when the solver returned any
+        if !r.dual.is_empty() {
+            let cons = m.constraints();
+            writeln!(f, "\nconstraints ({})", cons.len())?;
+            let width = cons.iter().map(|c| c.name.len()).max().unwrap_or(0);
+            for (i, c) in cons.iter().enumerate() {
+                let id = ConstraintId(u32::try_from(i).expect("constraint index fits u32"));
+                let d = r.dual_of(id).map_or_else(|| "n/a".to_owned(), num);
+                writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -177,5 +269,36 @@ mod tests {
         assert_eq!(r.objective(), Some(10.0));
         assert_eq!(r.value(VarId(0)), Some(1.5));
         assert_eq!(r.solution(1).unwrap().value(VarId(0)), Some(2.5));
+    }
+
+    #[test]
+    fn report_renders_sections() {
+        use oximo_core::Relate;
+
+        let m = Model::new("toy");
+        let x = m.var("x").lb(0.0).build();
+        let c = m.constraint("c", x.le(5.0));
+        m.maximize(x);
+
+        let mut primal = FxHashMap::default();
+        primal.insert(x.var_id().unwrap(), 5.0);
+        let mut dual = FxHashMap::default();
+        dual.insert(c, 1.0);
+
+        let r = SolverResult {
+            status: SolverStatus::Optimal,
+            solutions: vec![SolutionPoint { primal, objective: Some(5.0) }],
+            dual,
+            solver_name: Some("TestSolver".into()),
+            ..Default::default()
+        };
+
+        let out = r.report(&m).to_string();
+        assert!(out.contains("solver     : TestSolver"), "{out}");
+        assert!(out.contains("status     : Optimal"), "{out}");
+        assert!(out.contains("objective  : 5"), "{out}");
+        assert!(out.contains("(LP, maximize)"), "{out}");
+        assert!(out.contains("x = 5"), "{out}");
+        assert!(out.contains("dual = 1"), "{out}");
     }
 }

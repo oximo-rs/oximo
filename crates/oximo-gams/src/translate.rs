@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -162,7 +163,7 @@ pub fn solve(
     // Check the solution file before the exit code: GAMS may return a
     // non-zero exit on infeasible/unbounded models while still writing a
     // valid modelstat to the PUT file.
-    let result = if sol_path.exists() {
+    let mut result = if sol_path.exists() {
         let content = fs::read_to_string(&sol_path)
             .map_err(|e| SolverError::Backend(format!("cannot read solution file: {e}")))?;
         let mut result = parseoximo_solution(&content, elapsed, raw_log);
@@ -191,7 +192,18 @@ pub fn solve(
     };
 
     let _ = fs::remove_dir_all(&tmp_dir);
+    result.solver_name = Some(gams_solver_label(opts));
     Ok(result)
+}
+
+/// Backend label for the result: `GAMS/<sub-solver>` when a sub-solver is
+/// configured, otherwise just `GAMS`. When none is set, GAMS selects its own
+/// default solver for the model type, whose name we do not resolve here.
+fn gams_solver_label(opts: &GamsOptions) -> Cow<'static, str> {
+    match &opts.solver {
+        Some(cfg) => Cow::Owned(format!("{}/{}", crate::NAME, cfg.gams_name())),
+        None => Cow::Borrowed(crate::NAME),
+    }
 }
 
 /// Extract the compilation-error section from a GAMS `.lst` listing.
@@ -303,6 +315,7 @@ fn parseoximo_solution(
         solve_time: elapsed,
         iterations,
         raw_log,
+        solver_name: Some(crate::NAME.into()),
     }
 }
 
@@ -878,6 +891,16 @@ mod tests {
         let r = parseoximo_solution(content, std::time::Duration::ZERO, None);
         assert_eq!(r.status, SolverStatus::Optimal);
         assert_eq!(r.iterations, 42);
+    }
+
+    #[test]
+    fn solver_label_names_subsolver() {
+        use crate::solver_options::{GamsCplexOptions, GamsSolverConfig};
+        let opts =
+            GamsOptions::default().solver(GamsSolverConfig::Cplex(GamsCplexOptions::default()));
+        assert_eq!(gams_solver_label(&opts).as_ref(), "GAMS/CPLEX");
+        // No sub-solver configured: GAMS picks its own default, so just "GAMS".
+        assert_eq!(gams_solver_label(&GamsOptions::default()).as_ref(), "GAMS");
     }
 
     #[test]
