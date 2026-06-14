@@ -38,11 +38,15 @@ impl Baron {
     }
 }
 
+/// Display name for this backend; the single source for both [`Solver::name`]
+/// and the `solver_name` stamped on every [`SolverResult`].
+pub(crate) const NAME: &str = "BARON";
+
 impl Solver for Baron {
     type Options = BaronOptions;
 
     fn name(&self) -> &str {
-        "baron"
+        NAME
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
