@@ -159,6 +159,7 @@ For any other solver, use `GamsSolverConfig::Named(GamsSolver::Custom("NAME".int
 - `status` - mapped from GAMS model-status codes (`1=Optimal`, `4=Infeasible`, `3=Unbounded`, ...)
 - `solve_time` - wall time around the GAMS process invocation
 - `iterations` - iterations used, read from the GAMS model attribute `oximo_m.iterusd`
+- `solver_name` - `GAMS/<sub-solver>` when one is selected via `GamsOptions::solver` (e.g. `GAMS/CPLEX`, `GAMS/BARON`), otherwise just `GAMS`
 - `raw_log` - GAMS stdout/stderr, populated when `verbose(true)` or when GAMS exits non-zero
 
 `dual` and `reduced_costs` are filled with whatever marginals GAMS reports, for every model kind: globally valid duals for LP, locally valid duals at the returned point for QP/NLP, and duals of the integer-fixed problem for MIP/MIQP/MINLP (most GAMS solver links re-solve with integers fixed, e.g. CPLEX `solvefinal`). Entries the solver did not compute (`NA`/`UNDF`) are skipped, so a solver configured to skip the fixed re-solve simply leaves the maps empty.
