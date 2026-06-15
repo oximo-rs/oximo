@@ -84,7 +84,7 @@ fn product_flattens_nested_tuples() {
 #[test]
 fn filter_keeps_variant_for_range() {
     let s = Set::range(0..10).filter(|k| k.as_i64().unwrap() % 2 == 0);
-    assert!(matches!(s, Set::Range(_)));
+    assert!(s.is_range());
     assert_eq!(s.len(), 5);
 }
 
@@ -96,7 +96,7 @@ fn filter_keeps_variant_for_tuples() {
         let p = k.as_tuple().unwrap();
         p[0].as_i64() != p[1].as_i64()
     });
-    assert!(matches!(filtered, Set::Tuples(_)));
+    assert!(filtered.is_tuples());
     assert_eq!(filtered.len(), 6);
 }
 
@@ -138,7 +138,7 @@ fn indexed_var_per_key_bounds() {
     let _x = m
         .indexed_var("x", &set)
         .lb(0.0)
-        .ub_by(|k: i64| {
+        .ub_by(|k: usize| {
             #[allow(clippy::cast_precision_loss)]
             {
                 k as f64
@@ -184,18 +184,18 @@ fn add_constraints_over_tuple_set_typed_closure() {
     let cols = Set::strings(["a", "b"]);
     let ij = &rows * &cols;
     let x = m.indexed_var("x", &ij).lb(0.0).build();
-    m.add_constraints_over("c", &ij, |(i, j): (i64, String)| x[(i, j)].le(5.0));
+    m.add_constraints_over("c", &ij, |(i, j): (usize, String)| x[(i, j)].le(5.0));
     assert_eq!(m.num_constraints(), 4);
     assert!(m.constraint_id("c[0,a]").is_some());
     assert!(m.constraint_id("c[1,b]").is_some());
 }
 
 #[test]
-fn add_constraints_over_raw_key_escape_hatch() {
-    let m = Model::new("rule_raw");
+fn add_constraints_over_indexes_by_value() {
+    let m = Model::new("rule_val");
     let set = Set::range(0..2);
     let x = m.indexed_var("x", &set).lb(0.0).build();
-    m.add_constraints_over("c", &set, |k: IndexKey| x[&k].le(1.0));
+    m.add_constraints_over("c", &set, |i: usize| x[i].le(1.0));
     assert_eq!(m.num_constraints(), 2);
 }
 
@@ -239,8 +239,8 @@ fn lb_by_ub_by_override_binary_defaults() {
     let _x = m
         .indexed_var("x", &set)
         .binary()
-        .lb_by(|k: i64| if k == 0 { 1.0 } else { 0.0 })
-        .ub_by(|k: i64| if k == 2 { 0.0 } else { 1.0 })
+        .lb_by(|k: usize| if k == 0 { 1.0 } else { 0.0 })
+        .ub_by(|k: usize| if k == 2 { 0.0 } else { 1.0 })
         .build();
     let vars = m.variables();
     assert_eq!(vars[0].lb, 1.0); // fixed to 1

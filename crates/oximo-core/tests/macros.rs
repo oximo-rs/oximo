@@ -94,3 +94,57 @@ fn param_handle_keeps_model_linear() {
     assert_eq!(m.kind(), ModelKind::LP);
     assert!((m.param_value_of(rate).unwrap() - 0.05).abs() < f64::EPSILON);
 }
+
+#[test]
+fn infers_string_key_without_annotation() {
+    let m = Model::new("strkey");
+    let plants = Set::strings(["a", "b", "c"]);
+    variable!(m, x[p in plants] >= 0.0);
+    constraint!(m, total, sum!(x[p] for p in plants) <= 1.0);
+    objective!(m, Max, sum!(x[p] for p in plants));
+    assert_eq!(m.num_variables(), 3);
+    assert_eq!(m.kind(), ModelKind::LP);
+}
+
+#[test]
+fn infers_tuple_key_without_annotation() {
+    let m = Model::new("tuplekey");
+    let plants = Set::strings(["p1", "p2"]);
+    let times = Set::range(0..3); // Set<usize>
+    let pt = &plants * &times; // Set<(String, usize)>
+    variable!(m, b[(p, t) in pt] >= 0.0);
+    constraint!(m, lim[(p, t) in pt], b[(p, t)] <= 10.0);
+    assert_eq!(m.num_variables(), 6);
+    assert_eq!(m.num_constraints(), 6);
+}
+
+#[test]
+fn range_literal_defaults_usize_for_array_index() {
+    let m = Model::new("arr");
+    let cost = [1.0, 2.0, 3.0];
+    variable!(m, x[i in 0..3] >= 0.0);
+    // `i` defaults to usize, so it can index `cost` directly.
+    objective!(m, Min, sum!(cost[i] * x[i] for i in 0..3));
+    assert_eq!(m.num_variables(), 3);
+}
+
+#[test]
+fn named_integer_set_infers_usize() {
+    let m = Model::new("intset");
+    let days = Set::range(0..4); // Set<usize>
+    let demand = [5.0, 3.0, 8.0, 2.0];
+    variable!(m, y[d in days] >= 0.0);
+    constraint!(m, meet[d in days], y[d] >= demand[d]);
+    assert_eq!(m.num_constraints(), 4);
+}
+
+#[test]
+fn index_dependent_bound_infers_key() {
+    let m = Model::new("bound");
+    let items = Set::range(0..3);
+    let cap = [2.0, 4.0, 6.0];
+    variable!(m, 0.0 <= w[i in items] <= cap[i]);
+    assert_eq!(w.len(), 3);
+    let vars = m.variables();
+    assert!((vars[2].ub - 6.0).abs() < f64::EPSILON);
+}
