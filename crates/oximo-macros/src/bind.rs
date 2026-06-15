@@ -45,26 +45,55 @@ impl Parse for Binds {
 }
 
 impl IndexBind {
-    /// The key type for this binding: the explicit annotation, else `usize`.
-    pub(crate) fn key_type(&self) -> TokenStream2 {
-        if let Some(ty) = &self.ty { quote!(#ty) } else { quote!(usize) }
+    /// Whether the domain is written as a range expression.
+    pub(crate) fn is_range_literal(&self) -> bool {
+        matches!(self.domain, Expr::Range(_))
     }
 
-    /// A typed closure parameter for a single-index closure (`|pat: ty|`).
+    /// Closure parameter for a single-index `sum!` term. The domain is consumed
+    /// directly via `SumDomain`.
     pub(crate) fn closure_param(&self) -> TokenStream2 {
         let pat = &self.pat;
-        let ty = self.key_type();
-        quote!(#pat: #ty)
+        if let Some(ty) = &self.ty {
+            quote!(#pat: #ty)
+        } else if self.is_range_literal() {
+            quote!(#pat: usize)
+        } else {
+            quote!(#pat)
+        }
+    }
+
+    /// Key type to pin when iterating this binding via `keys_of::<K, _>`.
+    pub(crate) fn keys_of_type(&self) -> Option<TokenStream2> {
+        if let Some(ty) = &self.ty {
+            Some(quote!(#ty))
+        } else if self.is_range_literal() {
+            Some(quote!(usize))
+        } else {
+            None
+        }
     }
 }
 
-/// Build the closure parameter for an index family decoded as a whole key:
-/// single binding -> `pat: ty`; multiple -> `(p0, p1, ...): (t0, t1, ...)`.
+/// Build the closure parameter for an index family decoded as a whole key.
+/// The `Set<K>` passed to `__add_constraints_over` pins `K`, so the
+/// pattern is left bare unless the user annotated every binding.
 pub(crate) fn family_closure_param(binds: &[IndexBind]) -> TokenStream2 {
-    if let [single] = binds {
-        return single.closure_param();
-    }
     let pats = binds.iter().map(|b| &b.pat);
-    let tys = binds.iter().map(IndexBind::key_type);
-    quote!( (#(#pats),*): (#(#tys),*) )
+    let pattern = if let [single] = binds {
+        let pat = &single.pat;
+        quote!(#pat)
+    } else {
+        quote!( (#(#pats),*) )
+    };
+
+    let tys: Option<Vec<&Type>> = binds.iter().map(|b| b.ty.as_ref()).collect();
+    match tys {
+        Some(tys) if binds.len() == 1 => {
+            let ty = tys[0];
+            quote!(#pattern: #ty)
+        }
+        Some(tys) => quote!( #pattern: (#(#tys),*) ),
+        None => pattern,
+    }
 }

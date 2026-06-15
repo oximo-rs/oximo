@@ -122,16 +122,26 @@ enum BoundKind {
 
 /// Closure parameter for a per-key (`.lb_by`/`.ub_by`) bound: each index the
 /// bound does not reference is replaced with `_`, so the generated closure never
-/// has an unused parameter.
+/// has an unused parameter. The builder's key type pins the parameter, so it is
+/// left bare for inference unless the user annotated every binding.
 fn bound_closure_param(binds: &[IndexBind], bound: &TokenStream2) -> TokenStream2 {
-    if let [single] = binds {
-        let p = mask_pat(&single.pat, bound);
-        let ty = single.key_type();
-        return quote!(#p: #ty);
+    let masked = binds.iter().map(|b| mask_pat(&b.pat, bound));
+    let pattern = if binds.len() == 1 {
+        let p = mask_pat(&binds[0].pat, bound);
+        quote!(#p)
+    } else {
+        quote!( (#(#masked),*) )
+    };
+
+    let tys: Option<Vec<&syn::Type>> = binds.iter().map(|b| b.ty.as_ref()).collect();
+    match tys {
+        Some(tys) if binds.len() == 1 => {
+            let ty = tys[0];
+            quote!(#pattern: #ty)
+        }
+        Some(tys) => quote!( #pattern: (#(#tys),*) ),
+        None => pattern,
     }
-    let pats = binds.iter().map(|b| mask_pat(&b.pat, bound));
-    let tys = binds.iter().map(IndexBind::key_type);
-    quote!( (#(#pats),*): (#(#tys),*) )
 }
 
 /// Replace each bare-ident sub-pattern the bound does not reference with `_`,

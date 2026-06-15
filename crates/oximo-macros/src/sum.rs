@@ -60,10 +60,14 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     };
     for b in binds.iter().rev() {
         let pat = &b.pat;
-        let ty = b.key_type();
         let domain = &b.domain;
+        let keys = if let Some(ty) = b.keys_of_type() {
+            quote!( #root::__macro_support::keys_of::<#ty, _>(&(#domain)) )
+        } else {
+            quote!( #root::__macro_support::keys_of(&(#domain)) )
+        };
         inner = quote! {
-            for #pat in #root::__macro_support::keys_of::<#ty, _>(&(#domain)) {
+            for #pat in #keys {
                 #inner
             }
         };
