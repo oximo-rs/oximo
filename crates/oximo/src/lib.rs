@@ -1,7 +1,15 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+// Lets the `::oximo::...` paths emitted by `oximo-macros` resolve inside this
+// crate's own examples, tests, and doctests.
+extern crate self as oximo;
+
 pub use oximo_core as core;
+
+// Runtime glue the modeling macros expand into.
+#[doc(hidden)]
+pub use oximo_core::__macro_support;
 pub use oximo_expr as expr;
 pub use oximo_solver as solver;
 
