@@ -1,6 +1,11 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+extern crate self as oximo_core;
+
+#[doc(hidden)]
+#[path = "macro_support.rs"]
+pub mod __macro_support;
 pub mod constraint;
 pub mod domain;
 pub mod error;

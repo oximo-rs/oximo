@@ -1,4 +1,4 @@
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 
 use oximo_expr::{Expr, ExprArena, ExprClass, ParamId, VarId, classify};
 use rustc_hash::FxHashMap;
@@ -46,6 +46,9 @@ pub struct Model {
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     cached_kind: RefCell<Option<ModelKind>>,
+    /// Monotonic counter for auto-naming anonymous constraints registered via
+    /// the `constraint!` macro.
+    auto_seq: Cell<u32>,
 }
 
 impl std::fmt::Debug for Model {
@@ -73,12 +76,20 @@ impl Model {
             constraint_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
             cached_kind: RefCell::new(None),
+            auto_seq: Cell::new(0),
         }
     }
 
     // Variables
 
     pub fn var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
+        self.__var(name)
+    }
+
+    /// Macro-facing entry point behind [`Self::var`]. Not part of the stable
+    /// public API; use the `variable!` macro (or `var`) instead.
+    #[doc(hidden)]
+    pub fn __var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
         VarBuilder {
             model: self,
             name: name.into(),
@@ -112,6 +123,17 @@ impl Model {
     }
 
     pub fn indexed_var<'a>(&'a self, name: impl Into<String>, set: &Set) -> IndexedVarBuilder<'a> {
+        self.__indexed_var(name, set)
+    }
+
+    /// Macro-facing entry point behind [`Self::indexed_var`]. Not part of the
+    /// stable public API; use the `variable!` macro instead.
+    #[doc(hidden)]
+    pub fn __indexed_var<'a>(
+        &'a self,
+        name: impl Into<String>,
+        set: &Set,
+    ) -> IndexedVarBuilder<'a> {
         IndexedVarBuilder {
             model: self,
             base_name: name.into(),
@@ -160,6 +182,18 @@ impl Model {
         v.ub = value;
     }
 
+    /// Set the initial (warm-start) value of a single-variable expression.
+    /// The macro API has no bound-style syntax for warm starts, so this is the
+    /// supported way to seed `variable!`-declared variables.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `e` is not a bare variable handle.
+    pub fn set_initial(&self, e: Expr<'_>, value: f64) {
+        let id = e.var_id().expect("Model::set_initial expects a single-variable expression");
+        self.variables.borrow_mut()[id.index()].initial = Some(value);
+    }
+
     /// Restore bounds on variable `id`. Pass `f64::NEG_INFINITY` / `f64::INFINITY`
     /// to restore an unbounded direction.
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
@@ -183,6 +217,13 @@ impl Model {
     ///
     /// Panics if a parameter with the same name is already registered.
     pub fn param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
+        self.__param(name, value)
+    }
+
+    /// Macro-facing entry point behind [`Self::param`]. Not part of the stable
+    /// public API; use the `param!` macro instead.
+    #[doc(hidden)]
+    pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
         let name = name.into();
         assert!(
             !self.param_names.borrow().contains_key(&name),
@@ -254,6 +295,17 @@ impl Model {
     /// Panics if a constraint with the same name is already registered, or if
     /// the constraint count exceeds `u32::MAX`.
     pub fn constraint(&self, name: impl Into<SmolStr>, c: ConstraintExpr<'_>) -> ConstraintId {
+        self.__add_constraint(name, c)
+    }
+
+    /// Macro-facing entry point behind [`Self::constraint`]. Not part of the
+    /// stable public API; use the `constraint!` macro instead.
+    #[doc(hidden)]
+    pub fn __add_constraint(
+        &self,
+        name: impl Into<SmolStr>,
+        c: ConstraintExpr<'_>,
+    ) -> ConstraintId {
         let name = name.into();
         let mut by_name = self.constraint_names.borrow_mut();
         assert!(!by_name.contains_key(&name), "constraint name {name:?} already registered");
@@ -271,6 +323,22 @@ impl Model {
         id
     }
 
+    /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
+    /// internal counter. Backs the name-less form of the `constraint!` macro.
+    #[doc(hidden)]
+    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintId {
+        // Skip over any names a user may already have taken.
+        let name = loop {
+            let n = self.auto_seq.get();
+            self.auto_seq.set(n + 1);
+            let candidate: SmolStr = format!("_c{n}").into();
+            if !self.constraint_names.borrow().contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        self.__add_constraint(name, c)
+    }
+
     /// Bulk-register constraints. Each entry is `(name, ConstraintExpr)`.
     /// Useful with `.par_iter().map(...).collect()` style construction.
     pub fn add_constraints<'a, I>(&'a self, items: I)
@@ -278,7 +346,7 @@ impl Model {
         I: IntoIterator<Item = (SmolStr, ConstraintExpr<'a>)>,
     {
         for (name, c) in items {
-            self.constraint(name, c);
+            self.__add_constraint(name, c);
         }
     }
 
@@ -300,6 +368,19 @@ impl Model {
     /// });
     /// ```
     pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, mut rule: F)
+    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, rule: F)
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> ConstraintExpr<'a>,
+    {
+        self.__add_constraints_over(name_prefix, set, rule);
+    }
+
+    /// Macro-facing entry point behind [`Self::add_constraints_over`]. Backs the
+    /// indexed-family form of the `constraint!` macro. Not part of the stable
+    /// public API.
+    #[doc(hidden)]
+    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, mut rule: F)
     where
         K: FromIndexKey,
         F: FnMut(K) -> ConstraintExpr<'a>,
@@ -308,7 +389,7 @@ impl Model {
             let typed = K::from_index_key(&key);
             let c = rule(typed);
             let name: SmolStr = format_index_name(name_prefix, &key).into();
-            self.constraint(name, c);
+            self.__add_constraint(name, c);
         }
     }
 
@@ -327,10 +408,22 @@ impl Model {
     // Objective
 
     pub fn minimize(&self, expr: Expr<'_>) {
-        self.set_objective(expr, ObjectiveSense::Minimize);
+        self.__minimize(expr);
     }
 
     pub fn maximize(&self, expr: Expr<'_>) {
+        self.__maximize(expr);
+    }
+
+    /// Macro-facing entry point behind [`Self::minimize`]. Backs `objective!(m, Min, ..)`.
+    #[doc(hidden)]
+    pub fn __minimize(&self, expr: Expr<'_>) {
+        self.set_objective(expr, ObjectiveSense::Minimize);
+    }
+
+    /// Macro-facing entry point behind [`Self::maximize`]. Backs `objective!(m, Max, ..)`.
+    #[doc(hidden)]
+    pub fn __maximize(&self, expr: Expr<'_>) {
         self.set_objective(expr, ObjectiveSense::Maximize);
     }
 
@@ -493,7 +586,7 @@ impl<'a> IndexedVarBuilder<'a> {
             let scalar_name: SmolStr = format_index_name(&self.base_name, &key).into();
             let lb = self.lb_by.as_ref().map_or(self.lb, |f| f(&key));
             let ub = self.ub_by.as_ref().map_or(self.ub, |f| f(&key));
-            let expr = self.model.var(scalar_name).lb(lb).ub(ub).domain(self.domain).build();
+            let expr = self.model.__var(scalar_name).lb(lb).ub(ub).domain(self.domain).build();
             entries.insert(key, expr);
         }
         IndexedVar { entries }

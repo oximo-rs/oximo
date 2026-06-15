@@ -37,6 +37,35 @@ impl<K: Copy, const N: usize> SumDomain<K> for [K; N] {
     }
 }
 
+// Forward through a reference, so a domain that is itself a reference (e.g. a
+// `&Set` function parameter passed to `sum!`/`constraint!`) is accepted.
+impl<K, D: SumDomain<K> + ?Sized> SumDomain<K> for &D {
+    fn keys(&self) -> impl Iterator<Item = K> + '_ {
+        (**self).keys()
+    }
+}
+
+// Integer ranges as sum domains. Iteration is lazy, so `sum!(x[i] for i in 0..n)` 
+// allocates nothing. Provided for the common integer types the `sum!`/`constraint!` 
+// macros default to.
+impl SumDomain<usize> for std::ops::Range<usize> {
+    fn keys(&self) -> impl Iterator<Item = usize> + '_ {
+        self.clone()
+    }
+}
+
+impl SumDomain<i64> for std::ops::Range<i64> {
+    fn keys(&self) -> impl Iterator<Item = i64> + '_ {
+        self.clone()
+    }
+}
+
+impl SumDomain<i32> for std::ops::Range<i32> {
+    fn keys(&self) -> impl Iterator<Item = i32> + '_ {
+        self.clone()
+    }
+}
+
 /// Sum an expression over every element of a domain.
 ///
 /// Reads as the mathematical `sum_{k in domain} f(k)`. The closure parameter is
@@ -48,6 +77,10 @@ impl<K: Copy, const N: usize> SumDomain<K> for [K; N] {
 /// Panics if `domain` is empty, the resulting expression has no arena to
 /// attach to.
 pub fn sum_over<'a, K, D, F>(domain: &D, mut f: F) -> Expr<'a>
+/// Macro-facing entry point behind [`sum_over`]. Backs the `sum!` macro. Not
+/// part of the stable public API.
+#[doc(hidden)]
+pub fn __sum_over<'a, K, D, F>(domain: &D, mut f: F) -> Expr<'a>
 where
     D: SumDomain<K> + ?Sized,
     F: FnMut(K) -> Expr<'a>,
