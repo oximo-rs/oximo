@@ -32,3 +32,5 @@ pub use var::{VarBuilder, Variable};
 // Re-export the expression handle so downstream code does not need a separate
 // `oximo-expr` import.
 pub use oximo_expr::{Expr, ExprArena, ExprId, ExprNode, ParamId, VarId, dot};
+
+pub use oximo_macros::{constraint, objective, param, sum, variable};

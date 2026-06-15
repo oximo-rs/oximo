@@ -76,7 +76,14 @@ impl SumDomain<i32> for std::ops::Range<i32> {
 /// # Panics
 /// Panics if `domain` is empty, the resulting expression has no arena to
 /// attach to.
-pub fn sum_over<'a, K, D, F>(domain: &D, mut f: F) -> Expr<'a>
+pub fn sum_over<'a, K, D, F>(domain: &D, f: F) -> Expr<'a>
+where
+    D: SumDomain<K> + ?Sized,
+    F: FnMut(K) -> Expr<'a>,
+{
+    __sum_over(domain, f)
+}
+
 /// Macro-facing entry point behind [`sum_over`]. Backs the `sum!` macro. Not
 /// part of the stable public API.
 #[doc(hidden)]
