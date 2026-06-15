@@ -913,10 +913,10 @@ mod tests {
     #[test]
     fn linear_objective_uses_lp_solve_type() {
         let m = Model::new("lp");
-        let x = m.var("x").lb(0.0).ub(10.0).build();
-        let y = m.var("y").lb(0.0).ub(10.0).build();
-        m.constraint("c", (x + y).le(5.0));
-        m.minimize(x + 2.0 * y);
+        variable!(m, 0.0 <= x <= 10.0);
+        variable!(m, 0.0 <= y <= 10.0);
+        constraint!(m, c, x + y <= 5.0);
+        objective!(m, Min, x + 2.0 * y);
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using LP minimizing v_obj;"), "got:\n{gms}");
     }
@@ -924,8 +924,8 @@ mod tests {
     #[test]
     fn nlp_uses_transcendental_and_picks_nlp_solve_type() {
         let m = Model::new("nlp");
-        let x = m.var("x").lb(-std::f64::consts::PI).ub(std::f64::consts::PI).build();
-        m.minimize(x.sin() + x.exp());
+        variable!(m, -std::f64::consts::PI <= x <= std::f64::consts::PI);
+        objective!(m, Min, x.sin() + x.exp());
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using NLP minimizing v_obj;"), "got:\n{gms}");
         assert!(gms.contains("sin("), "expected sin(...) in objective:\n{gms}");
@@ -935,8 +935,8 @@ mod tests {
     #[test]
     fn abs_objective_emits_abs_func() {
         let m = Model::new("absnlp");
-        let x = m.var("x").lb(-5.0).ub(5.0).build();
-        m.minimize(x.abs());
+        variable!(m, -5.0 <= x <= 5.0);
+        objective!(m, Min, x.abs());
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using NLP minimizing v_obj;"), "got:\n{gms}");
         assert!(gms.contains("abs("), "expected abs(...) in objective:\n{gms}");
@@ -945,11 +945,10 @@ mod tests {
     #[test]
     fn minlp_nonlinear_knapsack_routes_to_minlp_solve_type() {
         let m = Model::new("minlp");
-        let x = m.var("x").binary().build();
-        let y = m.var("y").lb(0.0).ub(10.0).build();
-        m.constraint("budget", (x + y).le(8.0));
-        let one = Expr::constant(x.arena, 1.0);
-        m.maximize((one + y).log() + 2.0 * x);
+        variable!(m, x, Bin);
+        variable!(m, 0.0 <= y <= 10.0);
+        constraint!(m, budget, x + y <= 8.0);
+        objective!(m, Max, (1.0 + y).log() + 2.0 * x);
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using MINLP maximizing v_obj;"), "got:\n{gms}");
         assert!(gms.contains("log("), "expected log(...) in objective:\n{gms}");
@@ -958,10 +957,10 @@ mod tests {
     #[test]
     fn quadratic_constraint_emits_full_expression_against_rhs() {
         let m = Model::new("qcp");
-        let x = m.var("x").lb(0.0).ub(5.0).build();
-        let y = m.var("y").lb(0.0).ub(5.0).build();
-        m.constraint("xy", (x * y).le(4.0));
-        m.minimize(x + y);
+        variable!(m, 0.0 <= x <= 5.0);
+        variable!(m, 0.0 <= y <= 5.0);
+        constraint!(m, xy, x * y <= 4.0);
+        objective!(m, Min, x + y);
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using QCP minimizing v_obj;"), "got:\n{gms}");
         // The product term must appear on the LHS, the user RHS untouched.
@@ -972,8 +971,8 @@ mod tests {
     #[test]
     fn integer_power_uses_power_func() {
         let m = Model::new("pow");
-        let x = m.var("x").lb(-10.0).ub(10.0).build();
-        m.minimize(x.powi(3));
+        variable!(m, -10.0 <= x <= 10.0);
+        objective!(m, Min, x.powi(3));
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("power("), "expected power(...) for int Pow:\n{gms}");
         assert!(gms.contains(", 3)"), "expected exponent 3:\n{gms}");
@@ -983,8 +982,8 @@ mod tests {
     #[test]
     fn real_power_falls_back_to_double_star() {
         let m = Model::new("rpow");
-        let x = m.var("x").lb(0.1).ub(10.0).build();
-        m.minimize(x.powf(0.5));
+        variable!(m, 0.1 <= x <= 10.0);
+        objective!(m, Min, x.powf(0.5));
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains(" **"), "expected ** for real Pow:\n{gms}");
     }

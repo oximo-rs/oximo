@@ -16,9 +16,9 @@ fn gurobi_multi_optima_returns_pool() {
     // surfaced through the multi-solution API, best first.
     let m = Model::new("multi");
     let items = Set::range(0..4usize);
-    let x = m.indexed_var("x", &items).binary().build();
-    m.constraint("cap", sum_over(&items, |i: usize| x[i]).le(2.0));
-    m.maximize(sum_over(&items, |i: usize| x[i]));
+    variable!(m, x[i in items], Bin);
+    constraint!(m, cap, sum!(x[i] for i in items) <= 2.0);
+    objective!(m, Max, sum!(x[i] for i in items));
 
     let opts = GurobiOptions::default().pool_search_mode(2).pool_solutions(10);
     let r = Gurobi.solve(&m, &opts).unwrap();
@@ -42,10 +42,10 @@ fn gurobi_qp_duals_linear_constraint() {
     // Optimum: (1, 1), obj 2. KKT: 2x = lambda => dual of cap = 2,
     // reduced costs 0 (both variables interior to their bounds).
     let m = Model::new("qp_dual");
-    let x = m.var("x").lb(-10.0).ub(10.0).build();
-    let y = m.var("y").lb(-10.0).ub(10.0).build();
-    let cap = m.constraint("cap", (x + y).ge(2.0));
-    m.minimize(x * x + y * y);
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= y <= 10.0);
+    let cap = constraint!(m, cap, x + y >= 2.0);
+    objective!(m, Min, x * x + y * y);
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);
@@ -65,10 +65,10 @@ fn gurobi_qcp_duals_quadratic_constraint() {
     // => dual of ball = 1/2 (QCPi). Gurobi computes QCP duals only when the
     // we set .qcp_dual(1).
     let m = Model::new("qcp_dual");
-    let x = m.var("x").lb(-10.0).ub(10.0).build();
-    let y = m.var("y").lb(-10.0).ub(10.0).build();
-    let ball = m.constraint("ball", (x * x + y * y).le(2.0));
-    m.minimize(x + y);
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= y <= 10.0);
+    let ball = constraint!(m, ball, x * x + y * y <= 2.0);
+    objective!(m, Min, x + y);
 
     let opts = GurobiOptions::default().qcp_dual(1);
     let result = Gurobi.solve(&m, &opts).unwrap();
@@ -85,10 +85,10 @@ fn gurobi_qcp_duals_skipped_by_default() {
     // Same convex QCP without .qcp_dual(1): the backend leaves Gurobi's
     // QCPDual default (0) untouched, so no duals are computed.
     let m = Model::new("qcp_no_dual");
-    let x = m.var("x").lb(-10.0).ub(10.0).build();
-    let y = m.var("y").lb(-10.0).ub(10.0).build();
-    m.constraint("ball", (x * x + y * y).le(2.0));
-    m.minimize(x + y);
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= y <= 10.0);
+    constraint!(m, ball, x * x + y * y <= 2.0);
+    objective!(m, Min, x + y);
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
     assert_eq!(result.status, SolverStatus::Optimal);

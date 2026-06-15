@@ -810,10 +810,10 @@ mod tests {
     #[test]
     fn lp_emits_minimize_and_positive_vars() {
         let m = Model::new("lp");
-        let x = m.var("x").lb(0.0).ub(10.0).build();
-        let y = m.var("y").lb(0.0).ub(10.0).build();
-        m.constraint("c", (x + y).le(5.0));
-        m.minimize(x + 2.0 * y);
+        variable!(m, 0.0 <= x <= 10.0);
+        variable!(m, 0.0 <= y <= 10.0);
+        constraint!(m, c, x + y <= 5.0);
+        objective!(m, Min, x + 2.0 * y);
         let bar = render(&m);
         assert!(bar.contains("POSITIVE_VARIABLES x0, x1;"), "{bar}");
         assert!(bar.contains("OBJ: minimize"), "{bar}");
@@ -825,8 +825,8 @@ mod tests {
     #[test]
     fn free_variable_emits_lower_and_upper_bounds() {
         let m = Model::new("free");
-        let x = m.var("x").lb(-5.0).ub(5.0).build();
-        m.minimize(x * x);
+        variable!(m, -5.0 <= x <= 5.0);
+        objective!(m, Min, x * x);
         let bar = render(&m);
         assert!(bar.contains("VARIABLES x0;"), "{bar}");
         assert!(bar.contains("LOWER_BOUNDS{"), "{bar}");
@@ -837,9 +837,8 @@ mod tests {
     #[test]
     fn nlp_emits_exp_and_log() {
         let m = Model::new("nlp");
-        let x = m.var("x").lb(0.1).ub(10.0).build();
-        let one = Expr::constant(x.arena, 1.0);
-        m.minimize((one + x).log() + x.exp());
+        variable!(m, 0.1 <= x <= 10.0);
+        objective!(m, Min, (1.0 + x).log() + x.exp());
         let bar = render(&m);
         assert!(bar.contains("log("), "{bar}");
         assert!(bar.contains("exp("), "{bar}");
@@ -848,12 +847,11 @@ mod tests {
     #[test]
     fn minlp_partitions_binary_integer_and_continuous() {
         let m = Model::new("minlp");
-        let b = m.var("b").binary().build();
-        let n = m.var("n").integer().lb(0.0).ub(5.0).build();
-        let y = m.var("y").lb(0.0).ub(10.0).build();
-        m.constraint("budget", (b + n + y).le(8.0));
-        let one = Expr::constant(y.arena, 1.0);
-        m.maximize((one + y).log() + 2.0 * b + n);
+        variable!(m, b, Bin);
+        variable!(m, 0.0 <= n <= 5.0, Int);
+        variable!(m, 0.0 <= y <= 10.0);
+        constraint!(m, budget, b + n + y <= 8.0);
+        objective!(m, Max, (1.0 + y).log() + 2.0 * b + n);
         let bar = render(&m);
         assert!(bar.contains("BINARY_VARIABLES x0;"), "{bar}");
         assert!(bar.contains("INTEGER_VARIABLES x1;"), "{bar}");
@@ -864,8 +862,8 @@ mod tests {
     #[test]
     fn abs_reformulated_as_square_root() {
         let m = Model::new("absbar");
-        let x = m.var("x").lb(-10.0).ub(10.0).build();
-        m.minimize(x.abs());
+        variable!(m, -10.0 <= x <= 10.0);
+        objective!(m, Min, x.abs());
         let bar = render(&m);
         // BARON has no abs(), reformulate |x| = (x^2)^(1/2).
         assert!(bar.contains(") ^ 2) ^ 0.5)"), "expected abs rewrite:\n{bar}");
@@ -875,8 +873,8 @@ mod tests {
     #[test]
     fn integer_power_uses_caret() {
         let m = Model::new("pow");
-        let x = m.var("x").lb(-10.0).ub(10.0).build();
-        m.minimize(x.powi(3));
+        variable!(m, -10.0 <= x <= 10.0);
+        objective!(m, Min, x.powi(3));
         let bar = render(&m);
         assert!(bar.contains(" ^ 3)"), "expected caret power:\n{bar}");
     }
@@ -884,9 +882,9 @@ mod tests {
     #[test]
     fn constant_base_uses_native_caret() {
         let m = Model::new("cbpow");
-        let x = m.var("x").lb(0.0).ub(5.0).build();
+        variable!(m, 0.0 <= x <= 5.0);
         let two = Expr::constant(x.arena, 2.0);
-        m.minimize(two.pow(x));
+        objective!(m, Min, two.pow(x));
         let bar = render(&m);
         assert!(bar.contains("2 ^ x0"), "expected native b^x:\n{bar}");
         assert!(!bar.contains("exp("), "constant base must not rewrite to exp/log:\n{bar}");
@@ -895,9 +893,9 @@ mod tests {
     #[test]
     fn variable_exponent_rewrites_to_exp_log() {
         let m = Model::new("vpow");
-        let x = m.var("x").lb(0.1).ub(10.0).build();
-        let y = m.var("y").lb(0.1).ub(10.0).build();
-        m.minimize(x.pow(y));
+        variable!(m, 0.1 <= x <= 10.0);
+        variable!(m, 0.1 <= y <= 10.0);
+        objective!(m, Min, x.pow(y));
         let bar = render(&m);
         assert!(bar.contains("exp("), "{bar}");
         assert!(bar.contains("log("), "{bar}");
@@ -907,10 +905,10 @@ mod tests {
     #[test]
     fn quadratic_constraint_keeps_rhs() {
         let m = Model::new("qcp");
-        let x = m.var("x").lb(0.0).ub(5.0).build();
-        let y = m.var("y").lb(0.0).ub(5.0).build();
-        m.constraint("xy", (x * y).le(4.0));
-        m.minimize(x + y);
+        variable!(m, 0.0 <= x <= 5.0);
+        variable!(m, 0.0 <= y <= 5.0);
+        constraint!(m, xy, x * y <= 4.0);
+        objective!(m, Min, x + y);
         let bar = render(&m);
         assert!(bar.contains("x0") && bar.contains("x1"), "{bar}");
         assert!(bar.contains("<= 4;"), "{bar}");
@@ -919,8 +917,8 @@ mod tests {
     #[test]
     fn feasibility_problem_minimizes_zero() {
         let m = Model::new("feas");
-        let x = m.var("x").lb(0.0).ub(1.0).build();
-        m.constraint("c", x.le(1.0));
+        variable!(m, 0.0 <= x <= 1.0);
+        constraint!(m, c, x <= 1.0);
         let bar = render(&m);
         assert!(bar.contains("OBJ: minimize 0;"), "{bar}");
     }
@@ -928,8 +926,8 @@ mod tests {
     #[test]
     fn sin_is_rejected() {
         let m = Model::new("trig");
-        let x = m.var("x").lb(-1.0).ub(1.0).build();
-        m.minimize(x.sin());
+        variable!(m, -1.0 <= x <= 1.0);
+        objective!(m, Min, x.sin());
         let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
         match err {
             SolverError::Backend(msg) => assert!(msg.contains("sin"), "{msg}"),
@@ -938,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // SemiContinuous has no `variable!` syntax; uses the builder until 0.4.0
     fn semicontinuous_is_rejected() {
         let m = Model::new("semi");
         let x = m.var("x").domain(Domain::SemiContinuous { threshold: 1.0 }).ub(10.0).build();
@@ -949,10 +948,10 @@ mod tests {
     #[test]
     fn constant_constraint_is_rejected() {
         let m = Model::new("constc");
-        let x = m.var("x").lb(0.0).ub(5.0).build();
+        variable!(m, 0.0 <= x <= 5.0);
         // x - x folds to a constant left-hand side, which BARON would reject.
-        m.constraint("trivial", (x - x).le(1.0));
-        m.minimize(x);
+        constraint!(m, trivial, x - x <= 1.0);
+        objective!(m, Min, x);
         let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
         match err {
             SolverError::Backend(msg) => assert!(msg.contains("no variables"), "{msg}"),
@@ -963,8 +962,9 @@ mod tests {
     #[test]
     fn binary_fixed_to_one_emits_lower_bound() {
         let m = Model::new("fix1");
-        let b = m.var("b").binary().fix(1.0).build();
-        m.minimize(b);
+        variable!(m, b, Bin);
+        m.fix(b, 1.0);
+        objective!(m, Min, b);
         let bar = render(&m);
         assert!(bar.contains("BINARY_VARIABLES x0;"), "{bar}");
         // lb=1 differs from the binary default 0, so it must be emitted.
@@ -975,8 +975,9 @@ mod tests {
     #[test]
     fn binary_fixed_to_zero_emits_upper_bound() {
         let m = Model::new("fix0");
-        let b = m.var("b").binary().fix(0.0).build();
-        m.minimize(b);
+        variable!(m, b, Bin);
+        m.fix(b, 0.0);
+        objective!(m, Min, b);
         let bar = render(&m);
         // ub=0 differs from the binary default 1, so it must be emitted.
         assert!(bar.contains("UPPER_BOUNDS{"), "{bar}");
@@ -986,8 +987,9 @@ mod tests {
     #[test]
     fn starting_point_emitted_when_initial_set() {
         let m = Model::new("start");
-        let x = m.var("x").lb(0.0).ub(10.0).initial(3.5).build();
-        m.minimize(x * x);
+        variable!(m, 0.0 <= x <= 10.0);
+        m.set_initial(x, 3.5);
+        objective!(m, Min, x * x);
         let bar = render(&m);
         assert!(bar.contains("STARTING_POINT{"), "{bar}");
         assert!(bar.contains("x0: 3.5;"), "{bar}");
