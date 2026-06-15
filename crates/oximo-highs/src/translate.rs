@@ -284,10 +284,10 @@ mod tests {
     fn qp_min_sum_of_squares() {
         // min x^2 + y^2  s.t.  x + y = 1  ->  (0.5, 0.5), objective 0.5.
         let m = Model::new("sq");
-        let x = m.var("x").lb(-10.0).ub(10.0).build();
-        let y = m.var("y").lb(-10.0).ub(10.0).build();
-        m.constraint("c", (x + y).eq(1.0));
-        m.minimize(x.powi(2) + y.powi(2));
+        variable!(m, -10.0 <= x <= 10.0);
+        variable!(m, -10.0 <= y <= 10.0);
+        constraint!(m, c, x + y == 1.0);
+        objective!(m, Min, x.powi(2) + y.powi(2));
         assert_eq!(m.kind(), ModelKind::QP);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
@@ -302,10 +302,10 @@ mod tests {
         // min 2 x0^2 + x0 x1 + x1^2 + x0 + x1  s.t.  x0 + x1 = 1,  x >= 0.
         // cvxopt reference solution: x = [0.25, 0.75], objective = 1.875.
         let m = Model::new("cvxopt");
-        let x0 = m.var("x0").lb(0.0).build();
-        let x1 = m.var("x1").lb(0.0).build();
-        m.constraint("eq", (x0 + x1).eq(1.0));
-        m.minimize(2.0 * x0.powi(2) + x0 * x1 + x1.powi(2) + x0 + x1);
+        variable!(m, x0 >= 0.0);
+        variable!(m, x1 >= 0.0);
+        constraint!(m, eq, x0 + x1 == 1.0);
+        objective!(m, Min, 2.0 * x0.powi(2) + x0 * x1 + x1.powi(2) + x0 + x1);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.status, SolverStatus::Optimal);
@@ -318,8 +318,8 @@ mod tests {
     fn qp_objective_constant_is_added_back() {
         // min (x - 1)^2 = x^2 - 2x + 1  ->  x = 1, objective 0 (constant 1).
         let m = Model::new("shift");
-        let x = m.var("x").lb(-5.0).ub(5.0).build();
-        m.minimize((x - 1.0).powi(2));
+        variable!(m, -5.0 <= x <= 5.0);
+        objective!(m, Min, (x - 1.0).powi(2));
         assert_eq!(m.kind(), ModelKind::QP);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
@@ -332,8 +332,8 @@ mod tests {
     fn miqp_is_unsupported() {
         // Integer variable + quadratic objective = MIQP, which HiGHS cannot solve.
         let m = Model::new("miqp");
-        let x = m.var("x").lb(0.0).ub(5.0).integer().build();
-        m.minimize(x.powi(2));
+        variable!(m, 0.0 <= x <= 5.0, Int);
+        objective!(m, Min, x.powi(2));
         assert_eq!(m.kind(), ModelKind::MIQP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
