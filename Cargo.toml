@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/oximo-expr",
+    "crates/oximo-macros",
     "crates/oximo-core",
     "crates/oximo-solver",
     "crates/oximo-highs",
@@ -26,6 +27,7 @@ authors = ["Germán Martín Heim <german.martin.heim@gmail.com>"]
 
 [workspace.dependencies]
 oximo-expr   = { path = "crates/oximo-expr",   version = "0.2.0" }
+oximo-macros = { path = "crates/oximo-macros", version = "0.2.0" }
 oximo-core   = { path = "crates/oximo-core",   version = "0.2.0" }
 oximo-solver = { path = "crates/oximo-solver", version = "0.2.0" }
 oximo-highs  = { path = "crates/oximo-highs",  version = "0.2.0" }
@@ -34,15 +36,18 @@ oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.2.0" }
 oximo-gams   = { path = "crates/oximo-gams",   version = "0.2.0" }
 oximo-baron  = { path = "crates/oximo-baron",  version = "0.2.0" }
 
-rayon        = "1.12"
-smallvec     = "1.15"
-smol_str     = "0.3.6"
-rustc-hash   = "2.1"
-ndarray      = "0.17"
-thiserror    = "2.0"
-num-traits   = "0.2"
-highs        = "2.2"
-grb          = "3.0"
+rayon            = "1.12"
+syn              = { version = "2", features = ["full"] }
+quote            = "1"
+proc-macro2      = "1"
+proc-macro-crate = "3"
+smallvec         = "1.15"
+smol_str         = "0.3.6"
+rustc-hash       = "2.1"
+ndarray          = "0.17"
+thiserror        = "2.0"
+num-traits       = "0.2"
+highs            = "2.2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
