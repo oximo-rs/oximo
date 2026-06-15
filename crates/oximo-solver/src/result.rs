@@ -273,12 +273,12 @@ mod tests {
 
     #[test]
     fn report_renders_sections() {
-        use oximo_core::Relate;
+        use oximo_core::{constraint, objective, variable};
 
         let m = Model::new("toy");
-        let x = m.var("x").lb(0.0).build();
-        let c = m.constraint("c", x.le(5.0));
-        m.maximize(x);
+        variable!(m, x >= 0.0);
+        let c = constraint!(m, c, x <= 5.0);
+        objective!(m, Max, x);
 
         let mut primal = FxHashMap::default();
         primal.insert(x.var_id().unwrap(), 5.0);
