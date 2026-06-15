@@ -82,6 +82,10 @@ impl Model {
 
     // Variables
 
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
         self.__var(name)
     }
@@ -122,6 +126,10 @@ impl Model {
         Expr::from_var(&self.arena, id)
     }
 
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn indexed_var<'a>(&'a self, name: impl Into<String>, set: &Set) -> IndexedVarBuilder<'a> {
         self.__indexed_var(name, set)
     }
@@ -216,6 +224,10 @@ impl Model {
     /// # Panics
     ///
     /// Panics if a parameter with the same name is already registered.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `param!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
         self.__param(name, value)
     }
@@ -294,6 +306,10 @@ impl Model {
     ///
     /// Panics if a constraint with the same name is already registered, or if
     /// the constraint count exceeds `u32::MAX`.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn constraint(&self, name: impl Into<SmolStr>, c: ConstraintExpr<'_>) -> ConstraintId {
         self.__add_constraint(name, c)
     }
@@ -367,7 +383,10 @@ impl Model {
     ///     (b[(t, n)] - b_min[t] * w[(t, n)]).ge(0.0)
     /// });
     /// ```
-    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, mut rule: F)
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the indexed-family form of the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, rule: F)
     where
         K: FromIndexKey,
@@ -407,10 +426,18 @@ impl Model {
 
     // Objective
 
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `objective!(m, Min, ..)`, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn minimize(&self, expr: Expr<'_>) {
         self.__minimize(expr);
     }
 
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `objective!(m, Max, ..)`, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn maximize(&self, expr: Expr<'_>) {
         self.__maximize(expr);
     }
@@ -627,6 +654,8 @@ pub fn display_index_key(key: &IndexKey) -> String {
 }
 
 #[cfg(test)]
+// exercises the builder API directly until its 0.4.0 removal
+#[allow(deprecated)] 
 mod tests {
     use oximo_expr::extract_linear;
 

@@ -26,7 +26,9 @@ pub use model::{IndexedVarBuilder, Model, ModelKind, display_index_key};
 pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
 pub use set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
-pub use sum::{SumDomain, sum_over};
+pub use sum::SumDomain;
+#[allow(deprecated)]
+pub use sum::sum_over;
 pub use var::{VarBuilder, Variable};
 
 // Re-export the expression handle so downstream code does not need a separate

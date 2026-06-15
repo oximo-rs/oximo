@@ -1,4 +1,6 @@
 #![allow(clippy::float_cmp)]
+// builder API exercised in tests until its 0.4.0 removal
+#![allow(deprecated)]
 
 use oximo_core::prelude::*;
 

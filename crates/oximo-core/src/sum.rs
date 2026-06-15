@@ -76,6 +76,10 @@ impl SumDomain<i32> for std::ops::Range<i32> {
 /// # Panics
 /// Panics if `domain` is empty, the resulting expression has no arena to
 /// attach to.
+#[deprecated(
+    since = "0.3.0",
+    note = "use the `sum!` macro, the builder API is scheduled for removal in 0.4.0"
+)]
 pub fn sum_over<'a, K, D, F>(domain: &D, f: F) -> Expr<'a>
 where
     D: SumDomain<K> + ?Sized,
@@ -98,6 +102,8 @@ where
 }
 
 #[cfg(test)]
+// exercises the builder API directly until its 0.4.0 removal
+#[allow(deprecated)] 
 mod tests {
     use oximo_expr::extract_linear;
 
