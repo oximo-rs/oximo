@@ -24,18 +24,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m = Model::new("parametric_pricing");
 
     // Per-unit margin of product 1: a market price we re-bind per scenario.
-    let p1 = m.param("p1", 0.0);
+    param!(m, p1 = 0.0);
 
     // Production quantities (units)
-    let x1 = m.var("x1").lb(0.0).build();
-    let x2 = m.var("x2").lb(0.0).build();
+    variable!(m, x1 >= 0.0);
+    variable!(m, x2 >= 0.0);
 
     // Shared resources
-    m.constraint("labor", (2.0 * x1 + x2).le(100.0));
-    m.constraint("material", (x1 + 3.0 * x2).le(90.0));
+    constraint!(m, labor, 2.0 * x1 + x2 <= 100.0);
+    constraint!(m, material, x1 + 3.0 * x2 <= 90.0);
 
     // profit = p1 * x1 + 5 * x2  (product 2's margin is fixed at 5)
-    m.maximize(p1 * x1 + 5.0 * x2);
+    objective!(m, Max, p1 * x1 + 5.0 * x2);
 
     // The model kind is inferred and does not change as we re-bind `p1`.
     assert_eq!(m.kind(), ModelKind::LP);

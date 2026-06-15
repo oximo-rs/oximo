@@ -90,30 +90,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m = Model::new("reaction_path");
     let chemicals = Set::strings(CHEMICALS);
 
-    let y = m
-        .indexed_var("y", &chemicals)
-        .binary()
-        .lb_by(
-            |name: String| {
-                if available.iter().any(|&i| CHEMICALS[i] == name) { 1.0 } else { 0.0 }
-            },
-        )
-        .ub_by(
-            |name: String| {
-                if unavailable.iter().any(|&i| CHEMICALS[i] == name) { 0.0 } else { 1.0 }
-            },
-        )
-        .build();
+    variable!(m, y[v in chemicals], Bin);
+    // Fix availability: raw materials/catalysts to 1, unavailable chemicals to 0.
+    for &i in available {
+        m.fix(y[CHEMICALS[i]], 1.0);
+    }
+    for &i in unavailable {
+        m.fix(y[CHEMICALS[i]], 0.0);
+    }
 
     // sum_vv (1 - y[vv]) >= 1 - y[v]
     //    <=>  y[v] - sum_vv y[vv] >= 1 - |reactants|
-    for &(rx, prod, reactants) in logicc {
+    for &(_rx, prod, reactants) in logicc {
         let n = reactants.len() as f64;
-        let reactant_sum = sum_over(reactants, |vv: usize| y[CHEMICALS[vv]]);
-        m.constraint(format!("leq_{rx}"), (y[CHEMICALS[prod]] - reactant_sum).ge(1.0 - n));
+        constraint!(m, y[CHEMICALS[prod]] - sum!(y[CHEMICALS[vv]] for vv in reactants) >= 1.0 - n);
     }
 
-    m.minimize(y["y06"]); // acetone
+    objective!(m, Min, y["y06"]); // acetone
 
     #[cfg(feature = "gams")]
     let result = {

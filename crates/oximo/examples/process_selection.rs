@@ -39,30 +39,32 @@ mod model {
         let m = Model::new("procsel");
 
         // Positive variables (consumptions, capacities, purchases).
-        let a2 = m.var("a2").lb(0.0).build();
-        let a3 = m.var("a3").lb(0.0).build();
-        let b2 = m.var("b2").lb(0.0).build();
-        let b3 = m.var("b3").lb(0.0).build();
-        let bp = m.var("bp").lb(0.0).build();
-        let b1 = m.var("b1").lb(0.0).build();
-        let c1 = m.var("c1").lb(0.0).ub(1.0).build();
+        variable!(m, a2 >= 0.0);
+        variable!(m, a3 >= 0.0);
+        variable!(m, b2 >= 0.0);
+        variable!(m, b3 >= 0.0);
+        variable!(m, bp >= 0.0);
+        variable!(m, b1 >= 0.0);
+        variable!(m, 0.0 <= c1 <= 1.0);
 
         // Binaries: existence of each process unit.
-        let y1 = m.var("y1").binary().build();
-        let y2 = m.var("y2").binary().build();
-        let y3 = m.var("y3").binary().build();
+        variable!(m, y1, Bin);
+        variable!(m, y2, Bin);
+        variable!(m, y3, Bin);
 
-        m.constraint("inout1", c1.eq(0.9 * b1));
-        m.constraint("inout2", (b2.exp() - 1.0).eq(a2));
-        m.constraint("inout3", ((b3 / 1.2).exp() - 1.0).eq(a3));
-        m.constraint("mbalb", b1.eq(b2 + b3 + bp));
-        m.constraint("log1", c1.le(2.0 * y1));
-        m.constraint("log2", b2.le(4.0 * y2));
-        m.constraint("log3", b3.le(5.0 * y3));
+        constraint!(m, inout1, c1 == 0.9 * b1);
+        constraint!(m, inout2, b2.exp() - 1.0 == a2);
+        constraint!(m, inout3, (b3 / 1.2).exp() - 1.0 == a3);
+        constraint!(m, mbalb, b1 == b2 + b3 + bp);
+        constraint!(m, log1, c1 <= 2.0 * y1);
+        constraint!(m, log2, b2 <= 4.0 * y2);
+        constraint!(m, log3, b3 <= 5.0 * y3);
 
         // profit = sales - fixed investment - operating cost - purchases
-        m.maximize(
-            11.0 * c1 - 3.5 * y1 - y2 - 1.5 * y3 - b2 - 1.2 * b3 - 1.8 * (a2 + a3) - 7.0 * bp,
+        objective!(
+            m,
+            Max,
+            11.0 * c1 - 3.5 * y1 - y2 - 1.5 * y3 - b2 - 1.2 * b3 - 1.8 * (a2 + a3) - 7.0 * bp
         );
 
         let result = solver.solve(&m, opts)?;
