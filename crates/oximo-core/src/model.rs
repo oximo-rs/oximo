@@ -1,4 +1,5 @@
 use std::cell::{Cell, Ref, RefCell};
+use std::marker::PhantomData;
 
 use oximo_expr::{Expr, ExprArena, ExprClass, ParamId, VarId, classify};
 use rustc_hash::FxHashMap;
@@ -130,18 +131,22 @@ impl Model {
         since = "0.3.0",
         note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
     )]
-    pub fn indexed_var<'a>(&'a self, name: impl Into<String>, set: &Set) -> IndexedVarBuilder<'a> {
+    pub fn indexed_var<'a, K>(
+        &'a self,
+        name: impl Into<String>,
+        set: &Set<K>,
+    ) -> IndexedVarBuilder<'a, K> {
         self.__indexed_var(name, set)
     }
 
     /// Macro-facing entry point behind [`Self::indexed_var`]. Not part of the
     /// stable public API; use the `variable!` macro instead.
     #[doc(hidden)]
-    pub fn __indexed_var<'a>(
+    pub fn __indexed_var<'a, K>(
         &'a self,
         name: impl Into<String>,
-        set: &Set,
-    ) -> IndexedVarBuilder<'a> {
+        set: &Set<K>,
+    ) -> IndexedVarBuilder<'a, K> {
         IndexedVarBuilder {
             model: self,
             base_name: name.into(),
@@ -151,6 +156,7 @@ impl Model {
             lb_by: None,
             ub_by: None,
             domain: Domain::Real,
+            _k: PhantomData,
         }
     }
 
@@ -387,7 +393,7 @@ impl Model {
         since = "0.3.0",
         note = "use the indexed-family form of the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
     )]
-    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, rule: F)
+    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, rule: F)
     where
         K: FromIndexKey,
         F: FnMut(K) -> ConstraintExpr<'a>,
@@ -399,7 +405,7 @@ impl Model {
     /// indexed-family form of the `constraint!` macro. Not part of the stable
     /// public API.
     #[doc(hidden)]
-    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, mut rule: F)
+    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, mut rule: F)
     where
         K: FromIndexKey,
         F: FnMut(K) -> ConstraintExpr<'a>,
@@ -521,7 +527,7 @@ impl Model {
 type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> f64 + 'a>;
 
 #[must_use = "IndexedVarBuilder does nothing until you call .build()"]
-pub struct IndexedVarBuilder<'a> {
+pub struct IndexedVarBuilder<'a, K = IndexKey> {
     model: &'a Model,
     base_name: String,
     keys: Vec<IndexKey>,
@@ -530,9 +536,10 @@ pub struct IndexedVarBuilder<'a> {
     lb_by: Option<BoundFn<'a>>,
     ub_by: Option<BoundFn<'a>>,
     domain: Domain,
+    _k: PhantomData<fn() -> K>,
 }
 
-impl<'a> std::fmt::Debug for IndexedVarBuilder<'a> {
+impl<'a, K> std::fmt::Debug for IndexedVarBuilder<'a, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedVarBuilder")
             .field("base_name", &self.base_name)
@@ -546,7 +553,7 @@ impl<'a> std::fmt::Debug for IndexedVarBuilder<'a> {
     }
 }
 
-impl<'a> IndexedVarBuilder<'a> {
+impl<'a, K> IndexedVarBuilder<'a, K> {
     pub fn lb(mut self, v: f64) -> Self {
         self.lb = v;
         self
@@ -568,7 +575,7 @@ impl<'a> IndexedVarBuilder<'a> {
     /// .lb_by(|(p, q): (String, String)| floor_for(&p, &q))
     /// .lb_by(|i: usize| lower_bounds[i])
     /// ```
-    pub fn lb_by<K, F>(mut self, f: F) -> Self
+    pub fn lb_by<F>(mut self, f: F) -> Self
     where
         K: FromIndexKey,
         F: Fn(K) -> f64 + 'a,
@@ -584,7 +591,7 @@ impl<'a> IndexedVarBuilder<'a> {
     /// .ub_by(|(p, q): (String, String)| capacity_for(&p, &q))
     /// .ub_by(|i: usize| upper_bounds[i])
     /// ```
-    pub fn ub_by<K, F>(mut self, f: F) -> Self
+    pub fn ub_by<F>(mut self, f: F) -> Self
     where
         K: FromIndexKey,
         F: Fn(K) -> f64 + 'a,
@@ -607,7 +614,7 @@ impl<'a> IndexedVarBuilder<'a> {
         self
     }
 
-    pub fn build(self) -> IndexedVar<'a> {
+    pub fn build(self) -> IndexedVar<'a, K> {
         let mut entries = FxHashMap::default();
         for key in self.keys {
             let scalar_name: SmolStr = format_index_name(&self.base_name, &key).into();
@@ -616,7 +623,7 @@ impl<'a> IndexedVarBuilder<'a> {
             let expr = self.model.__var(scalar_name).lb(lb).ub(ub).domain(self.domain).build();
             entries.insert(key, expr);
         }
-        IndexedVar { entries }
+        IndexedVar { entries, _k: PhantomData }
     }
 }
 
