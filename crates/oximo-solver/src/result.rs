@@ -41,7 +41,11 @@ impl SolutionPoint {
     ///
     /// Returns `None` if `key` is not in the variable's set or the solver did
     /// not return a primal value for that scalar.
-    pub fn value_of_idx<K: Into<IndexKey>>(&self, var: &IndexedVar<'_>, key: K) -> Option<f64> {
+    pub fn value_of_idx<V, K: Into<IndexKey>>(
+        &self,
+        var: &IndexedVar<'_, V>,
+        key: K,
+    ) -> Option<f64> {
         var.get(key).and_then(|e| self.value_of(e))
     }
 
@@ -49,9 +53,9 @@ impl SolutionPoint {
     ///
     /// Yields `(&IndexKey, f64)` for every index whose primal value is present
     /// in the solution.
-    pub fn values_of<'iv, 'a>(
+    pub fn values_of<'iv, 'a, V>(
         &'iv self,
-        var: &'iv IndexedVar<'a>,
+        var: &'iv IndexedVar<'a, V>,
     ) -> impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv {
         var.iter().filter_map(|(k, e)| self.value_of(*e).map(|v| (k, v)))
     }
@@ -135,15 +139,19 @@ impl SolverResult {
 
     /// Look up the best solution's primal value for a specific index of an
     /// [`IndexedVar`].
-    pub fn value_of_idx<K: Into<IndexKey>>(&self, var: &IndexedVar<'_>, key: K) -> Option<f64> {
+    pub fn value_of_idx<V, K: Into<IndexKey>>(
+        &self,
+        var: &IndexedVar<'_, V>,
+        key: K,
+    ) -> Option<f64> {
         var.get(key).and_then(|e| self.value_of(e))
     }
 
     /// Iterate over the best solution's primal values for all entries of an
     /// [`IndexedVar`]. Yields nothing when no solution was found.
-    pub fn values_of<'iv, 'a>(
+    pub fn values_of<'iv, 'a, V>(
         &'iv self,
-        var: &'iv IndexedVar<'a>,
+        var: &'iv IndexedVar<'a, V>,
     ) -> impl Iterator<Item = (&'iv IndexKey, f64)> + 'iv {
         var.iter().filter_map(|(k, e)| self.value_of(*e).map(|v| (k, v)))
     }
