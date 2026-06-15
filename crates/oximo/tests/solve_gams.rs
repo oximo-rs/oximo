@@ -21,12 +21,12 @@ use oximo::solvers::Gams;
 #[test]
 fn gams_lp_canonical() {
     let m = Model::new("lp");
-    let x = m.var("x").lb(0.0).build();
-    let y = m.var("y").lb(0.0).ub(4.0).build();
-    m.constraint("c1", (x + 2.0 * y).le(14.0));
-    m.constraint("c2", (3.0 * x - y).ge(0.0));
-    m.constraint("c3", (x - y).le(2.0));
-    m.maximize(3.0 * x + 4.0 * y);
+    variable!(m, x >= 0.0);
+    variable!(m, 0.0 <= y <= 4.0);
+    constraint!(m, c1, x + 2.0 * y <= 14.0);
+    constraint!(m, c2, 3.0 * x - y >= 0.0);
+    constraint!(m, c3, x - y <= 2.0);
+    objective!(m, Max, 3.0 * x + 4.0 * y);
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
@@ -41,9 +41,9 @@ fn gams_lp_duals_and_reduced_costs() {
     // max x  s.t.  x <= 5,  x >= 0
     // Optimal: x = 5, dual of (x <= 5) = +/-1.0, reduced cost of x = 0.
     let m = Model::new("lp_dual");
-    let x = m.var("x").lb(0.0).build();
-    let c = m.constraint("cap", x.le(5.0));
-    m.maximize(x);
+    variable!(m, x >= 0.0);
+    let c = constraint!(m, cap, x <= 5.0);
+    objective!(m, Max, x);
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
@@ -56,7 +56,6 @@ fn gams_lp_duals_and_reduced_costs() {
     // Only one variable in the model -> VarId(0).
     let rc = result.reduced_costs.get(&VarId(0)).copied().expect("reduced cost missing for x");
     assert!(rc.abs() < 1e-6, "reduced_cost(x)={rc}");
-    let _ = x;
 }
 
 #[test]
@@ -65,9 +64,9 @@ fn gams_nlp_duals_at_local_point() {
     // Optimum: x = 1, obj e. KKT: exp(x) = lambda => dual of (x >= 1) = +/-e,
     // reduced cost of x = 0.
     let m = Model::new("nlp_dual");
-    let x = m.var("x").lb(-10.0).ub(10.0).build();
-    let cap = m.constraint("cap", x.ge(1.0));
-    m.minimize(x.exp());
+    variable!(m, -10.0 <= x <= 10.0);
+    let cap = constraint!(m, cap, x >= 1.0);
+    objective!(m, Min, x.exp());
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
@@ -93,10 +92,10 @@ fn gams_mip_duals_at_fixed_point() {
     // The exact split between constraint duals and reduced costs is
     // solver-dependent. We assert presence, not values.
     let m = Model::new("mip_dual");
-    let a = m.var("a").binary().build();
-    let b = m.var("b").binary().build();
-    let cap = m.constraint("cap", (a + b).le(1.0));
-    m.maximize(2.0 * a + 3.0 * b);
+    variable!(m, a, Bin);
+    variable!(m, b, Bin);
+    let cap = constraint!(m, cap, a + b <= 1.0);
+    objective!(m, Max, 2.0 * a + 3.0 * b);
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
@@ -110,11 +109,12 @@ fn gams_mip_duals_at_fixed_point() {
 fn gams_knapsack_milp() {
     let weights = [3.0, 4.0, 2.0, 5.0, 1.0, 6.0, 7.0, 2.0];
     let values = [10.0, 12.0, 5.0, 14.0, 3.0, 18.0, 22.0, 6.0];
+    let n = weights.len();
 
     let m = Model::new("knapsack");
-    let xs: Vec<_> = (0..weights.len()).map(|i| m.var(format!("x{i}")).binary().build()).collect();
-    m.constraint("cap", dot(&xs, &weights).le(15.0));
-    m.maximize(dot(&xs, &values));
+    variable!(m, x[i in 0..n], Bin);
+    constraint!(m, cap, sum!(weights[i] * x[i] for i in 0..n) <= 15.0);
+    objective!(m, Max, sum!(values[i] * x[i] for i in 0..n));
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
@@ -125,9 +125,9 @@ fn gams_knapsack_milp() {
 #[test]
 fn gams_infeasible_returns_status() {
     let m = Model::new("infeas");
-    let x = m.var("x").lb(0.0).ub(1.0).build();
-    m.constraint("c1", x.ge(5.0));
-    m.minimize(x);
+    variable!(m, 0.0 <= x <= 1.0);
+    constraint!(m, c1, x >= 5.0);
+    objective!(m, Min, x);
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
@@ -138,10 +138,11 @@ fn gams_infeasible_returns_status() {
 fn gams_mip_gap_option() {
     let weights = [3.0, 4.0, 2.0, 5.0, 1.0];
     let values = [10.0, 12.0, 5.0, 14.0, 3.0];
+    let n = weights.len();
     let m = Model::new("ks");
-    let xs: Vec<_> = (0..5).map(|i| m.var(format!("x{i}")).binary().build()).collect();
-    m.constraint("cap", dot(&xs, &weights).le(8.0));
-    m.maximize(dot(&xs, &values));
+    variable!(m, x[i in 0..n], Bin);
+    constraint!(m, cap, sum!(weights[i] * x[i] for i in 0..n) <= 8.0);
+    objective!(m, Max, sum!(values[i] * x[i] for i in 0..n));
 
     let result = Gams::new().solve(&m, &GamsOptions::default().mip_gap(0.5)).unwrap();
     assert!(
@@ -159,12 +160,12 @@ fn gams_mip_gap_option() {
 #[test]
 fn gams_highs_opt_file_simplex() {
     let m = Model::new("lp");
-    let x = m.var("x").lb(0.0).build();
-    let y = m.var("y").lb(0.0).ub(4.0).build();
-    m.constraint("c1", (x + 2.0 * y).le(14.0));
-    m.constraint("c2", (3.0 * x - y).ge(0.0));
-    m.constraint("c3", (x - y).le(2.0));
-    m.maximize(3.0 * x + 4.0 * y);
+    variable!(m, x >= 0.0);
+    variable!(m, 0.0 <= y <= 4.0);
+    constraint!(m, c1, x + 2.0 * y <= 14.0);
+    constraint!(m, c2, 3.0 * x - y >= 0.0);
+    constraint!(m, c3, x - y <= 2.0);
+    objective!(m, Max, 3.0 * x + 4.0 * y);
 
     let opts = GamsOptions::default().solver(GamsSolverConfig::Highs(GamsHighsOptions {
         solver: Some(GamsHighsSolver::Simplex),
@@ -181,9 +182,9 @@ fn gams_multi_optima_returns_single_best() {
     // GAMS bridge returns one optimum: exactly one valid point.
     let m = Model::new("multi");
     let items = Set::range(0..4usize);
-    let x = m.indexed_var("x", &items).binary().build();
-    m.constraint("cap", sum_over(&items, |i: usize| x[i]).le(2.0));
-    m.maximize(sum_over(&items, |i: usize| x[i]));
+    variable!(m, x[i in items], Bin);
+    constraint!(m, cap, sum!(x[i] for i in items) <= 2.0);
+    objective!(m, Max, sum!(x[i] for i in items));
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let r = Gams::new().solve(&m, &opts).unwrap();
@@ -202,9 +203,9 @@ fn gams_reads_cplex_solution_pool() {
     // Requires a GAMS install with a licensed CPLEX.
     let m = Model::new("multi");
     let items = Set::range(0..4usize);
-    let x = m.indexed_var("x", &items).binary().build();
-    m.constraint("cap", sum_over(&items, |i: usize| x[i]).le(2.0));
-    m.maximize(sum_over(&items, |i: usize| x[i]));
+    variable!(m, x[i in items], Bin);
+    constraint!(m, cap, sum!(x[i] for i in items) <= 2.0);
+    objective!(m, Max, sum!(x[i] for i in items));
 
     let cfg = GamsSolverConfig::Cplex(GamsCplexOptions {
         raw: vec![
