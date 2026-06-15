@@ -121,7 +121,7 @@ enum BoundKind {
 }
 
 /// Closure parameter for a per-key (`.lb_by`/`.ub_by`) bound: each index the
-/// bound does not reference is replaced with `_`, so the generated closure never 
+/// bound does not reference is replaced with `_`, so the generated closure never
 /// has an unused parameter.
 fn bound_closure_param(binds: &[IndexBind], bound: &TokenStream2) -> TokenStream2 {
     if let [single] = binds {

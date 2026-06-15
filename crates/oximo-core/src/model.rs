@@ -655,7 +655,7 @@ pub fn display_index_key(key: &IndexKey) -> String {
 
 #[cfg(test)]
 // exercises the builder API directly until its 0.4.0 removal
-#[allow(deprecated)] 
+#[allow(deprecated)]
 mod tests {
     use oximo_expr::extract_linear;
 

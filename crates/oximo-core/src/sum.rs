@@ -45,8 +45,8 @@ impl<K, D: SumDomain<K> + ?Sized> SumDomain<K> for &D {
     }
 }
 
-// Integer ranges as sum domains. Iteration is lazy, so `sum!(x[i] for i in 0..n)` 
-// allocates nothing. Provided for the common integer types the `sum!`/`constraint!` 
+// Integer ranges as sum domains. Iteration is lazy, so `sum!(x[i] for i in 0..n)`
+// allocates nothing. Provided for the common integer types the `sum!`/`constraint!`
 // macros default to.
 impl SumDomain<usize> for std::ops::Range<usize> {
     fn keys(&self) -> impl Iterator<Item = usize> + '_ {
@@ -103,7 +103,7 @@ where
 
 #[cfg(test)]
 // exercises the builder API directly until its 0.4.0 removal
-#[allow(deprecated)] 
+#[allow(deprecated)]
 mod tests {
     use oximo_expr::extract_linear;
 
