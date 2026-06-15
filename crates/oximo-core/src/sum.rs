@@ -13,7 +13,11 @@ pub trait SumDomain<K> {
     fn keys(&self) -> impl Iterator<Item = K> + '_;
 }
 
-impl<K: FromIndexKey> SumDomain<K> for Set {
+// A typed set yields exactly its own key type.
+// The single `SumDomain` impl for `Set<K>`, so `sum!`/`constraint!`
+// can infer the closure parameter without an annotation
+// (the erased `Set` defaulted to `Set<IndexKey>`).
+impl<K: FromIndexKey> SumDomain<K> for Set<K> {
     fn keys(&self) -> impl Iterator<Item = K> + '_ {
         self.iter().map(|k| K::from_index_key(&k))
     }
@@ -109,7 +113,6 @@ mod tests {
 
     use super::*;
     use crate::model::Model;
-    use crate::set::IndexKey;
 
     #[test]
     fn sum_over_scalar_set() {
@@ -153,12 +156,12 @@ mod tests {
     }
 
     #[test]
-    fn sum_over_passes_raw_index_key() {
-        let m = Model::new("rawkey");
+    fn sum_over_passes_typed_usize_key() {
+        let m = Model::new("usizekey");
         let items = Set::range(0..3);
         let x = m.indexed_var("x", &items).lb(0.0).build();
 
-        let total = sum_over(&items, |k: IndexKey| x[k]);
+        let total = sum_over(&items, |i: usize| x[i]);
         let arena = m.arena();
         let terms = extract_linear(&arena, total.id).expect("linear");
         assert_eq!(terms.coeffs.len(), 3);

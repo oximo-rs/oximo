@@ -25,7 +25,7 @@ pub use indexed::IndexedVar;
 pub use model::{IndexedVarBuilder, Model, ModelKind, display_index_key};
 pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
-pub use set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
+pub use set::{FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};
 pub use sum::SumDomain;
 #[allow(deprecated)]
 pub use sum::sum_over;
