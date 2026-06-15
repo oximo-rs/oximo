@@ -1,0 +1,22 @@
+[package]
+name = "oximo-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Internal procedural macros for oximo, re-exported through oximo-core"
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true, features = ["full"] }
+quote.workspace = true
+proc-macro2.workspace = true
+proc-macro-crate.workspace = true
+
+[lints]
+workspace = true
