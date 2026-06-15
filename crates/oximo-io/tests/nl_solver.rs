@@ -70,9 +70,11 @@ fn write_and_solve(m: &Model, expected_obj: f64, tol: f64) {
 fn rosenbrock_via_solver() {
     // min (1-x0)^2 + 100 (x1 - x0^2)^2, minimum 0 at (1, 1).
     let m = Model::new("rosenbrock");
-    let x0 = m.var("x0").lb(-5.0).ub(5.0).initial(-1.2).build();
-    let x1 = m.var("x1").lb(-5.0).ub(5.0).initial(1.0).build();
-    m.minimize((1.0 - x0).powi(2) + 100.0 * (x1 - x0.powi(2)).powi(2));
+    variable!(m, -5.0 <= x0 <= 5.0);
+    variable!(m, -5.0 <= x1 <= 5.0);
+    m.set_initial(x0, -1.2);
+    m.set_initial(x1, 1.0);
+    objective!(m, Min, (1.0 - x0).powi(2) + 100.0 * (x1 - x0.powi(2)).powi(2));
     write_and_solve(&m, 0.0, 1e-4);
 }
 
@@ -83,10 +85,10 @@ fn small_lp_via_solver() {
     //      0 <= x0, x1 <= 10
     // Optimal: x0=3, x1=0, obj=3.
     let m = Model::new("smalllp");
-    let x0 = m.var("x0").lb(0.0).ub(10.0).build();
-    let x1 = m.var("x1").lb(0.0).ub(10.0).build();
-    m.minimize(x0 + 2.0 * x1);
-    m.constraint("c0", (x0 + x1).ge(3.0));
+    variable!(m, 0.0 <= x0 <= 10.0);
+    variable!(m, 0.0 <= x1 <= 10.0);
+    objective!(m, Min, x0 + 2.0 * x1);
+    constraint!(m, c0, x0 + x1 >= 3.0);
     write_and_solve(&m, 3.0, 1e-4);
 }
 

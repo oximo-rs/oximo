@@ -10,10 +10,10 @@ use tempfile::TempDir;
 
 fn simple_lp() -> Model {
     let m = Model::new("opt");
-    let x = m.var("x").build();
-    let y = m.var("y").build();
-    m.minimize(x + 2.0 * y);
-    m.constraint("c0", (x + y).ge(3.0));
+    variable!(m, x);
+    variable!(m, y);
+    objective!(m, Min, x + 2.0 * y);
+    constraint!(m, c0, x + y >= 3.0);
     m
 }
 
@@ -30,9 +30,9 @@ fn no_comments() {
 fn precision_knob() {
     let m = {
         let m = Model::new("p");
-        let x = m.var("x").build();
-        m.minimize(x * std::f64::consts::PI);
-        m.constraint("c0", x.ge(0.0));
+        variable!(m, x);
+        objective!(m, Min, x * std::f64::consts::PI);
+        constraint!(m, c0, x >= 0.0);
         m
     };
     let mut opts = WriteOptions::ascii_lean();
@@ -47,9 +47,9 @@ fn precision_knob() {
 fn nonfinite_strings() {
     let m = {
         let m = Model::new("nf");
-        let x = m.var("x").lb(f64::NEG_INFINITY).ub(f64::INFINITY).build();
-        m.minimize(x);
-        m.constraint("c0", x.ge(0.0));
+        variable!(m, f64::NEG_INFINITY <= x <= f64::INFINITY);
+        objective!(m, Min, x);
+        constraint!(m, c0, x >= 0.0);
         m
     };
     // Default strict mode passes because bounds use the `b 3` (free) line
@@ -67,9 +67,9 @@ fn nonfinite_strings() {
 #[test]
 fn nonfinite_constant_in_residual() {
     let m = Model::new("nf_res");
-    let x = m.var("x").build();
-    m.minimize(f64::INFINITY * x.sin());
-    m.constraint("c0", x.ge(0.0));
+    variable!(m, x);
+    objective!(m, Min, f64::INFINITY * x.sin());
+    constraint!(m, c0, x >= 0.0);
 
     assert!(
         matches!(to_nl_string_with(&m, &WriteOptions::default()), Err(IoError::InvalidNumber)),
@@ -82,6 +82,7 @@ fn nonfinite_constant_in_residual() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn rejects_semi_domains() {
     for (dom, name) in [
         (Domain::SemiContinuous { threshold: 2.0 }, "SemiContinuous"),
@@ -213,9 +214,9 @@ fn d_segment_hook() {
 fn complementarity_in_r() {
     let m = {
         let m = Model::new("comp");
-        let x = m.var("x").lb(0.0).build();
-        m.minimize(x);
-        m.constraint("c0", x.ge(0.0));
+        variable!(m, x >= 0.0);
+        objective!(m, Min, x);
+        constraint!(m, c0, x >= 0.0);
         m
     };
     let mut opts = WriteOptions::ascii_lean();
