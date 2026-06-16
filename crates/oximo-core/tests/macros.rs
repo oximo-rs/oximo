@@ -187,6 +187,23 @@ fn multi_bind_declaration_not_mangled() {
 }
 
 #[test]
+fn computed_constraint_name_in_loop() {
+    let m = Model::new("named_loop");
+    let labels = ["a", "b", "c"];
+    variable!(m, x[i in 0..3] >= 0.0);
+    for (i, nm) in labels.iter().enumerate() {
+        constraint!(m, name = format!("cap_{nm}"), x[i] <= 1.0);
+    }
+    constraint!(m, name = "fixed", x[0] >= 0.0);
+
+    assert_eq!(m.num_constraints(), 4);
+    assert!(m.constraint_id("cap_a").is_some());
+    assert!(m.constraint_id("cap_c").is_some());
+    assert!(m.constraint_id("fixed").is_some());
+    assert!(m.constraint_id("_c0").is_none());
+}
+
+#[test]
 fn index_sugar_leaves_arrays_untouched() {
     let m = Model::new("arrays");
     let cost = [3.0, 5.0];
