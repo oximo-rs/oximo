@@ -8,10 +8,10 @@ use smol_str::SmolStr;
 use crate::constraint::{Constraint, ConstraintExpr, ConstraintId};
 use crate::domain::Domain;
 use crate::error::{Error, Result};
-use crate::indexed::IndexedVar;
+use crate::indexed::{IndexedVar, Storage, grid_offset};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
-use crate::set::{FromIndexKey, IndexKey, Set};
+use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::var::{VarBuilder, Variable};
 
 /// The kind of mathematical program a `Model` represents.
@@ -151,6 +151,7 @@ impl Model {
             model: self,
             base_name: name.into(),
             keys: set.iter().collect(),
+            axes: set.axes().map(Box::from),
             lb: f64::NEG_INFINITY,
             ub: f64::INFINITY,
             lb_by: None,
@@ -531,6 +532,7 @@ pub struct IndexedVarBuilder<'a, K = IndexKey> {
     model: &'a Model,
     base_name: String,
     keys: Vec<IndexKey>,
+    axes: Option<Box<[Axis]>>,
     lb: f64,
     ub: f64,
     lb_by: Option<BoundFn<'a>>,
@@ -614,16 +616,45 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
         self
     }
 
+    /// Register one scalar variable per key and return the [`IndexedVar`] handle.
+    ///
+    /// # Panics
+    /// Panics if a scalar variable name collides with one already registered.
     pub fn build(self) -> IndexedVar<'a, K> {
-        let mut entries = FxHashMap::default();
-        for key in self.keys {
-            let scalar_name: SmolStr = format_index_name(&self.base_name, &key).into();
-            let lb = self.lb_by.as_ref().map_or(self.lb, |f| f(&key));
-            let ub = self.ub_by.as_ref().map_or(self.ub, |f| f(&key));
-            let expr = self.model.__var(scalar_name).lb(lb).ub(ub).domain(self.domain).build();
-            entries.insert(key, expr);
-        }
-        IndexedVar { entries, _k: PhantomData }
+        let Self { model, base_name, keys, axes, lb, ub, lb_by, ub_by, domain, _k } = self;
+
+        let make = |key: &IndexKey| -> Expr<'a> {
+            let scalar_name: SmolStr = format_index_name(&base_name, key).into();
+            let lo = lb_by.as_ref().map_or(lb, |f| f(key));
+            let hi = ub_by.as_ref().map_or(ub, |f| f(key));
+            model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
+        };
+
+        let storage = if let Some(axes) = axes {
+            // Dense grid: place each scalar at its computed row-major offset,
+            // so the storage cannot be silently mis-built if `Set` iteration
+            // vever changes.
+            let total = keys.len();
+            let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
+            let mut kept: Vec<Option<IndexKey>> = vec![None; total];
+            for key in keys {
+                let expr = make(&key);
+                let off = grid_offset(&axes, &key).expect("dense grid key out of range");
+                data[off] = Some(expr);
+                kept[off] = Some(key);
+            }
+            let data = data.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
+            let kept = kept.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
+            Storage::Dense { data, keys: kept, axes }
+        } else {
+            let mut entries = FxHashMap::default();
+            for key in keys {
+                let expr = make(&key);
+                entries.insert(key, expr);
+            }
+            Storage::Sparse(entries)
+        };
+        IndexedVar { storage, _k: PhantomData }
     }
 }
 

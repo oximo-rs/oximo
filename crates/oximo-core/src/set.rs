@@ -37,6 +37,16 @@ impl SetRepr {
 
 // TODO: Simplify the following after removing the the builder API
 
+/// A single contiguous integer axis of a dense index grid.
+/// Carried by [`Set`] (see [`Set::axes`]) so an [`crate::IndexedVar`]
+/// built over a range can store its scalars densely and map
+/// a key to a flat offset without hashing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Axis {
+    pub start: i64,
+    pub len: usize,
+}
+
 /// A finite, ordered index set, parameterized by the type `K` its keys decode to.
 ///
 /// `K` is a phantom marker: the runtime representation is the same erased
@@ -46,15 +56,21 @@ impl SetRepr {
 ///
 /// Supports integer ranges (`K = usize`), string lists (`K = String`), and
 /// arbitrary tuple lists (built via [`Set::product`] / the `&a * &b` operator.
+///
+/// `axes` is `Some` exactly when the set is a dense integer grid
+/// and records the per-axis extents.
+/// It is `None` for string sets, sparse/`from_ints` sets, and any
+/// `filter`ed set.
 pub struct Set<K = IndexKey> {
     repr: SetRepr,
+    axes: Option<Box<[Axis]>>,
     _k: PhantomData<fn() -> K>,
 }
 
 // Manual `Clone`/`Debug` so they hold for every `K`
 impl<K> Clone for Set<K> {
     fn clone(&self) -> Self {
-        Self { repr: self.repr.clone(), _k: PhantomData }
+        Self { repr: self.repr.clone(), axes: self.axes.clone(), _k: PhantomData }
     }
 }
 
@@ -66,7 +82,18 @@ impl<K> std::fmt::Debug for Set<K> {
 
 impl<K> Set<K> {
     fn from_repr(repr: SetRepr) -> Self {
-        Self { repr, _k: PhantomData }
+        Self { repr, axes: None, _k: PhantomData }
+    }
+
+    fn from_repr_with_axes(repr: SetRepr, axes: Box<[Axis]>) -> Self {
+        Self { repr, axes: Some(axes), _k: PhantomData }
+    }
+
+    /// Per-axis extents when this set is a dense integer grid (a range or a
+    /// product of ranges), else `None`. Read by the `IndexedVar` builder to pick
+    /// dense vs sparse storage.
+    pub(crate) fn axes(&self) -> Option<&[Axis]> {
+        self.axes.as_deref()
     }
 
     /// Build a tuple set directly from an iterator of keys.
@@ -149,10 +176,20 @@ impl<K> Set<K> {
         let b_len = b.len();
         let total = a_len.checked_mul(b_len).expect("Set::product size overflow");
 
+        let axes = match (a.axes(), b.axes()) {
+            (Some(aa), Some(bb)) => {
+                let mut v = Vec::with_capacity(aa.len() + bb.len());
+                v.extend_from_slice(aa);
+                v.extend_from_slice(bb);
+                Some(v.into_boxed_slice())
+            }
+            _ => None,
+        };
+
         // Below this size, rayon dispatch overhead may dominate, so we stay serial.
         // TODO: benchmark and tune this threshold.
         const PAR_THRESHOLD: usize = 4096;
-        if total < PAR_THRESHOLD {
+        let out: Vec<IndexTuple> = if total < PAR_THRESHOLD {
             let mut out = Vec::with_capacity(total);
             for ka in a {
                 for kb in b {
@@ -162,21 +199,25 @@ impl<K> Set<K> {
                     out.push(parts.into_boxed_slice());
                 }
             }
-            return Set::from_repr(SetRepr::Tuples(out));
-        }
+            out
+        } else {
+            let a_keys: Vec<IndexKey> = a.iter().collect();
+            let b_keys: Vec<IndexKey> = b.iter().collect();
+            (0..total)
+                .into_par_iter()
+                .map(|i| {
+                    let mut parts: Vec<IndexKey> = Vec::new();
+                    push_flat(&mut parts, a_keys[i / b_len].clone());
+                    push_flat(&mut parts, b_keys[i % b_len].clone());
+                    parts.into_boxed_slice()
+                })
+                .collect()
+        };
 
-        let a_keys: Vec<IndexKey> = a.iter().collect();
-        let b_keys: Vec<IndexKey> = b.iter().collect();
-        let out: Vec<IndexTuple> = (0..total)
-            .into_par_iter()
-            .map(|i| {
-                let mut parts: Vec<IndexKey> = Vec::new();
-                push_flat(&mut parts, a_keys[i / b_len].clone());
-                push_flat(&mut parts, b_keys[i % b_len].clone());
-                parts.into_boxed_slice()
-            })
-            .collect();
-        Set::from_repr(SetRepr::Tuples(out))
+        match axes {
+            Some(axes) => Set::from_repr_with_axes(SetRepr::Tuples(out), axes),
+            None => Set::from_repr(SetRepr::Tuples(out)),
+        }
     }
 }
 
@@ -194,7 +235,16 @@ impl Set<usize> {
     pub fn range<T: PrimInt>(r: std::ops::Range<T>) -> Self {
         let start = r.start.to_i64().expect("range start out of i64 range");
         let end = r.end.to_i64().expect("range end out of i64 range");
-        Self::from_repr(SetRepr::Range((start..end).collect()))
+        Self::dense_i64(start, end)
+    }
+
+    /// Build a dense contiguous integer set from an `i64` half-open range,
+    /// recording the single axis so the resulting [`IndexedVar`] stores densely.
+    /// Shared by [`Self::range`] and the `RangeInclusive` `IntoSet` path.
+    pub(crate) fn dense_i64(start: i64, end: i64) -> Self {
+        let vals: Vec<i64> = (start..end).collect();
+        let len = vals.len();
+        Self::from_repr_with_axes(SetRepr::Range(vals), Box::from([Axis { start, len }]))
     }
 
     /// Build an integer index set from an iterator of any primitive integer
