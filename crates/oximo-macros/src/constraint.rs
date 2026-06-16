@@ -1,6 +1,6 @@
-//! `constraint!(model, [name | name[i in dom, ...]], lhs <op> rhs)`.
+//! `constraint!(model, [name | name = expr | name[i in dom, ...]], lhs <op> rhs)`.
 
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::Expr;
 
@@ -29,6 +29,14 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             Ok(quote!( (#model).__add_constraint_auto(#rel) ))
         }
         Some(rel_tokens) => {
+            // Computed name at run-time: `constraint!(m, name = expr, lhs OP rhs)`.
+            // Lets per-element constraints built in a `for` loop stay named
+            // (`format!("mb_{s}_{n}")`).
+            if let Some(name_expr) = computed_name(&first) {
+                let rel = build_relation(rel_tokens, &root)?;
+                return Ok(quote!( (#model).__add_constraint(#name_expr, #rel) ));
+            }
+
             let Named { name, binds } = parse_named(first)?;
             let name_str = name.to_string();
             match binds {
@@ -47,6 +55,22 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             }
         }
     }
+}
+
+/// Detect the computed-name form `name = EXPR` in the name slot, returning the
+/// `EXPR` tokens. The literal marker `name` keeps a bare ident a literal name.
+fn computed_name(first: &TokenStream2) -> Option<TokenStream2> {
+    let mut it = first.clone().into_iter();
+    match it.next()? {
+        TokenTree::Ident(id) if id == "name" => {}
+        _ => return None,
+    }
+    match it.next()? {
+        TokenTree::Punct(p) if p.as_char() == '=' && p.spacing() == Spacing::Alone => {}
+        _ => return None,
+    }
+    let expr: TokenStream2 = it.collect();
+    (!expr.is_empty()).then_some(expr)
 }
 
 /// Split `lhs <op> rhs` on its single relational operator and build the
