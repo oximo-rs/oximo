@@ -385,6 +385,12 @@ impl From<&&str> for IndexKey {
     }
 }
 
+impl From<&&String> for IndexKey {
+    fn from(s: &&String) -> Self {
+        Self::Str(SmolStr::new(s.as_str()))
+    }
+}
+
 impl<A, B> From<(A, B)> for IndexKey
 where
     A: Into<IndexKey>,

@@ -132,6 +132,10 @@ fn ref_keys_convert_for_index_sugar() {
     assert_eq!(parts[1].as_str(), Some("C2"));
     assert_eq!(parts[2].as_i64(), Some(3));
     assert_eq!(p, "P1");
+
+    let pref: &String = &p;
+    let k2: IndexKey = (&pref, &n).into();
+    assert_eq!(k2.as_tuple().unwrap()[0].as_str(), Some("P1"));
 }
 
 #[test]
