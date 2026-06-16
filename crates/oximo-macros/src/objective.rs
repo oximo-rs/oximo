@@ -23,6 +23,8 @@ impl Parse for ObjectiveInput {
 }
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
+    // Rewrite `q[i, j, k]` index sugar in the objective expression.
+    let input = crate::index::rewrite_index_subscripts(input);
     let ObjectiveInput { model, sense, expr } = syn::parse2(input)?;
 
     let method = match sense.to_string().as_str() {

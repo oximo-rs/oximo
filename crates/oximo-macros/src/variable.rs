@@ -61,6 +61,10 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     };
 
+    // Bound expressions are value expressions, so `q[i, j]` index sugar applies.
+    let lb = lb.map(crate::index::rewrite_index_subscripts);
+    let ub = ub.map(crate::index::rewrite_index_subscripts);
+
     let Named { name, binds } = parse_named(core)?;
     let name_str = name.to_string();
     let root = oximo_root();

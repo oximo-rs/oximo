@@ -34,6 +34,8 @@ impl Parse for SumInput {
 }
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
+    // Rewrite `q[i, j, k]` index sugar in the body / filter.
+    let input = crate::index::rewrite_index_subscripts(input);
     let SumInput { body, binds, cond } = syn::parse2(input)?;
     let root = oximo_root();
 

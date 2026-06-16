@@ -66,7 +66,7 @@ fn build_relation(tokens: TokenStream2, root: &TokenStream2) -> syn::Result<Toke
         ));
     };
     let method = op.method();
-    let lhs: Expr = syn::parse2(lhs)?;
-    let rhs: Expr = syn::parse2(rhs)?;
+    let lhs: Expr = syn::parse2(crate::index::rewrite_index_subscripts(lhs))?;
+    let rhs: Expr = syn::parse2(crate::index::rewrite_index_subscripts(rhs))?;
     Ok(quote!( #root::__macro_support::Relate::#method(#lhs, #rhs) ))
 }

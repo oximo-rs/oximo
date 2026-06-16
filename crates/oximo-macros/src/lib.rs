@@ -9,6 +9,7 @@ use syn::Ident;
 
 mod bind;
 mod constraint;
+mod index;
 mod objective;
 mod param;
 mod sum;
