@@ -360,6 +360,31 @@ impl From<&String> for IndexKey {
     }
 }
 
+// Reference conversions.
+impl From<&usize> for IndexKey {
+    fn from(v: &usize) -> Self {
+        Self::from(*v)
+    }
+}
+
+impl From<&i64> for IndexKey {
+    fn from(v: &i64) -> Self {
+        Self::Int(*v)
+    }
+}
+
+impl From<&i32> for IndexKey {
+    fn from(v: &i32) -> Self {
+        Self::Int(i64::from(*v))
+    }
+}
+
+impl From<&&str> for IndexKey {
+    fn from(s: &&str) -> Self {
+        Self::Str(SmolStr::new(*s))
+    }
+}
+
 impl<A, B> From<(A, B)> for IndexKey
 where
     A: Into<IndexKey>,

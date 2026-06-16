@@ -121,6 +121,20 @@ fn tuple_key_from_pair_literal() {
 }
 
 #[test]
+fn ref_keys_convert_for_index_sugar() {
+    let p: String = "P1".into();
+    let s: &str = "C2";
+    let n: usize = 3;
+    let k: IndexKey = (&p, &s, &n).into();
+    let parts = k.as_tuple().unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0].as_str(), Some("P1"));
+    assert_eq!(parts[1].as_str(), Some("C2"));
+    assert_eq!(parts[2].as_i64(), Some(3));
+    assert_eq!(p, "P1");
+}
+
+#[test]
 fn indexed_var_over_product_creates_named_scalars() {
     let m = Model::new("net");
     let plants = Set::strings(["seattle", "san-diego"]);
