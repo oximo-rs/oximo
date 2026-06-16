@@ -9,6 +9,7 @@ use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
 use syn::{Ident, Pat};
 
+use crate::bind::filtered_set;
 use crate::{
     IndexBind, Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas,
 };
@@ -65,7 +66,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let lb = lb.map(crate::index::rewrite_index_subscripts);
     let ub = ub.map(crate::index::rewrite_index_subscripts);
 
-    let Named { name, binds } = parse_named(core)?;
+    let Named { name, binds, cond } = parse_named(core)?;
     let name_str = name.to_string();
     let root = oximo_root();
 
@@ -107,6 +108,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         },
         Some(binds) => {
             let set = build_set(&binds, &root);
+            let set = filtered_set(set, &binds, cond.as_ref(), &root);
             quote! {
                 let #name = {
                     let __set = #set;

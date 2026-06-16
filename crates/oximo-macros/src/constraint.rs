@@ -4,7 +4,7 @@ use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::Expr;
 
-use crate::bind::family_closure_param;
+use crate::bind::{family_closure_param, filtered_set};
 use crate::{Named, build_set, oximo_root, parse_named, split_relops, split_top_commas};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
@@ -37,7 +37,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 return Ok(quote!( (#model).__add_constraint(#name_expr, #rel) ));
             }
 
-            let Named { name, binds } = parse_named(first)?;
+            let Named { name, binds, cond } = parse_named(first)?;
             let name_str = name.to_string();
             match binds {
                 None => {
@@ -47,6 +47,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 Some(binds) => {
                     let param = family_closure_param(&binds);
                     let set = build_set(&binds, &root);
+                    let set = filtered_set(set, &binds, cond.as_ref(), &root);
                     let rel = build_relation(rel_tokens, &root)?;
                     Ok(quote! {
                         (#model).__add_constraints_over(#name_str, &(#set), |#param| #rel);

@@ -152,10 +152,11 @@ fn split_relops(ts: TokenStream2) -> (Vec<TokenStream2>, Vec<RelOp>) {
 }
 
 /// A parsed `name` or `name[binds]` "core" of a `variable!`/`constraint!`
-/// declaration.
+/// declaration. `cond` holds an optional `if` filter on the index family.
 struct Named {
     name: Ident,
     binds: Option<Vec<IndexBind>>,
+    cond: Option<syn::Expr>,
 }
 
 /// Parse a `name`/`name[i in dom, ...]` core out of a token segment.
@@ -170,17 +171,17 @@ fn parse_named(seg: TokenStream2) -> syn::Result<Named> {
         return Err(syn::Error::new(span, "expected a name identifier"));
     };
 
-    let binds = match tts.get(1) {
-        None => None,
+    let (binds, cond) = match tts.get(1) {
+        None => (None, None),
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket => {
             let parsed: Binds = syn::parse2(g.stream())?;
-            Some(parsed.0)
+            (Some(parsed.binds), parsed.cond)
         }
         Some(other) => {
             return Err(syn::Error::new(other.span(), "expected `[index in domain, ...]`"));
         }
     };
-    Ok(Named { name, binds })
+    Ok(Named { name, binds, cond })
 }
 
 /// Build an owned `Set` token expression from one or more index bindings.

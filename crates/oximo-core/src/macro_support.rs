@@ -11,6 +11,16 @@ pub use crate::set::{FromIndexKey, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
 
+/// Filter a [`Set`] by a typed predicate over its decoded keys. Backs the
+/// filtered family form `name[i in dom if cond]` of `variable!`/`constraint!`.
+pub fn filter_keys<K, F>(set: &Set<K>, mut pred: F) -> Set<K>
+where
+    K: FromIndexKey,
+    F: FnMut(K) -> bool,
+{
+    set.filter(|k| pred(K::from_index_key(k)))
+}
+
 /// Typed key iterator over a sum/constraint domain. Backs the filtered form of
 /// the `sum!` macro (`sum!(.. for i in dom if cond)`), which iterates and skips
 /// non-matching keys rather than summing zero terms.

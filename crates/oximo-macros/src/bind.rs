@@ -4,7 +4,6 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::punctuated::Punctuated;
 use syn::{Expr, Pat, Token, Type};
 
 /// One `pat in domain` clause, with an optional explicit key type.
@@ -34,13 +33,34 @@ impl Parse for IndexBind {
     }
 }
 
-/// A comma-separated, optionally trailing list of [`IndexBind`]s
-pub(crate) struct Binds(pub(crate) Vec<IndexBind>);
+/// A comma-separated, optionally trailing list of [`IndexBind`]s, with an
+/// optional trailing `if cond` filter (`name[i in S if cond]`).
+pub(crate) struct Binds {
+    pub(crate) binds: Vec<IndexBind>,
+    pub(crate) cond: Option<Expr>,
+}
 
 impl Parse for Binds {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let parsed = Punctuated::<IndexBind, Token![,]>::parse_terminated(input)?;
-        Ok(Self(parsed.into_iter().collect()))
+        let mut binds = Vec::new();
+        while !input.is_empty() && !input.peek(Token![if]) {
+            binds.push(input.parse::<IndexBind>()?);
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+        let cond = if input.peek(Token![if]) {
+            input.parse::<Token![if]>()?;
+            Some(input.parse::<Expr>()?)
+        } else {
+            None
+        };
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after index bindings"));
+        }
+        Ok(Self { binds, cond })
     }
 }
 
@@ -71,6 +91,24 @@ impl IndexBind {
             Some(quote!(usize))
         } else {
             None
+        }
+    }
+}
+
+/// Wrap a built `Set` token expression in `filter_keys(.., |pat| cond)` when the
+/// family carries an `if` filter (`name[i in dom if cond]`), otherwise return the
+/// set unchanged.
+pub(crate) fn filtered_set(
+    set: TokenStream2,
+    binds: &[IndexBind],
+    cond: Option<&Expr>,
+    root: &TokenStream2,
+) -> TokenStream2 {
+    match cond {
+        None => set,
+        Some(cond) => {
+            let param = family_closure_param(binds);
+            quote!( #root::__macro_support::filter_keys(&(#set), |#param| #cond) )
         }
     }
 }
