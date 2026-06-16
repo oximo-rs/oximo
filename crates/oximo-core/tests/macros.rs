@@ -203,6 +203,70 @@ fn computed_constraint_name_in_loop() {
     assert!(m.constraint_id("_c0").is_none());
 }
 
+// --- Filtered families
+
+#[test]
+fn filtered_constraint_family_keeps_matching_keys() {
+    let m = Model::new("ffam");
+    variable!(m, x[i in 0..5] >= 0.0);
+    constraint!(m, evens[i in 0..5 if i % 2 == 0], x[i] <= 1.0);
+    assert_eq!(m.num_constraints(), 3);
+    assert!(m.constraint_id("evens[0]").is_some());
+    assert!(m.constraint_id("evens[2]").is_some());
+    assert!(m.constraint_id("evens[4]").is_some());
+    assert!(m.constraint_id("evens[1]").is_none());
+    assert!(m.constraint_id("evens[3]").is_none());
+}
+
+#[test]
+fn filtered_variable_family_only_builds_matching_keys() {
+    let m = Model::new("fvar");
+    variable!(m, x[i in 0..5 if i % 2 == 0] >= 0.0);
+    assert_eq!(m.num_variables(), 3);
+    assert_eq!(x.len(), 3);
+    objective!(m, Min, x[0] + x[2] + x[4]);
+    assert_eq!(m.kind(), ModelKind::LP);
+}
+
+#[test]
+fn filtered_tuple_family_uses_cross_index_condition() {
+    let m = Model::new("ftuple");
+    let rows = Set::range(0..3);
+    let cols = Set::range(0..3);
+    let rc = &rows * &cols;
+    variable!(m, y[(i, j) in rc] >= 0.0);
+    constraint!(m, diag[(i, j) in rc if i == j], y[i, j] <= 1.0);
+    assert_eq!(m.num_constraints(), 3);
+    assert!(m.constraint_id("diag[0,0]").is_some());
+    assert!(m.constraint_id("diag[1,1]").is_some());
+    assert!(m.constraint_id("diag[2,2]").is_some());
+    assert!(m.constraint_id("diag[0,1]").is_none());
+}
+
+#[test]
+fn filtered_family_reads_external_data() {
+    let m = Model::new("fdata");
+    let unit_of = [0_usize, 0, 1, 1, 2];
+    variable!(m, w[i in 0..5] >= 0.0);
+    constraint!(m, only_unit1[i in 0..5 if unit_of[i] == 1], w[i] <= 1.0);
+    assert_eq!(m.num_constraints(), 2);
+    assert!(m.constraint_id("only_unit1[2]").is_some());
+    assert!(m.constraint_id("only_unit1[3]").is_some());
+    assert!(m.constraint_id("only_unit1[0]").is_none());
+}
+
+#[test]
+fn filtered_string_family_drops_keys() {
+    let m = Model::new("fstr");
+    let plants = Set::strings(["a", "skip", "c"]);
+    variable!(m, x[p in plants] >= 0.0);
+    constraint!(m, keep[p in plants if p != "skip"], x[p] <= 1.0);
+    assert_eq!(m.num_constraints(), 2);
+    assert!(m.constraint_id("keep[a]").is_some());
+    assert!(m.constraint_id("keep[c]").is_some());
+    assert!(m.constraint_id("keep[skip]").is_none());
+}
+
 #[test]
 fn index_sugar_leaves_arrays_untouched() {
     let m = Model::new("arrays");
