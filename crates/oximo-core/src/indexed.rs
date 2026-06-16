@@ -91,7 +91,7 @@ impl<'a, K> IndexedVar<'a, K> {
     }
 
     /// Zero-allocation typed index by integer coordinates.
-    /// On a dense family this maps straight to a flat offset with no 
+    /// On a dense family this maps straight to a flat offset with no
     /// `IndexKey` built. On a sparse family it falls back to building a key.
     ///
     /// # Panics
