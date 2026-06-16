@@ -148,3 +148,56 @@ fn index_dependent_bound_infers_key() {
     let vars = m.variables();
     assert!((vars[2].ub - 6.0).abs() < f64::EPSILON);
 }
+
+// --- Multi-index access sugar: `q[i, j, k]` == `q[(&i, &j, &k)]`.
+
+#[test]
+fn multi_index_sugar_builds_the_family() {
+    let m = Model::new("sugar");
+    let hp = Set::strings(["H1", "H2"]);
+    let cp = Set::strings(["C1", "C2"]);
+    let st = Set::range(0..2);
+    let hcs = &(&hp * &cp) * &st;
+    variable!(m, q[(i, j, k) in hcs] >= 0.0);
+    constraint!(m, lim[(i, j, k) in hcs], q[i, j, k] <= 10.0);
+    objective!(m, Max, sum!(q[i, j, k] for (i, j, k) in hcs));
+    assert_eq!(m.num_variables(), 8);
+    assert_eq!(m.num_constraints(), 8);
+    assert!(m.constraint_id("lim[H1,C2,1]").is_some());
+}
+
+#[test]
+fn multi_index_sugar_allows_key_reuse() {
+    let m = Model::new("reuse");
+    let p = Set::strings(["a", "b"]);
+    let n = Set::range(0..2);
+    let pn = &p * &n;
+    variable!(m, s[(pp, nn) in pn] >= 0.0);
+    constraint!(m, c[(pp, nn) in pn], s[pp, nn] + s[pp, nn] <= 5.0);
+    assert_eq!(m.num_constraints(), 4);
+}
+
+#[test]
+fn multi_bind_declaration_not_mangled() {
+    let m = Model::new("multibind");
+    variable!(m, b[i in 0..2, n in 0..3] >= 0.0);
+    constraint!(m, lim[i in 0..2, n in 0..3], b[i, n] <= 1.0);
+    assert_eq!(m.num_variables(), 6);
+    assert_eq!(m.num_constraints(), 6);
+}
+
+#[test]
+fn index_sugar_leaves_arrays_untouched() {
+    let m = Model::new("arrays");
+    let cost = [3.0, 5.0];
+    let mat = [[1.0, 0.0], [0.0, 1.0]];
+    variable!(m, x[i in 0..2] >= 0.0);
+    constraint!(m, c, sum!(cost[i] * x[i] for i in 0..2) <= 100.0);
+    objective!(
+        m,
+        Max,
+        sum!(mat[i][j] * x[i] for i in 0..2, j in 0..2) + sum!([3.0, 5.0][i] * x[i] for i in 0..2)
+    );
+    assert_eq!(m.num_variables(), 2);
+    assert_eq!(m.num_constraints(), 1);
+}
