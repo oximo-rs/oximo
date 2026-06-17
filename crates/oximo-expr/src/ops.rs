@@ -1,7 +1,8 @@
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
+use crate::arena::ExprId;
 use crate::handle::Expr;
-use crate::linear::{add_into, div_into, mul_into, neg_into, sub_into};
+use crate::linear::{add_into, add_n, div_into, mul_into, neg_into, sub_into};
 
 // -----------------------------------------------------------------------------
 // Expr <op> Expr
@@ -147,13 +148,16 @@ impl_scalar_ops!(i32, f64::from);
 
 // -----------------------------------------------------------------------------
 // std::iter::Sum: the first element of the iterator carries the arena handle,
-// so no external zero is required.
+// so no external zero is required. Collected into a single flat n-ary `Add`.
 // -----------------------------------------------------------------------------
 
 impl<'a> std::iter::Sum for Expr<'a> {
-    fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
-        let first = iter.next().expect("Expr::sum on empty iterator");
-        iter.fold(first, |acc, e| acc + e)
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let items: Vec<Self> = iter.collect();
+        let first = *items.first().expect("Expr::sum on empty iterator");
+        let ids: Vec<ExprId> = items.iter().map(|e| e.id).collect();
+        let id = add_n(&mut first.arena.borrow_mut(), &ids);
+        Self::new(id, first.arena)
     }
 }
 

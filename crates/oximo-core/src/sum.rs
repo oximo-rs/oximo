@@ -101,14 +101,14 @@ where
 /// Macro-facing entry point behind [`sum_over`]. Backs the `sum!` macro. Not
 /// part of the stable public API.
 #[doc(hidden)]
-pub fn __sum_over<'a, K, D, F>(domain: &D, mut f: F) -> Expr<'a>
+pub fn __sum_over<'a, K, D, F>(domain: &D, f: F) -> Expr<'a>
 where
     D: SumDomain<K> + ?Sized,
     F: FnMut(K) -> Expr<'a>,
 {
-    let mut iter = domain.keys();
-    let first = f(iter.next().expect("sum_over on empty domain"));
-    iter.fold(first, |acc, k| acc + f(k))
+    let terms: Vec<Expr<'a>> = domain.keys().map(f).collect();
+    assert!(!terms.is_empty(), "sum_over on empty domain");
+    terms.into_iter().sum()
 }
 
 #[cfg(test)]

@@ -49,15 +49,11 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         return Ok(expr);
     };
 
-    // Filtered: iterate the (decoded) keys with nested `for` loops, skipping
-    // keys that fail `cond`, and accumulate only the matching terms.
+    // Filtered: iterate the (decoded) keys with nested `for` loops, pushing only
+    // the matching terms, then flatten them in one pass (`sum_terms`).
     let mut inner = quote! {
         if #cond {
-            let __term = #body;
-            __acc = ::core::option::Option::Some(match __acc {
-                ::core::option::Option::Some(__a) => __a + __term,
-                ::core::option::Option::None => __term,
-            });
+            __terms.push(#body);
         }
     };
     for b in binds.iter().rev() {
@@ -75,8 +71,12 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         };
     }
     Ok(quote! {{
-        let mut __acc = ::core::option::Option::None;
+        let mut __terms = ::std::vec::Vec::new();
         #inner
-        __acc.expect("sum! with an `if` filter produced no terms")
+        ::core::assert!(
+            !__terms.is_empty(),
+            "sum! with an `if` filter produced no terms"
+        );
+        #root::__macro_support::sum_terms(__terms)
     }})
 }

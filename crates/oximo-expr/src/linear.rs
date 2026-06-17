@@ -99,6 +99,20 @@ pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprI
     arena.push(ExprNode::Add(smallvec![lhs, rhs]))
 }
 
+/// Build a flat n-ary sum of `ids` as a single `Add` node.
+/// `as_linear`/`split_linear` collapse the resulting `Add`
+/// in one pass at extraction, so the linear fast-path is preserved.
+///
+/// # Panics
+/// Panics if `ids` is empty (callers supply at least one term).
+pub(crate) fn add_n(arena: &mut ExprArena, ids: &[ExprId]) -> ExprId {
+    match ids {
+        [] => panic!("add_n on an empty term list"),
+        [one] => *one,
+        _ => arena.push(ExprNode::Add(ids.iter().copied().collect())),
+    }
+}
+
 /// Build `lhs - rhs`. Same linear fast-path as `add_into`.
 pub(crate) fn sub_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
     let neg = neg_into(arena, rhs);

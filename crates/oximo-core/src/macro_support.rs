@@ -11,6 +11,13 @@ pub use crate::set::{FromIndexKey, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
 
+/// Flatten already-collected `sum!` terms into one expression (a single n-ary
+/// `Add`).
+#[must_use]
+pub fn sum_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
+    terms.into_iter().sum()
+}
+
 /// Filter a [`Set`] by a typed predicate over its decoded keys. Backs the
 /// filtered family form `name[i in dom if cond]` of `variable!`/`constraint!`.
 pub fn filter_keys<K, F>(set: &Set<K>, mut pred: F) -> Set<K>
