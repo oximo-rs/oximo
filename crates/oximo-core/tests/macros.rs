@@ -114,6 +114,77 @@ fn large_filtered_sum_builds_correctly() {
     assert_eq!(terms.coeffs.len(), N / 2);
 }
 
+// --- Two-sided range constraints: `lo <= e <= hi` lowers to `_lo` + `_hi` rows.
+
+#[test]
+fn range_constraint_lowers_to_two_rows() {
+    let m = Model::new("range");
+    variable!(m, x >= 0.0);
+    variable!(m, y >= 0.0);
+    constraint!(m, band, 1.0 <= x + y <= 3.0);
+
+    assert_eq!(m.num_constraints(), 2);
+    let cons = m.constraints();
+    let lo = &cons[m.constraint_id("band_lo").expect("lo row").index()];
+    let hi = &cons[m.constraint_id("band_hi").expect("hi row").index()];
+    assert_eq!(lo.sense, Sense::Ge);
+    assert!((lo.rhs - 1.0).abs() < f64::EPSILON);
+    assert_eq!(hi.sense, Sense::Le);
+    assert!((hi.rhs - 3.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn range_constraint_ge_form_is_equivalent() {
+    let m = Model::new("rangege");
+    variable!(m, x >= 0.0);
+    constraint!(m, b, 3.0 >= x >= 1.0);
+
+    let cons = m.constraints();
+    let lo = &cons[m.constraint_id("b_lo").unwrap().index()];
+    let hi = &cons[m.constraint_id("b_hi").unwrap().index()];
+    assert_eq!(lo.sense, Sense::Ge);
+    assert!((lo.rhs - 1.0).abs() < f64::EPSILON);
+    assert_eq!(hi.sense, Sense::Le);
+    assert!((hi.rhs - 3.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn anonymous_range_makes_two_auto_rows() {
+    let m = Model::new("anonr");
+    variable!(m, x >= 0.0);
+    constraint!(m, 0.0 <= x <= 5.0);
+    assert_eq!(m.num_constraints(), 2);
+    assert!(m.constraint_id("_c0").is_some());
+    assert!(m.constraint_id("_c1").is_some());
+}
+
+#[test]
+fn family_range_makes_two_rows_per_element() {
+    let m = Model::new("famr");
+    let lo = [1.0, 2.0, 3.0];
+    let hi = [4.0, 5.0, 6.0];
+    variable!(m, x[i in 0..3] >= 0.0);
+    constraint!(m, cap[i in 0..3], lo[i] <= x[i] <= hi[i]);
+
+    assert_eq!(m.num_constraints(), 6);
+    assert!(m.constraint_id("cap_lo[0]").is_some());
+    assert!(m.constraint_id("cap_hi[2]").is_some());
+    let cons = m.constraints();
+    let c = &cons[m.constraint_id("cap_lo[1]").unwrap().index()];
+    assert_eq!(c.sense, Sense::Ge);
+    assert!((c.rhs - 2.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn computed_name_range_suffixes_both_rows() {
+    let m = Model::new("crange");
+    variable!(m, x >= 0.0);
+    let tag = "band";
+    constraint!(m, name = format!("{tag}"), 1.0 <= x <= 2.0);
+    assert!(m.constraint_id("band_lo").is_some());
+    assert!(m.constraint_id("band_hi").is_some());
+}
+
 #[test]
 fn param_handle_keeps_model_linear() {
     let m = Model::new("param");
