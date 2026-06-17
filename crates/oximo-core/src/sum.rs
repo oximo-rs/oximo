@@ -9,6 +9,12 @@ use crate::set::{FromIndexKey, Set};
 /// Returns an iterator (rather than taking a callback) so the trait method
 /// monomorphizes through to the loop body in [`sum_over`], allowing inlining
 /// in hot sums. Implementations are typically one line.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid index domain over key type `{K}`",
+    label = "the domain's keys are not `{K}`",
+    note = "the loop/closure binding type must match the domain's keys",
+    note = "for a `Set<T>` write `for x in set` (the key type is inferred) or annotate `for x: T in set`. Integer ranges yield `usize`/`i64`/`i32`. A slice/`Vec`/array yields its element type"
+)]
 pub trait SumDomain<K> {
     fn keys(&self) -> impl Iterator<Item = K> + '_;
 }

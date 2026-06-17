@@ -301,6 +301,11 @@ where
 /// Type-level concatenation of index key types, mirroring the runtime tuple
 /// flattening in [`Set::product`]. The arity ceiling is 4, matching the
 /// [`FromIndexKey`]/`From<(...)>` tuple implementations.
+#[diagnostic::on_unimplemented(
+    message = "cannot form a Cartesian product index key from `{Self}` and `{Rhs}`",
+    label = "no product key for `{Self}` * `{Rhs}`",
+    note = "`&a * &b` composes scalar keys (`usize`/`i64`/`i32`/`String`) into flat tuples up to arity 4. A 5th axis or a non-scalar operand is unsupported"
+)]
 pub trait KeyCat<Rhs> {
     type Out;
 }
@@ -487,6 +492,12 @@ where
 ///     ...
 /// });
 /// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid index key type",
+    label = "cannot be decoded from an index key",
+    note = "index keys decode to `usize`, `i64`, `i32`, `String`, `IndexKey`, or a tuple of those up to arity 4",
+    note = "annotate the binding to one of these (e.g. `for k: usize in set`) or match the `Set`'s key type"
+)]
 pub trait FromIndexKey: Sized {
     fn from_index_key(k: &IndexKey) -> Self;
 }

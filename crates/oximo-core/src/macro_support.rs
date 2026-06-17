@@ -37,6 +37,11 @@ use num_traits::PrimInt;
 /// parameter type. Integer ranges decode to `usize`. The macro always passes
 /// the domain by reference; the blanket impl for `&S` forwards through, so a
 /// domain that is itself a `&Set` (e.g. a function parameter) also works.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid index domain for a `variable!`/`constraint!` family",
+    label = "not an index domain",
+    note = "use a `Set`, an integer range `a..b` / `a..=b`, or a reference to one"
+)]
 pub trait IntoSet {
     type Key;
     fn into_set(self) -> Set<Self::Key>;
