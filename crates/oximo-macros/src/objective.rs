@@ -1,4 +1,5 @@
-//! `objective!(model, Min|Max, expr)`.
+//! `objective!(model, Min|Max, expr)`. The sense also accepts the long forms
+//! `Minimize`/`Maximize` and lowercase `min`/`max`.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -31,7 +32,10 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         "Min" | "Minimize" | "min" => quote!(__minimize),
         "Max" | "Maximize" | "max" => quote!(__maximize),
         _ => {
-            return Err(syn::Error::new(sense.span(), "objective sense must be `Min` or `Max`"));
+            return Err(syn::Error::new(
+                sense.span(),
+                "objective sense must be `Min`/`Minimize` or `Max`/`Maximize`",
+            ));
         }
     };
 
