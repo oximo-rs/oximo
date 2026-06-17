@@ -85,6 +85,36 @@ fn filtered_sum_skips_nonmatching_keys() {
 }
 
 #[test]
+fn large_sum_builds_correctly() {
+    const N: usize = 2000;
+    let m = Model::new("bigsum");
+    let c: Vec<f64> = (0..N).map(|i| [1.0, 2.0, 3.0, 4.0, 5.0][i % 5]).collect();
+    variable!(m, x[i in 0..N] >= 0.0);
+    objective!(m, Min, sum!(c[i] * x[i] for i in 0..N));
+
+    let arena = m.arena();
+    let obj = m.try_objective().unwrap();
+    let terms = oximo_expr::extract_linear(&arena, obj.expr).expect("linear");
+    assert_eq!(terms.coeffs.len(), N);
+    let total: f64 = terms.coeffs.iter().map(|(_, v)| v).sum();
+    let expected: f64 = c.iter().sum();
+    assert!((total - expected).abs() < 1e-6);
+}
+
+#[test]
+fn large_filtered_sum_builds_correctly() {
+    const N: usize = 1000;
+    let m = Model::new("bigfilter");
+    variable!(m, x[i in 0..N] >= 0.0);
+    objective!(m, Max, sum!(x[i] for i in 0..N if i % 2 == 0));
+
+    let arena = m.arena();
+    let obj = m.try_objective().unwrap();
+    let terms = oximo_expr::extract_linear(&arena, obj.expr).expect("linear");
+    assert_eq!(terms.coeffs.len(), N / 2);
+}
+
+#[test]
 fn param_handle_keeps_model_linear() {
     let m = Model::new("param");
     param!(m, rate = 0.05);
