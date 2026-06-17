@@ -206,6 +206,53 @@ fn semi_integer_domain_sets_threshold() {
 }
 
 #[test]
+fn domain_aliases_map_correctly() {
+    let m = Model::new("aliases");
+    variable!(m, va, Bin);
+    variable!(m, vb, Binary);
+    variable!(m, vc, Int);
+    variable!(m, vd, Integer);
+    variable!(m, ve, Real);
+    variable!(m, vf, Cont);
+    variable!(m, vg, Continuous);
+    objective!(m, Min, va + vb + vc + vd + ve + vf + vg);
+
+    let v = m.variables();
+    assert_eq!(v[0].domain, Domain::Binary);
+    assert_eq!(v[1].domain, Domain::Binary);
+    assert_eq!(v[2].domain, Domain::Integer);
+    assert_eq!(v[3].domain, Domain::Integer);
+    assert_eq!(v[4].domain, Domain::Real);
+    assert_eq!(v[5].domain, Domain::Real);
+    assert_eq!(v[6].domain, Domain::Real);
+}
+
+#[test]
+fn objective_sense_aliases_map_correctly() {
+    use ObjectiveSense::{Maximize, Minimize};
+
+    let m = Model::new("o_min_long");
+    variable!(m, x >= 0.0);
+    objective!(m, Minimize, x);
+    assert_eq!(m.objective().as_ref().unwrap().sense, Minimize);
+
+    let m = Model::new("o_min_lower");
+    variable!(m, x >= 0.0);
+    objective!(m, min, x);
+    assert_eq!(m.objective().as_ref().unwrap().sense, Minimize);
+
+    let m = Model::new("o_max_long");
+    variable!(m, x >= 0.0);
+    objective!(m, Maximize, x);
+    assert_eq!(m.objective().as_ref().unwrap().sense, Maximize);
+
+    let m = Model::new("o_max_lower");
+    variable!(m, x >= 0.0);
+    objective!(m, max, x);
+    assert_eq!(m.objective().as_ref().unwrap().sense, Maximize);
+}
+
+#[test]
 fn param_handle_keeps_model_linear() {
     let m = Model::new("param");
     param!(m, rate = 0.05);
