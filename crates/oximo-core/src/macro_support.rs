@@ -7,6 +7,7 @@
 //! are re-exports of the real modeling surface plus a couple of helpers.
 
 pub use crate::constraint::Relate;
+pub use crate::domain::Domain;
 pub use crate::set::{FromIndexKey, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;

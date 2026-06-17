@@ -1,13 +1,16 @@
-//! `variable!(model, spec[, Bin|Int])`.
+//! `variable!(model, spec[, domain])`.
 //!
 //! Accepted `spec` shapes (where `name` may be `name` or `name[i in dom, ...]`):
 //! `name`, `name >= lb`, `name <= ub`, `lb <= name <= ub`. Bounds may reference
 //! the index variables (e.g. `b[i in I] <= b_max[i]`), in which case they are
 //! lowered to the builder's per-key `.lb_by` / `.ub_by`.
+//!
+//! The optional trailing `domain` is `Bin`/`Int`/`Real` (and aliases) or a call
+//! `SemiCont(thr)` / `SemiContinuous(thr)` / `SemiInt(thr)` / `SemiInteger(thr)`.
 
 use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
-use syn::{Ident, Pat};
+use syn::Pat;
 
 use crate::bind::filtered_set;
 use crate::{
@@ -27,22 +30,10 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         return Err(syn::Error::new_spanned(extra, "unexpected trailing tokens in variable!"));
     }
 
+    let root = oximo_root();
     let domain_method = match domain {
         None => quote!(),
-        Some(ts) => {
-            let id: Ident = syn::parse2(ts)?;
-            match id.to_string().as_str() {
-                "Bin" | "Binary" => quote!(.binary()),
-                "Int" | "Integer" => quote!(.integer()),
-                "Real" | "Cont" | "Continuous" => quote!(),
-                _ => {
-                    return Err(syn::Error::new(
-                        id.span(),
-                        "domain must be `Bin`, `Int`, or `Real`",
-                    ));
-                }
-            }
-        }
+        Some(ts) => domain_method(ts, &root)?,
     };
 
     // Split the bound spec on relational operators and identify the core name.
@@ -68,7 +59,6 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
     let Named { name, binds, cond } = parse_named(core)?;
     let name_str = name.to_string();
-    let root = oximo_root();
 
     let mut idents = Vec::new();
     if let Some(binds) = &binds {
@@ -118,6 +108,52 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     };
     Ok(expanded)
+}
+
+/// Map the trailing domain token to the builder method. Accepts the bare-ident
+/// forms (`Bin`/`Int`/`Real` and aliases) and the call forms `SemiCont(thr)`/
+/// `SemiContinuous(thr)`/`SemiInt(thr)`/`SemiInteger(thr)`, where `thr` is the
+/// semicontinuous threshold (`f64`).
+fn domain_method(ts: TokenStream2, root: &TokenStream2) -> syn::Result<TokenStream2> {
+    const HELP: &str = "domain must be `Bin`, `Int`, `Real`, `SemiCont(thr)`, or `SemiInt(thr)`";
+    match syn::parse2::<syn::Expr>(ts)? {
+        syn::Expr::Path(p) => {
+            let id = p.path.get_ident().ok_or_else(|| syn::Error::new_spanned(&p, HELP))?;
+            match id.to_string().as_str() {
+                "Bin" | "Binary" => Ok(quote!(.binary())),
+                "Int" | "Integer" => Ok(quote!(.integer())),
+                "Real" | "Cont" | "Continuous" => Ok(quote!()),
+                "SemiCont" | "SemiContinuous" | "SemiInt" | "SemiInteger" => {
+                    Err(syn::Error::new_spanned(
+                        id,
+                        format!("`{id}` needs a threshold, e.g. `{id}(1.0)`"),
+                    ))
+                }
+                _ => Err(syn::Error::new_spanned(id, HELP)),
+            }
+        }
+        syn::Expr::Call(call) => {
+            let syn::Expr::Path(fp) = &*call.func else {
+                return Err(syn::Error::new_spanned(&call.func, HELP));
+            };
+            let func = fp.path.get_ident().ok_or_else(|| syn::Error::new_spanned(fp, HELP))?;
+            let variant = match func.to_string().as_str() {
+                "SemiCont" | "SemiContinuous" => quote!(SemiContinuous),
+                "SemiInt" | "SemiInteger" => quote!(SemiInteger),
+                _ => return Err(syn::Error::new_spanned(func, HELP)),
+            };
+            let [thr] = call.args.iter().collect::<Vec<_>>()[..] else {
+                return Err(syn::Error::new_spanned(
+                    &call,
+                    format!("`{func}` takes exactly one threshold argument, e.g. `{func}(1.0)`"),
+                ));
+            };
+            Ok(quote! {
+                .domain(#root::__macro_support::Domain::#variant { threshold: f64::from(#thr) })
+            })
+        }
+        other => Err(syn::Error::new_spanned(other, HELP)),
+    }
 }
 
 #[derive(Copy, Clone)]

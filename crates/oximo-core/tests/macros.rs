@@ -186,6 +186,26 @@ fn computed_name_range_suffixes_both_rows() {
 }
 
 #[test]
+fn semicontinuous_domain_sets_threshold() {
+    let m = Model::new("semi");
+    variable!(m, x <= 10.0, SemiCont(2.0));
+    objective!(m, Min, x);
+    let vars = m.variables();
+    assert_eq!(vars[0].domain, Domain::SemiContinuous { threshold: 2.0 });
+    assert!((vars[0].ub - 10.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn semi_integer_domain_sets_threshold() {
+    let m = Model::new("semii");
+    variable!(m, y <= 5.0, SemiInteger(1.0));
+    objective!(m, Min, y);
+    let vars = m.variables();
+    assert_eq!(vars[0].domain, Domain::SemiInteger { threshold: 1.0 });
+    assert!(vars[0].domain.is_integer());
+}
+
+#[test]
 fn param_handle_keeps_model_linear() {
     let m = Model::new("param");
     param!(m, rate = 0.05);

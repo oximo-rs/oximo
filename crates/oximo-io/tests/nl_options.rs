@@ -82,21 +82,24 @@ fn nonfinite_constant_in_residual() {
 }
 
 #[test]
-#[allow(deprecated)]
 fn rejects_semi_domains() {
-    for (dom, name) in [
-        (Domain::SemiContinuous { threshold: 2.0 }, "SemiContinuous"),
-        (Domain::SemiInteger { threshold: 2.0 }, "SemiInteger"),
-    ] {
-        let m = Model::new("semi");
-        let x = m.var("x").lb(0.0).ub(10.0).domain(dom).build();
-        m.minimize(x);
-        let err = to_nl_string_with(&m, &WriteOptions::default()).unwrap_err();
-        assert!(
-            matches!(err, IoError::UnsupportedDomain(d) if d == name),
-            "expected UnsupportedDomain({name}), got {err:?}"
-        );
-    }
+    let m = Model::new("semic");
+    variable!(m, 0.0 <= x <= 10.0, SemiCont(2.0));
+    objective!(m, Min, x);
+    let err = to_nl_string_with(&m, &WriteOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, IoError::UnsupportedDomain(d) if d == "SemiContinuous"),
+        "expected UnsupportedDomain(SemiContinuous), got {err:?}"
+    );
+
+    let m = Model::new("semii");
+    variable!(m, 0.0 <= x <= 10.0, SemiInt(2.0));
+    objective!(m, Min, x);
+    let err = to_nl_string_with(&m, &WriteOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, IoError::UnsupportedDomain(d) if d == "SemiInteger"),
+        "expected UnsupportedDomain(SemiInteger), got {err:?}"
+    );
 }
 
 #[test]

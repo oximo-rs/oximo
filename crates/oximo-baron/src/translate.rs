@@ -936,11 +936,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // SemiContinuous has no `variable!` syntax; uses the builder until 0.4.0
     fn semicontinuous_is_rejected() {
         let m = Model::new("semi");
-        let x = m.var("x").domain(Domain::SemiContinuous { threshold: 1.0 }).ub(10.0).build();
-        m.minimize(x);
+        variable!(m, x <= 10.0, SemiCont(1.0));
+        objective!(m, Min, x);
         let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
         assert!(matches!(err, SolverError::Backend(_)));
     }
