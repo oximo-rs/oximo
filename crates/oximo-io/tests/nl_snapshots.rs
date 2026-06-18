@@ -12,10 +12,10 @@ fn nl_pure_lp() {
     // s.t. x + y >= 3
     // x, y free
     let m = Model::new("tinylp");
-    let x = m.var("x").build();
-    let y = m.var("y").build();
-    m.minimize(x + 2.0 * y);
-    m.constraint("c0", (x + y).ge(3.0));
+    variable!(m, x);
+    variable!(m, y);
+    objective!(m, Min, x + 2.0 * y);
+    constraint!(m, c0, x + y >= 3.0);
 
     let s = to_nl_string(&m).expect("nl writer");
     let expected = "\
@@ -56,10 +56,10 @@ fn nl_milp() {
     // s.t. z + y <= 4
     // z continuous, y binary
     let m = Model::new("milp");
-    let z = m.var("z").lb(0.0).ub(10.0).build();
-    let y = m.var("y").binary().build();
-    m.minimize(z + y);
-    m.constraint("c0", (z + y).le(4.0));
+    variable!(m, 0.0 <= z <= 10.0);
+    variable!(m, y, Bin);
+    objective!(m, Min, z + y);
+    constraint!(m, c0, z + y <= 4.0);
 
     let s = to_nl_string(&m).expect("nl writer");
     // Variables: z (id 0, linear continuous, bucket LinC), y (id 1, linear binary, bucket LinB).
@@ -101,9 +101,9 @@ fn nl_nlp_rosenbrock() {
     // min (1 - x)^2 + 100 (y - x^2)^2
     // x, y free
     let m = Model::new("rosen");
-    let x = m.var("x").build();
-    let y = m.var("y").build();
-    m.minimize((1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
+    variable!(m, x);
+    variable!(m, y);
+    objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
     let s = to_nl_string(&m).expect("nl writer");
     // Both vars are nonlinear in obj only -> bucket NlOnlyO, var_order = [x, y].
@@ -124,8 +124,8 @@ fn nl_nlp_rosenbrock() {
 fn nl_abs_objective() {
     // min |x|, x free
     let m = Model::new("absobj");
-    let x = m.var("x").build();
-    m.minimize(x.abs());
+    variable!(m, x);
+    objective!(m, Min, x.abs());
 
     let s = to_nl_string(&m).expect("nl writer");
     // abs is nonlinear in the objective and lowers to the OPABS opcode o15.
@@ -139,10 +139,10 @@ fn nl_minlp() {
     // s.t. x + y >= 1
     // x continuous free, y integer in [0, 5]
     let m = Model::new("mi");
-    let x = m.var("x").build();
-    let y = m.var("y").integer().lb(0.0).ub(5.0).build();
-    m.minimize(x * x + 3.0 * y);
-    m.constraint("c0", (x + y).ge(1.0));
+    variable!(m, x);
+    variable!(m, 0.0 <= y <= 5.0, Int);
+    objective!(m, Min, x * x + 3.0 * y);
+    constraint!(m, c0, x + y >= 1.0);
 
     let s = to_nl_string(&m).expect("nl writer");
     // split_linear separates `3*y` (linear) from `x*x` (residual). Only x
@@ -170,10 +170,10 @@ fn nl_nonlinear_integer_order() {
     // obj-only), continuous before integer within each group. So NlBothI (y)
     // precedes NlOnlyC (x): var_order = [y, x], i.e. y -> v0, x -> v1.
     let m = Model::new("minlp_nl_int");
-    let x = m.var("x").build();
-    let y = m.var("y").integer().lb(0.0).ub(5.0).build();
-    m.minimize(y * y);
-    m.constraint("c0", (x * x + y * y).le(10.0));
+    variable!(m, x);
+    variable!(m, 0.0 <= y <= 5.0, Int);
+    objective!(m, Min, y * y);
+    constraint!(m, c0, x * x + y * y <= 10.0);
 
     let s = to_nl_string(&m).expect("nl writer");
     // Nonlinear vars: in constraints = 2 (x, y), in objective = 1 (y), both = 1 (y).

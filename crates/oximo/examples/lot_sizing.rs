@@ -69,20 +69,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m = Model::new("lot_sizing");
     let periods = Set::range(0..T);
 
-    let x = m.indexed_var("x", &periods).lb(0.0).ub(capacity).build();
-    let h = m.indexed_var("h", &periods).lb(0.0).build();
-    let s = m.indexed_var("s", &periods).binary().build();
+    variable!(m, 0.0 <= x[t in periods] <= capacity);
+    variable!(m, h[t in periods] >= 0.0);
+    variable!(m, s[t in periods], Bin);
 
-    m.constraint("inv_bal[0]", (h[0] - x[0]).eq(initial_inventory - demand[0]));
-    m.add_constraints_over("inv_bal", &periods.filter(|k| k.as_i64().unwrap() > 0), |t: usize| {
-        (h[t] - h[t - 1] - x[t]).eq(-demand[t])
-    });
-    m.add_constraints_over("setup", &periods, |t: usize| (x[t] - capacity * s[t]).le(0.0));
-    m.constraint("safety_stock", h[T - 1].ge(safety_stock));
+    constraint!(m, inv_bal0, h[0] - x[0] == initial_inventory - demand[0]);
+    constraint!(m, inv_bal[t in 1..T], h[t] - h[t - 1] - x[t] == -demand[t]);
+    constraint!(m, setup[t in periods], x[t] <= capacity * s[t]);
+    constraint!(m, safety_stock, h[T - 1] >= safety_stock);
 
-    let cost =
-        sum_over(&periods, |t: usize| prod_cost[t] * x[t] + setup_cost * s[t] + hold_cost * h[t]);
-    m.minimize(cost);
+    objective!(
+        m,
+        Min,
+        sum!(prod_cost[t] * x[t] + setup_cost * s[t] + hold_cost * h[t] for t in periods)
+    );
 
     #[cfg(feature = "gurobi")]
     let result = {

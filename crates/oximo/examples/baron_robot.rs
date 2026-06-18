@@ -36,34 +36,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m = Model::new("robot");
 
     // Eight unknowns, each in [-1, 1].
-    let x1 = m.var("x1").lb(-1.0).ub(1.0).build();
-    let x2 = m.var("x2").lb(-1.0).ub(1.0).build();
-    let x3 = m.var("x3").lb(-1.0).ub(1.0).build();
-    let x4 = m.var("x4").lb(-1.0).ub(1.0).build();
-    let x5 = m.var("x5").lb(-1.0).ub(1.0).build();
-    let x6 = m.var("x6").lb(-1.0).ub(1.0).build();
-    let x7 = m.var("x7").lb(-1.0).ub(1.0).build();
-    let x8 = m.var("x8").lb(-1.0).ub(1.0).build();
+    variable!(m, -1.0 <= x1 <= 1.0);
+    variable!(m, -1.0 <= x2 <= 1.0);
+    variable!(m, -1.0 <= x3 <= 1.0);
+    variable!(m, -1.0 <= x4 <= 1.0);
+    variable!(m, -1.0 <= x5 <= 1.0);
+    variable!(m, -1.0 <= x6 <= 1.0);
+    variable!(m, -1.0 <= x7 <= 1.0);
+    variable!(m, -1.0 <= x8 <= 1.0);
 
     // Kinematic loop equations (linear + bilinear).
-    m.constraint(
-        "e1",
-        (0.004731 * x1 * x3 - 0.1238 * x1 - 0.3578 * x2 * x3 - 0.001637 * x2 - 0.9338 * x4 + x7)
-            .eq(0.3571),
+    constraint!(
+        m,
+        e1,
+        0.004731 * x1 * x3 - 0.1238 * x1 - 0.3578 * x2 * x3 - 0.001637 * x2 - 0.9338 * x4 + x7
+            == 0.3571
     );
-    m.constraint(
-        "e2",
-        (0.2238 * x1 * x3 + 0.2638 * x1 + 0.7623 * x2 * x3 - 0.07745 * x2 - 0.6734 * x4 - x7)
-            .eq(0.6022),
+    constraint!(
+        m,
+        e2,
+        0.2238 * x1 * x3 + 0.2638 * x1 + 0.7623 * x2 * x3 - 0.07745 * x2 - 0.6734 * x4 - x7
+            == 0.6022
     );
-    m.constraint("e3", (x6 * x8 + 0.3578 * x1 + 0.004731 * x2).eq(0.0));
-    m.constraint("e4", (-0.7623 * x1 + 0.2238 * x2).eq(-0.3461));
+    constraint!(m, e3, x6 * x8 + 0.3578 * x1 + 0.004731 * x2 == 0.0);
+    constraint!(m, e4, -0.7623 * x1 + 0.2238 * x2 == -0.3461);
 
     // Trigonometric identities: each (sin, cos) pair lies on the unit circle.
-    m.constraint("e5", (x1.powi(2) + x2.powi(2)).eq(1.0));
-    m.constraint("e6", (x3.powi(2) + x4.powi(2)).eq(1.0));
-    m.constraint("e7", (x5.powi(2) + x6.powi(2)).eq(1.0));
-    m.constraint("e8", (x7.powi(2) + x8.powi(2)).eq(1.0));
+    constraint!(m, e5, x1.powi(2) + x2.powi(2) == 1.0);
+    constraint!(m, e6, x3.powi(2) + x4.powi(2) == 1.0);
+    constraint!(m, e7, x5.powi(2) + x6.powi(2) == 1.0);
+    constraint!(m, e8, x7.powi(2) + x8.powi(2) == 1.0);
 
     // Pure feasibility problem: no objective set => `minimize 0`.
 

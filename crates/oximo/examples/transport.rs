@@ -16,13 +16,13 @@ use oximo::solvers::Highs;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let m = Model::new("transport");
 
-    let x = m.var("x").lb(0.0).build();
-    let y = m.var("y").lb(0.0).ub(4.0).build();
+    variable!(m, x >= 0.0);
+    variable!(m, 0.0 <= y <= 4.0);
 
-    m.constraint("c1", (x + 2.0 * y).le(14.0));
-    m.constraint("c2", (3.0 * x).ge(y));
-    m.constraint("c3", x.le(y + 2.0));
-    m.maximize(3.0 * x + 4.0 * y);
+    constraint!(m, c1, x + 2.0 * y <= 14.0);
+    constraint!(m, c2, 3.0 * x >= y);
+    constraint!(m, c3, x <= y + 2.0);
+    objective!(m, Max, 3.0 * x + 4.0 * y);
 
     let mut solver = Highs;
     let result = solver.solve(&m, &HighsOptions::default().verbose(true))?;

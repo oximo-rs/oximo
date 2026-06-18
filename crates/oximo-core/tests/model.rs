@@ -5,74 +5,75 @@ use oximo_core::prelude::*;
 #[test]
 fn classifies_lp() {
     let m = Model::new("lp");
-    let x = m.var("x").lb(0.0).build();
-    m.constraint("c", x.le(10.0));
-    m.minimize(x);
+    variable!(m, x >= 0.0);
+    constraint!(m, c, x <= 10.0);
+    objective!(m, Min, x);
     assert_eq!(m.kind(), ModelKind::LP);
 }
 
 #[test]
 fn classifies_milp() {
     let m = Model::new("milp");
-    let x = m.var("x").lb(0.0).ub(1.0).integer().build();
-    m.constraint("c", x.le(1.0));
-    m.minimize(x);
+    variable!(m, 0.0 <= x <= 1.0, Int);
+    constraint!(m, c, x <= 1.0);
+    objective!(m, Min, x);
     assert_eq!(m.kind(), ModelKind::MILP);
 }
 
 #[test]
 fn classifies_qp() {
     let m = Model::new("qp");
-    let x = m.var("x").lb(0.0).build();
-    m.minimize(x.powi(2));
+    variable!(m, x >= 0.0);
+    objective!(m, Min, x.powi(2));
     assert_eq!(m.kind(), ModelKind::QP);
 }
 
 #[test]
 fn classifies_miqp() {
     let m = Model::new("miqp");
-    let x = m.var("x").lb(0.0).build();
-    let y = m.var("y").lb(0.0).ub(1.0).integer().build();
+    variable!(m, x >= 0.0);
+    variable!(m, 0.0 <= y <= 1.0, Int);
     // Bilinear term keeps it quadratic, the integer var makes QP -> MIQP.
-    m.minimize(x * y);
+    objective!(m, Min, x * y);
     assert_eq!(m.kind(), ModelKind::MIQP);
 }
 
 #[test]
 fn quadratic_constraint_classifies_qp() {
     let m = Model::new("qp_con");
-    let x = m.var("x").lb(0.0).build();
+    variable!(m, x >= 0.0);
     // Linear objective but a quadratic constraint still makes the model a QP.
-    m.constraint("c", x.powi(2).le(4.0));
-    m.minimize(x);
+    constraint!(m, c, x.powi(2) <= 4.0);
+    objective!(m, Min, x);
     assert_eq!(m.kind(), ModelKind::QP);
 }
 
 #[test]
 fn classifies_nlp() {
     let m = Model::new("nlp");
-    let x = m.var("x").lb(0.0).build();
+    variable!(m, x >= 0.0);
     // Degree-3, so it falls through to the nonlinear path.
-    m.minimize(x.powi(3));
+    objective!(m, Min, x.powi(3));
     assert_eq!(m.kind(), ModelKind::NLP);
 }
 
 #[test]
 fn classifies_minlp_with_division() {
     let m = Model::new("minlp_div");
-    let x = m.var("x").lb(1.0).build();
-    let y = m.var("y").lb(0.0).ub(1.0).integer().build();
+    variable!(m, x >= 1.0);
+    variable!(m, 0.0 <= y <= 1.0, Int);
     // x / y is nonlinear (non-constant denominator)
-    m.minimize(x / y);
+    objective!(m, Min, x / y);
     assert_eq!(m.kind(), ModelKind::MINLP);
 }
 
 #[test]
 fn variable_count_matches_register() {
     let m = Model::new("vars");
-    let _ = m.var("x").build();
-    let _ = m.var("y").build();
-    let _ = m.var("z").build();
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, z);
+    let _ = (x, y, z);
     assert_eq!(m.num_variables(), 3);
 }
 
@@ -80,7 +81,7 @@ fn variable_count_matches_register() {
 fn indexed_var_creates_named_scalars() {
     let m = Model::new("net");
     let nodes = Set::range(0..3);
-    let flow = m.indexed_var("flow", &nodes).lb(0.0).build();
+    variable!(m, flow[i in nodes] >= 0.0);
     assert_eq!(flow.len(), 3);
     assert!(m.variable_id("flow[0]").is_some());
     assert!(m.variable_id("flow[2]").is_some());
@@ -89,23 +90,25 @@ fn indexed_var_creates_named_scalars() {
 #[test]
 fn kind_caches_and_invalidates() {
     let m = Model::new("cache");
-    let x = m.var("x").lb(0.0).build();
-    m.minimize(x);
+    variable!(m, x >= 0.0);
+    objective!(m, Min, x);
     // First call computes, second call must return same value without traversal
     assert_eq!(m.kind(), ModelKind::LP);
     assert_eq!(m.kind(), ModelKind::LP);
     // Adding an integer variable invalidates the cache
-    let _ = m.var("y").lb(0.0).integer().build();
+    variable!(m, y >= 0.0, Int);
+    let _ = y;
     assert_eq!(m.kind(), ModelKind::MILP);
     // Adding a constraint invalidates again
-    m.constraint("c", x.le(10.0));
+    constraint!(m, c, x <= 10.0);
     assert_eq!(m.kind(), ModelKind::MILP);
 }
 
 #[test]
-fn fix_builder_sets_equal_bounds() {
+fn fix_sets_equal_bounds() {
     let m = Model::new("fix_builder");
-    let _ = m.var("x").lb(0.0).ub(10.0).fix(3.5).build();
+    variable!(m, 0.0 <= x <= 10.0);
+    m.fix(x, 3.5);
     let vars = m.variables();
     assert_eq!(vars[0].lb, 3.5);
     assert_eq!(vars[0].ub, 3.5);
@@ -114,7 +117,8 @@ fn fix_builder_sets_equal_bounds() {
 #[test]
 fn fix_var_mutates_bounds_post_build() {
     let m = Model::new("fix_post");
-    let _ = m.var("x").lb(0.0).ub(10.0).build();
+    variable!(m, 0.0 <= x <= 10.0);
+    let _ = x;
     let id = m.variable_id("x").unwrap();
     m.fix_var(id, 7.0);
     let vars = m.variables();
@@ -125,7 +129,7 @@ fn fix_var_mutates_bounds_post_build() {
 #[test]
 fn fix_pins_var_expr_and_indexed_entry() {
     let m = Model::new("fix_expr");
-    let x = m.var("x").lb(0.0).ub(10.0).build();
+    variable!(m, 0.0 <= x <= 10.0);
     m.fix(x, 3.0);
     let xid = m.variable_id("x").unwrap();
     let vars = m.variables();
@@ -134,7 +138,7 @@ fn fix_pins_var_expr_and_indexed_entry() {
     drop(vars);
 
     let keys = Set::strings(["a", "b"]);
-    let w = m.indexed_var("w", &keys).binary().build();
+    variable!(m, w[k in keys], Bin);
     m.fix(w["a"], 1.0);
     let aid = m.variable_id("w[a]").unwrap();
     let vars = m.variables();
@@ -145,8 +149,8 @@ fn fix_pins_var_expr_and_indexed_entry() {
 #[test]
 fn var_id_is_none_for_compound_expr() {
     let m = Model::new("var_id");
-    let x = m.var("x").build();
-    let y = m.var("y").build();
+    variable!(m, x);
+    variable!(m, y);
     assert!(x.var_id().is_some());
     assert!((x + 1.0).var_id().is_none());
     assert!((x + y).var_id().is_none());
@@ -156,7 +160,8 @@ fn var_id_is_none_for_compound_expr() {
 #[test]
 fn unfix_var_restores_bounds() {
     let m = Model::new("unfix");
-    let _ = m.var("x").lb(0.0).ub(10.0).build();
+    variable!(m, 0.0 <= x <= 10.0);
+    let _ = x;
     let id = m.variable_id("x").unwrap();
     m.fix_var(id, 7.0);
     m.unfix_var(id, 0.0, 10.0);
@@ -168,8 +173,10 @@ fn unfix_var_restores_bounds() {
 #[test]
 fn initial_value_stored_on_variable() {
     let m = Model::new("init");
-    let _ = m.var("x").lb(0.0).initial(3.5).build();
-    let _ = m.var("y").lb(0.0).build();
+    variable!(m, x >= 0.0);
+    m.set_initial(x, 3.5);
+    variable!(m, y >= 0.0);
+    let _ = y;
     let vars = m.variables();
     assert_eq!(vars[0].initial, Some(3.5));
     assert_eq!(vars[1].initial, None);
@@ -179,10 +186,10 @@ fn initial_value_stored_on_variable() {
 fn rhs_expr_folded_into_lhs() {
     use oximo_expr::extract_linear;
     let m = Model::new("rhs");
-    let x = m.var("x").build();
-    let y = m.var("y").build();
+    variable!(m, x);
+    variable!(m, y);
     // x <= y + 3   ↦  canonical: (x - y - 3) <= 0
-    m.constraint("c", x.le(y + 3.0));
+    constraint!(m, c, x <= y + 3.0);
     let cs = m.constraints();
     assert_eq!(cs.len(), 1);
     assert_eq!(cs[0].rhs, 0.0);

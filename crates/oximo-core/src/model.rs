@@ -1,4 +1,5 @@
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
+use std::marker::PhantomData;
 
 use oximo_expr::{Expr, ExprArena, ExprClass, ParamId, VarId, classify};
 use rustc_hash::FxHashMap;
@@ -7,10 +8,10 @@ use smol_str::SmolStr;
 use crate::constraint::{Constraint, ConstraintExpr, ConstraintId};
 use crate::domain::Domain;
 use crate::error::{Error, Result};
-use crate::indexed::IndexedVar;
+use crate::indexed::{IndexedVar, Storage, grid_offset};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
-use crate::set::{FromIndexKey, IndexKey, Set};
+use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::var::{VarBuilder, Variable};
 
 /// The kind of mathematical program a `Model` represents.
@@ -46,6 +47,9 @@ pub struct Model {
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     cached_kind: RefCell<Option<ModelKind>>,
+    /// Monotonic counter for auto-naming anonymous constraints registered via
+    /// the `constraint!` macro.
+    auto_seq: Cell<u32>,
 }
 
 impl std::fmt::Debug for Model {
@@ -73,12 +77,24 @@ impl Model {
             constraint_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
             cached_kind: RefCell::new(None),
+            auto_seq: Cell::new(0),
         }
     }
 
     // Variables
 
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
+        self.__var(name)
+    }
+
+    /// Macro-facing entry point behind [`Self::var`]. Not part of the stable
+    /// public API; use the `variable!` macro (or `var`) instead.
+    #[doc(hidden)]
+    pub fn __var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
         VarBuilder {
             model: self,
             name: name.into(),
@@ -111,16 +127,37 @@ impl Model {
         Expr::from_var(&self.arena, id)
     }
 
-    pub fn indexed_var<'a>(&'a self, name: impl Into<String>, set: &Set) -> IndexedVarBuilder<'a> {
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
+    pub fn indexed_var<'a, K>(
+        &'a self,
+        name: impl Into<String>,
+        set: &Set<K>,
+    ) -> IndexedVarBuilder<'a, K> {
+        self.__indexed_var(name, set)
+    }
+
+    /// Macro-facing entry point behind [`Self::indexed_var`]. Not part of the
+    /// stable public API; use the `variable!` macro instead.
+    #[doc(hidden)]
+    pub fn __indexed_var<'a, K>(
+        &'a self,
+        name: impl Into<String>,
+        set: &Set<K>,
+    ) -> IndexedVarBuilder<'a, K> {
         IndexedVarBuilder {
             model: self,
             base_name: name.into(),
             keys: set.iter().collect(),
+            axes: set.axes().map(Box::from),
             lb: f64::NEG_INFINITY,
             ub: f64::INFINITY,
             lb_by: None,
             ub_by: None,
             domain: Domain::Real,
+            _k: PhantomData,
         }
     }
 
@@ -160,6 +197,18 @@ impl Model {
         v.ub = value;
     }
 
+    /// Set the initial (warm-start) value of a single-variable expression.
+    /// The macro API has no bound-style syntax for warm starts, so this is the
+    /// supported way to seed `variable!`-declared variables.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `e` is not a bare variable handle.
+    pub fn set_initial(&self, e: Expr<'_>, value: f64) {
+        let id = e.var_id().expect("Model::set_initial expects a single-variable expression");
+        self.variables.borrow_mut()[id.index()].initial = Some(value);
+    }
+
     /// Restore bounds on variable `id`. Pass `f64::NEG_INFINITY` / `f64::INFINITY`
     /// to restore an unbounded direction.
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
@@ -182,7 +231,18 @@ impl Model {
     /// # Panics
     ///
     /// Panics if a parameter with the same name is already registered.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `param!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
+        self.__param(name, value)
+    }
+
+    /// Macro-facing entry point behind [`Self::param`]. Not part of the stable
+    /// public API; use the `param!` macro instead.
+    #[doc(hidden)]
+    pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
         let name = name.into();
         assert!(
             !self.param_names.borrow().contains_key(&name),
@@ -253,7 +313,22 @@ impl Model {
     ///
     /// Panics if a constraint with the same name is already registered, or if
     /// the constraint count exceeds `u32::MAX`.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn constraint(&self, name: impl Into<SmolStr>, c: ConstraintExpr<'_>) -> ConstraintId {
+        self.__add_constraint(name, c)
+    }
+
+    /// Macro-facing entry point behind [`Self::constraint`]. Not part of the
+    /// stable public API; use the `constraint!` macro instead.
+    #[doc(hidden)]
+    pub fn __add_constraint(
+        &self,
+        name: impl Into<SmolStr>,
+        c: ConstraintExpr<'_>,
+    ) -> ConstraintId {
         let name = name.into();
         let mut by_name = self.constraint_names.borrow_mut();
         assert!(!by_name.contains_key(&name), "constraint name {name:?} already registered");
@@ -271,6 +346,22 @@ impl Model {
         id
     }
 
+    /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
+    /// internal counter. Backs the name-less form of the `constraint!` macro.
+    #[doc(hidden)]
+    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintId {
+        // Skip over any names a user may already have taken.
+        let name = loop {
+            let n = self.auto_seq.get();
+            self.auto_seq.set(n + 1);
+            let candidate: SmolStr = format!("_c{n}").into();
+            if !self.constraint_names.borrow().contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        self.__add_constraint(name, c)
+    }
+
     /// Bulk-register constraints. Each entry is `(name, ConstraintExpr)`.
     /// Useful with `.par_iter().map(...).collect()` style construction.
     pub fn add_constraints<'a, I>(&'a self, items: I)
@@ -278,7 +369,7 @@ impl Model {
         I: IntoIterator<Item = (SmolStr, ConstraintExpr<'a>)>,
     {
         for (name, c) in items {
-            self.constraint(name, c);
+            self.__add_constraint(name, c);
         }
     }
 
@@ -299,7 +390,23 @@ impl Model {
     ///     (b[(t, n)] - b_min[t] * w[(t, n)]).ge(0.0)
     /// });
     /// ```
-    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set, mut rule: F)
+    #[deprecated(
+        since = "0.3.0",
+        note = "use the indexed-family form of the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
+    )]
+    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, rule: F)
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> ConstraintExpr<'a>,
+    {
+        self.__add_constraints_over(name_prefix, set, rule);
+    }
+
+    /// Macro-facing entry point behind [`Self::add_constraints_over`]. Backs the
+    /// indexed-family form of the `constraint!` macro. Not part of the stable
+    /// public API.
+    #[doc(hidden)]
+    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, mut rule: F)
     where
         K: FromIndexKey,
         F: FnMut(K) -> ConstraintExpr<'a>,
@@ -308,7 +415,23 @@ impl Model {
             let typed = K::from_index_key(&key);
             let c = rule(typed);
             let name: SmolStr = format_index_name(name_prefix, &key).into();
-            self.constraint(name, c);
+            self.__add_constraint(name, c);
+        }
+    }
+
+    /// Macro-facing entry point for a two-sided range family.
+    #[doc(hidden)]
+    pub fn __add_range_constraints_over<'a, K, F>(&'a self, name: &str, set: &Set<K>, mut rule: F)
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> (ConstraintExpr<'a>, ConstraintExpr<'a>),
+    {
+        let lo_prefix = format!("{name}_lo");
+        let hi_prefix = format!("{name}_hi");
+        for key in set {
+            let (lo, hi) = rule(K::from_index_key(&key));
+            self.__add_constraint(format_index_name(&lo_prefix, &key), lo);
+            self.__add_constraint(format_index_name(&hi_prefix, &key), hi);
         }
     }
 
@@ -326,11 +449,31 @@ impl Model {
 
     // Objective
 
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `objective!(m, Min, ..)`, the builder API is scheduled for removal in 0.4.0"
+    )]
     pub fn minimize(&self, expr: Expr<'_>) {
+        self.__minimize(expr);
+    }
+
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `objective!(m, Max, ..)`, the builder API is scheduled for removal in 0.4.0"
+    )]
+    pub fn maximize(&self, expr: Expr<'_>) {
+        self.__maximize(expr);
+    }
+
+    /// Macro-facing entry point behind [`Self::minimize`]. Backs `objective!(m, Min, ..)`.
+    #[doc(hidden)]
+    pub fn __minimize(&self, expr: Expr<'_>) {
         self.set_objective(expr, ObjectiveSense::Minimize);
     }
 
-    pub fn maximize(&self, expr: Expr<'_>) {
+    /// Macro-facing entry point behind [`Self::maximize`]. Backs `objective!(m, Max, ..)`.
+    #[doc(hidden)]
+    pub fn __maximize(&self, expr: Expr<'_>) {
         self.set_objective(expr, ObjectiveSense::Maximize);
     }
 
@@ -401,18 +544,20 @@ impl Model {
 type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> f64 + 'a>;
 
 #[must_use = "IndexedVarBuilder does nothing until you call .build()"]
-pub struct IndexedVarBuilder<'a> {
+pub struct IndexedVarBuilder<'a, K = IndexKey> {
     model: &'a Model,
     base_name: String,
     keys: Vec<IndexKey>,
+    axes: Option<Box<[Axis]>>,
     lb: f64,
     ub: f64,
     lb_by: Option<BoundFn<'a>>,
     ub_by: Option<BoundFn<'a>>,
     domain: Domain,
+    _k: PhantomData<fn() -> K>,
 }
 
-impl<'a> std::fmt::Debug for IndexedVarBuilder<'a> {
+impl<'a, K> std::fmt::Debug for IndexedVarBuilder<'a, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedVarBuilder")
             .field("base_name", &self.base_name)
@@ -426,7 +571,7 @@ impl<'a> std::fmt::Debug for IndexedVarBuilder<'a> {
     }
 }
 
-impl<'a> IndexedVarBuilder<'a> {
+impl<'a, K> IndexedVarBuilder<'a, K> {
     pub fn lb(mut self, v: f64) -> Self {
         self.lb = v;
         self
@@ -448,7 +593,7 @@ impl<'a> IndexedVarBuilder<'a> {
     /// .lb_by(|(p, q): (String, String)| floor_for(&p, &q))
     /// .lb_by(|i: usize| lower_bounds[i])
     /// ```
-    pub fn lb_by<K, F>(mut self, f: F) -> Self
+    pub fn lb_by<F>(mut self, f: F) -> Self
     where
         K: FromIndexKey,
         F: Fn(K) -> f64 + 'a,
@@ -464,7 +609,7 @@ impl<'a> IndexedVarBuilder<'a> {
     /// .ub_by(|(p, q): (String, String)| capacity_for(&p, &q))
     /// .ub_by(|i: usize| upper_bounds[i])
     /// ```
-    pub fn ub_by<K, F>(mut self, f: F) -> Self
+    pub fn ub_by<F>(mut self, f: F) -> Self
     where
         K: FromIndexKey,
         F: Fn(K) -> f64 + 'a,
@@ -487,16 +632,45 @@ impl<'a> IndexedVarBuilder<'a> {
         self
     }
 
-    pub fn build(self) -> IndexedVar<'a> {
-        let mut entries = FxHashMap::default();
-        for key in self.keys {
-            let scalar_name: SmolStr = format_index_name(&self.base_name, &key).into();
-            let lb = self.lb_by.as_ref().map_or(self.lb, |f| f(&key));
-            let ub = self.ub_by.as_ref().map_or(self.ub, |f| f(&key));
-            let expr = self.model.var(scalar_name).lb(lb).ub(ub).domain(self.domain).build();
-            entries.insert(key, expr);
-        }
-        IndexedVar { entries }
+    /// Register one scalar variable per key and return the [`IndexedVar`] handle.
+    ///
+    /// # Panics
+    /// Panics if a scalar variable name collides with one already registered.
+    pub fn build(self) -> IndexedVar<'a, K> {
+        let Self { model, base_name, keys, axes, lb, ub, lb_by, ub_by, domain, _k } = self;
+
+        let make = |key: &IndexKey| -> Expr<'a> {
+            let scalar_name: SmolStr = format_index_name(&base_name, key).into();
+            let lo = lb_by.as_ref().map_or(lb, |f| f(key));
+            let hi = ub_by.as_ref().map_or(ub, |f| f(key));
+            model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
+        };
+
+        let storage = if let Some(axes) = axes {
+            // Dense grid: place each scalar at its computed row-major offset,
+            // so the storage cannot be silently mis-built if `Set` iteration
+            // vever changes.
+            let total = keys.len();
+            let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
+            let mut kept: Vec<Option<IndexKey>> = vec![None; total];
+            for key in keys {
+                let expr = make(&key);
+                let off = grid_offset(&axes, &key).expect("dense grid key out of range");
+                data[off] = Some(expr);
+                kept[off] = Some(key);
+            }
+            let data = data.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
+            let kept = kept.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
+            Storage::Dense { data, keys: kept, axes }
+        } else {
+            let mut entries = FxHashMap::default();
+            for key in keys {
+                let expr = make(&key);
+                entries.insert(key, expr);
+            }
+            Storage::Sparse(entries)
+        };
+        IndexedVar { storage, _k: PhantomData }
     }
 }
 
@@ -534,6 +708,8 @@ pub fn display_index_key(key: &IndexKey) -> String {
 }
 
 #[cfg(test)]
+// exercises the builder API directly until its 0.4.0 removal
+#[allow(deprecated)]
 mod tests {
     use oximo_expr::extract_linear;
 

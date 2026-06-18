@@ -44,12 +44,11 @@ use oximo::prelude::*;
 use oximo::solvers::Baron;
 
 let m = Model::new("box");
-let x = m.var("x").lb(0.1).ub(10.0).build();
-let y = m.var("y").lb(0.1).ub(10.0).build();
+variable!(m, 0.1 <= x <= 10.0);
+variable!(m, 0.1 <= y <= 10.0);
 
-m.constraint("c", (x + y).le(8.0));
-let one = Expr::constant(x.arena, 1.0);
-m.maximize((one + x).log() + 2.0 * y);
+constraint!(m, c, x + y <= 8.0);
+objective!(m, Max, (1.0 + x).log() + 2.0 * y);
 
 let result = Baron::new().solve(&m, &BaronOptions::default())?;
 println!("status = {:?}", result.status);

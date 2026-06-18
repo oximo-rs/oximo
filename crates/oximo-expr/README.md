@@ -81,7 +81,8 @@ use oximo_expr::dot;
 let total = dot(&vars, &coeffs);
 ```
 
-For sums indexed by an `oximo-core` `Set`, prefer `oximo_core::sum_over`.
+For sums indexed by an `oximo-core` `Set`, prefer the `sum!` macro (re-exported by
+`oximo-core` / `oximo::prelude`).
 
 ### `extract_linear`
 

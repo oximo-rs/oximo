@@ -14,20 +14,20 @@
     <img src="https://img.shields.io/github/actions/workflow/status/oximo-rs/oximo/ci.yml?branch=main&label=oximo%20CI&logo=github" alt="CI" />
 </a>
 
-oximo is a Rust algebraic modeling library for mathematical optimization. Build LP, MILP, QP/MIQP, NLP, and MINLP models with a clean builder API, then solve them with bundled or commercial solvers.
+oximo is a Rust algebraic modeling library for mathematical optimization. Build LP, MILP, QP/MIQP, NLP, and MINLP models with a concise macro API, then solve them with bundled or commercial solvers.
 
 ```rust,no_run
 use oximo::prelude::*;
 use oximo::solvers::Highs;
 
 let m = Model::new("transport");
-let x = m.var("x").lb(0.0).build();
-let y = m.var("y").lb(0.0).ub(4.0).build();
+variable!(m, x >= 0.0);
+variable!(m, 0.0 <= y <= 4.0);
 
-m.constraint("c1", (x + 2.0 * y).le(14.0));
-m.constraint("c2", (3.0 * x).ge(y));
-m.constraint("c3", x.le(y + 2.0));
-m.maximize(3.0 * x + 4.0 * y);
+constraint!(m, c1, x + 2.0 * y <= 14.0);
+constraint!(m, c2, 3.0 * x >= y);
+constraint!(m, c3, x <= y + 2.0);
+objective!(m, Max, 3.0 * x + 4.0 * y);
 
 let result = Highs.solve(&m, &HighsOptions::default())?;
 println!("obj = {:?}", result.objective()); // 34.0
@@ -43,25 +43,29 @@ println!("y   = {:?}", result.value_of(y)); // 4.0
 ```rust,ignore
 let m = Model::new("my_model");
 
-let x = m.var("x").lb(0.0).build();           // continuous, x >= 0
-let y = m.var("y").lb(0.0).ub(10.0).build();  // continuous, 0 <= y <= 10
-let z = m.var("z").build();                   // free (unbounded by default)
-let b = m.var("b").binary().build();          // binary {0, 1}
-let n = m.var("n").lb(0.0).integer().build(); // general integer
+variable!(m, x >= 0.0);                 // continuous, x >= 0
+variable!(m, 0.0 <= y <= 10.0);         // continuous, 0 <= y <= 10
+variable!(m, z);                        // free (unbounded by default)
+variable!(m, b, Bin);                   // binary {0, 1}   (also Binary)
+variable!(m, n >= 0.0, Int);            // general integer (also Integer)
+variable!(m, s <= 10.0, SemiCont(2.0)); // semicontinuous: 0 or in [2, 10] (SemiInt too)
 ```
 
 ### Constraints and objectives
 
-Expressions are built with standard Rust operators. Scalar multiplication, addition, subtraction, and nonlinear operations (see [Nonlinear Expressions](#nonlinear-expressions)) all work out of the box:
+Expressions are built with standard Rust operators. The macros let you write the
+relational operators `==`, `<=`, `>=` directly. Scalar multiplication, addition,
+subtraction, and nonlinear operations (see [Nonlinear Expressions](#nonlinear-expressions)) all work out of the box:
 
 ```rust,ignore
-m.constraint("cap", (2.0 * x + 3.0 * y).le(100.0));
-m.constraint("demand", x.ge(5.0));
-m.constraint("balance", (x - y).eq(0.0));
+constraint!(m, cap, 2.0 * x + 3.0 * y <= 100.0);
+constraint!(m, demand, x >= 5.0);
+constraint!(m, balance, x - y == 0.0);
+constraint!(m, band, 1.0 <= x + y <= 10.0); // two-sided range -> band_lo + band_hi
 
-m.minimize(3.0 * x + 5.0 * y);
+objective!(m, Min, 3.0 * x + 5.0 * y);
 // or
-m.maximize(x + 2.0 * y);
+objective!(m, Max, x + 2.0 * y);            // also Minimize/min, Maximize/max
 ```
 
 ### Index sets
@@ -90,69 +94,55 @@ let arcs = (&plants * &plants).filter(|k| {
 
 ### Indexed variables
 
-`Model::indexed_var(name, &set)` registers one scalar per key with auto-named
-entries like `x[seattle,nyc]`. Bounds apply uniformly by default, you can use
-`lb_by` / `ub_by` for per-key bounds.
+`variable!(m, x[k in set])` registers one scalar per key with auto-named entries
+like `x[seattle,nyc]`. Bounds apply uniformly by default.
 
 ```rust,ignore
 let m = Model::new("transport");
-let x = m.indexed_var("x", &routes).lb(0.0).build();
+variable!(m, x[r in routes] >= 0.0);
 
 // Scalar lookup: any type that converts to IndexKey works.
 let e1 = x[("seattle", "nyc")];
 let e2 = x[("san-diego", "chi")];
 
-// Per-key upper bound (e.g. capacity per arc).
-let _y = m.indexed_var("y", &routes)
-    .lb(0.0)
-    .ub_by(|(p, q): (String, String)| capacity_for(&p, &q))
-    .build();
+// Per-key upper bound (capacity per arc) -> index-dependent bound.
+variable!(m, 0.0 <= y[(p, q) in routes] <= capacity_for(&p, &q));
 ```
 
 ### Summing over sets
 
-`sum_over(&set, |k| expr)` reads as `sum_{k in set} expr(k)`. The closure
-receives the index as a typed value via `FromIndexKey`. Built-in impls cover
-`i64`, `i32`, `usize`, `String`, raw `IndexKey`, and tuples up to arity 4.
-State the shape in the closure-arg annotation.
+`sum!(body for k in set)` reads as `sum_{k in set} body`.
 
 ```rust,ignore
 // Single sum: sum_{i in items} weights[i] * x[i]
-let total_weight = sum_over(&items, |i: usize| weights[i] * x[i]);
-m.constraint("cap", total_weight.le(capacity));
+constraint!(m, cap, sum!(weights[i] * x[i] for i in items) <= capacity);
 
 // Double sum, flat: sum_{(p,q) in P*M} c[p,q] * x[p,q]
-let total_cost = sum_over(&(&plants * &markets), |(p, q): (String, String)| {
-    c[(&p, &q)] * x[(p, q)]
-});
+let total_cost = sum!(c[p, q] * x[p, q] for p in plants, q in markets);
 
-// Coefficient-weighted sum on paired Vecs: sum_{i} w_i * x_i
-let weight_sum = dot(&xs, &weights);
-
-// Freeform iterator -> use Iterator::sum.
-let active = (0..n).filter(|&i| online[i]).map(|i| x[i]).sum::<Expr>();
+// Filtered sum.
+let active = sum!(x[i] for i in 0..n if online[i]);
 ```
 
 ### Rule-style constraints
 
-`Model::add_constraints_over` is the constraint equivalent of `sum_over`, a
-closure receives the index as a typed value and returns one constraint per
-set element.
+The indexed form of `constraint!` emits one constraint per key, auto-named like
+`supply[seattle]`. A trailing `if` filters the keys, and `name = expr` gives a
+computed run-time name.
 
 ```rust,ignore
 // Scalar set: one constraint per period.
 let periods = Set::range(0..T);
-m.add_constraints_over("setup", &periods, |t: usize| {
-    (x[t] - capacity * s[t]).le(0.0)
-});
+constraint!(m, setup[t in periods], x[t] <= capacity * s[t]);
 
-// Tuple set: destructure inline. Inner `sum_over` builds the LHS expression.
-m.add_constraints_over("supply", &plants, |p: String| {
-    sum_over(&markets, |q: String| x[(&p, q)]).le(supply_of(&p))
-});
+// Tuple set + inner sum builds the LHS expression (key types inferred).
+constraint!(m, supply[p in plants], sum!(x[p, q] for q in markets) <= supply_of(&p));
 
-// Want the raw key? Annotate as IndexKey (clones once per iteration).
-m.add_constraints_over("c", &set, |k: IndexKey| x[&k].le(1.0));
+// Filtered family: only the keys passing the guard are built.
+constraint!(m, diag[(i, j) in arcs if i == j], x[i, j] <= 1.0);
+
+// Computed run-time name.
+constraint!(m, name = format!("bal_{p}"), inflow[p] - outflow[p] == 0.0);
 ```
 
 ### Nonlinear expressions
@@ -163,13 +153,13 @@ expressions.
 
 ```rust,ignore
 // Rosenbrock NLP
-m.minimize((1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
+objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
 // Quadratic constraint
-m.constraint("disk", (x.powi(2) + y.powi(2)).le(1.0));
+constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
 
 // Transcendental utility (MINLP when any variable is integer/binary)
-m.maximize(sum_over(&items, |i: usize| u[i] * (1.0 + w[i] * x[i]).log()));
+objective!(m, Max, sum!(u[i] * (1.0 + w[i] * x[i]).log() for i in items));
 ```
 
 ## Solving

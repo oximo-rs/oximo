@@ -21,9 +21,9 @@ fn baron_enumerates_multiple_solutions() {
     // result's solution pool (best first).
     let m = Model::new("multi");
     let items = Set::range(0..4usize);
-    let x = m.indexed_var("x", &items).binary().build();
-    m.constraint("cap", sum_over(&items, |i: usize| x[i]).le(2.0));
-    m.maximize(sum_over(&items, |i: usize| x[i]));
+    variable!(m, x[i in items], Bin);
+    constraint!(m, cap, sum!(x[i] for i in items) <= 2.0);
+    objective!(m, Max, sum!(x[i] for i in items));
 
     let opts = BaronOptions::default().num_sol(10).time_limit(Duration::from_secs(60));
     let r = Baron::new().solve(&m, &opts).unwrap();
@@ -42,10 +42,10 @@ fn baron_lp_duals_and_reduced_costs() {
     // min x + 2y  s.t.  x + y >= 5,  x, y >= 0
     // Optimal: (x, y) = (5, 0), obj 5, dual of c = 1, rc(x) = 0, rc(y) = 1.
     let m = Model::new("lp_dual");
-    let x = m.var("x").lb(0.0).build();
-    let y = m.var("y").lb(0.0).build();
-    let cap = m.constraint("cap", (x + y).ge(5.0));
-    m.minimize(x + 2.0 * y);
+    variable!(m, x >= 0.0);
+    variable!(m, y >= 0.0);
+    let cap = constraint!(m, cap, x + y >= 5.0);
+    objective!(m, Min, x + 2.0 * y);
 
     let opts = BaronOptions::default().want_dual(true).time_limit(Duration::from_secs(30));
     let result = Baron::new().solve(&m, &opts).unwrap();
@@ -68,10 +68,10 @@ fn baron_milp_duals_at_best_point() {
     // max 2a + 3b  s.t.  a + b <= 1,  a, b binary.
     // Optimal: (0, 1), obj 3.
     let m = Model::new("milp_dual");
-    let a = m.var("a").binary().build();
-    let b = m.var("b").binary().build();
-    let cap = m.constraint("cap", (a + b).le(1.0));
-    m.maximize(2.0 * a + 3.0 * b);
+    variable!(m, a, Bin);
+    variable!(m, b, Bin);
+    let cap = constraint!(m, cap, a + b <= 1.0);
+    objective!(m, Max, 2.0 * a + 3.0 * b);
 
     let opts = BaronOptions::default().want_dual(true).time_limit(Duration::from_secs(30));
     let result = Baron::new().solve(&m, &opts).unwrap();
