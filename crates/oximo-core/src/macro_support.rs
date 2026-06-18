@@ -74,7 +74,7 @@ impl<T: PrimInt> IntoSet for std::ops::RangeInclusive<T> {
     fn into_set(self) -> Set<usize> {
         let start = self.start().to_i64().expect("range start out of i64 range");
         let end = self.end().to_i64().expect("range end out of i64 range");
-        Set::dense_i64(start, end.checked_add(1).expect("range end out of i64 range"))
+        Set::dense_i64(start, end.checked_add(1).expect("inclusive range end overflows i64"))
     }
 }
 
