@@ -170,7 +170,7 @@ pub(crate) fn grid_offset(axes: &[Axis], key: &IndexKey) -> Option<usize> {
         (axes, IndexKey::Tuple(parts)) if parts.len() == axes.len() => {
             let mut off = 0usize;
             for (a, p) in axes.iter().zip(parts.iter()) {
-                off = off * a.len + axis_index(a, p.as_i64()?)?;
+                off = off.checked_mul(a.len)?.checked_add(axis_index(a, p.as_i64()?)?)?;
             }
             Some(off)
         }
