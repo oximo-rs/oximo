@@ -175,6 +175,12 @@ fn parse_named(seg: TokenStream2) -> syn::Result<Named> {
         None => (None, None),
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket => {
             let parsed: Binds = syn::parse2(g.stream())?;
+            if parsed.binds.is_empty() {
+                return Err(syn::Error::new(
+                    g.span(),
+                    "index family needs at least one binding, e.g. `name[i in domain]`",
+                ));
+            }
             (Some(parsed.binds), parsed.cond)
         }
         Some(other) => {
