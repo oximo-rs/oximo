@@ -35,12 +35,12 @@ use oximo::prelude::*;
 use oximo::io::{to_mps_string, to_lp_string};
 
 let m = Model::new("knapsack");
-let x = m.var("x").lb(0.0).build();
-let y = m.var("y").lb(0.0).ub(4.0).build();
+variable!(m, x >= 0.0);
+variable!(m, 0.0 <= y <= 4.0);
 
-m.constraint("c1", (x + 2.0 * y).le(14.0));
-m.constraint("c2", (3.0 * x - y).ge(0.0));
-m.maximize(3.0 * x + 4.0 * y);
+constraint!(m, c1, x + 2.0 * y <= 14.0);
+constraint!(m, c2, 3.0 * x - y >= 0.0);
+objective!(m, Max, 3.0 * x + 4.0 * y);
 
 let mps = to_mps_string(&m)?;
 let lp  = to_lp_string(&m)?;
@@ -120,9 +120,9 @@ use std::path::Path;
 
 // Rosenbrock: min (1 - x)^2 + 100 (y - x^2)^2
 let m = Model::new("rosen");
-let x = m.var("x").bounds(-5.0, 5.0).build();
-let y = m.var("y").bounds(-5.0, 5.0).build();
-m.minimize((1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
+variable!(m, -5.0 <= x <= 5.0);
+variable!(m, -5.0 <= y <= 5.0);
+objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
 // To string (ASCII only)
 let nl = to_nl_string(&m)?;

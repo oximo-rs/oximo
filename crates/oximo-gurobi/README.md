@@ -56,9 +56,9 @@ let m = Model::new("knapsack");
 let weights = [3.0, 4.0, 2.0, 5.0];
 let values  = [10.0, 12.0, 5.0, 14.0];
 
-let xs: Vec<_> = (0..4).map(|i| m.var(format!("x{i}")).binary().build()).collect();
-m.constraint("cap", dot(&xs, &weights).le(7.0));
-m.maximize(dot(&xs, &values));
+variable!(m, x[i in 0..4], Bin);
+constraint!(m, cap, sum!(weights[i] * x[i] for i in 0..4) <= 7.0);
+objective!(m, Max, sum!(values[i] * x[i] for i in 0..4));
 
 let result = Gurobi.solve(&m, &GurobiOptions::default())?;
 println!("status = {:?}", result.status);

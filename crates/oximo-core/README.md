@@ -26,27 +26,38 @@ use oximo_core::prelude::*;
 let m = Model::new("transport");
 
 // Scalar variables
-let x = m.var("x").lb(0.0).build();
-let y = m.var("y").lb(0.0).ub(10.0).build();
+variable!(m, x >= 0.0);
+variable!(m, 0.0 <= y <= 10.0);
 
-// Constraints
-m.constraint("c1", (x + 2.0 * y).le(14.0));
-m.constraint("c2", (3.0 * x - y).ge(0.0));
+// Constraints (incl. a two-sided range -> band_lo + band_hi)
+constraint!(m, c1, x + 2.0 * y <= 14.0);
+constraint!(m, c2, 3.0 * x - y >= 0.0);
+constraint!(m, band, 1.0 <= x + y <= 12.0);
 
 // Objective
-m.maximize(3.0 * x + 4.0 * y);
+objective!(m, Max, 3.0 * x + 4.0 * y);
 
 println!("kind = {:?}", m.kind()); // LP
 ```
 
-## Model
+## Modeling API
 
-`Model` uses interior mutability (`RefCell`) so the builder API takes `&self`. This lets you hold a `&Model` reference, build variables and constraints, and immediately use the returned `Expr` handles, no `&mut` threading required.
+The modeling surface is a set of macros: `variable!`, `constraint!`, `objective!`,
+`sum!`, and `param!`. Each expands to the underlying typed model operations,
+so there is no runtime cost and full compile-time type/borrow checking is preserved.
+
+> The older builder methods (`Model::var`/`indexed_var`/`constraint`/`minimize`/
+> `maximize`/`param`, free `sum_over`, `add_constraints_over`) are deprecated as
+> of 0.3.0 and scheduled for removal in 0.4.0. Prefer the macros.
+
+`Model` uses interior mutability (`RefCell`), so a macro can take `&m`, register
+variables/constraints, and the `variable!`-introduced bindings (`x`, `y`, ...) are
+locals you can use immediately.
 
 ```rust,ignore
 let m = Model::new("my_model");
-let x = m.var("x").lb(0.0).build(); // returns Expr<'_>
-m.constraint("cap", x.le(5.0));     // uses x while holding &m
+variable!(m, x >= 0.0);        // binds a local `x: Expr<'_>`
+constraint!(m, cap, x <= 5.0); // uses x while holding &m
 ```
 
 Names are unique per registry. Registering a duplicate variable or constraint name **panics**.
@@ -74,39 +85,38 @@ m.unfix_var(var_id, 0.0, 10.0); // restore bounds
 
 ## Variables
 
-### Scalar variable builder
+### Scalar variables
 
 ```rust,ignore
-let x = m.var("x")
-    .lb(0.0)              // lower bound (default: -inf)
-    .ub(10.0)             // upper bound (default: +inf)
-    .domain(Domain::Real) // explicit domain (default: Real)
-    .build();             // returns Expr<'_>
-
-// Shorthand domain setters:
-let b = m.var("b").binary().build();          // Domain::Binary, bounds [0, 1]
-let n = m.var("n").integer().lb(0.0).build(); // Domain::Integer
+variable!(m, x);                        // free (-inf, +inf)
+variable!(m, x >= 0.0);                 // lower bound only
+variable!(m, 0.0 <= x <= 10.0);         // both bounds
+variable!(m, b, Bin);                   // binary {0, 1}  (also Binary)
+variable!(m, 0.0 <= n <= 100.0, Int);   // general integer  (also Integer)
+variable!(m, s <= 10.0, SemiCont(2.0)); // semicontinuous: 0 or in [2, 10]
+variable!(m, t <= 5.0, SemiInt(1.0));   // semi-integer: 0 or integer in [1, 5]
 ```
 
-### Indexed variable builder
+### Indexed variables
 
-Creates one scalar variable per key in a `Set`, named `base[key]`.
+Creates one scalar variable per key in a `Set` (or range), named `base[key]`,
+and binds an `IndexedVar`.
 
 ```rust,ignore
 let i = Set::range(0..5);
-let x = m.indexed_var("x", &i)
-    .lb(0.0)
-    .integer()
-    .build(); // IndexedVar<'_>
+variable!(m, 0.0 <= x[k in i] <= 10.0);     // uniform bounds
+variable!(m, y[k in i] >= 0.0, Int);        // integer family
+variable!(m, z[a in rows, b in cols], Bin); // multi-index (Cartesian product)
 
 // Access by key (panics on missing key):
-let expr = x[2]; // or x["name"], x[(a, b)]
+let expr = x[2];  // single key (usize / "name" / (a, b))
+let e2 = z[a, b]; // inside the macros: multi-index sugar == z[(&a, &b)]
 
-// Per-key bounds:
-let x = m.indexed_var("x", &i)
-    .lb_by(|k: usize| lower_bounds[k])
-    .ub_by(|k: usize| upper_bounds[k])
-    .build();
+// Bounds may reference the index -> lowered to per-key bounds:
+variable!(m, lower[k] <= w[k in i] <= upper[k]);
+
+// Filtered family: keep only matching keys (no trivial elements built).
+variable!(m, d[(i, j) in rc if i == j] >= 0.0);
 ```
 
 ## Domain
@@ -138,32 +148,52 @@ let evens = i.filter(|k| k.as_i64().unwrap() % 2 == 0);
 
 ## Constraints
 
-### Single constraint
+`==`, `<=`, and `>=` are written directly, the macro intercepts the tokens, so
+these are real constraint operators.
 
 ```rust,ignore
-let c_id = m.constraint("name", expr.le(rhs)); // <=
-let c_id = m.constraint("name", expr.ge(rhs)); // >=
-let c_id = m.constraint("name", expr.eq(rhs)); // ==
+constraint!(m, name, lhs <= rhs);                  // named, also >= and ==
+constraint!(m, lhs >= rhs);                        // anonymous (auto-named _c0, _c1, ...)
+constraint!(m, band, 1.0 <= e <= 3.0);             // two-sided range -> band_lo + band_hi
+constraint!(m, name = format!("c_{k}"), e == rhs); // computed run-time name
 ```
 
-### Bulk, rule over a set
+### Indexed family over a set
 
 ```rust,ignore
-m.add_constraints_over("supply", &plants, |p: String| {
-    supply[&p].le(capacity[&p])
-});
+// One constraint per key, auto-named supply[seattle], ...
+constraint!(m, supply[p in plants], sum!(x[p, q] for q in markets) <= cap[p]);
 
-// Tuple sets, destructure inline:
-m.add_constraints_over("flow", &(&plants * &markets), |(p, m): (String, String)| {
-    x[(&p, &m)].le(capacity[&p])
-});
+// Multi-index family (multi-index access sugar: x[i, j]).
+constraint!(m, flow[i in 0..n, j in 0..m], x[i, j] >= 0.0);
+
+// Filtered family: only keys passing the guard.
+constraint!(m, diag[(i, j) in rc if i == j], x[i, j] <= 1.0);
+```
+
+### Summation
+
+`sum!(body for k in domain)` reads as `sum_{k in domain} body`. Nest with extra
+clauses and filter with a trailing `if`:
+
+```rust,ignore
+constraint!(m, cap, sum!(weights[i] * x[i] for i in items) <= capacity);
+objective!(m, Min, sum!(c[i, j] * x[i, j] for i in rows, j in cols));
+let evens = sum!(x[i] for i in items if i % 2 == 0); // filtered
 ```
 
 ## Objectives
 
 ```rust,ignore
-m.minimize(cost_expr);
-m.maximize(revenue_expr);
+objective!(m, Min, cost_expr);
+objective!(m, Max, revenue_expr);
+```
+
+## Parameters
+
+```rust,ignore
+param!(m, rate = 0.05);  // binds a re-bindable `rate: Expr<'_>`
+m.set_param(rate, 0.07); // change between solves without rebuilding
 ```
 
 ## Model kind

@@ -30,11 +30,11 @@ use oximo_highs::{Highs, HighsOptions};
 use oximo_solver::{Solver, SolverStatus};
 
 let m = Model::new("toy");
-let x = m.var("x").lb(0.0).build();
-let y = m.var("y").lb(0.0).ub(4.0).build();
-m.constraint("c1", (x + 2.0 * y).le(14.0));
-m.constraint("c2", (3.0 * x - y).ge(0.0));
-m.maximize(3.0 * x + 4.0 * y);
+variable!(m, x >= 0.0);
+variable!(m, 0.0 <= y <= 4.0);
+constraint!(m, c1, x + 2.0 * y <= 14.0);
+constraint!(m, c2, 3.0 * x - y >= 0.0);
+objective!(m, Max, 3.0 * x + 4.0 * y);
 
 let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
 assert_eq!(result.status, SolverStatus::Optimal);
@@ -56,10 +56,10 @@ use oximo_highs::{Highs, HighsOptions};
 use oximo_solver::{Solver, SolverStatus};
 
 let m = Model::new("qp");
-let x = m.var("x").lb(-10.0).ub(10.0).build();
-let y = m.var("y").lb(-10.0).ub(10.0).build();
-m.constraint("c", (x + y).eq(1.0));
-m.minimize(x.powi(2) + y.powi(2)); // min x^2 + y^2
+variable!(m, -10.0 <= x <= 10.0);
+variable!(m, -10.0 <= y <= 10.0);
+constraint!(m, c, x + y == 1.0);
+objective!(m, Min, x.powi(2) + y.powi(2)); // min x^2 + y^2
 
 let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
 assert_eq!(result.status, SolverStatus::Optimal); // x = y = 0.5, obj = 0.5
