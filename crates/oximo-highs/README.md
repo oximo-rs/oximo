@@ -114,6 +114,7 @@ let opts = HighsOptions::default()
 - `dual` - constraint duals, keyed by `ConstraintId`, access via `result.dual_of(c)`.
 - `reduced_costs` - variable reduced costs, keyed by `VarId`
 - `solve_time` - wall time measured around the HiGHS solve call
+- `iterations` - total solver iterations, summed across HiGHS's per-algorithm counters (`simplex` / `qp` / `ipm` / `pdlp` / `crossover`). HiGHS populates only the counter for the method it ran, so the sum is whichever applies; `0` when the model is solved entirely in presolve
 
 ## License
 
