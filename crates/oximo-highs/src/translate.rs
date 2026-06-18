@@ -146,7 +146,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         dual,
         reduced_costs,
         solve_time: elapsed,
-        iterations: 0,
+        iterations: total_iterations(&solved),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
     })
@@ -246,6 +246,24 @@ fn collect_solution(
         .map(|(i, v)| (ConstraintId(u32::try_from(i).unwrap()), *v))
         .collect();
     (primal, reduced_costs, dual)
+}
+
+/// Total solver iterations, summed across HiGHS' per-algorithm counters.
+///
+/// HiGHS populates only the counter for the method it actually ran (simplex,
+/// QP, IPM, PDLP, crossover) and leaves the others at `0`, so the sum collapses
+/// to whichever applies.
+fn total_iterations(solved: &highs::SolvedModel) -> u64 {
+    [
+        solved.simplex_iteration_count(),
+        solved.qp_iteration_count(),
+        solved.ipm_iteration_count(),
+        solved.pdlp_iteration_count(),
+        solved.crossover_iteration_count(),
+    ]
+    .into_iter()
+    .map(|c| u64::try_from(c.max(0)).unwrap_or(0))
+    .sum()
 }
 
 fn map_status(s: HighsModelStatus) -> SolverStatus {
