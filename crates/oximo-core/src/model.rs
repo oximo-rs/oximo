@@ -419,6 +419,22 @@ impl Model {
         }
     }
 
+    /// Macro-facing entry point for a two-sided range family.
+    #[doc(hidden)]
+    pub fn __add_range_constraints_over<'a, K, F>(&'a self, name: &str, set: &Set<K>, mut rule: F)
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> (ConstraintExpr<'a>, ConstraintExpr<'a>),
+    {
+        let lo_prefix = format!("{name}_lo");
+        let hi_prefix = format!("{name}_hi");
+        for key in set {
+            let (lo, hi) = rule(K::from_index_key(&key));
+            self.__add_constraint(format_index_name(&lo_prefix, &key), lo);
+            self.__add_constraint(format_index_name(&hi_prefix, &key), hi);
+        }
+    }
+
     pub fn constraints(&self) -> Ref<'_, Vec<Constraint>> {
         self.constraints.borrow()
     }
