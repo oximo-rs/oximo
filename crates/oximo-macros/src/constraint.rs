@@ -192,17 +192,12 @@ fn register_family(
         },
         Relations::Range { mid, lo, hi } => {
             let (lo_rel, hi_rel) = range_rows(&lo, &hi, root);
-            quote! {{
-                let __set = #set;
-                (#model).__add_constraints_over(::core::concat!(#name_str, "_lo"), &__set, |#param| {
+            quote! {
+                (#model).__add_range_constraints_over(#name_str, &(#set), |#param| {
                     let __mid = #mid;
-                    #lo_rel
+                    (#lo_rel, #hi_rel)
                 });
-                (#model).__add_constraints_over(::core::concat!(#name_str, "_hi"), &__set, |#param| {
-                    let __mid = #mid;
-                    #hi_rel
-                });
-            }}
+            }
         }
     }
 }
