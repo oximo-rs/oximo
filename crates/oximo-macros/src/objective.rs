@@ -34,7 +34,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         _ => {
             return Err(syn::Error::new(
                 sense.span(),
-                "objective sense must be `Min`/`Minimize` or `Max`/`Maximize`",
+                "objective sense must be `Min`/`min`/`Minimize` or `Max`/`max`/`Maximize`",
             ));
         }
     };
