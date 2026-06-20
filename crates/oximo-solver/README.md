@@ -8,8 +8,8 @@ This crate defines the contract that backend crates implement. End users interac
 
 ```toml
 [dependencies]
-oximo-solver = "0.2"
-oximo-core   = "0.2"
+oximo-solver = "0.3"
+oximo-core   = "0.3"
 ```
 
 ## `Solver` trait
@@ -53,6 +53,7 @@ result.best()                // Option<&SolutionPoint>, same as .solution(0)
 result.solution(i)           // Option<&SolutionPoint>, i-th pooled point
 result.result_count()        // usize, number of returned points
 result.status.has_solution() // true if Optimal or Feasible
+result.report(&model)        // Display: model-aware summary (status, vars, duals)
 
 // Indexed variables
 result.value_of_idx(&flow, "nyc")                  // Option<f64>, value at a specific index
