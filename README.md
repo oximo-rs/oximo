@@ -51,6 +51,17 @@ variable!(m, n >= 0.0, Int);            // general integer (also Integer)
 variable!(m, s <= 10.0, SemiCont(2.0)); // semicontinuous: 0 or in [2, 10] (SemiInt too)
 ```
 
+Bounds, domain, warm start, and fixing can also be given as keyword args after the
+name:
+
+```rust,ignore
+variable!(m, x, lb = 0.0, ub = 1.0);       // same as `0.0 <= x <= 1.0`
+variable!(m, n, lb = 0.0, domain = Int);   // keyword domain
+variable!(m, w, lb = 0.0, ub = 10.0, Int); // mixed with positional domain token
+variable!(m, p, lb = 0.0, initial = 3.0);  // warm start (scalar only)
+variable!(m, q, fix = 5.0);                // fixed to 5.0 (scalar only)
+```
+
 ### Constraints and objectives
 
 Expressions are built with standard Rust operators. The macros let you write the
