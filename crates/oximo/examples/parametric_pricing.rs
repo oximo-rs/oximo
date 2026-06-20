@@ -5,11 +5,11 @@
 //! *market parameter* we do not control. We want the optimal product mix as
 //! `p1` sweeps over a range of market scenarios.
 //!
-//! The point of a [`Model::param`] is that it stays symbolic in the model: we
-//! build the LP once, then call [`Model::set_param`] between solves to
-//! re-bind `p1` without rebuilding any variables, constraints, or objective.
-//! Each solve reads the parameter's current value, so the coefficient on `x1`
-//! tracks the latest binding.
+//! The point of a parameter is that it stays symbolic in the model: we build the
+//! LP once, then re-bind `p1` between solves with `set_param_value` without
+//! rebuilding any variables, constraints, or objective. Each solve reads the
+//! parameter's current value, so the coefficient on `x1` tracks the latest
+//! binding.
 //!
 //! References:
 //! - Dantzig, G. B. (1998). Linear Programming and Extensions.
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for price in [1.0, 1.6, 2.0, 5.0, 11.0] {
         // Re-bind `p1` to the current price
-        m.set_param(p1, price);
+        p1.set_param_value(price);
 
         let result = Highs.solve(&m, &HighsOptions::default())?;
         assert_eq!(result.status, SolverStatus::Optimal);
