@@ -1,14 +1,18 @@
-//! `variable!(model, spec[, domain])`.
+//! `variable!(model, spec[, domain][, kw = val ...])`.
 //!
 //! Accepted `spec` shapes (where `name` may be `name` or `name[i in dom, ...]`):
 //! `name`, `name >= lb`, `name <= ub`, `lb <= name <= ub`. Bounds may reference
 //! the index variables (e.g. `b[i in I] <= b_max[i]`), in which case they are
 //! lowered to the builder's per-key `.lb_by` / `.ub_by`.
 //!
-//! The optional trailing `domain` is `Bin`/`Int`/`Real` (and aliases) or a call
-//! `SemiCont(thr)` / `SemiContinuous(thr)` / `SemiInt(thr)` / `SemiInteger(thr)`.
+//! After the spec you can pass, in any order, an optional positional `domain`
+//! token (`Bin`/`Int`/`Real` and aliases, or a call `SemiCont(thr)` /
+//! `SemiContinuous(thr)` / `SemiInt(thr)` / `SemiInteger(thr)`) and any of the
+//! keyword args `lb = expr`, `ub = expr`, `domain = <domain>`, `initial = expr`,
+//! `fix = expr`. Keyword `lb`/`ub` behave exactly like the relational form (and
+//! may reference the index). `initial`/`fix` are scalar-only.
 
-use proc_macro2::{TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
 use syn::Pat;
 
@@ -25,20 +29,19 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let spec = parts.next().ok_or_else(|| {
         syn::Error::new(proc_macro2::Span::call_site(), "variable! needs a `name`/bounds spec")
     })?;
-    let domain = parts.next();
-    if let Some(extra) = parts.next() {
-        return Err(syn::Error::new_spanned(extra, "unexpected trailing tokens in variable!"));
-    }
 
     let root = oximo_root();
-    let domain_method = match domain {
+
+    let Trailing { domain: domain_ts, lb: kw_lb, ub: kw_ub, initial: kw_initial, fix: kw_fix } =
+        parse_trailing(parts)?;
+    let domain_method = match domain_ts {
         None => quote!(),
         Some(ts) => domain_method(ts, &root)?,
     };
 
     // Split the bound spec on relational operators and identify the core name.
     let (segs, ops) = split_relops(spec);
-    let (core, lb, ub) = match (segs.len(), ops.as_slice()) {
+    let (core, rel_lb, rel_ub) = match (segs.len(), ops.as_slice()) {
         (1, []) => (segs[0].clone(), None, None),
         (2, [RelOp::Le]) => (segs[0].clone(), None, Some(segs[1].clone())),
         (2, [RelOp::Ge]) => (segs[0].clone(), Some(segs[1].clone()), None),
@@ -53,12 +56,38 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     };
 
+    // Merge relational and keyword bounds, where the same bound from both is an error.
+    let lb = merge_bound(rel_lb, kw_lb, "lb")?;
+    let ub = merge_bound(rel_ub, kw_ub, "ub")?;
+
+    // `fix` pins both bounds, so explicit lb/ub alongside it is contradictory.
+    if kw_fix.is_some() {
+        if let Some(b) = lb.as_ref().or(ub.as_ref()) {
+            return Err(syn::Error::new_spanned(
+                b,
+                "`fix` sets both bounds. Do not combine it with `lb`/`ub`",
+            ));
+        }
+    }
+
     // Bound expressions are value expressions, so `q[i, j]` index sugar applies.
     let lb = lb.map(crate::index::rewrite_index_subscripts);
     let ub = ub.map(crate::index::rewrite_index_subscripts);
 
     let Named { name, binds, cond } = parse_named(core)?;
     let name_str = name.to_string();
+
+    // `initial`/`fix` lower to scalar `VarBuilder` methods the indexed builder
+    // lacks, so reject them on a family with a clear message.
+    if binds.is_some() {
+        if let Some(kw) = kw_initial.as_ref().or(kw_fix.as_ref()) {
+            return Err(syn::Error::new_spanned(
+                kw,
+                "`initial`/`fix` is not supported on an indexed family. Use `m.set_initial` / \
+                 `m.fix` per element",
+            ));
+        }
+    }
 
     let mut idents = Vec::new();
     if let Some(binds) = &binds {
@@ -92,9 +121,11 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         bounds.extend(bound_method(ub, BoundKind::Ub));
     }
 
+    let extras = scalar_extras(kw_initial, kw_fix);
+
     let expanded = match binds {
         None => quote! {
-            let #name = (#model).__var(#name_str) #domain_method #bounds .build();
+            let #name = (#model).__var(#name_str) #domain_method #bounds #extras .build();
         },
         Some(binds) => {
             let set = build_set(&binds, &root);
@@ -108,6 +139,109 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     };
     Ok(expanded)
+}
+
+/// Build the scalar-only `.initial(..)`/`.fix(..)` chain from the keyword args.
+/// Both are empty for an indexed family (rejected in `expand`).
+fn scalar_extras(initial: Option<TokenStream2>, fix: Option<TokenStream2>) -> TokenStream2 {
+    let mut extras = TokenStream2::new();
+    if let Some(init) = initial.map(crate::index::rewrite_index_subscripts) {
+        extras.extend(quote!(.initial(f64::from(#init))));
+    }
+    if let Some(fix) = fix.map(crate::index::rewrite_index_subscripts) {
+        extras.extend(quote!(.fix(f64::from(#fix))));
+    }
+    extras
+}
+
+/// The trailing modifiers of a `variable!` declaration: an optional domain
+/// (positional token or `domain =` keyword) plus the keyword bound/initial/
+/// fix expressions.
+struct Trailing {
+    domain: Option<TokenStream2>,
+    lb: Option<TokenStream2>,
+    ub: Option<TokenStream2>,
+    initial: Option<TokenStream2>,
+    fix: Option<TokenStream2>,
+}
+
+/// Parse the segments after the spec into [`Trailing`], collecting one positional
+/// domain token and the `lb`/`ub`/`domain`/`initial`/`fix` keyword args (in any
+/// order). Errors on a repeated keyword, a second positional token, or a domain
+/// given both ways.
+fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trailing> {
+    let mut positional_domain: Option<TokenStream2> = None;
+    let (mut kw_domain, mut lb, mut ub, mut initial, mut fix) = (None, None, None, None, None);
+
+    for seg in parts {
+        if seg.is_empty() {
+            continue; // tolerate a trailing comma
+        }
+        if let Some((kw, val)) = parse_keyword(&seg) {
+            let slot = match kw.to_string().as_str() {
+                "lb" => &mut lb,
+                "ub" => &mut ub,
+                "domain" => &mut kw_domain,
+                "initial" => &mut initial,
+                "fix" => &mut fix,
+                _ => unreachable!("parse_keyword only returns known keywords"),
+            };
+            if slot.is_some() {
+                return Err(syn::Error::new_spanned(&kw, format!("`{kw}` specified twice")));
+            }
+            *slot = Some(val);
+        } else if positional_domain.is_some() {
+            return Err(syn::Error::new_spanned(
+                &seg,
+                "unexpected trailing tokens in variable! (only one positional domain token is \
+                 allowed; use `lb =`/`ub =`/`domain =`/`initial =`/`fix =` for the rest)",
+            ));
+        } else {
+            positional_domain = Some(seg);
+        }
+    }
+
+    let domain = match (positional_domain, kw_domain) {
+        (Some(_), Some(d)) => return Err(syn::Error::new_spanned(d, "domain specified twice")),
+        (Some(d), None) | (None, Some(d)) => Some(d),
+        (None, None) => None,
+    };
+    Ok(Trailing { domain, lb, ub, initial, fix })
+}
+
+/// Recognize a trailing `kw = value` keyword segment, returning the keyword ident
+/// and the value tokens. A segment is a keyword iff it starts with one of the known
+/// keyword idents followed by a lone `=` (so `==`/`<=`/`>=` are not mistaken for
+/// it). Anything else (a bare domain token, `SemiCont(thr)`) returns `None`.
+fn parse_keyword(seg: &TokenStream2) -> Option<(proc_macro2::Ident, TokenStream2)> {
+    let tts: Vec<TokenTree> = seg.clone().into_iter().collect();
+    let TokenTree::Ident(kw) = tts.first()? else {
+        return None;
+    };
+    if !matches!(kw.to_string().as_str(), "lb" | "ub" | "domain" | "initial" | "fix") {
+        return None;
+    }
+    match tts.get(1)? {
+        TokenTree::Punct(p) if p.as_char() == '=' && p.spacing() == Spacing::Alone => {}
+        _ => return None,
+    }
+    Some((kw.clone(), tts[2..].iter().cloned().collect()))
+}
+
+/// Merge a bound coming from the relational spec with one given as a keyword.
+/// Specifying the same bound twice is an error.
+fn merge_bound(
+    rel: Option<TokenStream2>,
+    kw: Option<TokenStream2>,
+    which: &str,
+) -> syn::Result<Option<TokenStream2>> {
+    match (rel, kw) {
+        (Some(_), Some(kw)) => {
+            Err(syn::Error::new_spanned(kw, format!("`{which}` specified twice")))
+        }
+        (Some(b), None) | (None, Some(b)) => Ok(Some(b)),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Map the trailing domain token to the builder method. Accepts the bare-ident
