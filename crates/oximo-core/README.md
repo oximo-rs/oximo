@@ -43,7 +43,7 @@ println!("kind = {:?}", m.kind()); // LP
 ## Modeling API
 
 The modeling surface is a set of macros: `variable!`, `constraint!`, `objective!`,
-`sum!`, and `param!`. Each expands to the underlying typed model operations,
+`sum!`, `set!`, and `param!`. Each expands to the underlying typed model operations,
 so there is no runtime cost and full compile-time type/borrow checking is preserved.
 
 > The older builder methods (`Model::var`/`indexed_var`/`constraint`/`minimize`/
@@ -198,8 +198,8 @@ objective!(m, Max, revenue_expr);
 ## Parameters
 
 ```rust,ignore
-param!(m, rate = 0.05);  // binds a re-bindable `rate: Expr<'_>`
-m.set_param(rate, 0.07); // change between solves without rebuilding
+param!(m, rate = 0.05);     // binds a re-bindable `rate: Expr<'_>`
+rate.set_param_value(0.07); // change between solves without rebuilding
 ```
 
 ## Model kind
