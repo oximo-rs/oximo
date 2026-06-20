@@ -259,6 +259,8 @@ let result = Baron::new().solve(&m, &BaronOptions::default())?;
 
 ## Reading results
 
+For a quick, model-aware summary, print `result.report(&m)`. For programmatic access:
+
 ```rust,ignore
 let result = Highs.solve(&m, &HighsOptions::default())?;
 
