@@ -498,3 +498,60 @@ fn index_sugar_leaves_arrays_untouched() {
     assert_eq!(m.num_variables(), 2);
     assert_eq!(m.num_constraints(), 1);
 }
+
+// --- `set!`: index-set construction as a macro.
+
+#[test]
+fn set_macro_plain_range_normalizes() {
+    let m = Model::new("set_range");
+    set!(items = 0..5);
+    assert_eq!(items.len(), 5);
+    variable!(m, x[i in items] >= 0.0);
+    assert_eq!(x.len(), 5);
+    assert_eq!(m.num_variables(), 5);
+}
+
+#[test]
+fn set_macro_plain_product_borrows_operands() {
+    let plants = Set::strings(["seattle", "san-diego"]);
+    let markets = Set::strings(["nyc", "chi", "topeka"]);
+    set!(routes = plants * markets);
+    assert_eq!(routes.len(), 6);
+    assert_eq!(plants.len(), 2);
+    assert_eq!(markets.len(), 3);
+}
+
+#[test]
+fn set_macro_plain_product_still_accepts_refs() {
+    let plants = Set::strings(["a", "b"]);
+    set!(routes = &plants * &plants);
+    assert_eq!(routes.len(), 4);
+}
+
+#[test]
+fn set_macro_comprehension_filters_product() {
+    let plants = Set::strings(["seattle", "san-diego"]);
+    // Single tuple pattern over a `*` product domain, `if` decoded by-value.
+    set!(arcs = (p, q) in &plants * &plants if p != q);
+    assert_eq!(arcs.len(), 2);
+
+    let m = Model::new("set_arcs");
+    variable!(m, f[(p, q) in arcs] >= 0.0);
+    assert_eq!(f.len(), 2);
+    assert_eq!(m.num_variables(), 2);
+}
+
+#[test]
+fn set_macro_comprehension_multi_bind_builds_product() {
+    set!(rc = i in 0..2, j in 0..2);
+    assert_eq!(rc.len(), 4);
+
+    set!(diag = i in 0..3, j in 0..3 if i == j);
+    assert_eq!(diag.len(), 3);
+
+    let m = Model::new("set_diag");
+    variable!(m, y[(i, j) in diag] >= 0.0);
+    constraint!(m, lim[(i, j) in diag], y[i, j] <= 1.0);
+    assert_eq!(m.num_variables(), 3);
+    assert_eq!(m.num_constraints(), 3);
+}

@@ -35,4 +35,4 @@ pub use var::{VarBuilder, Variable};
 // `oximo-expr` import.
 pub use oximo_expr::{Expr, ExprArena, ExprId, ExprNode, ParamId, VarId, dot};
 
-pub use oximo_macros::{constraint, objective, param, sum, variable};
+pub use oximo_macros::{constraint, objective, param, set, sum, variable};

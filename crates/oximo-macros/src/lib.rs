@@ -12,6 +12,7 @@ mod constraint;
 mod index;
 mod objective;
 mod param;
+mod set;
 mod sum;
 mod variable;
 
@@ -71,6 +72,15 @@ pub fn sum(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn param(input: TokenStream) -> TokenStream {
     param::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `set!(name = domain)`, bind a local to an index `Set`. A plain right side
+/// (`0..5`, `a * b`) is normalized to an owned set (a top-level `*` is a borrowing
+/// Cartesian product). A `pat in domain[ if cond]` comprehension builds (and
+/// optionally filters) the set. See the crate docs.
+#[proc_macro]
+pub fn set(input: TokenStream) -> TokenStream {
+    set::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 // ---------------------------------------------------------------------------

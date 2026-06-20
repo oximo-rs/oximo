@@ -12,4 +12,4 @@ pub use crate::sum::sum_over;
 pub use crate::var::{VarBuilder, Variable};
 pub use oximo_expr::{Expr, ExprId, ParamId, VarId, dot};
 
-pub use oximo_macros::{constraint, objective, param, sum, variable};
+pub use oximo_macros::{constraint, objective, param, set, sum, variable};
