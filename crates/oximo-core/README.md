@@ -95,6 +95,12 @@ variable!(m, b, Bin);                   // binary {0, 1}  (also Binary)
 variable!(m, 0.0 <= n <= 100.0, Int);   // general integer  (also Integer)
 variable!(m, s <= 10.0, SemiCont(2.0)); // semicontinuous: 0 or in [2, 10]
 variable!(m, t <= 5.0, SemiInt(1.0));   // semi-integer: 0 or integer in [1, 5]
+
+// Keyword args:
+variable!(m, u, lb = 0.0, ub = 10.0);    // same as `0.0 <= u <= 10.0`
+variable!(m, v, lb = 0.0, domain = Int); // keyword domain (or a positional `Int`)
+variable!(m, w, initial = 3.0);          // warm start  (scalar only)
+variable!(m, p, fix = 5.0);              // fixed to 5.0 (scalar only)
 ```
 
 ### Indexed variables
