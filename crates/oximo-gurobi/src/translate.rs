@@ -112,9 +112,12 @@ fn add_variables(
             Domain::SemiContinuous { .. } => VarType::SemiCont,
             Domain::SemiInteger { .. } => VarType::SemiInt,
         };
+        // For a semi-continuous/semi-integer variable the gap floor (`threshold`)
+        // is Gurobi's lower bound: the value is 0 or in `[lb, ub]`.
+        let floor = v.domain.semi_threshold().unwrap_or(v.lb);
         // `add_var!` expands the f64 bounds with an `as f64` cast.
         #[allow(clippy::unnecessary_cast)]
-        let gvar = add_var!(grb_model, vtype, bounds: v.lb..v.ub, name: &format!("x{i}"))
+        let gvar = add_var!(grb_model, vtype, bounds: floor..v.ub, name: &format!("x{i}"))
             .map_err(map_grb_err)?;
         gurobi_vars.push(gvar);
         if let Some(val) = v.initial {
