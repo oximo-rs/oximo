@@ -112,6 +112,21 @@ fn filter_on_product() {
 }
 
 #[test]
+fn filter_typed_decodes_tuple_keys() {
+    let plants = Set::strings(["seattle", "san-diego"]);
+    let arcs = (&plants * &plants).filter_typed(|(p, q)| p != q);
+    assert!(arcs.is_tuples());
+    assert_eq!(arcs.len(), 2);
+}
+
+#[test]
+fn filter_typed_decodes_scalar_keys() {
+    let evens = Set::range(0..10).filter_typed(|i: usize| i % 2 == 0);
+    assert!(evens.is_range());
+    assert_eq!(evens.len(), 5);
+}
+
+#[test]
 fn tuple_key_from_pair_literal() {
     let k: IndexKey = (1, 2).into();
     let parts = k.as_tuple().unwrap();

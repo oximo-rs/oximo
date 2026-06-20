@@ -21,12 +21,12 @@ pub fn sum_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
 
 /// Filter a [`Set`] by a typed predicate over its decoded keys. Backs the
 /// filtered family form `name[i in dom if cond]` of `variable!`/`constraint!`.
-pub fn filter_keys<K, F>(set: &Set<K>, mut pred: F) -> Set<K>
+pub fn filter_keys<K, F>(set: &Set<K>, pred: F) -> Set<K>
 where
     K: FromIndexKey,
     F: FnMut(K) -> bool,
 {
-    set.filter(|k| pred(K::from_index_key(k)))
+    set.filter_typed(pred)
 }
 
 /// Typed key iterator over a sum/constraint domain. Backs the filtered form of

@@ -139,6 +139,29 @@ impl<K> Set<K> {
         Self::from_repr(repr)
     }
 
+    /// Filter keys with a predicate over the typed, by-value decoded key.
+    ///
+    /// Unlike [`Self::filter`] (which hands the closure a raw [`IndexKey`]), the
+    /// key is decoded to `K` first, so a product set yields native tuples and no
+    /// manual `as_tuple().unwrap()` unpacking is needed. The receiver's `K` pins
+    /// the closure parameter, so it usually needs no annotation.
+    ///
+    /// ```
+    /// use oximo_core::Set;
+    /// let plants = Set::strings(["seattle", "san-diego"]);
+    /// // No-self-loop arcs; keys decoded to `(String, String)`.
+    /// let arcs = (&plants * &plants).filter_typed(|(p, q)| p != q);
+    /// assert_eq!(arcs.len(), 2);
+    /// ```
+    #[must_use]
+    pub fn filter_typed<F>(&self, mut pred: F) -> Self
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> bool,
+    {
+        self.filter(|k| pred(K::from_index_key(k)))
+    }
+
     pub fn len(&self) -> usize {
         self.repr.len()
     }
