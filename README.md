@@ -76,48 +76,31 @@ constraint!(m, band, 1.0 <= x + y <= 10.0); // two-sided range -> band_lo + band
 
 objective!(m, Min, 3.0 * x + 5.0 * y);
 // or
-objective!(m, Max, x + 2.0 * y);            // also Minimize/min, Maximize/max
-```
-
-### Index sets
-
-`Set` is the modeling-layer container for an ordered, finite index set. Build
-one over integers, strings, or arbitrary tuples. You can combine sets with the
-Cartesian product operator `&a * &b`, and filter sparsely.
-
-```rust,ignore
-use oximo::prelude::*;
-
-let items = Set::range(0..5);
-let n_items = Set::range(0..weights.len());
-let plants = Set::strings(["seattle", "san-diego"]);
-
-// Cartesian product -> tuple keys, flattens automatically across nesting.
-let routes = &plants * &Set::strings(["nyc", "chi", "topeka"]);
-assert_eq!(routes.len(), 6);
-
-// Sparse subsets via filter without self-loops
-let arcs = (&plants * &plants).filter(|k| {
-    let p = k.as_tuple().unwrap();
-    p[0] != p[1]
-});
+objective!(m, Max, x + 2.0 * y); // also Minimize/min, Maximize/max
 ```
 
 ### Indexed variables
 
 `variable!(m, x[k in set])` registers one scalar per key with auto-named entries
-like `x[seattle,nyc]`. Bounds apply uniformly by default.
+like `x[seattle,nyc]`. Bounds apply uniformly by default; a multi-index family
+ranges over a Cartesian product.
 
 ```rust,ignore
 let m = Model::new("transport");
-variable!(m, x[r in routes] >= 0.0);
+variable!(m, x[r in routes] >= 0.0);        // one var per route
+variable!(m, y[k in items] >= 0.0, Int);    // integer family
+variable!(m, z[a in rows, b in cols], Bin); // multi-index (Cartesian product)
 
 // Scalar lookup: any type that converts to IndexKey works.
 let e1 = x[("seattle", "nyc")];
-let e2 = x[("san-diego", "chi")];
+let e2 = z[a, b];
 
-// Per-key upper bound (capacity per arc) -> index-dependent bound.
-variable!(m, 0.0 <= y[(p, q) in routes] <= capacity_for(&p, &q));
+// Per-key bounds may reference the index
+variable!(m, 0.0 <= w[(p, q) in routes] <= capacity_for(&p, &q));
+variable!(m, v[k in items], lb = 0.0, ub = cap[k]);
+
+// Filtered family: keep only matching keys (no trivial elements built).
+variable!(m, d[(i, j) in rc if i == j] >= 0.0);
 ```
 
 ### Summing over sets
@@ -154,6 +137,36 @@ constraint!(m, diag[(i, j) in arcs if i == j], x[i, j] <= 1.0);
 
 // Computed run-time name.
 constraint!(m, name = format!("bal_{p}"), inflow[p] - outflow[p] == 0.0);
+```
+
+### Index sets
+
+A `Set` is the modeling-layer container for an ordered, finite index set over
+integers, strings, or tuples. Most domains need no explicit `Set`: an integer
+range is already a domain (`x[i in 0..5]`, `sum!(.. for i in 0..n)`). Reach for
+`Set` when keys are strings, tuples, sparse, or a subset reused across statements.
+
+The `set!` macro binds a named set. A plain right side is normalized to an owned
+set, a `pat in domain[ if cond]` comprehension builds (and optionally filters)
+one.
+
+```rust,ignore
+use oximo::prelude::*;
+
+let plants = Set::strings(["seattle", "san-diego"]);
+
+set!(items = 0..5);             // range normalized to Set<usize>
+set!(routes = plants * plants); // Cartesian product
+
+// Comprehension: product domain + by-value `if`. These two are equivalent.
+set!(arcs = (p, q) in &plants * &plants if p != q); // single tuple pattern
+set!(arcs = i in plants, j in plants if i != j);    // multi-bind product
+
+// The typed filter is also a Set method (the receiver pins the key type):
+let diag = (&plants * &plants).filter_typed(|(p, q)| p == q);
+
+// Sparse/string leaf sets:
+let sparse = Set::from_ints([0, 2, 4, 8]);
 ```
 
 ### Nonlinear expressions
