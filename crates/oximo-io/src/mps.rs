@@ -83,7 +83,8 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     writeln!(out, "COLUMNS")?;
     let mut int_open = false;
     for v in vars.iter() {
-        let needs_marker = v.domain.is_integer();
+        // Semi-integer columns carry their integrality via the `SI` bound
+        let needs_marker = v.domain.is_integer() && v.domain.semi_threshold().is_none();
         if needs_marker && !int_open {
             writeln!(out, "    MARKER                 'MARKER'                 'INTORG'")?;
             int_open = true;
@@ -117,6 +118,14 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     for v in vars.iter() {
         let lb = v.lb;
         let ub = v.ub;
+        if let Some(thr) = v.domain.semi_threshold() {
+            writeln!(out, " LO BND       {:<10}{}", v.name, thr)?;
+            let semi_ub = if ub.is_finite() { ub } else { 1e30 };
+            // `is_integer()` distinguishes the two semi domains here.
+            let code = if v.domain.is_integer() { "SI" } else { "SC" };
+            writeln!(out, " {code} BND       {:<10}{}", v.name, semi_ub)?;
+            continue;
+        }
         if lb.is_finite() && (lb - ub).abs() < f64::EPSILON {
             writeln!(out, " FX BND       {:<10}{lb}", v.name)?;
             continue;

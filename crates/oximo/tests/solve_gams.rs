@@ -123,6 +123,27 @@ fn gams_knapsack_milp() {
 }
 
 #[test]
+fn gams_semicontinuous_respects_threshold_gap() {
+    // min s + t  s.t.  s >= 3,  t >= 3
+    // s is semicontinuous (0 or [5, 10]), t is semi-integer (0 or int in [5, 10]).
+    // The >= 3 constraints forbid 0 and the gap forbids (0, 5), so both jump to
+    // 5 -> obj 10. A dropped threshold would let the solver settle at 3.
+    let m = Model::new("semi");
+    variable!(m, s <= 10.0, SemiCont(5.0));
+    variable!(m, t <= 10.0, SemiInt(5.0));
+    constraint!(m, cs, s >= 3.0);
+    constraint!(m, ct, t >= 3.0);
+    objective!(m, Min, s + t);
+
+    let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
+    let result = Gams::new().solve(&m, &opts).unwrap();
+    assert_eq!(result.status, SolverStatus::Optimal);
+    assert!((result.objective().unwrap() - 10.0).abs() < 1e-4, "obj={:?}", result.objective());
+    assert!((result.value_of(s).unwrap() - 5.0).abs() < 1e-4, "s={:?}", result.value_of(s));
+    assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-4, "t={:?}", result.value_of(t));
+}
+
+#[test]
 fn gams_infeasible_returns_status() {
     let m = Model::new("infeas");
     variable!(m, 0.0 <= x <= 1.0);

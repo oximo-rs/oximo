@@ -77,6 +77,20 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         if matches!(v.domain, Domain::Binary) {
             continue;
         }
+        // Semicont/semiint: the gap floor (`threshold`) is the LP lower bound.
+        // The `Semi-Continuous` section below marks the gap.
+        if let Some(thr) = v.domain.semi_threshold() {
+            if !wrote_bounds_header {
+                writeln!(out, "Bounds")?;
+                wrote_bounds_header = true;
+            }
+            if v.ub == f64::INFINITY {
+                writeln!(out, " {} >= {}", v.name, thr)?;
+            } else {
+                writeln!(out, " {} <= {} <= {}", thr, v.name, v.ub)?;
+            }
+            continue;
+        }
         if v.lb.is_finite() && (v.lb - v.ub).abs() < f64::EPSILON {
             if !wrote_bounds_header {
                 writeln!(out, "Bounds")?;
@@ -123,6 +137,18 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if !binary_vars.is_empty() {
         writeln!(out, "Binaries")?;
         writeln!(out, " {}", binary_vars.join(" "))?;
+    }
+
+    // Semicontinuous and semi-integer vars. A var that is also in `General`
+    // (the SemiInteger filter above) is read back as semi-integer.
+    let semi_vars: Vec<&str> = vars
+        .iter()
+        .filter(|v| v.domain.semi_threshold().is_some())
+        .map(|v| v.name.as_str())
+        .collect();
+    if !semi_vars.is_empty() {
+        writeln!(out, "Semi-Continuous")?;
+        writeln!(out, " {}", semi_vars.join(" "))?;
     }
 
     writeln!(out, "End")?;

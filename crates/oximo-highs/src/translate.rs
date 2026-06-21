@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use highs::{HessianFormat, HighsModelStatus, RowProblem, Sense as HighsSense};
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId};
+use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable};
 use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
 };
@@ -19,7 +19,9 @@ use crate::options::apply as apply_options;
 /// Hessian is passed via `Highs_passHessian`. Nonlinear constraints or
 /// objectives, quadratic constraints (HiGHS has no quadratic constraints), and
 /// integer + quadratic (MIQP) models produce [`SolverError::Nonlinear`] or
-/// [`SolverError::UnsupportedKind`].
+/// [`SolverError::UnsupportedKind`]. Semicontinuous / semi-integer variables are
+/// rejected with [`SolverError::Backend`] (the `highs` crate exposes no way to
+/// set them).
 ///
 /// HiGHS supports only convex QPs.
 /// For minimization, `Q` must be positive semidefinite (PSD),
@@ -34,6 +36,7 @@ use crate::options::apply as apply_options;
 /// # Panics
 ///
 /// Panics if model variable IDs overflow `u32`.
+#[allow(clippy::too_many_lines)]
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
     if !matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP) {
@@ -42,6 +45,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
 
     let arena = model.arena();
     let vars = model.variables();
+    reject_semi_domains(&vars)?;
     let constraints = model.constraints();
     let objective = model.try_objective().map_err(SolverError::Core)?;
 
@@ -150,6 +154,22 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
     })
+}
+
+/// HiGHS supports semicontinuous/semi-integer variables, but the `highs` crate
+/// only exposes continuous/integer integrality, so we cannot mark them. Reject
+/// such a model.
+fn reject_semi_domains(vars: &[Variable]) -> Result<(), SolverError> {
+    for v in vars {
+        if v.domain.semi_threshold().is_some() {
+            return Err(SolverError::Backend(format!(
+                "variable x{} has a semicontinuous/semi-integer domain, \
+                 which the HiGHS backend does not support yet",
+                v.id.index()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// HiGHS Hessian in compressed-sparse-column form: one `(row, value)` list per

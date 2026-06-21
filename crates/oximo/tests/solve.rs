@@ -37,6 +37,19 @@ fn highs_multi_optima_returns_single_best() {
 }
 
 #[test]
+fn highs_rejects_semi_domains() {
+    // HiGHS can't represent the semicontinuity gap through the `highs` crate, so
+    // a semicontinuous (or semi-integer) variable must error.
+    let m = Model::new("semi");
+    variable!(m, s <= 10.0, SemiCont(2.0));
+    constraint!(m, c, s >= 3.0);
+    objective!(m, Min, s);
+
+    let err = Highs.solve(&m, &HighsOptions::default()).unwrap_err();
+    assert!(matches!(err, SolverError::Backend(_)), "expected Backend error, got {err:?}");
+}
+
+#[test]
 fn param_coefficient_lp_rebinds_without_rebuild() {
     let m = Model::new("param_lp");
     param!(m, price = 3.0);

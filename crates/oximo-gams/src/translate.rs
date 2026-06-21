@@ -540,14 +540,18 @@ fn write_preamble(gms: &mut String) {
     writeln!(gms).unwrap();
 }
 
-/// Emit `Variables`, `Binary Variables`, `Integer Variables` sections.
+/// Emit `Variables`, `Binary Variables`, `Integer Variables`,
+/// `Semicont Variables`, `Semiint Variables` sections.
 fn write_var_declarations(gms: &mut String, vars: &[Variable]) {
-    let (mut cont, mut bin, mut int) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut cont, mut bin, mut int, mut semicont, mut semiint) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for v in vars {
         match v.domain {
             Domain::Binary => bin.push(v),
-            Domain::Integer | Domain::SemiInteger { .. } => int.push(v),
-            _ => cont.push(v),
+            Domain::Integer => int.push(v),
+            Domain::SemiContinuous { .. } => semicont.push(v),
+            Domain::SemiInteger { .. } => semiint.push(v),
+            Domain::Real => cont.push(v),
         }
     }
 
@@ -559,6 +563,8 @@ fn write_var_declarations(gms: &mut String, vars: &[Variable]) {
 
     write_typed_var_section(gms, "Binary Variables", &bin);
     write_typed_var_section(gms, "Integer Variables", &int);
+    write_typed_var_section(gms, "Semicont Variables", &semicont);
+    write_typed_var_section(gms, "Semiint Variables", &semiint);
     writeln!(gms).unwrap();
 }
 
@@ -600,6 +606,15 @@ fn write_var_bounds(gms: &mut String, v: &Variable) {
             writeln!(gms, "v{i}.lo = {};", fmt(v.lb)).unwrap();
         }
         if (v.ub - 1.0).abs() > f64::EPSILON {
+            writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
+        }
+        return;
+    }
+    // Semicont/semiint variables: GAMS reads `.lo` as the gap floor (the value
+    // is 0 or in `[.lo, .up]`), so emit the threshold there rather than `lb`.
+    if let Some(thr) = v.domain.semi_threshold() {
+        writeln!(gms, "v{i}.lo = {};", fmt(thr)).unwrap();
+        if v.ub.is_finite() {
             writeln!(gms, "v{i}.up = {};", fmt(v.ub)).unwrap();
         }
         return;
