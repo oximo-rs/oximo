@@ -81,6 +81,26 @@ fn gurobi_qcp_duals_quadratic_constraint() {
 }
 
 #[test]
+fn gurobi_semicontinuous_respects_threshold_gap() {
+    // min s + t  s.t.  s >= 3,  t >= 3
+    // s is semicontinuous (0 or [5, 10]), t is semi-integer (0 or int in [5, 10]).
+    // The >= 3 constraints forbid 0, and the gap forbids (0, 5), so both jump to
+    // 5 -> obj 10. If the threshold were dropped, the solver would settle at 3.
+    let m = Model::new("semi");
+    variable!(m, s <= 10.0, SemiCont(5.0));
+    variable!(m, t <= 10.0, SemiInt(5.0));
+    constraint!(m, cs, s >= 3.0);
+    constraint!(m, ct, t >= 3.0);
+    objective!(m, Min, s + t);
+
+    let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
+    assert_eq!(result.status, SolverStatus::Optimal);
+    assert!((result.objective().unwrap() - 10.0).abs() < 1e-5, "obj={:?}", result.objective());
+    assert!((result.value_of(s).unwrap() - 5.0).abs() < 1e-5, "s={:?}", result.value_of(s));
+    assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-5, "t={:?}", result.value_of(t));
+}
+
+#[test]
 fn gurobi_qcp_duals_skipped_by_default() {
     // Same convex QCP without .qcp_dual(1): the backend leaves Gurobi's
     // QCPDual default (0) untouched, so no duals are computed.
