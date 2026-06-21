@@ -57,6 +57,7 @@ Fixed-format MPS (fixed-column, 10-char field width). Widely supported by commer
 |-------------------|--------------------------------------------------------------------------------------------------------------------------------|
 | Objective row     | Named `OBJ`, maximization models are negated with a `* sense: maximize` comment so re-importers can recover the original sense |
 | Integer variables | Wrapped in `INTORG`/`INTEND` markers                                                                                           |
+| Semicont variables| `LO` (threshold) + upper-bound semi marker: `SC` for semi-continuous, `SI` for semi-integer                                    |
 | Bounds            | `FR` (free), `MI`+`UP` (lower=-inf), `LO`/`UP` as needed. Default lb=0 omitted                                                 |
 | Constant terms    | Objective constant written to `RHS OBJ`, constraint constants folded into `RHS`                                                |
 
@@ -75,12 +76,13 @@ write_mps(&model, &mut f)?;
 
 ### LP (CPLEX LP format)
 
-Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `End`.
+Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `Semi-Continuous`, `End`.
 
 | Feature            | Behavior                                                           |
 |--------------------|--------------------------------------------------------------------|
 | Objective sense    | `Minimize` / `Maximize` keyword, no negation needed                |
 | Integer variables  | `General` section (integer/semi-integer), `Binaries` section       |
+| Semicont variables | `Semi-Continuous` section, threshold emitted as the lower bound    |
 | Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted |
 | Objective constant | Written as a comment if non-zero                                   |
 
