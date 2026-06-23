@@ -46,7 +46,7 @@ pub struct Model {
     pub(crate) constraints: RefCell<Vec<Constraint>>,
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
-    cached_kind: RefCell<Option<ModelKind>>,
+    cached_kind: Cell<Option<ModelKind>>,
     /// Monotonic counter for auto-naming anonymous constraints registered via
     /// the `constraint!` macro.
     auto_seq: Cell<u32>,
@@ -76,7 +76,7 @@ impl Model {
             constraints: RefCell::new(Vec::new()),
             constraint_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
-            cached_kind: RefCell::new(None),
+            cached_kind: Cell::new(None),
             auto_seq: Cell::new(0),
         }
     }
@@ -123,7 +123,7 @@ impl Model {
         names.insert(b.name, id);
         drop(vars);
         drop(names);
-        *self.cached_kind.borrow_mut() = None;
+        self.cached_kind.set(None);
         Expr::from_var(&self.arena, id)
     }
 
@@ -255,7 +255,7 @@ impl Model {
         };
         self.parameters.borrow_mut().push(Parameter { id, name: name.clone() });
         self.param_names.borrow_mut().insert(name, id);
-        *self.cached_kind.borrow_mut() = None;
+        self.cached_kind.set(None);
         Expr::new(node, &self.arena)
     }
 
@@ -275,7 +275,7 @@ impl Model {
     /// truth); extraction and evaluation read it from there.
     pub fn set_param_id(&self, id: ParamId, value: f64) {
         self.arena.borrow_mut().set_param_value(id, value);
-        *self.cached_kind.borrow_mut() = None;
+        self.cached_kind.set(None);
     }
 
     /// Current value bound to parameter `id`.
@@ -342,7 +342,7 @@ impl Model {
             active: true,
         });
         by_name.insert(name, id);
-        *self.cached_kind.borrow_mut() = None;
+        self.cached_kind.set(None);
         id
     }
 
@@ -479,7 +479,7 @@ impl Model {
 
     fn set_objective(&self, expr: Expr<'_>, sense: ObjectiveSense) {
         *self.objective.borrow_mut() = Some(Objective { expr: expr.id, sense });
-        *self.cached_kind.borrow_mut() = None;
+        self.cached_kind.set(None);
     }
 
     pub fn objective(&self) -> Ref<'_, Option<Objective>> {
@@ -501,7 +501,7 @@ impl Model {
     /// Result is cached and invalidated whenever variables, constraints, or the
     /// objective change.
     pub fn kind(&self) -> ModelKind {
-        if let Some(k) = *self.cached_kind.borrow() {
+        if let Some(k) = self.cached_kind.get() {
             return k;
         }
         let arena = self.arena.borrow();
@@ -528,7 +528,7 @@ impl Model {
             (false, ExprClass::Nonlinear) => ModelKind::NLP,
             (true, ExprClass::Nonlinear) => ModelKind::MINLP,
         };
-        *self.cached_kind.borrow_mut() = Some(k);
+        self.cached_kind.set(Some(k));
         k
     }
 }
