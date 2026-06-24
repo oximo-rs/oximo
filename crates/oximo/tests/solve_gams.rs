@@ -30,7 +30,7 @@ fn gams_lp_canonical() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());
     assert!((result.value_of(x).unwrap() - 6.0).abs() < 1e-4);
     assert!((result.value_of(y).unwrap() - 4.0).abs() < 1e-4);
@@ -47,7 +47,7 @@ fn gams_lp_duals_and_reduced_costs() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 5.0).abs() < 1e-6);
 
     let d = result.dual_of(c).expect("dual missing for cap constraint");
@@ -71,9 +71,10 @@ fn gams_nlp_duals_at_local_point() {
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert!(
-        matches!(result.status, SolverStatus::Optimal | SolverStatus::Feasible),
-        "status={:?}",
-        result.status
+        result.has_solution(),
+        "termination={:?}, primal={:?}",
+        result.termination,
+        result.primal_status
     );
     assert!((result.objective().unwrap() - std::f64::consts::E).abs() < 1e-5);
     assert!((result.value_of(x).unwrap() - 1.0).abs() < 1e-5);
@@ -99,7 +100,7 @@ fn gams_mip_duals_at_fixed_point() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 3.0).abs() < 1e-6);
     assert!(result.dual_of(cap).is_some(), "dual missing for cap");
     assert!(!result.reduced_costs.is_empty(), "reduced costs missing");
@@ -118,7 +119,7 @@ fn gams_knapsack_milp() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 47.0).abs() < 1e-4, "obj={:?}", result.objective());
 }
 
@@ -137,7 +138,7 @@ fn gams_semicontinuous_respects_threshold_gap() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 10.0).abs() < 1e-4, "obj={:?}", result.objective());
     assert!((result.value_of(s).unwrap() - 5.0).abs() < 1e-4, "s={:?}", result.value_of(s));
     assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-4, "t={:?}", result.value_of(t));
@@ -152,7 +153,7 @@ fn gams_infeasible_returns_status() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(30));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Infeasible);
+    assert_eq!(result.termination, TerminationStatus::Infeasible);
 }
 
 #[test]
@@ -167,9 +168,10 @@ fn gams_mip_gap_option() {
 
     let result = Gams::new().solve(&m, &GamsOptions::default().mip_gap(0.5)).unwrap();
     assert!(
-        matches!(result.status, SolverStatus::Optimal | SolverStatus::Feasible),
-        "unexpected status: {:?}",
-        result.status
+        result.has_solution(),
+        "unexpected status: {:?} / {:?}",
+        result.termination,
+        result.primal_status
     );
     assert!(result.objective().unwrap() > 0.0);
 }
@@ -193,7 +195,7 @@ fn gams_highs_opt_file_simplex() {
         ..Default::default()
     }));
     let result = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());
 }
 
@@ -209,7 +211,7 @@ fn gams_multi_optima_returns_single_best() {
 
     let opts = GamsOptions::default().time_limit(Duration::from_secs(60));
     let r = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(r.status, SolverStatus::Optimal);
+    assert_eq!(r.termination, TerminationStatus::Optimal);
     assert_eq!(r.result_count(), 1);
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4);
     let chosen: f64 = (0..4).filter_map(|i| r.value_of_idx(&x, i)).sum();
@@ -238,7 +240,7 @@ fn gams_reads_cplex_solution_pool() {
     });
     let opts = GamsOptions::default().solver(cfg).time_limit(Duration::from_secs(60));
     let r = Gams::new().solve(&m, &opts).unwrap();
-    assert_eq!(r.status, SolverStatus::Optimal);
+    assert_eq!(r.termination, TerminationStatus::Optimal);
     assert!(r.result_count() > 1, "expected a solution pool, got {}", r.result_count());
 
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4);
