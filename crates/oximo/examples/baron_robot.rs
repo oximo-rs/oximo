@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         BaronOptions::default().time_limit(Duration::from_secs(120)).num_sol(20).verbose(true);
     let result = Baron::new().solve(&m, &opts)?;
 
-    println!("status = {:?}", result.status);
+    println!("status = {:?}", result.termination);
     println!("solutions found = {}", result.result_count());
 
     // BARON enumerates the distinct solutions of this feasibility system,

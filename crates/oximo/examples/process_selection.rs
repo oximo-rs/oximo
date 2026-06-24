@@ -71,7 +71,7 @@ mod model {
 
         if let Some(obj) = result.objective() {
             println!("--- {label} ---");
-            println!("status = {:?}", result.status);
+            println!("status = {:?}", result.termination);
             println!("profit = {obj:.4} M$/yr");
 
             println!("units selected:");
@@ -102,7 +102,7 @@ mod model {
             );
         } else {
             println!("--- {label} ---");
-            println!("status = {:?}", result.status);
+            println!("status = {:?}", result.termination);
             println!("no objective value");
         }
 
