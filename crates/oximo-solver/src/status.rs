@@ -1,20 +1,85 @@
 use thiserror::Error;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum SolverStatus {
+/// Why a solver stopped, independent of whether a usable point was returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminationStatus {
+    /// Proven globally optimal.
     Optimal,
-    Feasible,
+    /// A local optimum.
+    LocallyOptimal,
+    /// Proven infeasible.
     Infeasible,
+    /// Proven unbounded.
     Unbounded,
+    /// Infeasible or unbounded, the backend can't differentiate.
+    InfeasibleOrUnbounded,
+    /// Stopped at an iteration limit.
+    IterationLimit,
+    /// Stopped at a time limit.
     TimeLimit,
+    /// Stopped at a branch-and-bound node limit.
+    NodeLimit,
+    /// Stopped by an external interrupt or solver-specific user limit.
+    Interrupted,
+    /// The solver hit a numerical problem (singular basis, presolve error, ...).
     NumericError,
+    /// No solve has been attempted yet.
     NotSolved,
+    /// A backend status with no direct mapping. Carries the raw label.
     Other(String),
 }
 
-impl SolverStatus {
-    pub fn has_solution(&self) -> bool {
-        matches!(self, Self::Optimal | Self::Feasible)
+impl TerminationStatus {
+    /// Whether a solver that stopped for this reason may still return a usable
+    /// primal point. `true` for optimality and for the various limits (which
+    /// keep the best incumbent found so far), `false` for infeasible/unbounded/
+    /// error/unsolved states.
+    pub fn admits_primal(&self) -> bool {
+        matches!(
+            self,
+            Self::Optimal
+                | Self::LocallyOptimal
+                | Self::IterationLimit
+                | Self::TimeLimit
+                | Self::NodeLimit
+                | Self::Interrupted
+        )
+    }
+}
+
+/// The status of the primal point held in a [`SolverResult`].
+///
+/// Decoupled from [`TerminationStatus`] so a result that stopped at a limit can
+/// still carry a usable incumbent.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PrimalStatus {
+    /// No primal point is available.
+    NoSolution,
+    /// A feasible point is available, but not proven optimal.
+    FeasiblePoint,
+    /// A proven-optimal point is available.
+    OptimalPoint,
+}
+
+impl PrimalStatus {
+    /// Classify the primal status from the termination reason and whether a
+    /// point was actually returned. `Optimal` termination with a point yields
+    /// [`PrimalStatus::OptimalPoint`]; any other termination with a point yields
+    /// [`PrimalStatus::FeasiblePoint`]; no point yields
+    /// [`PrimalStatus::NoSolution`].
+    pub fn infer(termination: &TerminationStatus, has_point: bool) -> Self {
+        if !has_point {
+            Self::NoSolution
+        } else if matches!(termination, TerminationStatus::Optimal) {
+            Self::OptimalPoint
+        } else {
+            Self::FeasiblePoint
+        }
+    }
+
+    /// Whether a usable primal point is available.
+    pub fn has_solution(self) -> bool {
+        !matches!(self, Self::NoSolution)
     }
 }
 

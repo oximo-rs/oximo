@@ -6,7 +6,7 @@ use oximo_core::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::status::SolverStatus;
+use crate::status::{PrimalStatus, TerminationStatus};
 
 /// A single primal point returned by a solver.
 ///
@@ -63,16 +63,22 @@ impl SolutionPoint {
 
 /// A solver's final result on a model.
 ///
-/// Primal points are held in `solutions` (index `0` is the best/incumbent,
-/// empty when no solution was found). `dual` and `reduced_costs` apply to the
-/// best continuous point and are sparse maps, so a solver that does not return
-/// duals (e.g. MILP) can simply leave them empty.
+/// `termination` expresses why the solver stopped and `primal_status` says
+/// whether the point in `solutions` is usable. Primal points are held in
+/// `solutions` (index `0` is the best/incumbent, empty when no solution was
+/// found). `dual` and `reduced_costs` apply to the best continuous point and are
+/// sparse maps, so a solver that does not return duals (e.g. MILP) can simply
+/// leave them empty. `best_bound` and `gap` are populated by branch-and-bound
+/// backends when available.
 #[derive(Clone, Debug)]
 pub struct SolverResult {
-    pub status: SolverStatus,
+    pub termination: TerminationStatus,
+    pub primal_status: PrimalStatus,
     pub solutions: Vec<SolutionPoint>,
     pub dual: FxHashMap<ConstraintId, f64>,
     pub reduced_costs: FxHashMap<VarId, f64>,
+    pub best_bound: Option<f64>,
+    pub gap: Option<f64>,
     pub solve_time: Duration,
     pub iterations: u64,
     pub raw_log: Option<String>,
@@ -82,10 +88,13 @@ pub struct SolverResult {
 impl Default for SolverResult {
     fn default() -> Self {
         Self {
-            status: SolverStatus::NotSolved,
+            termination: TerminationStatus::NotSolved,
+            primal_status: PrimalStatus::NoSolution,
             solutions: Vec::new(),
             dual: FxHashMap::default(),
             reduced_costs: FxHashMap::default(),
+            best_bound: None,
+            gap: None,
             solve_time: Duration::ZERO,
             iterations: 0,
             raw_log: None,
@@ -109,6 +118,13 @@ impl SolverResult {
     /// The best primal point, or `None` when no solution was found.
     pub fn best(&self) -> Option<&SolutionPoint> {
         self.solutions.first()
+    }
+
+    /// Whether a usable primal point is available, regardless of why the solver
+    /// stopped. Driven by [`PrimalStatus`], so an incumbent returned at a time
+    /// or iteration limit still counts.
+    pub fn has_solution(&self) -> bool {
+        self.primal_status.has_solution()
     }
 
     /// The objective value of the best solution, or `None` when none was found.
@@ -200,11 +216,18 @@ impl std::fmt::Display for ModelReport<'_> {
         writeln!(f, "solution summary")?;
         writeln!(f, "  solver     : {}", r.solver_name.as_deref().unwrap_or("(unknown)"))?;
         writeln!(f, "  model      : {}  ({:?}, {sense})", m.name, m.kind())?;
-        writeln!(f, "  status     : {:?}", r.status)?;
+        writeln!(f, "  termination: {:?}", r.termination)?;
+        writeln!(f, "  primal     : {:?}", r.primal_status)?;
         writeln!(f, "  solutions  : {}", r.result_count())?;
         match r.objective() {
             Some(v) => writeln!(f, "  objective  : {}", num(v))?,
             None => writeln!(f, "  objective  : (none)")?,
+        }
+        if let Some(b) = r.best_bound {
+            writeln!(f, "  best bound : {}", num(b))?;
+        }
+        if let Some(g) = r.gap {
+            writeln!(f, "  gap        : {}", num(g))?;
         }
         writeln!(f, "  solve time : {:?}", r.solve_time)?;
         writeln!(f, "  iterations : {}", r.iterations)?;
@@ -266,7 +289,8 @@ mod tests {
         let mut p1 = FxHashMap::default();
         p1.insert(VarId(0), 2.5);
         let r = SolverResult {
-            status: SolverStatus::Optimal,
+            termination: TerminationStatus::Optimal,
+            primal_status: PrimalStatus::OptimalPoint,
             solutions: vec![
                 SolutionPoint { primal: p0, objective: Some(10.0) },
                 SolutionPoint { primal: p1, objective: Some(9.0) },
@@ -294,7 +318,8 @@ mod tests {
         dual.insert(c, 1.0);
 
         let r = SolverResult {
-            status: SolverStatus::Optimal,
+            termination: TerminationStatus::Optimal,
+            primal_status: PrimalStatus::OptimalPoint,
             solutions: vec![SolutionPoint { primal, objective: Some(5.0) }],
             dual,
             solver_name: Some("TestSolver".into()),
@@ -303,7 +328,8 @@ mod tests {
 
         let out = r.report(&m).to_string();
         assert!(out.contains("solver     : TestSolver"), "{out}");
-        assert!(out.contains("status     : Optimal"), "{out}");
+        assert!(out.contains("termination: Optimal"), "{out}");
+        assert!(out.contains("primal     : OptimalPoint"), "{out}");
         assert!(out.contains("objective  : 5"), "{out}");
         assert!(out.contains("(LP, maximize)"), "{out}");
         assert!(out.contains("x = 5"), "{out}");
