@@ -1,11 +1,13 @@
 use std::time::Instant;
 
-use highs::{HessianFormat, HighsModelStatus, RowProblem, Sense as HighsSense};
+use highs::{
+    HessianFormat, HighsModelStatus, HighsSolutionStatus, RowProblem, Sense as HighsSense,
+};
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable};
 use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
 };
-use oximo_solver::{SolutionPoint, SolverError, SolverResult, SolverStatus};
+use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
@@ -126,10 +128,11 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         .map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
     let elapsed = started.elapsed();
 
-    let status = map_status(solved.status());
+    let termination = map_status(solved.status());
+    let has_point = solved.primal_solution_status() == HighsSolutionStatus::Feasible;
     let solution = solved.get_solution();
     let (primal, reduced_costs, dual) = collect_solution(
-        &status,
+        has_point,
         solution.columns(),
         solution.dual_columns(),
         solution.dual_rows(),
@@ -137,18 +140,25 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     );
 
     let objective_value =
-        if status.has_solution() { Some(solved.objective_value() + obj_constant) } else { None };
+        if has_point { Some(solved.objective_value() + obj_constant) } else { None };
 
-    let solutions = if status.has_solution() {
+    let solutions = if has_point {
         vec![SolutionPoint { primal, objective: objective_value }]
     } else {
         Vec::new()
     };
+    let primal_status = PrimalStatus::infer(&termination, has_point);
+    let raw_gap = solved.mip_gap();
+    let gap = raw_gap.is_finite().then_some(raw_gap);
+    let best_bound = solved.double_info_value(c"mip_dual_bound").ok().filter(|b| b.is_finite());
     Ok(SolverResult {
-        status,
+        termination,
+        primal_status,
         solutions,
         dual,
         reduced_costs,
+        best_bound,
+        gap,
         solve_time: elapsed,
         iterations: total_iterations(&solved),
         raw_log: None,
@@ -223,13 +233,13 @@ fn hessian_columns(quad: &QuadraticTerms, num_vars: usize) -> HessianCols {
 }
 
 fn collect_solution(
-    status: &SolverStatus,
+    has_point: bool,
     cols: &[f64],
     dcols: &[f64],
     drows_full: &[f64],
     num_constraints: usize,
 ) -> (FxHashMap<VarId, f64>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
-    if !status.has_solution() {
+    if !has_point {
         return (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
     }
     let drows = &drows_full[..num_constraints.min(drows_full.len())];
@@ -286,28 +296,25 @@ fn total_iterations(solved: &highs::SolvedModel) -> u64 {
     .sum()
 }
 
-fn map_status(s: HighsModelStatus) -> SolverStatus {
+fn map_status(s: HighsModelStatus) -> TerminationStatus {
     match s {
-        // TODO: Improve this mapping
-        HighsModelStatus::Optimal => SolverStatus::Optimal,
-        HighsModelStatus::Infeasible => SolverStatus::Infeasible,
-        HighsModelStatus::UnboundedOrInfeasible | HighsModelStatus::Unbounded => {
-            SolverStatus::Unbounded
-        }
-        HighsModelStatus::ReachedTimeLimit | HighsModelStatus::ReachedIterationLimit => {
-            SolverStatus::TimeLimit
-        }
-        HighsModelStatus::ModelEmpty => SolverStatus::Other("model_empty".into()),
-        HighsModelStatus::NotSet | HighsModelStatus::Unknown => SolverStatus::NotSolved,
+        HighsModelStatus::Optimal => TerminationStatus::Optimal,
+        HighsModelStatus::Infeasible => TerminationStatus::Infeasible,
+        HighsModelStatus::UnboundedOrInfeasible => TerminationStatus::InfeasibleOrUnbounded,
+        HighsModelStatus::Unbounded => TerminationStatus::Unbounded,
+        HighsModelStatus::ReachedTimeLimit => TerminationStatus::TimeLimit,
+        HighsModelStatus::ReachedIterationLimit => TerminationStatus::IterationLimit,
         HighsModelStatus::ObjectiveBound | HighsModelStatus::ObjectiveTarget => {
-            SolverStatus::Feasible
+            TerminationStatus::Interrupted
         }
+        HighsModelStatus::ModelEmpty => TerminationStatus::Other("model_empty".into()),
+        HighsModelStatus::NotSet | HighsModelStatus::Unknown => TerminationStatus::NotSolved,
         HighsModelStatus::LoadError
         | HighsModelStatus::ModelError
         | HighsModelStatus::PresolveError
         | HighsModelStatus::SolveError
-        | HighsModelStatus::PostsolveError => SolverStatus::NumericError,
-        _ => SolverStatus::Other("unknown_highs_status".into()),
+        | HighsModelStatus::PostsolveError => TerminationStatus::NumericError,
+        _ => TerminationStatus::Other("unknown_highs_status".into()),
     }
 }
 
@@ -329,7 +336,7 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::QP);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
-        assert_eq!(res.status, SolverStatus::Optimal);
+        assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!((res.value_of(x).unwrap() - 0.5).abs() < 1e-6);
         assert!((res.value_of(y).unwrap() - 0.5).abs() < 1e-6);
         assert!((res.objective().unwrap() - 0.5).abs() < 1e-6);
@@ -346,7 +353,7 @@ mod tests {
         objective!(m, Min, 2.0 * x0.powi(2) + x0 * x1 + x1.powi(2) + x0 + x1);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
-        assert_eq!(res.status, SolverStatus::Optimal);
+        assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!((res.value_of(x0).unwrap() - 0.25).abs() < 1e-6);
         assert!((res.value_of(x1).unwrap() - 0.75).abs() < 1e-6);
         assert!((res.objective().unwrap() - 1.875).abs() < 1e-6);
@@ -361,7 +368,7 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::QP);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
-        assert_eq!(res.status, SolverStatus::Optimal);
+        assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!((res.value_of(x).unwrap() - 1.0).abs() < 1e-6);
         assert!(res.objective().unwrap().abs() < 1e-6);
     }

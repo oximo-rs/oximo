@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         p1.set_param_value(price);
 
         let result = Highs.solve(&m, &HighsOptions::default())?;
-        assert_eq!(result.status, SolverStatus::Optimal);
+        assert_eq!(result.termination, TerminationStatus::Optimal);
 
         let x1v = result.value_of(x1).unwrap_or(0.0);
         let x2v = result.value_of(x2).unwrap_or(0.0);

@@ -61,8 +61,9 @@ constraint!(m, cap, sum!(weights[i] * x[i] for i in 0..4) <= 7.0);
 objective!(m, Max, sum!(values[i] * x[i] for i in 0..4));
 
 let result = Gurobi.solve(&m, &GurobiOptions::default())?;
-println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective());
+println!("termination = {:?}", result.termination);
+println!("primal      = {:?}", result.primal_status);
+println!("obj         = {:?}", result.objective());
 ```
 
 Run the bundled example:
@@ -123,11 +124,15 @@ let opts = GurobiOptions::default()
 
 ## Result
 
-`SolverResult` fields populated on `Optimal` or `Feasible`:
+`SolverResult` fields, populated whenever a usable point is available (`primal_status` is `FeasiblePoint` or `OptimalPoint`):
 
 - `solutions` - primal points (`Vec<SolutionPoint>`), best first. Each point holds its `primal` values keyed by `VarId` and its `objective` (adjusted for any constant term). Gurobi's solution pool fills the vector during a MIP solve (tune with `PoolSearchMode`/`PoolSolutions`); continuous solves return a single point. Access the best point via `result.objective()` / `result.value_of(var)` and the rest via `result.solution(i)`
 - `dual` - constraint duals (`Pi` for linear rows, `QCPi` for quadratic rows), keyed by `ConstraintId`, access via `result.dual_of(c)`. Returned for continuous models (LP, QP). For quadratically constrained models Gurobi skips duals by default, opt in with `.qcp_dual(1)`. Whenever Gurobi reports no duals (e.g. a nonconvex QP solved via spatial branching) the maps stay empty
 - `reduced_costs` - variable reduced costs (`RC`), keyed by `VarId`, continuous models only
+- `termination` - why the solve stopped (`Optimal`, `Infeasible`, `Unbounded`, `InfeasibleOrUnbounded`, `TimeLimit`, `IterationLimit`, `NodeLimit`, `Interrupted`, ...), mapped from Gurobi's `Status`
+- `primal_status` - whether a usable point came back (`NoSolution` / `FeasiblePoint` / `OptimalPoint`), `result.has_solution()` is the shortcut. Gurobi keeps an incumbent (`SolCount > 0`) even at a limit
+- `best_bound` - Gurobi's best objective bound (`ObjBound`), `None` when unavailable (e.g. continuous models)
+- `gap` - relative MIP gap (`MIPGap`), `None` when unavailable
 - `iterations` - simplex iteration count (`IterCount`)
 - `solve_time` - wall time measured around the Gurobi optimize call
 

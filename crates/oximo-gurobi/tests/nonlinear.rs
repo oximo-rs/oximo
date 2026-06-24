@@ -2,18 +2,14 @@
 
 use oximo_core::prelude::*;
 use oximo_gurobi::{Gurobi, GurobiOptions};
-use oximo_solver::{Solver, SolverStatus};
+use oximo_solver::Solver;
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
 }
 
 fn assert_solved(r: &oximo_solver::SolverResult) {
-    assert!(
-        matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible),
-        "status = {:?}",
-        r.status
-    );
+    assert!(r.has_solution(), "termination = {:?}, primal = {:?}", r.termination, r.primal_status);
 }
 
 #[test]
@@ -27,7 +23,7 @@ fn qp_min_sum_of_squares() {
     objective!(m, Min, x.powi(2) + y.powi(2));
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
-    assert!(matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible));
+    assert!(r.has_solution());
     let obj = r.objective().expect("obj");
     assert!(close(obj, 0.5, 1e-4), "obj = {obj}");
 }
@@ -42,7 +38,7 @@ fn nlp_with_sin_objective() {
     objective!(m, Min, (x - 1.0).powi(2) + 0.1 * x.sin().powi(2));
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
-    assert!(matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible));
+    assert!(r.has_solution());
     let primal_x = r.value(VarId(0)).expect("primal");
     assert!(close(primal_x, 1.0, 0.1), "x = {primal_x}");
 }
@@ -74,7 +70,7 @@ fn minlp_binary_with_log() {
     objective!(m, Min, (x - 1.0).powi(2) + b * (1.0 + x).log());
 
     let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
-    assert!(matches!(r.status, SolverStatus::Optimal | SolverStatus::Feasible));
+    assert!(r.has_solution());
     let obj = r.objective().expect("obj");
     assert!(close(obj, 0.0, 1e-3), "obj = {obj}");
 }

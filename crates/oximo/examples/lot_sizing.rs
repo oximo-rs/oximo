@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("\nLot-Sizing Result");
-    println!("Status    : {:?}", result.status);
+    println!("Status    : {:?}", result.termination);
     if let Some(obj) = result.objective() {
         println!("Total cost: {obj:.2}");
     }

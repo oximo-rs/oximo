@@ -6,7 +6,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, extract_linear};
-use oximo_solver::{SolutionPoint, SolverError, SolverResult, SolverStatus};
+use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::FxHashMap;
 
 use crate::GurobiOptions;
@@ -73,23 +73,24 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
     grb_model.optimize().map_err(map_grb_err)?;
     let elapsed = started.elapsed();
 
-    let status = map_status(&grb_model)?;
+    let termination = map_status(&grb_model)?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = grb_model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
-    let (solutions, reduced_costs, dual) = collect_solution(
-        &status,
-        kind,
-        &mut grb_model,
-        &gurobi_vars,
-        &gurobi_constrs,
-        obj_constant,
-    );
+    let (solutions, reduced_costs, dual) =
+        collect_solution(kind, &mut grb_model, &gurobi_vars, &gurobi_constrs, obj_constant);
+
+    let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
+    let best_bound = grb_model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
+    let gap = grb_model.get_attr(attr::MIPGap).ok().filter(|g| g.is_finite());
 
     Ok(SolverResult {
-        status,
+        termination,
+        primal_status,
         solutions,
         dual,
         reduced_costs,
+        best_bound,
+        gap,
         solve_time: elapsed,
         iterations,
         raw_log: None,
@@ -260,22 +261,21 @@ fn set_objective(
 /// for continuous models (`LP` and `QP`). For quadratically constrained models
 /// Gurobi computes duals only with `QCPDual=1`.
 fn collect_solution(
-    status: &SolverStatus,
     kind: ModelKind,
     model: &mut grb::Model,
     vars: &[grb::Var],
     constrs: &[GrbRow],
     obj_constant: f64,
 ) -> (Vec<SolutionPoint>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
-    // `has_solution` only flags Optimal/Feasible, but Gurobi often holds an
-    // incumbent (SolCount > 0) on TimeLimit/IterationLimit/NodeLimit too.
+    // A primal point exists only when Gurobi actually stored one. `SolCount` is
+    // the number of available solutions and it stays `> 0` for an incumbent
+    // kept at a time/iteration/node limit.
     let sol_count = model.get_attr(attr::SolCount).unwrap_or(0);
-    let n = if sol_count > 0 { sol_count } else { i32::from(status.has_solution()) };
-    if n == 0 {
+    if sol_count <= 0 {
         return (Vec::new(), FxHashMap::default(), FxHashMap::default());
     }
 
-    let solutions = collect_pool(model, vars, obj_constant, n);
+    let solutions = collect_pool(model, vars, obj_constant, sol_count);
 
     // Skip retrieval of duals and reduced costs for any model
     // class where Gurobi will either return zeros or refuse the attribute.
@@ -341,16 +341,20 @@ fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
     vals.iter().enumerate().map(|(i, &val)| (VarId(u32::try_from(i).unwrap()), val)).collect()
 }
 
-fn map_status(model: &grb::Model) -> Result<SolverStatus, SolverError> {
+fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
     let status = model.get_attr(attr::Status).map_err(map_grb_err)?;
     Ok(match status {
-        Status::Optimal => SolverStatus::Optimal,
-        Status::Infeasible => SolverStatus::Infeasible,
-        Status::Unbounded | Status::InfOrUnbd => SolverStatus::Unbounded,
-        Status::Numeric => SolverStatus::NumericError,
-        Status::TimeLimit | Status::IterationLimit | Status::NodeLimit => SolverStatus::TimeLimit,
-        Status::SubOptimal => SolverStatus::Feasible,
-        Status::Loaded => SolverStatus::NotSolved,
-        _ => SolverStatus::Other(format!("Status: {status:?}")),
+        Status::Optimal => TerminationStatus::Optimal,
+        Status::Infeasible => TerminationStatus::Infeasible,
+        Status::Unbounded => TerminationStatus::Unbounded,
+        Status::InfOrUnbd => TerminationStatus::InfeasibleOrUnbounded,
+        Status::Numeric => TerminationStatus::NumericError,
+        Status::TimeLimit => TerminationStatus::TimeLimit,
+        Status::IterationLimit => TerminationStatus::IterationLimit,
+        Status::NodeLimit => TerminationStatus::NodeLimit,
+        // Gurobi could not meet optimality tolerances but holds a usable point.
+        Status::SubOptimal => TerminationStatus::Interrupted,
+        Status::Loaded => TerminationStatus::NotSolved,
+        _ => TerminationStatus::Other(format!("Status: {status:?}")),
     })
 }

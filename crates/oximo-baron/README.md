@@ -51,8 +51,9 @@ constraint!(m, c, x + y <= 8.0);
 objective!(m, Max, (1.0 + x).log() + 2.0 * y);
 
 let result = Baron::new().solve(&m, &BaronOptions::default())?;
-println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective());
+println!("termination = {:?}", result.termination);
+println!("primal      = {:?}", result.primal_status);
+println!("obj         = {:?}", result.objective());
 ```
 
 Run the bundled example:
@@ -119,12 +120,15 @@ BARON's `.bar` format has no trigonometric intrinsics, so a model whose objectiv
 
 ## Result
 
-`SolverResult` fields populated on `Optimal` or `Feasible`:
+`SolverResult` fields, populated whenever a usable point is available (`primal_status` is `FeasiblePoint` or `OptimalPoint`):
 
 - `solutions`: primal points (`Vec<SolutionPoint>`), best first. Each point holds its `primal` values keyed by `VarId` and its `objective`. With `.num_sol(n)` BARON enumerates up to `n` distinct solutions into the pool, otherwise the vector holds the single incumbent. Access the best point via `result.objective()` / `result.value_of(var)` and the rest via `result.solution(i)`
 - `dual`: constraint marginals at the best point, keyed by `ConstraintId`, access via `result.dual_of(c)`
 - `reduced_costs`: variable marginals at the best point, keyed by `VarId`
-- `status`: mapped from BARON solver/model status codes
+- `termination`: why the solve stopped, read from BARON's `res.lst` termination banner
+- `primal_status`: whether a usable point came back (`NoSolution` / `FeasiblePoint` / `OptimalPoint`), `result.has_solution()` is the shortcut
+- `best_bound`: BARON's relaxation/dual bound (the bound opposite the incumbent)
+- `gap`: relative optimality gap from BARON's lower/upper bounds, when both are finite
 - `solve_time`: wall time around the BARON process invocation
 - `iterations`: branch-and-reduce iteration count from `tim.lst`
 - `raw_log`: BARON stdout/stderr, captured when BARON exits non-zero in quiet mode. With `verbose(true)` the output is streamed live to the terminal and not captured (`raw_log` is `None`)

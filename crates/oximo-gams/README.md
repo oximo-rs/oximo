@@ -55,8 +55,9 @@ constraint!(m, c3, x - y <= 2.0);
 objective!(m, Max, 3.0 * x + 4.0 * y);
 
 let result = Gams::new().solve(&m, &GamsOptions::default())?;
-println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective());
+println!("termination = {:?}", result.termination);
+println!("primal      = {:?}", result.primal_status);
+println!("obj         = {:?}", result.objective());
 ```
 
 Run the bundled example:
@@ -151,12 +152,14 @@ For any other solver, use `GamsSolverConfig::Named(GamsSolver::Custom("NAME".int
 
 ## Result
 
-`SolverResult` fields populated on `Optimal` or `Feasible`:
+`SolverResult` fields, populated whenever a usable point is available (`primal_status` is `FeasiblePoint` or `OptimalPoint`):
 
 - `solutions` - primal points (`Vec<SolutionPoint>`), best first. Each point holds its `primal` values keyed by `VarId` and its `objective`. The vector holds the incumbent, plus any alternative points read from a sub-solver solution pool (e.g. CPLEX `solnpool`). Access the best point via `result.objective()` / `result.value_of(var)` and the rest via `result.solution(i)`
 - `dual` - constraint marginals (GAMS `.m`), keyed by `ConstraintId`, access via `result.dual_of(c)`
 - `reduced_costs` - variable marginals, keyed by `VarId`
-- `status` - mapped from GAMS model-status codes (`1=Optimal`, `4=Infeasible`, `3=Unbounded`, ...)
+- `termination` - why the solve stopped, driven by the GAMS solve status (`solvestat`), with the model status (`modelstat`) resolving the outcome on normal completion (`Optimal`, `Infeasible`, `Unbounded`, `TimeLimit`, `IterationLimit`, ...)
+- `primal_status` - whether a usable point came back (`NoSolution` / `FeasiblePoint` / `OptimalPoint`), `result.has_solution()` is the shortcut
+- `best_bound` / `gap` - left unset (`None`), not exposed in the GAMS PUT solution file
 - `solve_time` - wall time around the GAMS process invocation
 - `iterations` - iterations used, read from the GAMS model attribute `oximo_m.iterusd`
 - `solver_name` - `GAMS/<sub-solver>` when one is selected via `GamsOptions::solver` (e.g. `GAMS/CPLEX`, `GAMS/BARON`), otherwise just `GAMS`

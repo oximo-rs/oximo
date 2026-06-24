@@ -13,7 +13,7 @@ use oximo_core::{
     Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
-use oximo_solver::{SolutionPoint, SolverError, SolverResult, SolverStatus};
+use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::FxHashMap;
 
 use crate::GamsOptions;
@@ -170,7 +170,7 @@ pub fn solve(
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
-        if result.status.has_solution() {
+        if result.has_solution() {
             let pool = read_solution_pool(&tmp_dir, gams_exec, sense);
             if !pool.is_empty() {
                 result.solutions = pool;
@@ -300,18 +300,23 @@ fn parseoximo_solution(
         }
     }
 
-    let status = map_status(modelstat.unwrap_or(13), solvestat.unwrap_or(0));
-    let has_sol = status.has_solution();
+    let modelstat = modelstat.unwrap_or(13);
+    let termination = map_status(modelstat, solvestat.unwrap_or(0));
+    let has_sol = modelstat_has_solution(modelstat);
 
     // The PUT solution file holds only the incumbent. `solve` augments this with
     // a sub-solver solution pool (if one was written) read from the run dir's GDX.
     let solutions =
         if has_sol { vec![SolutionPoint { primal, objective: obj_val }] } else { Vec::new() };
+    let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
     SolverResult {
         solutions,
         dual: if has_sol { dual } else { FxHashMap::default() },
         reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
-        status,
+        termination,
+        primal_status,
+        best_bound: None,
+        gap: None,
         solve_time: elapsed,
         iterations,
         raw_log,
@@ -417,50 +422,71 @@ fn parse_gdx_level(line: &str) -> f64 {
     0.0
 }
 
-/// Map GAMS model-status to `SolverStatus`.
+/// Map a GAMS solve to a [`TerminationStatus`].
+///
+/// GAMS reports two orthogonal codes, which line up with our two-axis result:
+/// `solvestat` (the *solver termination condition* — why the run stopped) drives
+/// the [`TerminationStatus`], while `modelstat` (the *model status* — what kind
+/// of solution exists) drives feasibility/primal status (see
+/// [`modelstat_has_solution`]) and disambiguates the outcome on normal
+/// completion.
+///
+/// `solvestat` table:
+///  1 = Normal, 2 = Iteration, 3 = Resource (time), 4 = Terminated by solver,
+///  5 = Evaluation error, 6 = Capability (model beyond solver), 7 = License,
+///  8 = User (interrupt), 9 = Setup error, 10 = Solver error,
+///  11 = Internal error, 12 = Skipped, 13 = System error.
+///
+/// On a normal completion the `solvestat` carries no outcome, so we defer to
+/// [`modelstat_termination`].
+///
+/// Reference: GAMS `SolveStat` codes,
+/// <https://www.gams.com/latest/docs/apis/python/classgams_1_1control_1_1workspace_1_1SolveStat.html>
+fn map_status(modelstat: i32, solvestat: i32) -> TerminationStatus {
+    match solvestat {
+        1 => modelstat_termination(modelstat),
+        2 => TerminationStatus::IterationLimit,
+        3 => TerminationStatus::TimeLimit,
+        // "Terminated by solver" / "User request": abnormal early stops that may
+        // still carry an incumbent.
+        4 | 8 => TerminationStatus::Interrupted,
+        // Evaluation / solver / internal / system errors.
+        5 | 10 | 11 | 13 => TerminationStatus::NumericError,
+        6 => TerminationStatus::Other("gams_solver_capability".into()),
+        7 => TerminationStatus::Other("gams_license_error".into()),
+        9 => TerminationStatus::Other("gams_setup_error".into()),
+        12 => TerminationStatus::NotSolved,
+        n => TerminationStatus::Other(format!("gams_solvestat_{n}")),
+    }
+}
+
+/// Termination from the GAMS `modelstat` when the solver completed normally
+/// (`solvestat == 1`), so the model status is the authoritative outcome.
 ///
 /// Full modelstat table (codes 1-19):
-///  1 = Optimal,
-///  2 = Locally Optimal,
-///  3 = Unbounded,
-///  4 = Infeasible,
-///  5 = Locally Infeasible,
-///  6 = Intermediate Infeasible,
-///  7 = Feasible Solution,
-///  8 = Integer Solution,
-///  9 = Intermediate Non-integer,
-///  10 = Integer Infeasible,
-///  11 = Lic Problem No Solution,
-///  12 = Error Unknown,
-///  13 = Error No Solution,
-///  14 = No Solution Returned,
-///  15 = Solved Unique,
-///  16 = Solved,
-///  17 = Solved Singular,
-///  18 = Unbounded-No Solution,
-///  19 = Infeasible-No Solution.
+///  1 = Optimal, 2 = Locally Optimal, 3 = Unbounded, 4 = Infeasible,
+///  5 = Locally Infeasible, 6 = Intermediate Infeasible, 7 = Feasible Solution,
+///  8 = Integer Solution, 9 = Intermediate Non-integer, 10 = Integer Infeasible,
+///  11 = Lic Problem No Solution, 12 = Error Unknown, 13 = Error No Solution,
+///  14 = No Solution Returned, 15 = Solved Unique, 16 = Solved,
+///  17 = Solved Singular, 18 = Unbounded-No Solution, 19 = Infeasible-No Solution.
 ///
-/// References:
-/// "GAMS Output - Model Status," GAMS Development Corporation.
-/// <https://www.gams.com/latest/docs/UG_GAMSOutput.html#UG_GAMSOutput_ModelStatus> (accessed May 14, 2026).
-fn map_status(modelstat: i32, solvestat: i32) -> SolverStatus {
-    // TODO: Could refine this mapping if we modify the `SolverStatus` enum.
+/// Reference: GAMS `ModelStat` codes,
+/// <https://www.gams.com/latest/docs/apis/python/classgams_1_1control_1_1workspace_1_1ModelStat.html>
+fn modelstat_termination(modelstat: i32) -> TerminationStatus {
     match modelstat {
-        1 | 15 | 16 => SolverStatus::Optimal,
-        2 | 7 | 9 | 17 => SolverStatus::Feasible,
-        3 | 18 => SolverStatus::Unbounded,
-        4 | 5 | 6 | 10 | 19 => SolverStatus::Infeasible,
-        // MIP integer solution: proven optimal when solvestat == 1 (normal completion)
-        8 => {
-            if solvestat == 1 {
-                SolverStatus::Optimal
-            } else {
-                SolverStatus::Feasible
-            }
-        }
-        11 => SolverStatus::Other("gams_license_error".into()),
-        _ => SolverStatus::Other(format!("gams_modelstat_{modelstat}")),
+        1 | 8 | 15 | 16 | 17 => TerminationStatus::Optimal,
+        2 | 7 | 9 => TerminationStatus::LocallyOptimal,
+        3 | 18 => TerminationStatus::Unbounded,
+        4 | 5 | 6 | 10 | 19 => TerminationStatus::Infeasible,
+        11 => TerminationStatus::Other("gams_license_error".into()),
+        n => TerminationStatus::Other(format!("gams_modelstat_{n}")),
     }
+}
+
+/// GAMS model-status codes that carry a usable primal point.
+fn modelstat_has_solution(modelstat: i32) -> bool {
+    matches!(modelstat, 1 | 2 | 7 | 8 | 9 | 15 | 16 | 17)
 }
 
 // - Helpers
@@ -904,8 +930,26 @@ mod tests {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
         let r = parseoximo_solution(content, std::time::Duration::ZERO, None);
-        assert_eq!(r.status, SolverStatus::Optimal);
+        assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.iterations, 42);
+    }
+
+    #[test]
+    fn termination_is_driven_by_solvestat() {
+        // solvestat (args are `(modelstat, solvestat)`).
+        // Normal completion defers to modelstat.
+        assert_eq!(map_status(1, 1), TerminationStatus::Optimal);
+        assert_eq!(map_status(2, 1), TerminationStatus::LocallyOptimal);
+        assert_eq!(map_status(8, 1), TerminationStatus::Optimal);
+        assert_eq!(map_status(4, 1), TerminationStatus::Infeasible);
+        assert_eq!(map_status(3, 1), TerminationStatus::Unbounded);
+        assert_eq!(map_status(8, 2), TerminationStatus::IterationLimit);
+        assert_eq!(map_status(7, 3), TerminationStatus::TimeLimit);
+        assert_eq!(map_status(8, 8), TerminationStatus::Interrupted);
+        assert_eq!(map_status(8, 4), TerminationStatus::Interrupted);
+        assert_eq!(map_status(1, 5), TerminationStatus::NumericError);
+        assert_eq!(map_status(1, 12), TerminationStatus::NotSolved);
+        assert_eq!(map_status(1, 7), TerminationStatus::Other("gams_license_error".into()));
     }
 
     #[test]

@@ -22,7 +22,7 @@ fn gurobi_multi_optima_returns_pool() {
 
     let opts = GurobiOptions::default().pool_search_mode(2).pool_solutions(10);
     let r = Gurobi.solve(&m, &opts).unwrap();
-    assert_eq!(r.status, SolverStatus::Optimal);
+    assert_eq!(r.termination, TerminationStatus::Optimal);
     assert!(r.result_count() > 1, "expected a solution pool, got {}", r.result_count());
 
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-6);
@@ -48,7 +48,7 @@ fn gurobi_qp_duals_linear_constraint() {
     objective!(m, Min, x * x + y * y);
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 2.0).abs() < 1e-5);
     assert!((result.value_of(x).unwrap() - 1.0).abs() < 1e-5);
 
@@ -72,7 +72,7 @@ fn gurobi_qcp_duals_quadratic_constraint() {
 
     let opts = GurobiOptions::default().qcp_dual(1);
     let result = Gurobi.solve(&m, &opts).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() + 2.0).abs() < 1e-5);
     assert!((result.value_of(x).unwrap() + 1.0).abs() < 1e-5);
 
@@ -94,7 +94,7 @@ fn gurobi_semicontinuous_respects_threshold_gap() {
     objective!(m, Min, s + t);
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 10.0).abs() < 1e-5, "obj={:?}", result.objective());
     assert!((result.value_of(s).unwrap() - 5.0).abs() < 1e-5, "s={:?}", result.value_of(s));
     assert!((result.value_of(t).unwrap() - 5.0).abs() < 1e-5, "t={:?}", result.value_of(t));
@@ -111,7 +111,7 @@ fn gurobi_qcp_duals_skipped_by_default() {
     objective!(m, Min, x + y);
 
     let result = Gurobi.solve(&m, &GurobiOptions::default()).unwrap();
-    assert_eq!(result.status, SolverStatus::Optimal);
+    assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() + 2.0).abs() < 1e-5);
     assert!(result.dual.is_empty(), "QCP duals must be empty without .qcp_dual(1)");
 }

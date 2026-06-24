@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(all(feature = "highs", not(feature = "gams")))]
     let result = Highs.solve(&m, &HighsOptions::default().verbose(true))?;
 
-    println!("Status : {:?}", result.status);
+    println!("Status : {:?}", result.termination);
     if let Some(obj) = result.objective() {
         println!(
             "Acetone (y06, ch3coch3): {}",
