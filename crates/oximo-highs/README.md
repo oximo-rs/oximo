@@ -108,11 +108,15 @@ let opts = HighsOptions::default()
 
 ## Result
 
-`SolverResult` fields populated on `Optimal` or `Feasible`:
+`SolverResult` fields, populated whenever a usable point is available (`primal_status` is `FeasiblePoint` or `OptimalPoint`):
 
 - `solutions` - primal points (`Vec<SolutionPoint>`). This backend returns a single point holding the `primal` values keyed by `VarId` and the `objective` (adjusted for any constant term). Access via `result.objective()` / `result.value_of(var)`
 - `dual` - constraint duals, keyed by `ConstraintId`, access via `result.dual_of(c)`.
 - `reduced_costs` - variable reduced costs, keyed by `VarId`
+- `termination` - why the solve stopped (`Optimal`, `Infeasible`, `Unbounded`, `InfeasibleOrUnbounded`, `TimeLimit`, `IterationLimit`, ...), mapped from the HiGHS model status
+- `primal_status` - whether a usable point came back (`NoSolution` / `FeasiblePoint` / `OptimalPoint`), taken from HiGHS's own primal-solution flag, `result.has_solution()` is the shortcut
+- `best_bound` - the MIP dual bound (`mip_dual_bound`), `None` for LP/QP
+- `gap` - relative MIP gap (`mip_gap`), `None` for LP/QP
 - `solve_time` - wall time measured around the HiGHS solve call
 - `iterations` - total solver iterations, summed across HiGHS's per-algorithm counters (`simplex` / `qp` / `ipm` / `pdlp` / `crossover`). HiGHS populates only the counter for the method it ran, so the sum is whichever applies; `0` when the model is solved entirely in presolve
 
