@@ -51,8 +51,9 @@ constraint!(m, c, x + y <= 8.0);
 objective!(m, Max, (1.0 + x).log() + 2.0 * y);
 
 let result = Baron::new().solve(&m, &BaronOptions::default())?;
-println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective());
+println!("termination = {:?}", result.termination);
+println!("primal      = {:?}", result.primal_status);
+println!("obj         = {:?}", result.objective());
 ```
 
 Run the bundled example:

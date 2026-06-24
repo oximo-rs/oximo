@@ -27,7 +27,7 @@ oximo-solver = "0.3"
 ```rust,no_run
 use oximo_core::prelude::*;
 use oximo_highs::{Highs, HighsOptions};
-use oximo_solver::{Solver, SolverStatus};
+use oximo_solver::{Solver, TerminationStatus};
 
 let m = Model::new("toy");
 variable!(m, x >= 0.0);
@@ -37,7 +37,7 @@ constraint!(m, c2, 3.0 * x - y >= 0.0);
 objective!(m, Max, 3.0 * x + 4.0 * y);
 
 let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
-assert_eq!(result.status, SolverStatus::Optimal);
+assert_eq!(result.termination, TerminationStatus::Optimal);
 println!("obj = {}", result.objective().unwrap()); // 34.0
 println!("x   = {}", result.value_of(x).unwrap()); // 6.0
 println!("y   = {}", result.value_of(y).unwrap()); // 4.0
@@ -53,7 +53,7 @@ detected as `QP` and solved by uploading the Hessian `Q` via
 ```rust,no_run
 use oximo_core::prelude::*;
 use oximo_highs::{Highs, HighsOptions};
-use oximo_solver::{Solver, SolverStatus};
+use oximo_solver::{Solver, TerminationStatus};
 
 let m = Model::new("qp");
 variable!(m, -10.0 <= x <= 10.0);
@@ -62,7 +62,7 @@ constraint!(m, c, x + y == 1.0);
 objective!(m, Min, x.powi(2) + y.powi(2)); // min x^2 + y^2
 
 let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
-assert_eq!(result.status, SolverStatus::Optimal); // x = y = 0.5, obj = 0.5
+assert_eq!(result.termination, TerminationStatus::Optimal); // x = y = 0.5, obj = 0.5
 ```
 
 > **Convexity.** HiGHS supports only convex QPs.

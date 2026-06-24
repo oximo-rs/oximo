@@ -61,8 +61,9 @@ constraint!(m, cap, sum!(weights[i] * x[i] for i in 0..4) <= 7.0);
 objective!(m, Max, sum!(values[i] * x[i] for i in 0..4));
 
 let result = Gurobi.solve(&m, &GurobiOptions::default())?;
-println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective());
+println!("termination = {:?}", result.termination);
+println!("primal      = {:?}", result.primal_status);
+println!("obj         = {:?}", result.objective());
 ```
 
 Run the bundled example:

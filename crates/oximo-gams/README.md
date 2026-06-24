@@ -55,8 +55,9 @@ constraint!(m, c3, x - y <= 2.0);
 objective!(m, Max, 3.0 * x + 4.0 * y);
 
 let result = Gams::new().solve(&m, &GamsOptions::default())?;
-println!("status = {:?}", result.status);
-println!("obj    = {:?}", result.objective());
+println!("termination = {:?}", result.termination);
+println!("primal      = {:?}", result.primal_status);
+println!("obj         = {:?}", result.objective());
 ```
 
 Run the bundled example:

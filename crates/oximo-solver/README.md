@@ -28,14 +28,18 @@ Each backend defines its own `Options` type. Users get compile-time validation a
 
 ## `SolverResult`
 
-Populated by the backend on `Optimal` or `Feasible`. Sparse maps (`FxHashMap`) mean backends that don't return duals or reduced costs simply leave those fields empty.
+`termination` records why the solve stopped, while `primal_status` records whether a usable
+point came back.
 
 | Field           | Type                           | Description                                       |
 |-----------------|--------------------------------|---------------------------------------------------|
-| `status`        | `SolverStatus`                 | Outcome of the solve                              |
+| `termination`   | `TerminationStatus`            | Why the solve stopped                             |
+| `primal_status` | `PrimalStatus`                 | Whether a usable primal point is available        |
 | `solutions`     | `Vec<SolutionPoint>`           | Primal points, best first (empty if no solution)  |
 | `dual`          | `FxHashMap<ConstraintId, f64>` | Constraint duals at the best point                |
 | `reduced_costs` | `FxHashMap<VarId, f64>`        | Variable reduced costs at the best point          |
+| `best_bound`    | `Option<f64>`                  | Dual/relaxation bound (branch-and-bound backends) |
+| `gap`           | `Option<f64>`                  | Relative optimality gap, when reported            |
 | `solve_time`    | `Duration`                     | Wall time around the solve call                   |
 | `iterations`    | `u64`                          | Simplex iteration count (if reported)             |
 | `raw_log`       | `Option<String>`               | Solver stdout/stderr                              |
@@ -45,15 +49,15 @@ Each `SolutionPoint` holds the `primal` variable values (`FxHashMap<VarId, f64>`
 ### Accessors
 
 ```rust,ignore
-result.objective()           // Option<f64>, best solution's objective
-result.value_of(expr)        // Option<f64>, primal value for a Var expr (best solution)
-result.value(var_id)         // Option<f64>, primal value by VarId (best solution)
-result.dual_of(c_id)         // Option<f64>, dual for a constraint
-result.best()                // Option<&SolutionPoint>, same as .solution(0)
-result.solution(i)           // Option<&SolutionPoint>, i-th pooled point
-result.result_count()        // usize, number of returned points
-result.status.has_solution() // true if Optimal or Feasible
-result.report(&model)        // Display: model-aware summary (status, vars, duals)
+result.objective()    // Option<f64>, best solution's objective
+result.value_of(expr) // Option<f64>, primal value for a Var expr (best solution)
+result.value(var_id)  // Option<f64>, primal value by VarId (best solution)
+result.dual_of(c_id)  // Option<f64>, dual for a constraint
+result.best()         // Option<&SolutionPoint>, same as .solution(0)
+result.solution(i)    // Option<&SolutionPoint>, i-th pooled point
+result.result_count() // usize, number of returned points
+result.has_solution() // true when a usable primal point is available
+result.report(&model) // Display: model-aware summary (status, vars, duals)
 
 // Indexed variables
 result.value_of_idx(&flow, "nyc")                  // Option<f64>, value at a specific index
@@ -61,18 +65,32 @@ result.values_of(&flow)                            // Iterator<(&IndexKey, f64)>
 result.values_of(&flow).filter(|(_, v)| *v != 0.0) // nonzero only (sparse solutions)
 ```
 
-## `SolverStatus`
+## `TerminationStatus`
 
-| Variant         | Meaning                                                          |
-|-----------------|------------------------------------------------------------------|
-| `Optimal`       | Proven optimal                                                   |
-| `Feasible`      | Feasible but not proven optimal (e.g. time limit with incumbent) |
-| `Infeasible`    | No feasible solution exists                                      |
-| `Unbounded`     | Objective is unbounded                                           |
-| `TimeLimit`     | Time limit reached with no feasible solution                     |
-| `NumericError`  | Solver reported numerical difficulties                           |
-| `NotSolved`     | Default, solve not yet called                                    |
-| `Other(String)` | Backend-specific status not covered above                        |
+Why the solve stopped (complementary to whether a point was returned).
+
+| Variant                 | Meaning                                                |
+|-------------------------|--------------------------------------------------------|
+| `Optimal`               | Proven globally optimal                                |
+| `LocallyOptimal`        | A local optimum                                        |
+| `Infeasible`            | No feasible solution exists                            |
+| `Unbounded`             | Objective is unbounded                                 |
+| `InfeasibleOrUnbounded` | Infeasible or unbounded; solver could not tell which   |
+| `IterationLimit`        | Stopped at an iteration limit                          |
+| `TimeLimit`             | Stopped at a time limit                                |
+| `NodeLimit`             | Stopped at a branch-and-bound node limit               |
+| `Interrupted`           | Stopped early (user limit/interrupt, sub-optimal stop) |
+| `NumericError`          | Solver reported numerical difficulties                 |
+| `NotSolved`             | Default, solve not yet called                          |
+| `Other(String)`         | Backend-specific status not covered above              |
+
+## `PrimalStatus`
+
+| Variant         | Meaning                                           |
+|-----------------|---------------------------------------------------|
+| `NoSolution`    | No primal point is available                      |
+| `FeasiblePoint` | A feasible point is available, not proven optimal |
+| `OptimalPoint`  | A proven-optimal point is available               |
 
 ## `SolverError`
 
@@ -98,11 +116,11 @@ let opts = MyBackendOptions::default()
     .verbose(true);
 ```
 
-| Method                  | Field        | Type                |
-|-------------------------|--------------|---------------------|
-| `.time_limit(Duration)` | `time_limit` | `Option<Duration>`  |
-| `.threads(u32)`         | `threads`    | `Option<u32>`       |
-| `.verbose(bool)`        | `verbose`    | `Option<bool>`      |
+| Method                  | Field        | Type               |
+|-------------------------|--------------|--------------------|
+| `.time_limit(Duration)` | `time_limit` | `Option<Duration>` |
+| `.threads(u32)`         | `threads`    | `Option<u32>`      |
+| `.verbose(bool)`        | `verbose`    | `Option<bool>`     |
 
 ### Implementing `HasUniversal` for a new backend
 
