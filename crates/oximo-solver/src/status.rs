@@ -118,9 +118,11 @@ mod tests {
         use TerminationStatus as T;
         match t {
             T::Optimal => (true, PrimalStatus::OptimalPoint),
-            T::LocallyOptimal | T::IterationLimit | T::TimeLimit | T::NodeLimit | T::Interrupted => {
-                (true, PrimalStatus::FeasiblePoint)
-            }
+            T::LocallyOptimal
+            | T::IterationLimit
+            | T::TimeLimit
+            | T::NodeLimit
+            | T::Interrupted => (true, PrimalStatus::FeasiblePoint),
             T::Infeasible
             | T::Unbounded
             | T::InfeasibleOrUnbounded
@@ -167,7 +169,11 @@ mod tests {
         for t in all_terminations() {
             let has_point = t.admits_primal();
             let primal = PrimalStatus::infer(&t, has_point);
-            assert_eq!(primal.has_solution(), has_point, "has_solution mirrors admits_primal for {t:?}");
+            assert_eq!(
+                primal.has_solution(),
+                has_point,
+                "has_solution mirrors admits_primal for {t:?}"
+            );
             let expected = match (has_point, &t) {
                 (false, _) => PrimalStatus::NoSolution,
                 (true, TerminationStatus::Optimal) => PrimalStatus::OptimalPoint,
