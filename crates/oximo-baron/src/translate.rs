@@ -8,7 +8,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, Objective, ObjectiveSense, Sense, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
-use oximo_solver::{SolutionPoint, SolverError, SolverResult, SolverStatus};
+use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::FxHashMap;
 
 use crate::BaronOptions;
@@ -506,9 +506,10 @@ fn fmt(v: f64) -> String {
 ///
 /// The times file is a single whitespace-separated line. Field positions follow
 /// the BARON convention (0-indexed here):
-/// `[5]` lower bound, `[6]` upper bound, `[7]` solver status, `[8]` model status,
-/// `[10]` branch-and-reduce iterations, `[11]` node where the optimum was found
-/// (`-3` => no solution), last = wall time.
+/// `[5]` lower bound, `[6]` upper bound, `[8]` model status, `[10]`
+/// branch-and-reduce iterations, `[11]` node where the optimum was found
+/// (`-3` => no solution), last = wall time. The termination reason comes from
+/// the `res.lst` banner (see [`map_status`]), not the numeric `[7]` solver status.
 fn parse_solution(
     tim: &str,
     res: &str,
@@ -521,15 +522,17 @@ fn parse_solution(
     let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
     let float_at = |i: usize| tokens.get(i).and_then(|s| parse_baron_float(s));
 
-    let solver_status = int_at(7).unwrap_or(99);
     let model_status = int_at(8).unwrap_or(5);
     let lower = float_at(5);
     let upper = float_at(6);
     let iterations = int_at(10).and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
     let nodeopt = int_at(11);
 
-    let status = map_status(solver_status, model_status);
-    let has_sol = status.has_solution();
+    let termination = map_status(res, model_status);
+    // BARON has a usable point when the model status says optimal (`1`) or
+    // intermediate-feasible (`4`). The solution node (`nodeopt`) only 
+    // controls whether a primal vector is available.
+    let has_sol = matches!(model_status, 1 | 4);
 
     // For minimization the incumbent is the upper bound, for maximization the
     // lower bound (the other field is the dual/relaxation bound).
@@ -538,11 +541,8 @@ fn parse_solution(
         ObjectiveSense::Maximize => lower,
     };
 
-    let mut solutions = if has_sol && nodeopt != Some(-3) {
-        parse_results(res, var_order, sense)
-    } else {
-        Vec::new()
-    };
+    let mut solutions =
+        if has_sol && nodeopt != Some(-3) { parse_results(res, var_order, sense) } else { Vec::new() };
 
     // BARON prints each solution's exact objective. Only when the status says a
     // solution exists but no primal block was parsed do we fall back to the times
@@ -557,11 +557,21 @@ fn parse_solution(
         (FxHashMap::default(), FxHashMap::default())
     };
 
+    let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
+    let best_bound = match sense {
+        ObjectiveSense::Minimize => lower,
+        ObjectiveSense::Maximize => upper,
+    };
+    let gap = relative_gap(lower, upper);
+
     SolverResult {
         solutions,
         dual,
         reduced_costs,
-        status,
+        termination,
+        primal_status,
+        best_bound,
+        gap,
         solve_time: elapsed,
         iterations,
         raw_log,
@@ -569,30 +579,76 @@ fn parse_solution(
     }
 }
 
-/// Map BARON solver/model status codes to [`SolverStatus`].
+/// Relative optimality gap from BARON's lower/upper bounds, `None` unless both
+/// are finite. Normalized by the larger-magnitude bound (+ epsilon) so it is
+/// comparable across models.
+fn relative_gap(lower: Option<f64>, upper: Option<f64>) -> Option<f64> {
+    match (lower, upper) {
+        (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() => {
+            let g = (hi - lo).abs() / (lo.abs().max(hi.abs()) + 1e-10);
+            g.is_finite().then_some(g)
+        }
+        _ => None,
+    }
+}
+
+/// Determine the [`TerminationStatus`] from BARON's results-file termination banner
+/// (BARON manual, Section 5.2 "Termination messages, model and solver statuses").
 ///
-/// We prefer the model status when it indicates a solution (optimal/feasible) so
-/// a run that hit a time or iteration limit but found an incumbent still reports
-/// `Feasible` and keeps its primal. Status code tables (BARON manual):
-/// Solver `1`=normal, `4`=time limit, `5`=numerical, `11`=licensing. Model
-/// `1`=optimal, `2`=infeasible, `3`=unbounded, `4`=intermediate feasible,
-/// `5`=unknown.
-fn map_status(solver_status: i64, model_status: i64) -> SolverStatus {
+/// BARON prints exactly one `*** ... ***` banner at the end of `res.lst`. We map
+/// it to a termination reason. `Normal completion` carries no limit/error reason,
+/// so it (and any unrecognized output) defers to the numeric model status via
+/// [`model_status_termination`]. Whether a usable point exists is tracked
+/// separately via [`PrimalStatus`], so a limit- or heuristic-terminated run still
+/// keeps its incumbent.
+fn map_status(res: &str, model_status: i64) -> TerminationStatus {
+    let log = res.to_ascii_lowercase();
+    let has = |needle: &str| log.contains(needle);
+
+    if has("nodes in memory") {
+        // *** Max. allowable nodes in memory reached ***
+        TerminationStatus::NodeLimit
+    } else if has("bar iterations") {
+        // *** Max. allowable BaR iterations reached ***
+        TerminationStatus::IterationLimit
+    } else if has("time exceeded") {
+        // *** Max. allowable time exceeded ***
+        TerminationStatus::TimeLimit
+    } else if has("numerically sensitive") {
+        // *** Problem is numerically sensitive ***
+        TerminationStatus::NumericError
+    } else if has("search interrupted by user") || has("access violation") {
+        // *** Search interrupted by user *** / *** ... access violation ... ***
+        TerminationStatus::Interrupted
+    } else if has("heuristic termination") {
+        // *** Heuristic termination ***, feasible found, global optimality not
+        // guaranteed (DeltaTerm).
+        TerminationStatus::Interrupted
+    } else if has("insufficient memory") {
+        // *** Insufficient Memory for Data structures ***
+        TerminationStatus::Other("baron_insufficient_memory".into())
+    } else if has("appropriate variable bounds") {
+        // *** User did not provide appropriate variable bounds ***, relaxation
+        // bounds may be invalid, so neither globality nor infeasibility is
+        // guaranteed. Feasibility, if any, is still reflected in the primal status.
+        TerminationStatus::Other("baron_missing_bounds".into())
+    } else {
+        // *** Normal completion *** or no recognizable banner.
+        // The model status is the authoritative outcome.
+        model_status_termination(model_status)
+    }
+}
+
+/// Outcome implied by BARON's numeric model status, used on normal completion or
+/// when `res.lst` carries no recognizable termination banner. `1`=optimal,
+/// `2`=infeasible, `3`=unbounded, `4`=intermediate feasible (a normal completion
+/// that reports a feasible point is a solved global optimum), `5`=unknown.
+fn model_status_termination(model_status: i64) -> TerminationStatus {
     match model_status {
-        1 => SolverStatus::Optimal,
-        2 => SolverStatus::Infeasible,
-        3 => SolverStatus::Unbounded,
-        4 => SolverStatus::Feasible,
-        // Model status unknown: fall back to the solver-level termination reason.
-        // TODO: This can be improved, we need to redefine SolverStatus.
-        _ => match solver_status {
-            4 => SolverStatus::TimeLimit,
-            5 => SolverStatus::NumericError,
-            3 => SolverStatus::Other("baron_iteration_limit".into()),
-            11 => SolverStatus::Other("baron_license_error".into()),
-            1 => SolverStatus::Other("baron_unknown".into()),
-            n => SolverStatus::Other(format!("baron_solver_status_{n}")),
-        },
+        1 | 4 => TerminationStatus::Optimal,
+        2 => TerminationStatus::Infeasible,
+        3 => TerminationStatus::Unbounded,
+        n => TerminationStatus::Other(format!("baron_model_status_{n}")),
     }
 }
 
@@ -995,15 +1051,46 @@ mod tests {
     }
 
     #[test]
-    fn map_status_table() {
-        assert_eq!(map_status(1, 1), SolverStatus::Optimal);
-        assert_eq!(map_status(1, 2), SolverStatus::Infeasible);
-        assert_eq!(map_status(1, 3), SolverStatus::Unbounded);
-        assert_eq!(map_status(4, 4), SolverStatus::Feasible); // time limit but feasible
-        assert_eq!(map_status(4, 5), SolverStatus::TimeLimit);
-        assert_eq!(map_status(5, 5), SolverStatus::NumericError);
-        assert_eq!(map_status(11, 5), SolverStatus::Other("baron_license_error".into()));
-        assert_eq!(map_status(3, 5), SolverStatus::Other("baron_iteration_limit".into()));
+    fn termination_from_banner() {
+        // `map_status(res, model_status)`. The results-file banner
+        // (manual, Section 5.2) drives the termination reason,
+        // the model status is the fallback.
+        let nc = "*** Normal completion ***";
+        assert_eq!(map_status(nc, 1), TerminationStatus::Optimal);
+        assert_eq!(map_status(nc, 2), TerminationStatus::Infeasible);
+        assert_eq!(map_status(nc, 3), TerminationStatus::Unbounded);
+        // Limit / interrupt banners are authoritative regardless of model status,
+        // and a feasible incumbent is kept via the primal status.
+        assert_eq!(
+            map_status("*** Max. allowable nodes in memory reached ***", 4),
+            TerminationStatus::NodeLimit
+        );
+        assert_eq!(
+            map_status("*** Max. allowable BaR iterations reached ***", 4),
+            TerminationStatus::IterationLimit
+        );
+        assert_eq!(
+            map_status("*** Max. allowable time exceeded ***", 4),
+            TerminationStatus::TimeLimit
+        );
+        assert_eq!(
+            map_status("*** Problem is numerically sensitive ***", 4),
+            TerminationStatus::NumericError
+        );
+        assert_eq!(
+            map_status("*** Search interrupted by user ***", 4),
+            TerminationStatus::Interrupted
+        );
+        assert_eq!(
+            map_status("*** Heuristic termination ***", 4),
+            TerminationStatus::Interrupted
+        );
+        assert_eq!(
+            map_status("*** User did not provide appropriate variable bounds ***", 4),
+            TerminationStatus::Other("baron_missing_bounds".into())
+        );
+        // No recognizable banner falls back to the model status.
+        assert_eq!(map_status("", 1), TerminationStatus::Optimal);
     }
 
     #[test]
@@ -1012,7 +1099,7 @@ mod tests {
         let tim = "m 1 2 0 0 1.5 9.5 1 1 0 42 7 0 0 0.42";
         let r =
             parse_solution(tim, "", ObjectiveSense::Minimize, std::time::Duration::ZERO, None, &[]);
-        assert_eq!(r.status, SolverStatus::Optimal);
+        assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.objective(), Some(9.5)); // upper bound for minimize
         assert_eq!(r.iterations, 42); // branch-and-reduce iterations from tim[10]
         let r =
