@@ -106,3 +106,81 @@ impl std::fmt::Debug for SolverError {
         std::fmt::Display::fmt(self, f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The contract for a single termination: whether it admits a primal point
+    /// ([`TerminationStatus::admits_primal`]) and what [`PrimalStatus::infer`]
+    /// yields when a point is present.
+    fn contract(t: &TerminationStatus) -> (bool, PrimalStatus) {
+        use TerminationStatus as T;
+        match t {
+            T::Optimal => (true, PrimalStatus::OptimalPoint),
+            T::LocallyOptimal | T::IterationLimit | T::TimeLimit | T::NodeLimit | T::Interrupted => {
+                (true, PrimalStatus::FeasiblePoint)
+            }
+            T::Infeasible
+            | T::Unbounded
+            | T::InfeasibleOrUnbounded
+            | T::NumericError
+            | T::NotSolved
+            | T::Other(_) => (false, PrimalStatus::FeasiblePoint),
+        }
+    }
+
+    fn all_terminations() -> Vec<TerminationStatus> {
+        use TerminationStatus as T;
+        vec![
+            T::Optimal,
+            T::LocallyOptimal,
+            T::Infeasible,
+            T::Unbounded,
+            T::InfeasibleOrUnbounded,
+            T::IterationLimit,
+            T::TimeLimit,
+            T::NodeLimit,
+            T::Interrupted,
+            T::NumericError,
+            T::NotSolved,
+            T::Other("backend_specific".into()),
+        ]
+    }
+
+    #[test]
+    fn admits_primal_and_infer_match_contract() {
+        for t in all_terminations() {
+            let (admits, with_point) = contract(&t);
+            assert_eq!(t.admits_primal(), admits, "admits_primal for {t:?}");
+            assert_eq!(PrimalStatus::infer(&t, true), with_point, "infer(.., true) for {t:?}");
+            assert_eq!(
+                PrimalStatus::infer(&t, false),
+                PrimalStatus::NoSolution,
+                "infer(.., false) for {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admits_primal_drives_inference_for_status_driven_backends() {
+        for t in all_terminations() {
+            let has_point = t.admits_primal();
+            let primal = PrimalStatus::infer(&t, has_point);
+            assert_eq!(primal.has_solution(), has_point, "has_solution mirrors admits_primal for {t:?}");
+            let expected = match (has_point, &t) {
+                (false, _) => PrimalStatus::NoSolution,
+                (true, TerminationStatus::Optimal) => PrimalStatus::OptimalPoint,
+                (true, _) => PrimalStatus::FeasiblePoint,
+            };
+            assert_eq!(primal, expected, "inferred primal for {t:?}");
+        }
+    }
+
+    #[test]
+    fn primal_status_has_solution() {
+        assert!(!PrimalStatus::NoSolution.has_solution());
+        assert!(PrimalStatus::FeasiblePoint.has_solution());
+        assert!(PrimalStatus::OptimalPoint.has_solution());
+    }
+}
