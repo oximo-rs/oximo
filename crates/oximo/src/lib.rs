@@ -44,8 +44,8 @@ pub mod prelude {
     //! Glob-import target. Brings the modeling and solver surface into scope.
     pub use oximo_core::prelude::*;
     pub use oximo_solver::{
-        HasUniversal, ModelReport, SolutionPoint, Solver, SolverError, SolverResult, SolverStatus,
-        UniversalOptions, UniversalOptionsExt,
+        HasUniversal, ModelReport, PrimalStatus, SolutionPoint, Solver, SolverError, SolverResult,
+        TerminationStatus, UniversalOptions, UniversalOptionsExt,
     };
 
     #[cfg(feature = "highs")]
