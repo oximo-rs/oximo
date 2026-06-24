@@ -76,14 +76,8 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
     let termination = map_status(&grb_model)?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = grb_model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
-    let (solutions, reduced_costs, dual) = collect_solution(
-        termination.admits_primal(),
-        kind,
-        &mut grb_model,
-        &gurobi_vars,
-        &gurobi_constrs,
-        obj_constant,
-    );
+    let (solutions, reduced_costs, dual) =
+        collect_solution(kind, &mut grb_model, &gurobi_vars, &gurobi_constrs, obj_constant);
 
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
     let best_bound = grb_model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
@@ -267,23 +261,21 @@ fn set_objective(
 /// for continuous models (`LP` and `QP`). For quadratically constrained models
 /// Gurobi computes duals only with `QCPDual=1`.
 fn collect_solution(
-    admits_primal: bool,
     kind: ModelKind,
     model: &mut grb::Model,
     vars: &[grb::Var],
     constrs: &[GrbRow],
     obj_constant: f64,
 ) -> (Vec<SolutionPoint>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
-    // Gurobi often holds an incumbent (SolCount > 0) on TimeLimit/IterationLimit/
-    // NodeLimit, so trust SolCount first and fall back to whether the termination
-    // reason admits a primal point at all.
+    // A primal point exists only when Gurobi actually stored one. `SolCount` is
+    // the number of available solutions and it stays `> 0` for an incumbent
+    // kept at a time/iteration/node limit.
     let sol_count = model.get_attr(attr::SolCount).unwrap_or(0);
-    let n = if sol_count > 0 { sol_count } else { i32::from(admits_primal) };
-    if n == 0 {
+    if sol_count <= 0 {
         return (Vec::new(), FxHashMap::default(), FxHashMap::default());
     }
 
-    let solutions = collect_pool(model, vars, obj_constant, n);
+    let solutions = collect_pool(model, vars, obj_constant, sol_count);
 
     // Skip retrieval of duals and reduced costs for any model
     // class where Gurobi will either return zeros or refuse the attribute.
