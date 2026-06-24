@@ -265,7 +265,13 @@ For a quick, model-aware summary, print `result.report(&m)`. For programmatic ac
 let result = Highs.solve(&m, &HighsOptions::default())?;
 
 match result.termination {
-    TerminationStatus::Optimal => println!("optimal: {}", result.objective().unwrap()),
+    TerminationStatus::Optimal => {
+        // `objective()` is `Option` (a model may have no objective), so print it
+        // only when present.
+        if let Some(obj) = result.objective() {
+            println!("optimal: {obj}");
+        }
+    }
     TerminationStatus::Infeasible => println!("infeasible"),
     TerminationStatus::TimeLimit if result.has_solution() => {
         println!("time limit, best = {:?}", result.objective());
