@@ -560,7 +560,9 @@ fn parse_solution(
         (FxHashMap::default(), FxHashMap::default())
     };
 
-    let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
+    // A point is only usable if it carries primal values.
+    let has_usable_primal = solutions.iter().any(|s| !s.primal.is_empty());
+    let primal_status = PrimalStatus::infer(&termination, has_usable_primal);
     let best_bound = match sense {
         ObjectiveSense::Minimize => lower,
         ObjectiveSense::Maximize => upper,
@@ -1304,8 +1306,9 @@ The above solution has an objective value of:  0.0
 
     #[test]
     fn no_solution_node_minus_three_leaves_primal_empty() {
-        // solver=1 model=1 (optimal) but nodeopt = -3 => no solution vector. We
-        // still surface a single point (objective known, variables unavailable).
+        // model=1 (optimal) but nodeopt = -3 => no solution vector. We surface a
+        // single objective-only point, but it carries no primal data,
+        // so it must NOT count as a usable solution.
         let tim = "m 1 1 0 0 0 0 1 1 0 0 -3 0 0 0.01";
         let res = "The best solution found is:\n\n\n  x0  0  9.9\n";
         let r = parse_solution(
@@ -1322,5 +1325,10 @@ The above solution has an objective value of:  0.0
             "nodeopt -3 must skip primal: {:?}",
             r.solution(0)
         );
+        assert_eq!(r.primal_status, PrimalStatus::NoSolution);
+        assert!(!r.has_solution(), "nodeopt -3 must not report a usable solution");
+        let primal = r.primal().expect("objective-only point is present");
+        assert!(primal.is_empty(), "nodeopt -3 must expose no primal values: {primal:?}");
+        assert!(r.value(VarId(0)).is_none(), "nodeopt -3 must not yield a variable value");
     }
 }
