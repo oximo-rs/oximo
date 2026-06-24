@@ -9,12 +9,7 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 }
 
 fn assert_solved(r: &oximo_solver::SolverResult) {
-    assert!(
-        r.has_solution(),
-        "termination = {:?}, primal = {:?}",
-        r.termination,
-        r.primal_status
-    );
+    assert!(r.has_solution(), "termination = {:?}, primal = {:?}", r.termination, r.primal_status);
 }
 
 #[test]

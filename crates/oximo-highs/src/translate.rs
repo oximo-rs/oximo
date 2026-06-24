@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use highs::{HessianFormat, HighsModelStatus, HighsSolutionStatus, RowProblem, Sense as HighsSense};
+use highs::{
+    HessianFormat, HighsModelStatus, HighsSolutionStatus, RowProblem, Sense as HighsSense,
+};
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable};
 use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,

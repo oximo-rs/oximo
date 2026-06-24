@@ -530,7 +530,7 @@ fn parse_solution(
 
     let termination = map_status(res, model_status);
     // BARON has a usable point when the model status says optimal (`1`) or
-    // intermediate-feasible (`4`). The solution node (`nodeopt`) only 
+    // intermediate-feasible (`4`). The solution node (`nodeopt`) only
     // controls whether a primal vector is available.
     let has_sol = matches!(model_status, 1 | 4);
 
@@ -541,8 +541,11 @@ fn parse_solution(
         ObjectiveSense::Maximize => lower,
     };
 
-    let mut solutions =
-        if has_sol && nodeopt != Some(-3) { parse_results(res, var_order, sense) } else { Vec::new() };
+    let mut solutions = if has_sol && nodeopt != Some(-3) {
+        parse_results(res, var_order, sense)
+    } else {
+        Vec::new()
+    };
 
     // BARON prints each solution's exact objective. Only when the status says a
     // solution exists but no primal block was parsed do we fall back to the times
@@ -1081,10 +1084,7 @@ mod tests {
             map_status("*** Search interrupted by user ***", 4),
             TerminationStatus::Interrupted
         );
-        assert_eq!(
-            map_status("*** Heuristic termination ***", 4),
-            TerminationStatus::Interrupted
-        );
+        assert_eq!(map_status("*** Heuristic termination ***", 4), TerminationStatus::Interrupted);
         assert_eq!(
             map_status("*** User did not provide appropriate variable bounds ***", 4),
             TerminationStatus::Other("baron_missing_bounds".into())
