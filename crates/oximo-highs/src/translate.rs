@@ -83,8 +83,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
 
     for (c, t) in constraints.iter().zip(con_terms) {
         let adjusted_rhs = c.rhs - t.constant;
-        let factors: Vec<(highs::Col, f64)> =
-            t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co)).collect();
+        let factors = t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co));
         match c.sense {
             Sense::Le => pb.add_row(f64::NEG_INFINITY..=adjusted_rhs, factors),
             Sense::Ge => pb.add_row(adjusted_rhs..=f64::INFINITY, factors),
