@@ -10,6 +10,43 @@ pub struct LinearTerms {
     pub constant: f64,
 }
 
+/// Accumulator that merges duplicate `(VarId, coeff)` terms while
+/// preserving the order each variable is first seen.
+struct CoeffAccum {
+    coeffs: Vec<(VarId, f64)>,
+    slot: FxHashMap<VarId, usize>,
+}
+
+impl CoeffAccum {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            coeffs: Vec::with_capacity(n),
+            slot: FxHashMap::with_capacity_and_hasher(n, FxBuildHasher),
+        }
+    }
+
+    /// Add `c` to `v`'s running coefficient, appending `v` the first time it is
+    /// seen.
+    fn add(&mut self, v: VarId, c: f64) {
+        if let Some(&i) = self.slot.get(&v) {
+            self.coeffs[i].1 += c;
+        } else {
+            self.slot.insert(v, self.coeffs.len());
+            self.coeffs.push((v, c));
+        }
+    }
+
+    fn extend(&mut self, terms: impl IntoIterator<Item = (VarId, f64)>) {
+        for (v, c) in terms {
+            self.add(v, c);
+        }
+    }
+
+    fn into_coeffs(self) -> Vec<(VarId, f64)> {
+        self.coeffs
+    }
+}
+
 /// Try to interpret `id` as a linear expression. Returns `None` for any
 /// nonlinear node (Mul of two non-constants, Pow, transcendentals, ...).
 ///
@@ -35,18 +72,14 @@ fn as_linear(arena: &ExprArena, id: ExprId, resolve_params: bool) -> Option<Line
         }
         ExprNode::Add(children) => {
             let children: smallvec::SmallVec<[ExprId; 4]> = children.iter().copied().collect();
-            let mut acc = LinearTerms::default();
-            let mut map: FxHashMap<VarId, f64> =
-                FxHashMap::with_capacity_and_hasher(children.len() * 4, FxBuildHasher);
+            let mut acc = CoeffAccum::with_capacity(children.len() * 4);
+            let mut constant = 0.0;
             for child in children {
                 let t = as_linear(arena, child, resolve_params)?;
-                for (v, c) in t.coeffs {
-                    *map.entry(v).or_insert(0.0) += c;
-                }
-                acc.constant += t.constant;
+                acc.extend(t.coeffs);
+                constant += t.constant;
             }
-            acc.coeffs = map.into_iter().collect();
-            Some(acc)
+            Some(LinearTerms { coeffs: acc.into_coeffs(), constant })
         }
         ExprNode::Mul(children) => {
             // Linear if and only if exactly one non-const child is linear and the rest are constants.
@@ -86,14 +119,12 @@ fn push_linear(arena: &mut ExprArena, mut t: LinearTerms) -> ExprId {
 /// linear. Falls back to an n-ary `Add` node otherwise.
 pub(crate) fn add_into(arena: &mut ExprArena, lhs: ExprId, rhs: ExprId) -> ExprId {
     if let (Some(lt), Some(rt)) = (as_linear(arena, lhs, false), as_linear(arena, rhs, false)) {
-        let mut map: FxHashMap<VarId, f64> =
-            FxHashMap::with_capacity_and_hasher(lt.coeffs.len() + rt.coeffs.len(), FxBuildHasher);
-        for (v, c) in lt.coeffs.into_iter().chain(rt.coeffs) {
-            *map.entry(v).or_insert(0.0) += c;
-        }
+        let mut acc = CoeffAccum::with_capacity(lt.coeffs.len() + rt.coeffs.len());
+        acc.extend(lt.coeffs);
+        acc.extend(rt.coeffs);
         return push_linear(
             arena,
-            LinearTerms { coeffs: map.into_iter().collect(), constant: lt.constant + rt.constant },
+            LinearTerms { coeffs: acc.into_coeffs(), constant: lt.constant + rt.constant },
         );
     }
     arena.push(ExprNode::Add(smallvec![lhs, rhs]))
@@ -203,7 +234,8 @@ pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedEx
     if let Some(lt) = as_linear(arena, id, true) {
         return (lt, Vec::new());
     }
-    let mut lin = LinearTerms::default();
+    let mut lin = CoeffAccum::with_capacity(0);
+    let mut constant = 0.0;
     let mut residual: Vec<SignedExpr> = Vec::new();
     let mut sign_stack: smallvec::SmallVec<[(ExprId, f64); 8]> = smallvec![(id, 1.0)];
     while let Some((cur, sign)) = sign_stack.pop() {
@@ -220,22 +252,17 @@ pub fn split_linear(arena: &ExprArena, id: ExprId) -> (LinearTerms, Vec<SignedEx
                         t.coeffs.iter_mut().for_each(|(_, c)| *c *= sign);
                         t.constant *= sign;
                     }
-                    for (v, c) in t.coeffs {
-                        if let Some((_, acc)) = lin.coeffs.iter_mut().find(|(vv, _)| *vv == v) {
-                            *acc += c;
-                        } else {
-                            lin.coeffs.push((v, c));
-                        }
-                    }
-                    lin.constant += t.constant;
+                    lin.extend(t.coeffs);
+                    constant += t.constant;
                 } else {
                     residual.push(SignedExpr { id: cur, neg: sign < 0.0 });
                 }
             }
         }
     }
-    lin.coeffs.retain(|(_, c)| *c != 0.0);
-    (lin, residual)
+    let mut coeffs = lin.into_coeffs();
+    coeffs.retain(|(_, c)| *c != 0.0);
+    (LinearTerms { coeffs, constant }, residual)
 }
 
 #[cfg(test)]
@@ -282,5 +309,37 @@ mod tests {
         let terms = extract_linear(&arena, sum).expect("linear");
         assert_eq!(terms.coeffs, vec![(VarId(0), 1.0)]);
         assert!((terms.constant - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn add_extraction_is_first_seen_ordered_and_merges() {
+        // `z + x + y + x`: coefficients come out in first-seen order [z, x, y]
+        // and the repeated `x` is merged to coeff 2.
+        let mut arena = ExprArena::new();
+        let z = arena.push(ExprNode::Var(VarId(2)));
+        let x = arena.push(ExprNode::Var(VarId(0)));
+        let y = arena.push(ExprNode::Var(VarId(1)));
+        let sum = arena.push(ExprNode::Add(smallvec::smallvec![z, x, y, x]));
+
+        let terms = extract_linear(&arena, sum).expect("linear");
+        assert_eq!(terms.coeffs, vec![(VarId(2), 1.0), (VarId(0), 2.0), (VarId(1), 1.0)]);
+        assert!(terms.constant.abs() < f64::EPSILON);
+        assert_eq!(extract_linear(&arena, sum).unwrap().coeffs, terms.coeffs);
+    }
+
+    #[test]
+    fn wide_sum_merges_repeated_vars_in_order() {
+        let mut arena = ExprArena::new();
+        let n = 50u32;
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            for v in 0..n {
+                ids.push(arena.push(ExprNode::Var(VarId(v))));
+            }
+        }
+        let sum = arena.push(ExprNode::Add(ids.into_iter().collect()));
+        let terms = extract_linear(&arena, sum).expect("linear");
+        let expected: Vec<(VarId, f64)> = (0..n).map(|v| (VarId(v), 3.0)).collect();
+        assert_eq!(terms.coeffs, expected);
     }
 }
