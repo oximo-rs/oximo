@@ -40,7 +40,7 @@ use num_traits::PrimInt;
 
 /// Conversion into an owned [`Set`], used by the `variable!`/`constraint!`
 /// macros to turn an index domain (`i in 0..n`, `i in some_set`) into the
-/// [`Set`] that [`crate::Model::indexed_var`] expects. The associated `Key` is
+/// [`Set`] the indexed `variable!` form expects. The associated `Key` is
 /// the type the domain's keys decode to, so the macro can infer the closure
 /// parameter type. Integer ranges decode to `usize`. The macro always passes
 /// the domain by reference; the blanket impl for `&S` forwards through, so a

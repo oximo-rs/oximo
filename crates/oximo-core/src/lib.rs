@@ -27,8 +27,6 @@ pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
 pub use set::{Axis, FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};
 pub use sum::SumDomain;
-#[allow(deprecated)]
-pub use sum::sum_over;
 pub use var::{VarBuilder, Variable};
 
 // Re-export the expression handle so downstream code does not need a separate

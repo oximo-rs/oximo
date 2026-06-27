@@ -17,7 +17,7 @@ pub struct Variable {
     pub initial: Option<f64>,
 }
 
-/// Builder returned by [`Model::var`]. Configure bounds / domain, then call
+/// Builder backing the `variable!` macro. Configure bounds / domain, then call
 /// [`Self::build`] to register the variable and obtain an `Expr` handle.
 #[must_use = "VarBuilder does nothing until you call .build()"]
 pub struct VarBuilder<'a> {

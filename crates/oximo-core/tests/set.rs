@@ -1,6 +1,4 @@
 #![allow(clippy::float_cmp)]
-// builder API exercised in tests until its 0.4.0 removal
-#![allow(deprecated)]
 
 use oximo_core::prelude::*;
 
@@ -158,7 +156,7 @@ fn indexed_var_over_product_creates_named_scalars() {
     let m = Model::new("net");
     let plants = Set::strings(["seattle", "san-diego"]);
     let markets = Set::strings(["nyc", "chi", "topeka"]);
-    let flow = m.indexed_var("flow", &(&plants * &markets)).lb(0.0).build();
+    let flow = m.__indexed_var("flow", &(&plants * &markets)).lb(0.0).build();
     assert_eq!(flow.len(), 6);
     assert!(m.variable_id("flow[seattle,nyc]").is_some());
     assert!(m.variable_id("flow[san-diego,topeka]").is_some());
@@ -169,7 +167,7 @@ fn indexed_var_per_key_bounds() {
     let m = Model::new("ub_by");
     let set = Set::range(0..3);
     let _x = m
-        .indexed_var("x", &set)
+        .__indexed_var("x", &set)
         .lb(0.0)
         .ub_by(|k: usize| {
             #[allow(clippy::cast_precision_loss)]
@@ -189,7 +187,7 @@ fn indexed_var_tuple_indexing() {
     let model = Model::new("idx");
     let rows = Set::range(0..2);
     let cols = Set::range(0..2);
-    let x = model.indexed_var("x", &(&rows * &cols)).lb(0.0).build();
+    let x = model.__indexed_var("x", &(&rows * &cols)).lb(0.0).build();
     let by_tuple = x[(0, 1)];
 
     let key: IndexKey = (1, 0).into();
@@ -203,8 +201,8 @@ fn indexed_var_tuple_indexing() {
 fn add_constraints_over_scalar_typed_closure() {
     let m = Model::new("rule");
     let set = Set::range(0..3);
-    let x = m.indexed_var("x", &set).lb(0.0).build();
-    m.add_constraints_over("c", &set, |i: usize| x[i].le(10.0));
+    let x = m.__indexed_var("x", &set).lb(0.0).build();
+    m.__add_constraints_over("c", &set, |i: usize| x[i].le(10.0));
     assert_eq!(m.num_constraints(), 3);
     assert!(m.constraint_id("c[0]").is_some());
     assert!(m.constraint_id("c[2]").is_some());
@@ -216,8 +214,8 @@ fn add_constraints_over_tuple_set_typed_closure() {
     let rows = Set::range(0..2);
     let cols = Set::strings(["a", "b"]);
     let ij = &rows * &cols;
-    let x = m.indexed_var("x", &ij).lb(0.0).build();
-    m.add_constraints_over("c", &ij, |(i, j): (usize, String)| x[(i, j)].le(5.0));
+    let x = m.__indexed_var("x", &ij).lb(0.0).build();
+    m.__add_constraints_over("c", &ij, |(i, j): (usize, String)| x[(i, j)].le(5.0));
     assert_eq!(m.num_constraints(), 4);
     assert!(m.constraint_id("c[0,a]").is_some());
     assert!(m.constraint_id("c[1,b]").is_some());
@@ -227,8 +225,8 @@ fn add_constraints_over_tuple_set_typed_closure() {
 fn add_constraints_over_indexes_by_value() {
     let m = Model::new("rule_val");
     let set = Set::range(0..2);
-    let x = m.indexed_var("x", &set).lb(0.0).build();
-    m.add_constraints_over("c", &set, |i: usize| x[i].le(1.0));
+    let x = m.__indexed_var("x", &set).lb(0.0).build();
+    m.__add_constraints_over("c", &set, |i: usize| x[i].le(1.0));
     assert_eq!(m.num_constraints(), 2);
 }
 
@@ -270,7 +268,7 @@ fn lb_by_ub_by_override_binary_defaults() {
     let m = Model::new("fix");
     let set = Set::range(0..3);
     let _x = m
-        .indexed_var("x", &set)
+        .__indexed_var("x", &set)
         .binary()
         .lb_by(|k: usize| if k == 0 { 1.0 } else { 0.0 })
         .ub_by(|k: usize| if k == 2 { 0.0 } else { 1.0 })

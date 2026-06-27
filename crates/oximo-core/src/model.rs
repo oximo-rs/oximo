@@ -83,16 +83,8 @@ impl Model {
 
     // Variables
 
-    #[deprecated(
-        since = "0.3.0",
-        note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
-        self.__var(name)
-    }
-
-    /// Macro-facing entry point behind [`Self::var`]. Not part of the stable
-    /// public API; use the `variable!` macro (or `var`) instead.
+    /// Macro-facing entry point backing the `variable!` macro. Not part of the
+    /// stable public API.
     #[doc(hidden)]
     pub fn __var(&self, name: impl Into<SmolStr>) -> VarBuilder<'_> {
         VarBuilder {
@@ -127,20 +119,8 @@ impl Model {
         Expr::from_var(&self.arena, id)
     }
 
-    #[deprecated(
-        since = "0.3.0",
-        note = "use the `variable!` macro, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn indexed_var<'a, K>(
-        &'a self,
-        name: impl Into<String>,
-        set: &Set<K>,
-    ) -> IndexedVarBuilder<'a, K> {
-        self.__indexed_var(name, set)
-    }
-
-    /// Macro-facing entry point behind [`Self::indexed_var`]. Not part of the
-    /// stable public API; use the `variable!` macro instead.
+    /// Macro-facing entry point backing the indexed form of the `variable!`
+    /// macro. Not part of the stable public API.
     #[doc(hidden)]
     pub fn __indexed_var<'a, K>(
         &'a self,
@@ -178,8 +158,8 @@ impl Model {
     }
 
     /// Fix a single-variable expression to `value`.
-    /// Convenience over [`Self::fix_var`] for handles from [`Model::var`] or
-    /// [`crate::IndexedVar`] indexing.
+    /// Convenience over [`Self::fix_var`] for handles from the `variable!` macro
+    /// or [`crate::IndexedVar`] indexing.
     ///
     /// # Panics
     ///
@@ -220,27 +200,18 @@ impl Model {
 
     // Parameters
 
-    /// Register a named scalar parameter initialized to `value`, returning an
-    /// [`Expr`] handle that references it symbolically.
+    /// Macro-facing entry point backing the `param!` macro. Not part of the
+    /// stable public API.
     ///
-    /// A parameter behaves like a constant coefficient (`param * var` is linear),
-    /// but stays symbolic in the expression tree so it can be re-bound with
-    /// [`Self::set_param`] / [`Self::set_param_id`] between solves without
-    /// rebuilding the model.
+    /// Registers a named scalar parameter initialized to `value`, returning an
+    /// [`Expr`] handle that references it symbolically. A parameter behaves like a
+    /// constant coefficient (`param * var` is linear) but stays symbolic so it can
+    /// be re-bound with [`Self::set_param`] / [`Self::set_param_id`] between solves
+    /// without rebuilding the model.
     ///
     /// # Panics
     ///
     /// Panics if a parameter with the same name is already registered.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use the `param!` macro, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
-        self.__param(name, value)
-    }
-
-    /// Macro-facing entry point behind [`Self::param`]. Not part of the stable
-    /// public API; use the `param!` macro instead.
     #[doc(hidden)]
     pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
         let name = name.into();
@@ -263,7 +234,8 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `p` is not a bare parameter handle (see [`Self::param`]).
+    /// Panics if `p` is not a bare parameter handle (one returned by the `param!`
+    /// macro).
     pub fn set_param(&self, p: Expr<'_>, value: f64) {
         let id = p.param_id().expect("Model::set_param expects a single-parameter expression");
         self.set_param_id(id, value);
@@ -282,7 +254,7 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `id` was not produced by [`Self::param`] on this model.
+    /// Panics if `id` does not belong to a parameter registered on this model.
     pub fn param_value(&self, id: ParamId) -> f64 {
         self.arena.borrow().param_value(id)
     }
@@ -307,22 +279,13 @@ impl Model {
 
     // Constraints
 
-    /// Register a new constraint.
+    /// Macro-facing entry point backing the `constraint!` macro. Not part of the
+    /// stable public API.
     ///
     /// # Panics
     ///
     /// Panics if a constraint with the same name is already registered, or if
     /// the constraint count exceeds `u32::MAX`.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn constraint(&self, name: impl Into<SmolStr>, c: ConstraintExpr<'_>) -> ConstraintId {
-        self.__add_constraint(name, c)
-    }
-
-    /// Macro-facing entry point behind [`Self::constraint`]. Not part of the
-    /// stable public API; use the `constraint!` macro instead.
     #[doc(hidden)]
     pub fn __add_constraint(
         &self,
@@ -373,38 +336,10 @@ impl Model {
         }
     }
 
-    /// Rule-style bulk constraint registration.
-    ///
-    /// The closure receives the index as a typed value `K`. Any type
-    /// implementing [`FromIndexKey`] is accepted. Built-in impls cover `i64`,
-    /// `i32`, `usize`, `String`, raw `IndexKey`, and tuples up to arity 4.
-    /// The user states the expected shape via the closure-arg annotation.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Scalar set: closure receives a usize directly.
-    /// m.add_constraints_over("upper", &i, |i: usize| x[i].le(b[i]));
-    ///
-    /// // Tuple set: destructure inline.
-    /// m.add_constraints_over("blo", &(&tasks * &events), |(t, n): (usize, usize)| {
-    ///     (b[(t, n)] - b_min[t] * w[(t, n)]).ge(0.0)
-    /// });
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use the indexed-family form of the `constraint!` macro, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, rule: F)
-    where
-        K: FromIndexKey,
-        F: FnMut(K) -> ConstraintExpr<'a>,
-    {
-        self.__add_constraints_over(name_prefix, set, rule);
-    }
-
-    /// Macro-facing entry point behind [`Self::add_constraints_over`]. Backs the
-    /// indexed-family form of the `constraint!` macro. Not part of the stable
-    /// public API.
+    /// Macro-facing entry point backing the indexed-family form of the
+    /// `constraint!` macro. The closure receives the index as a typed value `K`
+    /// (any [`FromIndexKey`]: `i64`, `i32`, `usize`, `String`, raw `IndexKey`, or
+    /// tuples up to arity 4). Not part of the stable public API.
     #[doc(hidden)]
     pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, mut rule: F)
     where
@@ -449,29 +384,15 @@ impl Model {
 
     // Objective
 
-    #[deprecated(
-        since = "0.3.0",
-        note = "use `objective!(m, Min, ..)`, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn minimize(&self, expr: Expr<'_>) {
-        self.__minimize(expr);
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use `objective!(m, Max, ..)`, the builder API is scheduled for removal in 0.4.0"
-    )]
-    pub fn maximize(&self, expr: Expr<'_>) {
-        self.__maximize(expr);
-    }
-
-    /// Macro-facing entry point behind [`Self::minimize`]. Backs `objective!(m, Min, ..)`.
+    /// Macro-facing entry point backing `objective!(m, Min, ..)`. Not part of the
+    /// stable public API.
     #[doc(hidden)]
     pub fn __minimize(&self, expr: Expr<'_>) {
         self.set_objective(expr, ObjectiveSense::Minimize);
     }
 
-    /// Macro-facing entry point behind [`Self::maximize`]. Backs `objective!(m, Max, ..)`.
+    /// Macro-facing entry point backing `objective!(m, Max, ..)`. Not part of the
+    /// stable public API.
     #[doc(hidden)]
     pub fn __maximize(&self, expr: Expr<'_>) {
         self.set_objective(expr, ObjectiveSense::Maximize);
@@ -699,8 +620,8 @@ fn write_key_parts(out: &mut String, key: &IndexKey) {
     }
 }
 
-/// Public render of an `IndexKey`'s textual form, used by helpers like
-/// [`Model::add_constraints_over`] to derive constraint names.
+/// Public render of an `IndexKey`'s textual form, used when deriving
+/// auto-generated names for indexed-family constraints.
 pub fn display_index_key(key: &IndexKey) -> String {
     let mut out = String::new();
     write_key_parts(&mut out, key);
@@ -708,8 +629,6 @@ pub fn display_index_key(key: &IndexKey) -> String {
 }
 
 #[cfg(test)]
-// exercises the builder API directly until its 0.4.0 removal
-#[allow(deprecated)]
 mod tests {
     use oximo_expr::extract_linear;
 
@@ -719,17 +638,17 @@ mod tests {
     #[test]
     fn param_times_var_keeps_model_linear() {
         let m = Model::new("p");
-        let param = m.param("param", 4.0);
-        let x = m.var("x").lb(0.0).build();
-        m.minimize(param * x);
+        let param = m.__param("param", 4.0);
+        let x = m.__var("x").lb(0.0).build();
+        m.__minimize(param * x);
         assert_eq!(m.kind(), ModelKind::LP);
     }
 
     #[test]
     fn param_coeff_resolves_and_rebinds() {
         let m = Model::new("p");
-        let param = m.param("param", 4.0);
-        let x = m.var("x").lb(0.0).build();
+        let param = m.__param("param", 4.0);
+        let x = m.__var("x").lb(0.0).build();
         let obj = param * x;
 
         let coeff = |m: &Model| {
@@ -746,7 +665,7 @@ mod tests {
     #[test]
     fn param_value_reads_live_arena_value() {
         let m = Model::new("p");
-        let param = m.param("param", 4.0);
+        let param = m.__param("param", 4.0);
         let id = param.param_id().unwrap();
         assert!((m.param_value(id) - 4.0).abs() < f64::EPSILON);
         assert!((m.param_value_of(param).unwrap() - 4.0).abs() < f64::EPSILON);
@@ -754,16 +673,16 @@ mod tests {
         m.set_param(param, 7.5);
         assert!((m.param_value(id) - 7.5).abs() < f64::EPSILON);
 
-        let x = m.var("x").build();
+        let x = m.__var("x").build();
         assert!(m.param_value_of(x).is_none());
     }
 
     #[test]
     fn set_param_invalidates_kind_cache() {
         let m = Model::new("p");
-        let p = m.param("p", 1.0);
-        let x = m.var("x").lb(0.0).build();
-        m.constraint("c", (p * x).le(10.0));
+        let p = m.__param("p", 1.0);
+        let x = m.__var("x").lb(0.0).build();
+        m.__add_constraint("c", (p * x).le(10.0));
         assert_eq!(m.kind(), ModelKind::LP);
         m.set_param(p, 2.0);
         assert_eq!(m.kind(), ModelKind::LP);
@@ -773,7 +692,7 @@ mod tests {
     #[should_panic(expected = "parameter name \"dup\" already registered")]
     fn duplicate_param_name_panics() {
         let m = Model::new("p");
-        let _a = m.param("dup", 1.0);
-        let _b = m.param("dup", 2.0);
+        let _a = m.__param("dup", 1.0);
+        let _b = m.__param("dup", 2.0);
     }
 }

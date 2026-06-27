@@ -35,8 +35,6 @@ impl SetRepr {
     }
 }
 
-// TODO: Simplify the following after removing the the builder API
-
 /// A single contiguous integer axis of a dense index grid.
 /// Carried by [`Set`] (see [`Set::axes`]) so an [`crate::IndexedVar`]
 /// built over a range can store its scalars densely and map
@@ -506,11 +504,11 @@ where
 /// key's shape does not match the target type, the same contract as
 /// [`crate::indexed::IndexedVar`] indexing on a missing key.
 ///
-/// Used by [`crate::model::Model::add_constraints_over`] (and similar rule
-/// helpers) to give the closure typed indices directly:
+/// Used by the indexed-family `constraint!` macro (and similar rule helpers) to
+/// give the closure typed indices directly:
 ///
 /// ```ignore
-/// m.add_constraints_over("supply", &(&plants * &markets), |(p, m): (String, String)| {
+/// constraint!(m, supply[(p, m) in &plants * &markets], {
 ///     // p, m are native String, no manual unpack
 ///     ...
 /// });

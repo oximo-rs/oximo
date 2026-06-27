@@ -46,10 +46,6 @@ The modeling surface is a set of macros: `variable!`, `constraint!`, `objective!
 `sum!`, `set!`, and `param!`. Each expands to the underlying typed model operations,
 so there is no runtime cost and full compile-time type/borrow checking is preserved.
 
-> The older builder methods (`Model::var`/`indexed_var`/`constraint`/`minimize`/
-> `maximize`/`param`, free `sum_over`, `add_constraints_over`) are deprecated as
-> of 0.3.0 and scheduled for removal in 0.4.0. Prefer the macros.
-
 `Model` uses interior mutability (`RefCell`), so a macro can take `&m`, register
 variables/constraints, and the `variable!`-introduced bindings (`x`, `y`, ...) are
 locals you can use immediately.

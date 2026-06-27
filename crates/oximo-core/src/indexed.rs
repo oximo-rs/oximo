@@ -20,7 +20,7 @@ pub(crate) enum Storage<'a> {
 /// Indexed variable: maps an `IndexKey` to a single-variable `Expr`, tagged with
 /// the key type `K` its domain decodes to.
 ///
-/// Constructed by [`crate::Model::indexed_var`] or the `variable!` macro. `K` is
+/// Constructed by the indexed form of the `variable!` macro. `K` is
 /// a phantom marker, carried so the type of an indexed family is visible and
 /// typed iteration via [`Self::keys`] is possible.
 ///

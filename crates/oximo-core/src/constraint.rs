@@ -32,7 +32,7 @@ pub struct Constraint {
 }
 
 /// In-progress constraint produced by [`Relate::le`] / [`Relate::ge`] /
-/// [`Relate::eq`]. Pass to [`crate::Model::constraint`] to register.
+/// [`Relate::eq`]. Registered through the `constraint!` macro.
 #[derive(Copy, Clone, Debug)]
 pub struct ConstraintExpr<'a> {
     pub lhs: Expr<'a>,
