@@ -276,7 +276,8 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if `key` is not present in the family.
+    /// Panics if `key` is not present in the family, or if `params` was built on
+    /// a different `Model`.
     pub fn set_param_idx<K, Q: Into<IndexKey>>(
         &self,
         params: &IndexedParam<'_, K>,
@@ -284,6 +285,10 @@ impl Model {
         value: f64,
     ) {
         let e = params.get(key).expect("set_param_idx: key not present in indexed parameter");
+        assert!(
+            std::ptr::eq(e.arena, std::ptr::from_ref(&self.arena)),
+            "set_param_idx: indexed parameter belongs to a different model"
+        );
         let id = e.param_id().expect("indexed parameter entry is not a parameter handle");
         self.set_param_id(id, value);
     }
@@ -768,6 +773,16 @@ mod tests {
         assert!((coeff(&m) - 99.0).abs() < f64::EPSILON);
         assert!((m.param_value_idx(&cost, 1usize).unwrap() - 99.0).abs() < f64::EPSILON);
         assert!((m.param_value_idx(&cost, 0usize).unwrap() - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "different model")]
+    fn set_param_idx_rejects_foreign_family() {
+        let a = Model::new("a");
+        let b = Model::new("b");
+        let items = Set::range(0..2);
+        let pa = a.__indexed_param("p", &items, |_i: usize| 1.0);
+        b.set_param_idx(&pa, 0usize, 5.0);
     }
 
     #[test]
