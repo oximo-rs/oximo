@@ -21,7 +21,7 @@ pub mod var;
 pub use constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
 pub use domain::Domain;
 pub use error::{Error, Result};
-pub use indexed::IndexedVar;
+pub use indexed::{IndexedParam, IndexedVar};
 pub use model::{IndexedVarBuilder, Model, ModelKind, display_index_key};
 pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;

@@ -9,12 +9,13 @@ use smol_str::SmolStr;
 /// keep two copies in sync. Read it with [`Model::param_value`] /
 /// [`Model::param_value_of`].
 ///
-/// For now, we support scalar parameters only.
-///
-/// TODO: Add support for more parameters
+/// An indexed family of parameters (one `Parameter` per key) is built by the
+/// indexed form of the `param!` macro and surfaced as an
+/// [`IndexedParam`](crate::IndexedParam).
 ///
 /// [`Model::param_value`]: crate::Model::param_value
 /// [`Model::param_value_of`]: crate::Model::param_value_of
+/// [`Model::set_param_idx`]: crate::Model::set_param_idx
 #[derive(Clone, Debug)]
 pub struct Parameter {
     pub id: ParamId,

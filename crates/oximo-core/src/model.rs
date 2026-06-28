@@ -8,7 +8,7 @@ use smol_str::SmolStr;
 use crate::constraint::{Constraint, ConstraintExpr, ConstraintId};
 use crate::domain::Domain;
 use crate::error::{Error, Result};
-use crate::indexed::{IndexedVar, Storage, grid_offset};
+use crate::indexed::{IndexedFamily, IndexedParam, IndexedVar, build_storage};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
@@ -214,7 +214,17 @@ impl Model {
     /// Panics if a parameter with the same name is already registered.
     #[doc(hidden)]
     pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
-        let name = name.into();
+        self.register_param(name.into(), value)
+    }
+
+    /// Register one scalar parameter named `name` initialized to `value` and
+    /// return its `Expr` handle. Shared by [`Self::__param`] and the indexed
+    /// builder.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a parameter with the same name is already registered.
+    fn register_param(&self, name: SmolStr, value: f64) -> Expr<'_> {
         assert!(
             !self.param_names.borrow().contains_key(&name),
             "parameter name {name:?} already registered"
@@ -228,6 +238,64 @@ impl Model {
         self.param_names.borrow_mut().insert(name, id);
         self.cached_kind.set(None);
         Expr::new(node, &self.arena)
+    }
+
+    /// Macro-facing entry point backing the indexed form of the `param!` macro
+    /// (`param!(m, cost[i in items] = data[i])`). Registers one scalar parameter
+    /// per key, evaluating `value` on the typed key, and returns an
+    /// [`IndexedParam`]. Not part of the stable public API.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a per-key parameter name collides with one already registered.
+    #[doc(hidden)]
+    pub fn __indexed_param<'a, K, F>(
+        &'a self,
+        name: impl Into<String>,
+        set: &Set<K>,
+        mut value: F,
+    ) -> IndexedParam<'a, K>
+    where
+        K: FromIndexKey,
+        F: FnMut(K) -> f64,
+    {
+        let base = name.into();
+        let axes = set.axes().map(Box::from);
+        let keys: Vec<IndexKey> = set.iter().collect();
+        let make = |key: &IndexKey| -> Expr<'a> {
+            let pname: SmolStr = format_index_name(&base, key).into();
+            let v = value(K::from_index_key(key));
+            self.register_param(pname, v)
+        };
+        let storage = build_storage(keys, axes, make);
+        IndexedFamily { storage, _marker: PhantomData }
+    }
+
+    /// Re-bind the parameter at `key` of an indexed family to `value`. Takes
+    /// effect on the next solve.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `key` is not present in the family.
+    pub fn set_param_idx<K, Q: Into<IndexKey>>(
+        &self,
+        params: &IndexedParam<'_, K>,
+        key: Q,
+        value: f64,
+    ) {
+        let e = params.get(key).expect("set_param_idx: key not present in indexed parameter");
+        let id = e.param_id().expect("indexed parameter entry is not a parameter handle");
+        self.set_param_id(id, value);
+    }
+
+    /// Current value bound to the parameter at `key` of an indexed family, or
+    /// `None` if the key is absent.
+    pub fn param_value_idx<K, Q: Into<IndexKey>>(
+        &self,
+        params: &IndexedParam<'_, K>,
+        key: Q,
+    ) -> Option<f64> {
+        params.get(key).and_then(|e| self.param_value_of(e))
     }
 
     /// Re-bind the parameter referenced by handle `p` to `value`.
@@ -567,31 +635,8 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
             model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
         };
 
-        let storage = if let Some(axes) = axes {
-            // Dense grid: place each scalar at its computed row-major offset,
-            // so the storage cannot be silently mis-built if `Set` iteration
-            // vever changes.
-            let total = keys.len();
-            let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
-            let mut kept: Vec<Option<IndexKey>> = vec![None; total];
-            for key in keys {
-                let expr = make(&key);
-                let off = grid_offset(&axes, &key).expect("dense grid key out of range");
-                data[off] = Some(expr);
-                kept[off] = Some(key);
-            }
-            let data = data.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
-            let kept = kept.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
-            Storage::Dense { data, keys: kept, axes }
-        } else {
-            let mut entries = FxHashMap::default();
-            for key in keys {
-                let expr = make(&key);
-                entries.insert(key, expr);
-            }
-            Storage::Sparse(entries)
-        };
-        IndexedVar { storage, _k: PhantomData }
+        let storage = build_storage(keys, axes, make);
+        IndexedFamily { storage, _marker: PhantomData }
     }
 }
 
@@ -633,6 +678,7 @@ mod tests {
     use oximo_expr::extract_linear;
 
     use super::*;
+    use crate::Set;
     use crate::constraint::Relate;
 
     #[test]
@@ -694,5 +740,46 @@ mod tests {
         let m = Model::new("p");
         let _a = m.__param("dup", 1.0);
         let _b = m.__param("dup", 2.0);
+    }
+
+    #[test]
+    fn indexed_param_dense_value_and_per_key_rebind() {
+        let m = Model::new("ip");
+        let items = Set::range(0..3);
+        let data = [10.0, 20.0, 30.0];
+        let cost = m.__indexed_param("cost", &items, |i: usize| data[i]);
+
+        assert!(cost.is_dense());
+        assert_eq!(cost.len(), 3);
+        assert_eq!(m.num_parameters(), 3);
+        assert!(m.parameter_id("cost[0]").is_some());
+        assert!(m.parameter_id("cost[2]").is_some());
+        assert!((m.param_value_idx(&cost, 1usize).unwrap() - 20.0).abs() < f64::EPSILON);
+
+        let x = m.__var("x").lb(0.0).build();
+        let obj = cost.at([1]) * x;
+        let coeff = |m: &Model| {
+            let arena = m.arena();
+            extract_linear(&arena, obj.id).expect("linear").coeffs[0].1
+        };
+        assert!((coeff(&m) - 20.0).abs() < f64::EPSILON);
+
+        m.set_param_idx(&cost, 1usize, 99.0);
+        assert!((coeff(&m) - 99.0).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&cost, 1usize).unwrap() - 99.0).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&cost, 0usize).unwrap() - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn indexed_param_sparse_string_keyed() {
+        let m = Model::new("ips");
+        let plants = Set::strings(["a", "b"]);
+        let price =
+            m.__indexed_param("price", &plants, |p: String| if p == "a" { 1.5 } else { 2.5 });
+        assert!(!price.is_dense());
+        assert_eq!(price.len(), 2);
+        assert!((m.param_value_idx(&price, "a").unwrap() - 1.5).abs() < f64::EPSILON);
+        assert!((m.param_value_idx(&price, "b").unwrap() - 2.5).abs() < f64::EPSILON);
+        assert!(m.param_value_idx(&price, "z").is_none());
     }
 }

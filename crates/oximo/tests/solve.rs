@@ -37,6 +37,31 @@ fn highs_multi_optima_returns_single_best() {
 }
 
 #[test]
+fn indexed_param_rebind_changes_solution() {
+    // maximize sum_i price[i] * x[i] s.t. sum_i x[i] <= 1, 0 <= x <= 1.
+    // With price = [1, 3, 2] the optimum loads x[1] (price 3) -> obj 3.
+    // Re-binding price[2] to 5 shifts the optimum to x[2] -> obj 5.
+    let m = Model::new("ip_solve");
+    let items = Set::range(0..3usize);
+    let price = [1.0, 3.0, 2.0];
+    param!(m, p[i in items] = price[i]);
+    variable!(m, 0.0 <= x[i in items] <= 1.0);
+    constraint!(m, budget, sum!(x[i] for i in items) <= 1.0);
+    objective!(m, Max, sum!(p[i] * x[i] for i in items));
+
+    let r1 = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(r1.termination, TerminationStatus::Optimal);
+    assert!((r1.objective().unwrap() - 3.0).abs() < 1e-6);
+    assert!((r1.value_of_idx(&x, 1usize).unwrap() - 1.0).abs() < 1e-6);
+
+    m.set_param_idx(&p, 2usize, 5.0);
+    let r2 = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(r2.termination, TerminationStatus::Optimal);
+    assert!((r2.objective().unwrap() - 5.0).abs() < 1e-6);
+    assert!((r2.value_of_idx(&x, 2usize).unwrap() - 1.0).abs() < 1e-6);
+}
+
+#[test]
 fn highs_rejects_semi_domains() {
     // HiGHS can't represent the semicontinuity gap through the `highs` crate, so
     // a semicontinuous (or semi-integer) variable must error.

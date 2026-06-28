@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::set::{Axis, FromIndexKey, IndexKey};
 
-/// Backing storage for an [`IndexedVar`].
+/// Backing storage for an [`IndexedFamily`].
 ///
 /// `Dense` is used when the domain is a contiguous integer grid (a range, or a
 /// product of ranges). `Sparse` (string sets, sparse `from_ints`, or any
@@ -17,37 +17,77 @@ pub(crate) enum Storage<'a> {
     Sparse(FxHashMap<IndexKey, Expr<'a>>),
 }
 
-/// Indexed variable: maps an `IndexKey` to a single-variable `Expr`, tagged with
-/// the key type `K` its domain decodes to.
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Marker selecting which kind of indexed family an [`IndexedFamily`] is.
 ///
-/// Constructed by the indexed form of the `variable!` macro. `K` is
-/// a phantom marker, carried so the type of an indexed family is visible and
-/// typed iteration via [`Self::keys`] is possible.
+/// Sealed implementation detail: implemented only for [`VarFamily`] and
+/// [`ParamFamily`]. It exists so [`IndexedVar`] and [`IndexedParam`] are distinct
+/// types (only a parameter family can be re-bound) while sharing one
+/// implementation.
+#[doc(hidden)]
+pub trait Family: sealed::Sealed {
+    /// Type name used in [`Debug`](std::fmt::Debug) output.
+    const NAME: &'static str;
+}
+
+/// Marker for an indexed family of decision variables ([`IndexedVar`]).
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct VarFamily;
+
+/// Marker for an indexed family of parameters ([`IndexedParam`]).
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ParamFamily;
+
+impl sealed::Sealed for VarFamily {}
+impl sealed::Sealed for ParamFamily {}
+impl Family for VarFamily {
+    const NAME: &'static str = "IndexedVar";
+}
+impl Family for ParamFamily {
+    const NAME: &'static str = "IndexedParam";
+}
+
+/// Indexed family: maps an `IndexKey` to a single-element `Expr` (a variable or a
+/// parameter), tagged with the key type `K` its domain decodes to and the family
+/// kind `F`.
+///
+/// You normally name this through the [`IndexedVar`]/[`IndexedParam`] aliases,
+/// constructed by the indexed form of the `variable!`/`param!` macros.
 ///
 /// When the domain is a contiguous integer range (or a Cartesian product of
 /// ranges) the family is stored densely (see [`Storage`]).
 /// String, sparse, and `filter`ed families fall back to a hash map.
-pub struct IndexedVar<'a, K = IndexKey> {
+pub struct IndexedFamily<'a, K = IndexKey, F = VarFamily> {
     pub(crate) storage: Storage<'a>,
-    pub(crate) _k: PhantomData<fn() -> K>,
+    pub(crate) _marker: PhantomData<fn() -> (K, F)>,
 }
 
-impl<'a, K> Clone for IndexedVar<'a, K> {
+/// Indexed family of decision variables; see [`IndexedFamily`].
+pub type IndexedVar<'a, K = IndexKey> = IndexedFamily<'a, K, VarFamily>;
+
+/// Indexed family of re-bindable parameters; see [`IndexedFamily`].
+///
+/// Re-bind a single entry with [`Model::set_param_idx`](crate::Model::set_param_idx).
+pub type IndexedParam<'a, K = IndexKey> = IndexedFamily<'a, K, ParamFamily>;
+
+impl<'a, K, F> Clone for IndexedFamily<'a, K, F> {
     fn clone(&self) -> Self {
-        Self { storage: self.storage.clone(), _k: PhantomData }
+        Self { storage: self.storage.clone(), _marker: PhantomData }
     }
 }
 
-impl<'a, K> std::fmt::Debug for IndexedVar<'a, K> {
+impl<'a, K, F: Family> std::fmt::Debug for IndexedFamily<'a, K, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IndexedVar")
-            .field("len", &self.len())
-            .field("dense", &self.is_dense())
-            .finish()
+        f.debug_struct(F::NAME).field("len", &self.len()).field("dense", &self.is_dense()).finish()
     }
 }
 
-impl<'a, K> IndexedVar<'a, K> {
+impl<'a, K, F> IndexedFamily<'a, K, F> {
     pub fn len(&self) -> usize {
         match &self.storage {
             Storage::Dense { data, .. } => data.len(),
@@ -97,7 +137,7 @@ impl<'a, K> IndexedVar<'a, K> {
     /// # Panics
     /// Panics if the coordinates are out of range/not present.
     pub fn at<const N: usize>(&self, coords: [usize; N]) -> Expr<'a> {
-        *self.get_ref(&coords).expect("IndexedVar: coordinates not present")
+        *self.get_ref(&coords).expect("indexed family: coordinates not present")
     }
 
     /// Fallible form of [`Self::at`].
@@ -115,43 +155,73 @@ impl<'a, K> IndexedVar<'a, K> {
     }
 }
 
-impl<'a, K: FromIndexKey> IndexedVar<'a, K> {
+impl<'a, K: FromIndexKey, F> IndexedFamily<'a, K, F> {
     /// Iterate the family's entries with each key decoded to the typed `K`.
     pub fn keys(&self) -> impl Iterator<Item = (K, Expr<'a>)> + '_ {
         self.iter().map(|(k, e)| (K::from_index_key(k), *e))
     }
 }
 
-impl<'a, K, Q: Into<IndexKey>> Index<Q> for IndexedVar<'a, K> {
+impl<'a, K, F, Q: Into<IndexKey>> Index<Q> for IndexedFamily<'a, K, F> {
     type Output = Expr<'a>;
     fn index(&self, key: Q) -> &Self::Output {
         match &self.storage {
-            Storage::Sparse(m) => m.get(&key.into()).expect("IndexedVar: key not present"),
+            Storage::Sparse(m) => m.get(&key.into()).expect("indexed family: key not present"),
             Storage::Dense { data, axes, .. } => {
-                let off = grid_offset(axes, &key.into()).expect("IndexedVar: key not present");
+                let off = grid_offset(axes, &key.into()).expect("indexed family: key not present");
                 &data[off]
             }
         }
     }
 }
 
-impl<'a, K> Index<&IndexKey> for IndexedVar<'a, K> {
+impl<'a, K, F> Index<&IndexKey> for IndexedFamily<'a, K, F> {
     type Output = Expr<'a>;
     fn index(&self, key: &IndexKey) -> &Self::Output {
         match &self.storage {
-            Storage::Sparse(m) => m.get(key).expect("IndexedVar: key not present"),
+            Storage::Sparse(m) => m.get(key).expect("indexed family: key not present"),
             Storage::Dense { data, axes, .. } => {
-                let off = grid_offset(axes, key).expect("IndexedVar: key not present");
+                let off = grid_offset(axes, key).expect("indexed family: key not present");
                 &data[off]
             }
         }
     }
 }
 
-impl<'a, K, const N: usize> Index<[usize; N]> for IndexedVar<'a, K> {
+impl<'a, K, F, const N: usize> Index<[usize; N]> for IndexedFamily<'a, K, F> {
     type Output = Expr<'a>;
     fn index(&self, coords: [usize; N]) -> &Self::Output {
-        self.get_ref(&coords).expect("IndexedVar: coordinates not present")
+        self.get_ref(&coords).expect("indexed family: coordinates not present")
+    }
+}
+
+/// Build [`Storage`] from a family's keys and optional dense axes, registering
+/// each element through `make`.
+pub(crate) fn build_storage<'a>(
+    keys: Vec<IndexKey>,
+    axes: Option<Box<[Axis]>>,
+    mut make: impl FnMut(&IndexKey) -> Expr<'a>,
+) -> Storage<'a> {
+    if let Some(axes) = axes {
+        let total = keys.len();
+        let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
+        let mut kept: Vec<Option<IndexKey>> = vec![None; total];
+        for key in keys {
+            let expr = make(&key);
+            let off = grid_offset(&axes, &key).expect("dense grid key out of range");
+            data[off] = Some(expr);
+            kept[off] = Some(key);
+        }
+        let data = data.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
+        let kept = kept.into_iter().map(|o| o.expect("dense grid had a gap")).collect();
+        Storage::Dense { data, keys: kept, axes }
+    } else {
+        let mut entries = FxHashMap::default();
+        for key in keys {
+            let expr = make(&key);
+            entries.insert(key, expr);
+        }
+        Storage::Sparse(entries)
     }
 }
 
@@ -191,7 +261,7 @@ fn grid_offset_coords(axes: &[Axis], coords: &[usize]) -> Option<usize> {
 }
 
 /// Build the `IndexKey` a coordinate array would hash to (sparse fallback for
-/// [`IndexedVar::get_ref`]).
+/// [`IndexedFamily::get_ref`]).
 fn coords_to_key(coords: &[usize]) -> IndexKey {
     if let [single] = coords {
         IndexKey::from(*single)
