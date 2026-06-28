@@ -14,12 +14,9 @@
 
 use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
-use syn::Pat;
 
-use crate::bind::filtered_set;
-use crate::{
-    IndexBind, Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas,
-};
+use crate::bind::{filtered_set, masked_closure_param, references_any};
+use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let mut parts = split_top_commas(input).into_iter();
@@ -100,7 +97,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let bound_method = |val: &TokenStream2, kind: BoundKind| -> TokenStream2 {
         match binds_slice {
             Some(bs) if references_any(val, &idents) => {
-                let param = bound_closure_param(bs, val);
+                let param = masked_closure_param(bs, val);
                 match kind {
                     BoundKind::Lb => quote!(.lb_by(move |#param| f64::from(#val))),
                     BoundKind::Ub => quote!(.ub_by(move |#param| f64::from(#val))),
@@ -296,45 +293,6 @@ enum BoundKind {
     Ub,
 }
 
-/// Closure parameter for a per-key (`.lb_by`/`.ub_by`) bound: each index the
-/// bound does not reference is replaced with `_`, so the generated closure never
-/// has an unused parameter. The builder's key type pins the parameter, so it is
-/// left bare for inference unless the user annotated every binding.
-fn bound_closure_param(binds: &[IndexBind], bound: &TokenStream2) -> TokenStream2 {
-    let masked = binds.iter().map(|b| mask_pat(&b.pat, bound));
-    let pattern = if binds.len() == 1 {
-        let p = mask_pat(&binds[0].pat, bound);
-        quote!(#p)
-    } else {
-        quote!( (#(#masked),*) )
-    };
-
-    let tys: Option<Vec<&syn::Type>> = binds.iter().map(|b| b.ty.as_ref()).collect();
-    match tys {
-        Some(tys) if binds.len() == 1 => {
-            let ty = tys[0];
-            quote!(#pattern: #ty)
-        }
-        Some(tys) => quote!( #pattern: (#(#tys),*) ),
-        None => pattern,
-    }
-}
-
-/// Replace each bare-ident sub-pattern the bound does not reference with `_`,
-/// recursing into tuple patterns.
-fn mask_pat(pat: &Pat, bound: &TokenStream2) -> TokenStream2 {
-    match pat {
-        Pat::Tuple(t) => {
-            let elems = t.elems.iter().map(|e| mask_pat(e, bound));
-            quote!( (#(#elems),*) )
-        }
-        Pat::Ident(pi) if pi.subpat.is_none() && pi.by_ref.is_none() => {
-            if references_any(bound, &[pi.ident.to_string()]) { quote!(#pat) } else { quote!(_) }
-        }
-        _ => quote!(#pat),
-    }
-}
-
 /// Collect every identifier appearing in a token stream (recursing into groups).
 fn collect_idents(ts: &TokenStream2, out: &mut Vec<String>) {
     for tt in ts.clone() {
@@ -344,13 +302,4 @@ fn collect_idents(ts: &TokenStream2, out: &mut Vec<String>) {
             _ => {}
         }
     }
-}
-
-/// Whether a token stream references any of the given identifiers.
-fn references_any(ts: &TokenStream2, idents: &[String]) -> bool {
-    ts.clone().into_iter().any(|tt| match tt {
-        TokenTree::Ident(id) => idents.contains(&id.to_string()),
-        TokenTree::Group(g) => references_any(&g.stream(), idents),
-        _ => false,
-    })
 }
