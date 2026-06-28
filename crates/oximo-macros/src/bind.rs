@@ -1,7 +1,7 @@
 //! Parsing for index bindings (`pat in domain`, optionally `pat: ty in domain`)
 //! shared by `variable!`, `constraint!`, and `sum!`.
 
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Pat, Token, Type};
@@ -111,6 +111,55 @@ pub(crate) fn filtered_set(
             quote!( #root::__macro_support::filter_keys(&(#set), |#param| #cond) )
         }
     }
+}
+
+/// Closure parameter for a per-key expression (a `.lb_by`/`.ub_by` bound or an
+/// indexed `param!` value): each index the expression does not reference is
+/// replaced with `_`, so the generated closure never has an unused parameter.
+/// The family's key type pins the parameter, so it is left bare for inference
+/// unless the user annotated every binding.
+pub(crate) fn masked_closure_param(binds: &[IndexBind], expr: &TokenStream2) -> TokenStream2 {
+    let masked = binds.iter().map(|b| mask_pat(&b.pat, expr));
+    let pattern = if binds.len() == 1 {
+        let p = mask_pat(&binds[0].pat, expr);
+        quote!(#p)
+    } else {
+        quote!( (#(#masked),*) )
+    };
+
+    let tys: Option<Vec<&Type>> = binds.iter().map(|b| b.ty.as_ref()).collect();
+    match tys {
+        Some(tys) if binds.len() == 1 => {
+            let ty = tys[0];
+            quote!(#pattern: #ty)
+        }
+        Some(tys) => quote!( #pattern: (#(#tys),*) ),
+        None => pattern,
+    }
+}
+
+/// Replace each bare-ident sub-pattern that `expr` does not reference with `_`,
+/// recursing into tuple patterns.
+fn mask_pat(pat: &Pat, expr: &TokenStream2) -> TokenStream2 {
+    match pat {
+        Pat::Tuple(t) => {
+            let elems = t.elems.iter().map(|e| mask_pat(e, expr));
+            quote!( (#(#elems),*) )
+        }
+        Pat::Ident(pi) if pi.subpat.is_none() && pi.by_ref.is_none() => {
+            if references_any(expr, &[pi.ident.to_string()]) { quote!(#pat) } else { quote!(_) }
+        }
+        _ => quote!(#pat),
+    }
+}
+
+/// Whether a token stream references any of the given identifiers.
+pub(crate) fn references_any(ts: &TokenStream2, idents: &[String]) -> bool {
+    ts.clone().into_iter().any(|tt| match tt {
+        TokenTree::Ident(id) => idents.contains(&id.to_string()),
+        TokenTree::Group(g) => references_any(&g.stream(), idents),
+        _ => false,
+    })
 }
 
 /// Build the closure parameter for an index family decoded as a whole key.

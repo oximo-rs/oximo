@@ -1,7 +1,7 @@
 pub use crate::constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
 pub use crate::domain::Domain;
 pub use crate::error::Error;
-pub use crate::indexed::IndexedVar;
+pub use crate::indexed::{IndexedParam, IndexedVar};
 pub use crate::model::{IndexedVarBuilder, Model, ModelKind, display_index_key};
 pub use crate::objective::{Objective, ObjectiveSense};
 pub use crate::param::Parameter;

@@ -198,6 +198,24 @@ param!(m, rate = 0.05);     // binds a re-bindable `rate: Expr<'_>`
 rate.set_param_value(0.07); // change between solves without rebuilding
 ```
 
+### Indexed parameters
+
+Mirror indexed variables: one re-bindable scalar parameter per key, bound as an
+`IndexedParam`. The right-hand side is evaluated per key and may reference the
+index.
+
+```rust,ignore
+let items = Set::range(0..3);
+param!(m, cost[i in items] = base_cost[i]); // one parameter per key
+param!(m, w[(i, j) in rc] = weight(i, j));  // multi-index
+param!(m, c[p in plants] = price[p]);       // string-keyed (sparse)
+
+let unit = cost[1];             // index for a param `Expr`
+cost[1].set_param_value(9.0);   // re-bind one entry via its handle
+m.set_param_idx(&cost, 1, 9.0); // ...or by key on the model
+m.param_value_idx(&cost, 1);    // -> Some(9.0)
+```
+
 ## Model kind
 
 Inferred automatically from variables and expressions, cached and invalidated on change:
