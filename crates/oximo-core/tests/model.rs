@@ -192,8 +192,7 @@ fn rhs_expr_folded_into_lhs() {
     constraint!(m, c, x <= y + 3.0);
     let cs = m.constraints();
     assert_eq!(cs.len(), 1);
-    assert_eq!(cs[0].rhs, 0.0);
-    assert_eq!(cs[0].sense, Sense::Le);
+    assert_eq!(cs[0].as_single(), Some((Sense::Le, 0.0)));
 
     // Decode the LHS and confirm the original `y + 3` made it into the linear
     // form so `coeff*x - coeff*y - 3 <= 0` is what the solver will see.

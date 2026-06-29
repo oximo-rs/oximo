@@ -61,15 +61,26 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     writeln!(out, "Subject To")?;
     for c in constraints.iter() {
         let t = extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear)?;
-        let adjusted_rhs = c.rhs - t.constant;
-        let op = match c.sense {
-            Sense::Le => "<=",
-            Sense::Ge => ">=",
-            Sense::Eq => "=",
-        };
-        write!(out, " {}:", c.name)?;
-        write_linear(out, &t, &vars)?;
-        writeln!(out, " {op} {adjusted_rhs}")?;
+        if let Some((sense, rhs)) = c.as_single() {
+            let op = match sense {
+                Sense::Le => "<=",
+                Sense::Ge => ">=",
+                Sense::Eq => "=",
+            };
+            let adjusted_rhs = rhs - t.constant;
+            write!(out, " {}:", c.name)?;
+            write_linear(out, &t, &vars)?;
+            writeln!(out, " {op} {adjusted_rhs}")?;
+        } else {
+            let lo = c.lower - t.constant;
+            let hi = c.upper - t.constant;
+            write!(out, " {}_lo:", c.name)?;
+            write_linear(out, &t, &vars)?;
+            writeln!(out, " >= {lo}")?;
+            write!(out, " {}_hi:", c.name)?;
+            write_linear(out, &t, &vars)?;
+            writeln!(out, " <= {hi}")?;
+        }
     }
 
     let mut wrote_bounds_header = false;

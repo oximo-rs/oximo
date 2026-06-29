@@ -117,20 +117,18 @@ fn large_filtered_sum_builds_correctly() {
 // --- Two-sided range constraints: `lo <= e <= hi` lowers to `_lo` + `_hi` rows.
 
 #[test]
-fn range_constraint_lowers_to_two_rows() {
+fn range_constraint_with_const_bounds_collapses_to_one_row() {
     let m = Model::new("range");
     variable!(m, x >= 0.0);
     variable!(m, y >= 0.0);
     constraint!(m, band, 1.0 <= x + y <= 3.0);
 
-    assert_eq!(m.num_constraints(), 2);
+    assert_eq!(m.num_constraints(), 1);
     let cons = m.constraints();
-    let lo = &cons[m.constraint_id("band_lo").expect("lo row").index()];
-    let hi = &cons[m.constraint_id("band_hi").expect("hi row").index()];
-    assert_eq!(lo.sense, Sense::Ge);
-    assert!((lo.rhs - 1.0).abs() < f64::EPSILON);
-    assert_eq!(hi.sense, Sense::Le);
-    assert!((hi.rhs - 3.0).abs() < f64::EPSILON);
+    let band = &cons[m.constraint_id("band").expect("range row").index()];
+    assert!(band.is_range());
+    assert!((band.lower - 1.0).abs() < f64::EPSILON);
+    assert!((band.upper - 3.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -139,50 +137,90 @@ fn range_constraint_ge_form_is_equivalent() {
     variable!(m, x >= 0.0);
     constraint!(m, b, 3.0 >= x >= 1.0);
 
+    assert_eq!(m.num_constraints(), 1);
     let cons = m.constraints();
-    let lo = &cons[m.constraint_id("b_lo").unwrap().index()];
-    let hi = &cons[m.constraint_id("b_hi").unwrap().index()];
-    assert_eq!(lo.sense, Sense::Ge);
-    assert!((lo.rhs - 1.0).abs() < f64::EPSILON);
-    assert_eq!(hi.sense, Sense::Le);
-    assert!((hi.rhs - 3.0).abs() < f64::EPSILON);
+    let b = &cons[m.constraint_id("b").unwrap().index()];
+    assert!(b.is_range());
+    assert!((b.lower - 1.0).abs() < f64::EPSILON);
+    assert!((b.upper - 3.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn anonymous_range_makes_two_auto_rows() {
+fn range_constraint_with_expr_bounds_falls_back_to_two_rows() {
+    let m = Model::new("rangeexpr");
+    variable!(m, x >= 0.0);
+    variable!(m, lo >= 0.0);
+    variable!(m, hi >= 0.0);
+    constraint!(m, band, lo <= x <= hi);
+
+    assert_eq!(m.num_constraints(), 2);
+    let cons = m.constraints();
+    let lo_row = &cons[m.constraint_id("band_lo").expect("lo row").index()];
+    let hi_row = &cons[m.constraint_id("band_hi").expect("hi row").index()];
+    assert_eq!(lo_row.as_single().map(|(s, _)| s), Some(Sense::Ge));
+    assert_eq!(hi_row.as_single().map(|(s, _)| s), Some(Sense::Le));
+}
+
+#[test]
+fn anonymous_range_makes_one_auto_row() {
     let m = Model::new("anonr");
     variable!(m, x >= 0.0);
     constraint!(m, 0.0 <= x <= 5.0);
-    assert_eq!(m.num_constraints(), 2);
-    assert!(m.constraint_id("_c0").is_some());
-    assert!(m.constraint_id("_c1").is_some());
+    assert_eq!(m.num_constraints(), 1);
+    let c = &m.constraints()[m.constraint_id("_c0").expect("auto row").index()];
+    assert!(c.is_range());
 }
 
 #[test]
-fn family_range_makes_two_rows_per_element() {
+fn family_range_const_bounds_makes_one_row_per_element() {
     let m = Model::new("famr");
     let lo = [1.0, 2.0, 3.0];
     let hi = [4.0, 5.0, 6.0];
     variable!(m, x[i in 0..3] >= 0.0);
     constraint!(m, cap[i in 0..3], lo[i] <= x[i] <= hi[i]);
 
-    assert_eq!(m.num_constraints(), 6);
-    assert!(m.constraint_id("cap_lo[0]").is_some());
-    assert!(m.constraint_id("cap_hi[2]").is_some());
+    assert_eq!(m.num_constraints(), 3);
     let cons = m.constraints();
-    let c = &cons[m.constraint_id("cap_lo[1]").unwrap().index()];
-    assert_eq!(c.sense, Sense::Ge);
-    assert!((c.rhs - 2.0).abs() < f64::EPSILON);
+    let c = &cons[m.constraint_id("cap[1]").expect("range row").index()];
+    assert!(c.is_range());
+    assert!((c.lower - 2.0).abs() < f64::EPSILON);
+    assert!((c.upper - 5.0).abs() < f64::EPSILON);
 }
 
 #[test]
-fn computed_name_range_suffixes_both_rows() {
+fn inverted_range_stays_a_range_not_an_equality() {
+    let m = Model::new("inv");
+    variable!(m, x);
+    constraint!(m, c, 5.0 <= x <= 1.0);
+    assert_eq!(m.num_constraints(), 1);
+    let c = &m.constraints()[m.constraint_id("c").unwrap().index()];
+    assert!(c.is_range());
+    assert_eq!(c.as_single(), None);
+}
+
+#[test]
+fn nonlinear_range_falls_back_to_two_rows() {
+    let m = Model::new("nlr");
+    variable!(m, x);
+    constraint!(m, c, 1.0 <= x * x <= 4.0);
+    assert_eq!(m.num_constraints(), 2);
+    let cons = m.constraints();
+    let lo = &cons[m.constraint_id("c_lo").expect("lo row").index()];
+    let hi = &cons[m.constraint_id("c_hi").expect("hi row").index()];
+    assert!(!lo.is_range());
+    assert_eq!(lo.as_single().map(|(s, _)| s), Some(Sense::Ge));
+    assert_eq!(hi.as_single().map(|(s, _)| s), Some(Sense::Le));
+}
+
+#[test]
+fn computed_name_range_collapses_to_one_row() {
     let m = Model::new("crange");
     variable!(m, x >= 0.0);
     let tag = "band";
     constraint!(m, name = format!("{tag}"), 1.0 <= x <= 2.0);
-    assert!(m.constraint_id("band_lo").is_some());
-    assert!(m.constraint_id("band_hi").is_some());
+    assert_eq!(m.num_constraints(), 1);
+    let c = &m.constraints()[m.constraint_id("band").expect("range row").index()];
+    assert!(c.is_range());
 }
 
 #[test]

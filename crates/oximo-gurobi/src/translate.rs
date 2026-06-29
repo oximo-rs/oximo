@@ -145,34 +145,57 @@ fn add_constraints(
     gurobi_vars: &[grb::Var],
     aux_counter: &mut u32,
 ) -> Result<Vec<GrbRow>, SolverError> {
+    // One `GrbRow` per oximo constraint keeps `gurobi_constrs` 1:1 with
+    // `ConstraintId`, which `collect_solution` relies on to key duals. A
+    // two-sided range becomes a single native `add_range` row.
     let mut gurobi_constrs: Vec<GrbRow> = Vec::with_capacity(constraints.len());
     for (c_id, c) in constraints.iter().enumerate() {
-        if let Some(t) = extract_linear(arena, c.lhs) {
-            let adjusted_rhs = c.rhs - t.constant;
+        let name = format!("c{c_id}");
+        if let Some((sense, rhs)) = c.as_single() {
+            if let Some(t) = extract_linear(arena, c.lhs) {
+                let adjusted_rhs = rhs - t.constant;
+                let mut expr = LinExpr::new();
+                for (v, co) in t.coeffs {
+                    expr.add_term(co, gurobi_vars[v.index()]);
+                }
+                let constr = match sense {
+                    Sense::Le => grb_model.add_constr(&name, c!(expr <= adjusted_rhs)),
+                    Sense::Ge => grb_model.add_constr(&name, c!(expr >= adjusted_rhs)),
+                    Sense::Eq => grb_model.add_constr(&name, c!(expr == adjusted_rhs)),
+                }
+                .map_err(map_grb_err)?;
+                gurobi_constrs.push(GrbRow::Lin(constr));
+            } else {
+                let row = add_nonlinear_constraint(
+                    arena,
+                    c.lhs,
+                    sense,
+                    rhs,
+                    c_id,
+                    grb_model,
+                    gurobi_vars,
+                    aux_counter,
+                )?;
+                gurobi_constrs.push(row);
+            }
+        } else {
+            // Genuine two-sided range. Gurobi's `add_range` is linear-only.
+            let Some(t) = extract_linear(arena, c.lhs) else {
+                return Err(SolverError::Backend(format!(
+                    "Gurobi does not support a two-sided range on a nonlinear constraint ('{}')",
+                    c.name
+                )));
+            };
+            let lower = c.lower - t.constant;
+            let upper = c.upper - t.constant;
             let mut expr = LinExpr::new();
             for (v, co) in t.coeffs {
                 expr.add_term(co, gurobi_vars[v.index()]);
             }
-            let name = format!("c{c_id}");
-            let constr = match c.sense {
-                Sense::Le => grb_model.add_constr(&name, c!(expr <= adjusted_rhs)),
-                Sense::Ge => grb_model.add_constr(&name, c!(expr >= adjusted_rhs)),
-                Sense::Eq => grb_model.add_constr(&name, c!(expr == adjusted_rhs)),
-            }
-            .map_err(map_grb_err)?;
+            #[allow(clippy::unnecessary_cast)]
+            let (_slack, constr) =
+                grb_model.add_range(&name, c!(expr in lower..upper)).map_err(map_grb_err)?;
             gurobi_constrs.push(GrbRow::Lin(constr));
-        } else {
-            let row = add_nonlinear_constraint(
-                arena,
-                c.lhs,
-                c.sense,
-                c.rhs,
-                c_id,
-                grb_model,
-                gurobi_vars,
-                aux_counter,
-            )?;
-            gurobi_constrs.push(row);
         }
     }
     Ok(gurobi_constrs)

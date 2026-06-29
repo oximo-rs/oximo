@@ -37,6 +37,24 @@ fn highs_multi_optima_returns_single_best() {
 }
 
 #[test]
+fn range_constraint_solves_as_single_row() {
+    // max x  s.t.  1 <= x <= 4.
+    let m = Model::new("range");
+    variable!(m, x);
+    constraint!(m, band, 1.0 <= x <= 4.0);
+    objective!(m, Max, x);
+
+    assert_eq!(m.num_constraints(), 1);
+
+    let r = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(r.termination, TerminationStatus::Optimal);
+    assert!((r.objective().unwrap() - 4.0).abs() < 1e-6);
+    assert!((r.value_of(x).unwrap() - 4.0).abs() < 1e-6);
+    let band = m.constraint_id("band").unwrap();
+    assert!(r.dual_of(band).is_some());
+}
+
+#[test]
 fn indexed_param_rebind_changes_solution() {
     // maximize sum_i price[i] * x[i] s.t. sum_i x[i] <= 1, 0 <= x <= 1.
     // With price = [1, 3, 2] the optimum loads x[1] (price 3) -> obj 3.

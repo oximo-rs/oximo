@@ -41,7 +41,9 @@ impl Stats {
         _perm: &Permutation,
         opts: &WriteOptions,
     ) -> Self {
-        let n_eqns = constraints.iter().filter(|c| c.sense == Sense::Eq).count();
+        let n_eqns =
+            constraints.iter().filter(|c| matches!(c.as_single(), Some((Sense::Eq, _)))).count();
+        let n_ranges = constraints.iter().filter(|c| c.is_range()).count();
         let nl_con = analysis.cons.iter().filter(|r| r.is_nonlinear()).count();
         let nl_obj = usize::from(analysis.obj.is_nonlinear());
 
@@ -92,7 +94,7 @@ impl Stats {
             n_var: vars.len(),
             n_con: constraints.len(),
             n_obj: 1,
-            n_ranges: 0,
+            n_ranges,
             n_eqns,
             nl_con,
             nl_obj,

@@ -42,7 +42,7 @@ pub fn solve(
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
     let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
-    let (bar, var_order) = build_bar(model, opts)?;
+    let (bar, var_order, con_order) = build_bar(model, opts)?;
 
     // - Temp directory. Combine a timestamp with a per-process atomic counter so
     //   concurrent invocations never share a directory.
@@ -120,7 +120,7 @@ pub fn solve(
     let tim = fs::read_to_string(&tim_path)
         .map_err(|e| SolverError::Backend(format!("cannot read times file: {e}")))?;
     let res = fs::read_to_string(tmp_dir.join(RES_NAME)).unwrap_or_default();
-    let result = parse_solution(&tim, &res, sense, elapsed, raw_log, &var_order);
+    let result = parse_solution(&tim, &res, sense, elapsed, raw_log, &var_order, &con_order);
 
     let _ = fs::remove_dir_all(&tmp_dir);
     Ok(result)
@@ -128,8 +128,12 @@ pub fn solve(
 
 /// Build the full `.bar` file text for `model`, returning it alongside the
 /// variable declaration order (see [`write_var_declarations`]) used to decode
-/// BARON's numeric solution-pool blocks.
-fn build_bar(model: &Model, opts: &BaronOptions) -> Result<(String, Vec<VarId>), SolverError> {
+/// BARON's numeric solution-pool blocks, and the constraint emit-order (see
+/// [`write_equations`]) used to fold range duals back onto their `ConstraintId`.
+fn build_bar(
+    model: &Model,
+    opts: &BaronOptions,
+) -> Result<(String, Vec<VarId>, Vec<ConstraintId>), SolverError> {
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
@@ -139,10 +143,10 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<(String, Vec<VarId>),
     write_options(&mut bar, opts, RES_NAME, TIM_NAME);
     let var_order = write_var_declarations(&mut bar, &vars)?;
     write_bounds(&mut bar, &vars);
-    write_equations(&mut bar, &arena, &constraints)?;
+    let con_order = write_equations(&mut bar, &arena, &constraints)?;
     write_objective(&mut bar, &arena, objective.as_ref())?;
     write_starting_point(&mut bar, &vars);
-    Ok((bar, var_order))
+    Ok((bar, var_order, con_order))
 }
 
 // - .bar writers
@@ -247,29 +251,38 @@ fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
     }
 }
 
+/// Write the `EQUATIONS` block, returning the emit-order map.
+/// The `ConstraintId` behind each emitted equation, in BARON's 1-based
+/// "Constraint no." order. BARON has no two-sided equation,
+/// so a range emits two rows (`c{i}_lo`/`c{i}_hi`) that both map back
+/// to the one `ConstraintId`. The dual parser folds them together so
+/// positional indices stay correct.
 fn write_equations(
     bar: &mut String,
     arena: &ExprArena,
     constraints: &[Constraint],
-) -> Result<(), SolverError> {
+) -> Result<Vec<ConstraintId>, SolverError> {
+    let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
     if constraints.is_empty() {
-        return Ok(());
+        return Ok(emit_map);
     }
-    write!(bar, "EQUATIONS ").unwrap();
-    for i in 0..constraints.len() {
-        if i > 0 {
-            write!(bar, ", ").unwrap();
+
+    let mut names: Vec<String> = Vec::with_capacity(constraints.len());
+    for (i, c) in constraints.iter().enumerate() {
+        let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
+        if c.is_range() {
+            names.push(format!("c{i}_lo"));
+            names.push(format!("c{i}_hi"));
+            emit_map.push(id);
+            emit_map.push(id);
+        } else {
+            names.push(format!("c{i}"));
+            emit_map.push(id);
         }
-        write!(bar, "c{i}").unwrap();
     }
-    writeln!(bar, ";").unwrap();
+    writeln!(bar, "EQUATIONS {};", names.join(", ")).unwrap();
 
     for (i, c) in constraints.iter().enumerate() {
-        let op = match c.sense {
-            Sense::Le => "<=",
-            Sense::Ge => ">=",
-            Sense::Eq => "==",
-        };
         // BARON rejects a constraint whose expression evaluates to a constant,
         // so surface a clear error instead of emitting an invalid `.bar`.
         if !expr_has_var(arena, c.lhs) {
@@ -279,19 +292,44 @@ fn write_equations(
                 c.name
             )));
         }
-        write!(bar, "c{i}: ").unwrap();
-        // Linear constraints fold the constant into the RHS, matching the
-        // canonical `lhs <op> rhs` shape; nonlinear ones emit the full LHS.
-        if let Some(t) = extract_linear(arena, c.lhs) {
-            let adjusted_rhs = c.rhs - t.constant;
-            write_linear(bar, &t, false);
-            writeln!(bar, " {op} {};", fmt(adjusted_rhs)).unwrap();
+        if let Some((sense, rhs)) = c.as_single() {
+            let op = match sense {
+                Sense::Le => "<=",
+                Sense::Ge => ">=",
+                Sense::Eq => "==",
+            };
+            write!(bar, "c{i}: ").unwrap();
+            write_constraint_body(bar, arena, c.lhs, op, rhs)?;
         } else {
-            write_bar_expr(bar, arena, c.lhs)?;
-            writeln!(bar, " {op} {};", fmt(c.rhs)).unwrap();
+            // Two-sided range -> `_lo` (>= lower) and `_hi` (<= upper).
+            write!(bar, "c{i}_lo: ").unwrap();
+            write_constraint_body(bar, arena, c.lhs, ">=", c.lower)?;
+            write!(bar, "c{i}_hi: ").unwrap();
+            write_constraint_body(bar, arena, c.lhs, "<=", c.upper)?;
         }
     }
     writeln!(bar).unwrap();
+    Ok(emit_map)
+}
+
+/// Emit one constraint body `<lhs> <op> <rhs>;`. Linear constraints fold the
+/// constant into the RHS (canonical `lhs <op> rhs`). Nonlinear ones emit the
+/// full LHS and keep the original RHS.
+fn write_constraint_body(
+    bar: &mut String,
+    arena: &ExprArena,
+    lhs: ExprId,
+    op: &str,
+    rhs: f64,
+) -> Result<(), SolverError> {
+    if let Some(t) = extract_linear(arena, lhs) {
+        let adjusted_rhs = rhs - t.constant;
+        write_linear(bar, &t, false);
+        writeln!(bar, " {op} {};", fmt(adjusted_rhs)).unwrap();
+    } else {
+        write_bar_expr(bar, arena, lhs)?;
+        writeln!(bar, " {op} {};", fmt(rhs)).unwrap();
+    }
     Ok(())
 }
 
@@ -517,6 +555,7 @@ fn parse_solution(
     elapsed: std::time::Duration,
     raw_log: Option<String>,
     var_order: &[VarId],
+    con_order: &[ConstraintId],
 ) -> SolverResult {
     let tokens: Vec<&str> = tim.split_whitespace().collect();
     let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
@@ -555,7 +594,7 @@ fn parse_solution(
     }
 
     let (dual, reduced_costs) = if has_sol {
-        parse_dual_solution(res, var_order)
+        parse_dual_solution(res, var_order, con_order)
     } else {
         (FxHashMap::default(), FxHashMap::default())
     };
@@ -756,6 +795,7 @@ fn parse_solution_pool(res: &str, var_order: &[VarId]) -> Vec<SolutionPoint> {
 fn parse_dual_solution(
     res: &str,
     var_order: &[VarId],
+    con_order: &[ConstraintId],
 ) -> (FxHashMap<ConstraintId, f64>, FxHashMap<VarId, f64>) {
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
     let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
@@ -793,8 +833,8 @@ fn parse_dual_solution(
             continue;
         }
         if in_prices {
-            if let Ok(idx) = u32::try_from(k - 1) {
-                dual.insert(ConstraintId(idx), val);
+            if let Some(&id) = con_order.get(k - 1) {
+                *dual.entry(id).or_insert(0.0) += val;
             }
         } else if k <= var_order.len() {
             reduced_costs.insert(var_order[k - 1], val);
@@ -1099,13 +1139,27 @@ mod tests {
     fn parse_tim_picks_objective_by_sense() {
         // name ncon nvar a b lower upper solver model c iters nodeopt ... wall
         let tim = "m 1 2 0 0 1.5 9.5 1 1 0 42 7 0 0 0.42";
-        let r =
-            parse_solution(tim, "", ObjectiveSense::Minimize, std::time::Duration::ZERO, None, &[]);
+        let r = parse_solution(
+            tim,
+            "",
+            ObjectiveSense::Minimize,
+            std::time::Duration::ZERO,
+            None,
+            &[],
+            &[],
+        );
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.objective(), Some(9.5)); // upper bound for minimize
         assert_eq!(r.iterations, 42); // branch-and-reduce iterations from tim[10]
-        let r =
-            parse_solution(tim, "", ObjectiveSense::Maximize, std::time::Duration::ZERO, None, &[]);
+        let r = parse_solution(
+            tim,
+            "",
+            ObjectiveSense::Maximize,
+            std::time::Duration::ZERO,
+            None,
+            &[],
+            &[],
+        );
         assert_eq!(r.objective(), Some(1.5)); // lower bound for maximize
     }
 
@@ -1192,7 +1246,8 @@ The best solution found is:
 
 The above solution has an objective value of:    5.0
 ";
-        let (dual, rc) = parse_dual_solution(res, &[VarId(0), VarId(1)]);
+        let (dual, rc) =
+            parse_dual_solution(res, &[VarId(0), VarId(1)], &[ConstraintId(0), ConstraintId(1)]);
         assert_eq!(rc.get(&VarId(0)), Some(&0.0));
         assert_eq!(rc.get(&VarId(1)), Some(&-0.5));
         assert_eq!(dual.get(&ConstraintId(0)), Some(&2.0));
@@ -1233,9 +1288,25 @@ The above solution has an objective value of:    5.0
 
 The best solution found is:
 ";
-        let (dual, rc) = parse_dual_solution(res, &[VarId(0)]);
+        let (dual, rc) = parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0)]);
         assert_eq!(rc.get(&VarId(0)), Some(&0.0));
         assert_eq!(dual.get(&ConstraintId(0)), Some(&1.0));
+    }
+
+    #[test]
+    fn parse_dual_folds_range_rows_onto_one_constraint() {
+        let res = "\
+ >>> Corresponding dual solution vector is:
+ >>> Variable no.              Marginal
+ >>>       1             0.0000000000000000000000
+ >>> Constraint no.             Price
+ >>>       1             2.0000000000000000000000
+ >>>       2            -.50000000000000000000000
+";
+        let (dual, _rc) =
+            parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0), ConstraintId(0)]);
+        assert_eq!(dual.len(), 1);
+        assert_eq!(dual.get(&ConstraintId(0)), Some(&1.5)); // 2.0 + (-0.5)
     }
 
     #[test]
@@ -1252,7 +1323,7 @@ No dual information is available.
 
 The best solution found is:
 ";
-        let (dual, rc) = parse_dual_solution(res, &[VarId(0)]);
+        let (dual, rc) = parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0)]);
         assert!(dual.is_empty());
         assert!(rc.is_empty());
     }
@@ -1297,6 +1368,7 @@ The above solution has an objective value of:  0.0
             std::time::Duration::ZERO,
             None,
             &[VarId(0), VarId(1)],
+            &[ConstraintId(0)],
         );
         assert_eq!(r.result_count(), 2);
         assert_eq!(r.reduced_costs.get(&VarId(1)), Some(&1.5));
@@ -1318,6 +1390,7 @@ The above solution has an objective value of:  0.0
             std::time::Duration::ZERO,
             None,
             &[VarId(0)],
+            &[],
         );
         assert_eq!(r.result_count(), 1);
         assert!(

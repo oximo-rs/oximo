@@ -1,11 +1,11 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::marker::PhantomData;
 
-use oximo_expr::{Expr, ExprArena, ExprClass, ParamId, VarId, classify};
+use oximo_expr::{Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
-use crate::constraint::{Constraint, ConstraintExpr, ConstraintId};
+use crate::constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
 use crate::domain::Domain;
 use crate::error::{Error, Result};
 use crate::indexed::{IndexedFamily, IndexedParam, IndexedVar, build_storage};
@@ -365,37 +365,55 @@ impl Model {
         name: impl Into<SmolStr>,
         c: ConstraintExpr<'_>,
     ) -> ConstraintId {
-        let name = name.into();
+        let (lower, upper) = match c.sense {
+            Sense::Le => (f64::NEG_INFINITY, c.rhs),
+            Sense::Ge => (c.rhs, f64::INFINITY),
+            Sense::Eq => (c.rhs, c.rhs),
+        };
+        self.register_constraint(name.into(), c.lhs.id, lower, upper)
+    }
+
+    /// Push a constraint row `lower <= lhs <= upper` into the registry. Shared by
+    /// [`Self::__add_constraint`] and the range entry points.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a constraint with the same name is already registered, or if the
+    /// constraint count exceeds `u32::MAX`.
+    fn register_constraint(
+        &self,
+        name: SmolStr,
+        lhs: ExprId,
+        lower: f64,
+        upper: f64,
+    ) -> ConstraintId {
         let mut by_name = self.constraint_names.borrow_mut();
         assert!(!by_name.contains_key(&name), "constraint name {name:?} already registered");
         let mut all = self.constraints.borrow_mut();
         let id = ConstraintId(u32::try_from(all.len()).expect("constraint count overflow"));
-        all.push(Constraint {
-            name: name.clone(),
-            lhs: c.lhs.id,
-            sense: c.sense,
-            rhs: c.rhs,
-            active: true,
-        });
+        all.push(Constraint { name: name.clone(), lhs, lower, upper, active: true });
         by_name.insert(name, id);
         self.cached_kind.set(None);
         id
     }
 
-    /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
-    /// internal counter. Backs the name-less form of the `constraint!` macro.
-    #[doc(hidden)]
-    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintId {
-        // Skip over any names a user may already have taken.
-        let name = loop {
+    /// A fresh unique auto-name `_c{n}`, skipping any a user already took.
+    fn next_auto_name(&self) -> SmolStr {
+        loop {
             let n = self.auto_seq.get();
             self.auto_seq.set(n + 1);
             let candidate: SmolStr = format!("_c{n}").into();
             if !self.constraint_names.borrow().contains_key(&candidate) {
                 break candidate;
             }
-        };
-        self.__add_constraint(name, c)
+        }
+    }
+
+    /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
+    /// internal counter. Backs the name-less form of the `constraint!` macro.
+    #[doc(hidden)]
+    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintId {
+        self.__add_constraint(self.next_auto_name(), c)
     }
 
     /// Bulk-register constraints. Each entry is `(name, ConstraintExpr)`.
@@ -427,19 +445,73 @@ impl Model {
         }
     }
 
-    /// Macro-facing entry point for a two-sided range family.
+    /// Macro-facing entry point for a two-sided range `lo <= mid <= hi`.
+    ///
+    /// Collapses to a single interval [`Constraint`] named `name` only when both
+    /// bounds are pure constants and the body is linear (the condition under which
+    /// one two-sided row is representable).
     #[doc(hidden)]
-    pub fn __add_range_constraints_over<'a, K, F>(&'a self, name: &str, set: &Set<K>, mut rule: F)
+    pub fn __add_range<'a, B1, B2>(&'a self, name: &str, mid: Expr<'a>, lo: B1, hi: B2)
     where
-        K: FromIndexKey,
-        F: FnMut(K) -> (ConstraintExpr<'a>, ConstraintExpr<'a>),
+        B1: IntoRhs<'a>,
+        B2: IntoRhs<'a>,
     {
-        let lo_prefix = format!("{name}_lo");
-        let hi_prefix = format!("{name}_hi");
+        if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
+            self.register_constraint(name.into(), mid.id, lower, upper);
+        } else {
+            self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
+            self.__add_constraint(format!("{name}_hi"), mid.le(hi));
+        }
+    }
+
+    /// Anonymous form of [`Self::__add_range`] (auto-named rows).
+    #[doc(hidden)]
+    pub fn __add_range_auto<'a, B1, B2>(&'a self, mid: Expr<'a>, lo: B1, hi: B2)
+    where
+        B1: IntoRhs<'a>,
+        B2: IntoRhs<'a>,
+    {
+        if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
+            self.register_constraint(self.next_auto_name(), mid.id, lower, upper);
+        } else {
+            self.__add_constraint_auto(mid.ge(lo));
+            self.__add_constraint_auto(mid.le(hi));
+        }
+    }
+
+    /// The interval `(lower, upper)` a range collapses to, or `None` (keep two
+    /// rows). Requires both bounds to be literal constants and the body `mid` to
+    /// be linear.
+    fn collapse_bounds<'a>(
+        &self,
+        mid: ExprId,
+        lo: &impl IntoRhs<'a>,
+        hi: &impl IntoRhs<'a>,
+    ) -> Option<(f64, f64)> {
+        let lower = lo.const_bound()?;
+        let upper = hi.const_bound()?;
+        (classify(&self.arena.borrow(), mid) == ExprClass::Linear).then_some((lower, upper))
+    }
+
+    /// Macro-facing entry point for a two-sided range family. One row per key,
+    /// each collapsing to a single interval constraint when both bounds are
+    /// constant (see [`Self::__add_range`]).
+    #[doc(hidden)]
+    pub fn __add_range_constraints_over<'a, K, B1, B2, F>(
+        &'a self,
+        name: &str,
+        set: &Set<K>,
+        mut rule: F,
+    ) where
+        K: FromIndexKey,
+        B1: IntoRhs<'a>,
+        B2: IntoRhs<'a>,
+        F: FnMut(K) -> (Expr<'a>, B1, B2),
+    {
         for key in set {
-            let (lo, hi) = rule(K::from_index_key(&key));
-            self.__add_constraint(format_index_name(&lo_prefix, &key), lo);
-            self.__add_constraint(format_index_name(&hi_prefix, &key), hi);
+            let (mid, lo, hi) = rule(K::from_index_key(&key));
+            let row_name = format_index_name(name, &key);
+            self.__add_range(&row_name, mid, lo, hi);
         }
     }
 
