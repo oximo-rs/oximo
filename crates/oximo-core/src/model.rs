@@ -378,8 +378,8 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if a constraint with the same name is already registered, or if the
-    /// constraint count exceeds `u32::MAX`.
+    /// Panics if a constraint with the same name is already registered, if a
+    /// bound is NaN, or if the constraint count exceeds `u32::MAX`.
     fn register_constraint(
         &self,
         name: SmolStr,
@@ -387,6 +387,10 @@ impl Model {
         lower: f64,
         upper: f64,
     ) -> ConstraintId {
+        assert!(
+            !lower.is_nan() && !upper.is_nan(),
+            "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
+        );
         let mut by_name = self.constraint_names.borrow_mut();
         assert!(!by_name.contains_key(&name), "constraint name {name:?} already registered");
         let mut all = self.constraints.borrow_mut();
