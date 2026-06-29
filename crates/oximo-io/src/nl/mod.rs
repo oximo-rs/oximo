@@ -25,7 +25,6 @@
 //!   (accessed: June 3, 2026).
 
 // TODO: Missing features:
-// - Range constraints
 // - Hollerith strings
 
 mod analyze;
