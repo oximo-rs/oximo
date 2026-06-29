@@ -72,7 +72,7 @@ subtraction, and nonlinear operations (see [Nonlinear Expressions](#nonlinear-ex
 constraint!(m, cap, 2.0 * x + 3.0 * y <= 100.0);
 constraint!(m, demand, x >= 5.0);
 constraint!(m, balance, x - y == 0.0);
-constraint!(m, band, 1.0 <= x + y <= 10.0); // two-sided range -> band_lo + band_hi
+constraint!(m, band, 1.0 <= x + y <= 10.0); // two-sided range -> one constraint
 
 objective!(m, Min, 3.0 * x + 5.0 * y);
 // or
