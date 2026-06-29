@@ -47,7 +47,7 @@ impl TerminationStatus {
     }
 }
 
-/// The status of the primal point held in a [`SolverResult`].
+/// The status of the primal point held in a [`crate::SolverResult`].
 ///
 /// Decoupled from [`TerminationStatus`] so a result that stopped at a limit can
 /// still carry a usable incumbent.
