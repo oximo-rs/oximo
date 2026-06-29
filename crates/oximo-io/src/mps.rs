@@ -72,11 +72,15 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     writeln!(out, "ROWS")?;
     writeln!(out, " N  OBJ")?;
     for c in constraints.iter() {
-        // A two-sided range is an `L` row bounded by the `RANGES` section below.
         let tag = match c.as_single() {
-            Some((Sense::Le, _)) | None => 'L',
+            Some((Sense::Le, _)) => 'L',
             Some((Sense::Ge, _)) => 'G',
             Some((Sense::Eq, _)) => 'E',
+            // A two-sided range is an `L` row bounded by the `RANGES` section below.
+            None if c.is_range() => 'L',
+            // A free `[-inf, +inf]` row imposes nothing: emit an unconstraining
+            // `N` row (no RHS) rather than an `L` row with a `+inf` bound.
+            None => 'N',
         };
         writeln!(out, " {tag}  {}", c.name)?;
     }
@@ -113,7 +117,9 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         // section then widens it down to the lower bound.
         let rhs = match c.as_single() {
             Some((_, rhs)) => rhs,
-            None => c.upper,
+            None if c.is_range() => c.upper,
+            // Free `N` row: carries no RHS.
+            None => continue,
         };
         let adjusted = rhs - t.constant;
         if adjusted != 0.0 {
