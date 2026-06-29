@@ -80,6 +80,11 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             write!(out, " {}_hi:", c.name)?;
             write_linear(out, &t, &vars)?;
             writeln!(out, " <= {hi}")?;
+        } else {
+            // Free `[-inf, +inf]` row: imposes no constraint and has no valid LP
+            // representation (`>= -inf` / `<= +inf` are illegal).
+            // Leave a comment so the omission is traceable in the output.
+            writeln!(out, "\\* skipped free row: {} *\\", c.name)?;
         }
     }
 
