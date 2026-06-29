@@ -1,8 +1,8 @@
 //! `constraint!(model, [name | name = expr | name[i in dom, ...]], <relation>)`,
 //! where `<relation>` is `lhs <op> rhs` or a two-sided range `lo <= e <= hi`
-//! (`hi >= e >= lo`). A range lowers to two rows, `{name}_lo` and `{name}_hi`.
-
-// TODO: Improve so that ranges don't lower to two rows.
+//! (`hi >= e >= lo`). A range with constant bounds and a linear body becomes a
+//! single interval constraint named `{name}`; expression/parameter bounds or a
+//! nonlinear body lower to two rows, `{name}_lo` and `{name}_hi`.
 
 use proc_macro2::{Spacing, Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
@@ -28,24 +28,24 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let root = oximo_root();
 
     match second {
-        None => Ok(register_anonymous(&model, build_relations(first, &root)?, &root)),
+        None => Ok(register_anonymous(&model, build_relations(first, &root)?)),
         Some(rel_tokens) => {
             // Computed name at run-time: `constraint!(m, name = expr, <relation>)`.
             if let Some(name_expr) = computed_name(&first) {
                 let rel = build_relations(rel_tokens, &root)?;
-                return Ok(register_computed(&model, &name_expr, rel, &root));
+                return Ok(register_computed(&model, &name_expr, rel));
             }
 
             let Named { name, binds, cond } = parse_named(first)?;
             let name_str = name.to_string();
             let rel = build_relations(rel_tokens, &root)?;
             match binds {
-                None => Ok(register_named(&model, &name_str, rel, &root)),
+                None => Ok(register_named(&model, &name_str, rel)),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
                     let set = build_set(&binds, &root);
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
-                    Ok(register_family(&model, &name_str, &set, &param, rel, &root))
+                    Ok(register_family(&model, &name_str, &set, &param, rel))
                 }
             }
         }
@@ -116,65 +116,31 @@ fn build_relations(tokens: TokenStream2, root: &TokenStream2) -> syn::Result<Rel
     }
 }
 
-/// The two relation tokens for a range: `mid >= lo` (the `_lo` row) and
-/// `mid <= hi` (the `_hi` row).
-fn range_rows(lo: &Expr, hi: &Expr, root: &TokenStream2) -> (TokenStream2, TokenStream2) {
-    (
-        quote!( #root::__macro_support::Relate::ge(__mid, #lo) ),
-        quote!( #root::__macro_support::Relate::le(__mid, #hi) ),
-    )
-}
-
-fn register_anonymous(model: &Expr, rel: Relations, root: &TokenStream2) -> TokenStream2 {
+fn register_anonymous(model: &Expr, rel: Relations) -> TokenStream2 {
     match rel {
         Relations::Single(r) => quote!( (#model).__add_constraint_auto(#r) ),
-        Relations::Range { mid, lo, hi } => {
-            let (lo_rel, hi_rel) = range_rows(&lo, &hi, root);
-            quote! {{
-                let __mid = #mid;
-                (#model).__add_constraint_auto(#lo_rel);
-                (#model).__add_constraint_auto(#hi_rel);
-            }}
-        }
+        Relations::Range { mid, lo, hi } => quote! {
+            (#model).__add_range_auto(#mid, #lo, #hi)
+        },
     }
 }
 
-fn register_named(
-    model: &Expr,
-    name_str: &str,
-    rel: Relations,
-    root: &TokenStream2,
-) -> TokenStream2 {
+fn register_named(model: &Expr, name_str: &str, rel: Relations) -> TokenStream2 {
     match rel {
         Relations::Single(r) => quote!( (#model).__add_constraint(#name_str, #r) ),
-        Relations::Range { mid, lo, hi } => {
-            let (lo_rel, hi_rel) = range_rows(&lo, &hi, root);
-            quote! {{
-                let __mid = #mid;
-                (#model).__add_constraint(::core::concat!(#name_str, "_lo"), #lo_rel);
-                (#model).__add_constraint(::core::concat!(#name_str, "_hi"), #hi_rel);
-            }}
-        }
+        Relations::Range { mid, lo, hi } => quote! {
+            (#model).__add_range(#name_str, #mid, #lo, #hi)
+        },
     }
 }
 
-fn register_computed(
-    model: &Expr,
-    name_expr: &TokenStream2,
-    rel: Relations,
-    root: &TokenStream2,
-) -> TokenStream2 {
+fn register_computed(model: &Expr, name_expr: &TokenStream2, rel: Relations) -> TokenStream2 {
     match rel {
         Relations::Single(r) => quote!( (#model).__add_constraint(#name_expr, #r) ),
-        Relations::Range { mid, lo, hi } => {
-            let (lo_rel, hi_rel) = range_rows(&lo, &hi, root);
-            quote! {{
-                let __mid = #mid;
-                let __name = #name_expr;
-                (#model).__add_constraint(::std::format!("{__name}_lo"), #lo_rel);
-                (#model).__add_constraint(::std::format!("{__name}_hi"), #hi_rel);
-            }}
-        }
+        Relations::Range { mid, lo, hi } => quote! {{
+            let __name = #name_expr;
+            (#model).__add_range(&__name, #mid, #lo, #hi)
+        }},
     }
 }
 
@@ -184,20 +150,13 @@ fn register_family(
     set: &TokenStream2,
     param: &TokenStream2,
     rel: Relations,
-    root: &TokenStream2,
 ) -> TokenStream2 {
     match rel {
         Relations::Single(r) => quote! {
             (#model).__add_constraints_over(#name_str, &(#set), |#param| #r);
         },
-        Relations::Range { mid, lo, hi } => {
-            let (lo_rel, hi_rel) = range_rows(&lo, &hi, root);
-            quote! {
-                (#model).__add_range_constraints_over(#name_str, &(#set), |#param| {
-                    let __mid = #mid;
-                    (#lo_rel, #hi_rel)
-                });
-            }
-        }
+        Relations::Range { mid, lo, hi } => quote! {
+            (#model).__add_range_constraints_over(#name_str, &(#set), |#param| (#mid, #lo, #hi));
+        },
     }
 }

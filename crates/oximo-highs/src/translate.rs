@@ -3,7 +3,7 @@ use std::time::Instant;
 use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, RowProblem, Sense as HighsSense,
 };
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable};
+use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId, Variable};
 use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
 };
@@ -82,13 +82,10 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         .collect::<Result<Vec<_>, _>>()?;
 
     for (c, t) in constraints.iter().zip(con_terms) {
-        let adjusted_rhs = c.rhs - t.constant;
+        let lower = c.lower - t.constant;
+        let upper = c.upper - t.constant;
         let factors = t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co));
-        match c.sense {
-            Sense::Le => pb.add_row(f64::NEG_INFINITY..=adjusted_rhs, factors),
-            Sense::Ge => pb.add_row(adjusted_rhs..=f64::INFINITY, factors),
-            Sense::Eq => pb.add_row(adjusted_rhs..=adjusted_rhs, factors),
-        }
+        pb.add_row(lower..=upper, factors);
     }
 
     // The arena / vars / constraints borrows are released before we move into

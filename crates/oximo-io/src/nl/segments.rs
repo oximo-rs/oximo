@@ -214,24 +214,37 @@ fn write_r_segment<W: Write>(
         }
         let c = &constraints[orig_idx];
         let lin_const = analysis.cons[orig_idx].linear.constant;
-        let rhs = c.rhs - lin_const;
-        match c.sense {
-            Sense::Le => {
+        // `r`-segment line types (D. M. Gay, Table 17): 0 = `lo <= body <= hi`
+        // (range, two values), 1 = upper, 2 = lower, 3 = free, 4 = equality.
+        match c.as_single() {
+            Some((Sense::Le, rhs)) => {
                 w.int(1)?;
                 w.sep()?;
-                w.dbl(rhs)?;
+                w.dbl(rhs - lin_const)?;
                 w.eor()?;
             }
-            Sense::Ge => {
+            Some((Sense::Ge, rhs)) => {
                 w.int(2)?;
                 w.sep()?;
-                w.dbl(rhs)?;
+                w.dbl(rhs - lin_const)?;
                 w.eor()?;
             }
-            Sense::Eq => {
+            Some((Sense::Eq, rhs)) => {
                 w.int(4)?;
                 w.sep()?;
-                w.dbl(rhs)?;
+                w.dbl(rhs - lin_const)?;
+                w.eor()?;
+            }
+            None if c.is_range() => {
+                w.int(0)?;
+                w.sep()?;
+                w.dbl(c.lower - lin_const)?;
+                w.sep()?;
+                w.dbl(c.upper - lin_const)?;
+                w.eor()?;
+            }
+            None => {
+                w.int(3)?;
                 w.eor()?;
             }
         }

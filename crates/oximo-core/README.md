@@ -29,7 +29,7 @@ let m = Model::new("transport");
 variable!(m, x >= 0.0);
 variable!(m, 0.0 <= y <= 10.0);
 
-// Constraints (incl. a two-sided range -> band_lo + band_hi)
+// Constraints (incl. a two-sided range, kept as one constraint)
 constraint!(m, c1, x + 2.0 * y <= 14.0);
 constraint!(m, c2, 3.0 * x - y >= 0.0);
 constraint!(m, band, 1.0 <= x + y <= 12.0);
@@ -156,7 +156,7 @@ these are real constraint operators.
 ```rust,ignore
 constraint!(m, name, lhs <= rhs);                  // named, also >= and ==
 constraint!(m, lhs >= rhs);                        // anonymous (auto-named _c0, _c1, ...)
-constraint!(m, band, 1.0 <= e <= 3.0);             // two-sided range -> band_lo + band_hi
+constraint!(m, band, 1.0 <= e <= 3.0);             // two-sided range -> one constraint (expr bounds -> band_lo/band_hi)
 constraint!(m, name = format!("c_{k}"), e == rhs); // computed run-time name
 ```
 

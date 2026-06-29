@@ -91,8 +91,14 @@ pub fn solve(
     for i in 0..vars.len() {
         writeln!(gms, "Put 'R{i}=' v{i}.m:0:15 /;").unwrap();
     }
-    for i in 0..constraints.len() {
-        writeln!(gms, "Put 'D{i}=' eq_c{i}.m:0:15 /;").unwrap();
+    // A two-sided range is emitted as two equations (`_lo`/`_hi`), summing their
+    // marginals into one `D{i}` keeps the dual keyed by the single `ConstraintId`.
+    for (i, c) in constraints.iter().enumerate() {
+        if c.is_range() {
+            writeln!(gms, "Put 'D{i}=' (eq_c{i}_lo.m + eq_c{i}_hi.m):0:15 /;").unwrap();
+        } else {
+            writeln!(gms, "Put 'D{i}=' eq_c{i}.m:0:15 /;").unwrap();
+        }
     }
     writeln!(gms, "Putclose oximo_sol;").unwrap();
 
@@ -662,8 +668,12 @@ fn write_equations(
     objective: &Objective,
 ) {
     write!(gms, "Equations\n    eq_obj").unwrap();
-    for i in 0..constraints.len() {
-        write!(gms, ", eq_c{i}").unwrap();
+    for (i, c) in constraints.iter().enumerate() {
+        if c.as_single().is_some() {
+            write!(gms, ", eq_c{i}").unwrap();
+        } else {
+            write!(gms, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
+        }
     }
     writeln!(gms, ";").unwrap();
     writeln!(gms).unwrap();
@@ -674,21 +684,44 @@ fn write_equations(
     writeln!(gms, ";").unwrap();
 
     for (ci, c) in constraints.iter().enumerate() {
-        let sense_str = match c.sense {
-            Sense::Le => "=l=",
-            Sense::Ge => "=g=",
-            Sense::Eq => "=e=",
-        };
-        write!(gms, "eq_c{ci}..").unwrap();
-        match ExprForm::from(arena, c.lhs) {
-            ExprForm::Linear(t) => {
-                let adjusted_rhs = c.rhs - t.constant;
-                write_linear(gms, &t, false);
-                writeln!(gms, " {sense_str} {};", fmt(adjusted_rhs)).unwrap();
+        if let Some((sense, rhs)) = c.as_single() {
+            let sense_str = match sense {
+                Sense::Le => "=l=",
+                Sense::Ge => "=g=",
+                Sense::Eq => "=e=",
+            };
+            write!(gms, "eq_c{ci}..").unwrap();
+            match ExprForm::from(arena, c.lhs) {
+                ExprForm::Linear(t) => {
+                    let adjusted_rhs = rhs - t.constant;
+                    write_linear(gms, &t, false);
+                    writeln!(gms, " {sense_str} {};", fmt(adjusted_rhs)).unwrap();
+                }
+                ExprForm::Nonlinear(id) => {
+                    write_gams_expr(gms, arena, id, true);
+                    writeln!(gms, " {sense_str} {};", fmt(rhs)).unwrap();
+                }
             }
-            ExprForm::Nonlinear(id) => {
-                write_gams_expr(gms, arena, id, true);
-                writeln!(gms, " {sense_str} {};", fmt(c.rhs)).unwrap();
+        } else {
+            match ExprForm::from(arena, c.lhs) {
+                ExprForm::Linear(t) => {
+                    let lo = c.lower - t.constant;
+                    let hi = c.upper - t.constant;
+                    write!(gms, "eq_c{ci}_lo..").unwrap();
+                    write_linear(gms, &t, false);
+                    writeln!(gms, " =g= {};", fmt(lo)).unwrap();
+                    write!(gms, "eq_c{ci}_hi..").unwrap();
+                    write_linear(gms, &t, false);
+                    writeln!(gms, " =l= {};", fmt(hi)).unwrap();
+                }
+                ExprForm::Nonlinear(id) => {
+                    write!(gms, "eq_c{ci}_lo..").unwrap();
+                    write_gams_expr(gms, arena, id, true);
+                    writeln!(gms, " =g= {};", fmt(c.lower)).unwrap();
+                    write!(gms, "eq_c{ci}_hi..").unwrap();
+                    write_gams_expr(gms, arena, id, true);
+                    writeln!(gms, " =l= {};", fmt(c.upper)).unwrap();
+                }
             }
         }
     }

@@ -14,7 +14,7 @@
 
 use std::io::Write;
 
-use oximo_core::{Model, ObjectiveSense, Sense};
+use oximo_core::{Constraint, Model, ObjectiveSense, Sense};
 use oximo_expr::{LinearTerms, VarId, extract_linear};
 use rustc_hash::FxHashMap;
 
@@ -72,10 +72,15 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     writeln!(out, "ROWS")?;
     writeln!(out, " N  OBJ")?;
     for c in constraints.iter() {
-        let tag = match c.sense {
-            Sense::Le => 'L',
-            Sense::Ge => 'G',
-            Sense::Eq => 'E',
+        let tag = match c.as_single() {
+            Some((Sense::Le, _)) => 'L',
+            Some((Sense::Ge, _)) => 'G',
+            Some((Sense::Eq, _)) => 'E',
+            // A two-sided range is an `L` row bounded by the `RANGES` section below.
+            None if c.is_range() => 'L',
+            // A free `[-inf, +inf]` row imposes nothing: emit an unconstraining
+            // `N` row (no RHS) rather than an `L` row with a `+inf` bound.
+            None => 'N',
         };
         writeln!(out, " {tag}  {}", c.name)?;
     }
@@ -108,9 +113,26 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         writeln!(out, "    RHS       OBJ       {}", -obj_constant)?;
     }
     for (c, t) in constraints.iter().zip(con_terms.iter()) {
-        let adjusted = c.rhs - t.constant;
+        // A range row's RHS is its upper bound (it is an `L` row), the `RANGES`
+        // section then widens it down to the lower bound.
+        let rhs = match c.as_single() {
+            Some((_, rhs)) => rhs,
+            None if c.is_range() => c.upper,
+            // Free `N` row: carries no RHS.
+            None => continue,
+        };
+        let adjusted = rhs - t.constant;
         if adjusted != 0.0 {
             writeln!(out, "    RHS       {:<10}{}", c.name, adjusted)?;
+        }
+    }
+
+    if constraints.iter().any(Constraint::is_range) {
+        writeln!(out, "RANGES")?;
+        for c in constraints.iter() {
+            if c.is_range() {
+                writeln!(out, "    RNG       {:<10}{}", c.name, c.upper - c.lower)?;
+            }
         }
     }
 

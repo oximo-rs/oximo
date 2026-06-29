@@ -16,6 +16,7 @@ use std::io::Write;
 
 use oximo_core::{Domain, Model, ObjectiveSense, Sense};
 use oximo_expr::{LinearTerms, extract_linear};
+use rustc_hash::FxHashSet;
 
 use crate::error::IoError;
 
@@ -58,18 +59,42 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         writeln!(out, "\\* objective constant: {} *\\", obj_terms.constant)?;
     }
 
+    // A collapsed range row is split into `{name}_lo` / `{name}_hi` labels at
+    // export time. Those derived labels can clash with another constraint named
+    // literally `{name}_lo`, so disambiguate against every registered name.
+    let mut used_labels: FxHashSet<String> =
+        constraints.iter().map(|c| c.name.to_string()).collect();
+
     writeln!(out, "Subject To")?;
     for c in constraints.iter() {
         let t = extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear)?;
-        let adjusted_rhs = c.rhs - t.constant;
-        let op = match c.sense {
-            Sense::Le => "<=",
-            Sense::Ge => ">=",
-            Sense::Eq => "=",
-        };
-        write!(out, " {}:", c.name)?;
-        write_linear(out, &t, &vars)?;
-        writeln!(out, " {op} {adjusted_rhs}")?;
+        if let Some((sense, rhs)) = c.as_single() {
+            let op = match sense {
+                Sense::Le => "<=",
+                Sense::Ge => ">=",
+                Sense::Eq => "=",
+            };
+            let adjusted_rhs = rhs - t.constant;
+            write!(out, " {}:", c.name)?;
+            write_linear(out, &t, &vars)?;
+            writeln!(out, " {op} {adjusted_rhs}")?;
+        } else if c.is_range() {
+            let lo = c.lower - t.constant;
+            let hi = c.upper - t.constant;
+            let lo_label = unique_label(&mut used_labels, &format!("{}_lo", c.name));
+            write!(out, " {lo_label}:")?;
+            write_linear(out, &t, &vars)?;
+            writeln!(out, " >= {lo}")?;
+            let hi_label = unique_label(&mut used_labels, &format!("{}_hi", c.name));
+            write!(out, " {hi_label}:")?;
+            write_linear(out, &t, &vars)?;
+            writeln!(out, " <= {hi}")?;
+        } else {
+            // Free `[-inf, +inf]` row: imposes no constraint and has no valid LP
+            // representation (`>= -inf` / `<= +inf` are illegal).
+            // Leave a comment so the omission is traceable in the output.
+            writeln!(out, "\\* skipped free row: {} *\\", c.name)?;
+        }
     }
 
     let mut wrote_bounds_header = false;
@@ -168,6 +193,23 @@ pub fn to_lp_string(model: &Model) -> Result<String, IoError> {
     let mut buf = Vec::new();
     write_lp(model, &mut buf)?;
     Ok(String::from_utf8(buf).expect("LP writer emits ASCII"))
+}
+
+/// Reserve a unique row label. Returns `base` if free, otherwise appends
+/// `_2`, `_3`, ... until it no longer collides with a name in `used`. The chosen
+/// label is recorded so later split rows cannot reuse it.
+fn unique_label(used: &mut FxHashSet<String>, base: &str) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Write a linear expression as a sequence of `+/- coeff varname` terms.
