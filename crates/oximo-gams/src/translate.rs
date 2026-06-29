@@ -669,10 +669,10 @@ fn write_equations(
 ) {
     write!(gms, "Equations\n    eq_obj").unwrap();
     for (i, c) in constraints.iter().enumerate() {
-        if c.is_range() {
-            write!(gms, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
-        } else {
+        if c.as_single().is_some() {
             write!(gms, ", eq_c{i}").unwrap();
+        } else {
+            write!(gms, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
         }
     }
     writeln!(gms, ";").unwrap();
