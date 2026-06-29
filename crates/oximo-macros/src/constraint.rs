@@ -1,8 +1,8 @@
 //! `constraint!(model, [name | name = expr | name[i in dom, ...]], <relation>)`,
 //! where `<relation>` is `lhs <op> rhs` or a two-sided range `lo <= e <= hi`
-//! (`hi >= e >= lo`). A range with constant bounds becomes a single interval
-//! constraint named `{name}`, if a bound is an expression/parameter it instead
-//! lowers to two rows, `{name}_lo` and `{name}_hi`.
+//! (`hi >= e >= lo`). A range with constant bounds and a linear body becomes a
+//! single interval constraint named `{name}`; expression/parameter bounds or a
+//! nonlinear body lower to two rows, `{name}_lo` and `{name}_hi`.
 
 use proc_macro2::{Spacing, Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
