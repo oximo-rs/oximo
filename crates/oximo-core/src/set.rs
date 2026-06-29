@@ -36,7 +36,7 @@ impl SetRepr {
 }
 
 /// A single contiguous integer axis of a dense index grid.
-/// Carried by [`Set`] (see [`Set::axes`]) so an [`crate::IndexedVar`]
+/// Carried by [`Set`] (see its internal `axes`) so an [`crate::IndexedVar`]
 /// built over a range can store its scalars densely and map
 /// a key to a flat offset without hashing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

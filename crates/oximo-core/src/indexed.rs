@@ -60,7 +60,7 @@ impl Family for ParamFamily {
 /// constructed by the indexed form of the `variable!`/`param!` macros.
 ///
 /// When the domain is a contiguous integer range (or a Cartesian product of
-/// ranges) the family is stored densely (see [`Storage`]).
+/// ranges) the family is stored densely (see the internal `Storage`).
 /// String, sparse, and `filter`ed families fall back to a hash map.
 pub struct IndexedFamily<'a, K = IndexKey, F = VarFamily> {
     pub(crate) storage: Storage<'a>,
