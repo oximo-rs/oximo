@@ -71,7 +71,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             write!(out, " {}:", c.name)?;
             write_linear(out, &t, &vars)?;
             writeln!(out, " {op} {adjusted_rhs}")?;
-        } else {
+        } else if c.is_range() {
             let lo = c.lower - t.constant;
             let hi = c.upper - t.constant;
             write!(out, " {}_lo:", c.name)?;
