@@ -20,7 +20,7 @@ pub use oximo_io as io;
 pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
 
 #[cfg(feature = "gurobi")]
-pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
+pub use oximo_gurobi::{GurobiOptions, GurobiPersistent, GurobiPresolve};
 
 #[cfg(feature = "gams")]
 pub use oximo_gams::{GamsOptions, GamsSolver};
@@ -44,15 +44,15 @@ pub mod prelude {
     //! Glob-import target. Brings the modeling and solver surface into scope.
     pub use oximo_core::prelude::*;
     pub use oximo_solver::{
-        HasUniversal, ModelReport, PrimalStatus, SolutionPoint, Solver, SolverError, SolverResult,
-        TerminationStatus, UniversalOptions, UniversalOptionsExt,
+        HasUniversal, ModelReport, PersistentSolver, PrimalStatus, SolutionPoint, Solver,
+        SolverError, SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt,
     };
 
     #[cfg(feature = "highs")]
-    pub use oximo_highs::{HighsMethod, HighsOptions, HighsPresolve};
+    pub use oximo_highs::{HighsMethod, HighsOptions, HighsPersistent, HighsPresolve};
 
     #[cfg(feature = "gurobi")]
-    pub use oximo_gurobi::{GurobiOptions, GurobiPresolve};
+    pub use oximo_gurobi::{GurobiOptions, GurobiPersistent, GurobiPresolve};
 
     #[cfg(feature = "gams")]
     pub use oximo_gams::{GamsOptions, GamsSolver};
