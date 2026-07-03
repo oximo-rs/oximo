@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(after.termination, TerminationStatus::Optimal);
         assert!((first.objective().unwrap() - after.objective().unwrap()).abs() < 1e-9);
     }
-    
+
     #[test]
     fn persistent_warm_start_not_worse_than_cold() {
         let m = Model::new("mix");
