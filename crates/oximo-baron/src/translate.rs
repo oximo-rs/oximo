@@ -5,7 +5,8 @@ use std::time::Instant;
 use std::{fs, io};
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, Objective, ObjectiveSense, Sense, VarId, Variable,
+    Constraint, ConstraintId, Domain, Model, Objective, ObjectiveSense, Sense, SocConstraint,
+    VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
@@ -137,13 +138,14 @@ fn build_bar(
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
+    let socs = model.soc_constraints();
     let objective = model.objective();
 
     let mut bar = String::with_capacity(4096);
     write_options(&mut bar, opts, RES_NAME, TIM_NAME);
     let var_order = write_var_declarations(&mut bar, &vars)?;
     write_bounds(&mut bar, &vars);
-    let con_order = write_equations(&mut bar, &arena, &constraints)?;
+    let con_order = write_equations(&mut bar, &arena, &constraints, &socs)?;
     write_objective(&mut bar, &arena, objective.as_ref())?;
     write_starting_point(&mut bar, &vars);
     Ok((bar, var_order, con_order))
@@ -251,6 +253,8 @@ fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
     }
 }
 
+// TODO: Report SOC duals
+
 /// Write the `EQUATIONS` block, returning the emit-order map.
 /// The `ConstraintId` behind each emitted equation, in BARON's 1-based
 /// "Constraint no." order. BARON has no two-sided equation,
@@ -261,13 +265,14 @@ fn write_equations(
     bar: &mut String,
     arena: &ExprArena,
     constraints: &[Constraint],
+    socs: &[SocConstraint],
 ) -> Result<Vec<ConstraintId>, SolverError> {
     let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
-    if constraints.is_empty() {
+    if constraints.is_empty() && socs.is_empty() {
         return Ok(emit_map);
     }
 
-    let mut names: Vec<String> = Vec::with_capacity(constraints.len());
+    let mut names: Vec<String> = Vec::with_capacity(constraints.len() + 2 * socs.len());
     for (i, c) in constraints.iter().enumerate() {
         let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
         if c.is_range() {
@@ -279,6 +284,10 @@ fn write_equations(
             names.push(format!("c{i}"));
             emit_map.push(id);
         }
+    }
+    for i in 0..socs.len() {
+        names.push(format!("soc{i}"));
+        names.push(format!("soc{i}_sign"));
     }
     writeln!(bar, "EQUATIONS {};", names.join(", ")).unwrap();
 
@@ -308,8 +317,35 @@ fn write_equations(
             write_constraint_body(bar, arena, c.lhs, "<=", c.upper)?;
         }
     }
+    write_soc_rows(bar, arena, socs);
     writeln!(bar).unwrap();
     Ok(emit_map)
+}
+
+/// Emit each explicit SOC constraint `||terms||_2 <= bound` as the polynomial
+/// row `(term_1)^2 + ... - (bound)^2 <= 0` plus the sign row `bound >= 0`
+/// (squaring loses the sign of the bound side).
+fn write_soc_rows(bar: &mut String, arena: &ExprArena, socs: &[SocConstraint]) {
+    for (i, s) in socs.iter().enumerate() {
+        write!(bar, "soc{i}: ").unwrap();
+        for (k, &term) in s.terms.iter().enumerate() {
+            if k > 0 {
+                write!(bar, " + ").unwrap();
+            }
+            let t = extract_linear(arena, term).expect("SOC members are validated affine");
+            write!(bar, "(").unwrap();
+            write_linear(bar, &t, true);
+            write!(bar, ")^2").unwrap();
+        }
+        let b = extract_linear(arena, s.bound).expect("SOC bound is validated affine");
+        write!(bar, " - (").unwrap();
+        write_linear(bar, &b, true);
+        writeln!(bar, ")^2 <= 0;").unwrap();
+
+        write!(bar, "soc{i}_sign: ").unwrap();
+        write_linear(bar, &b, true);
+        writeln!(bar, " >= 0;").unwrap();
+    }
 }
 
 /// Emit one constraint body `<lhs> <op> <rhs>;`. Linear constraints fold the
@@ -958,6 +994,26 @@ mod tests {
         assert!(bar.contains("INTEGER_VARIABLES x1;"), "{bar}");
         assert!(bar.contains("POSITIVE_VARIABLES x2;"), "{bar}");
         assert!(bar.contains("OBJ: maximize"), "{bar}");
+    }
+
+    #[test]
+    fn explicit_soc_emits_squared_rows_and_sign_row() {
+        let m = Model::new("socp");
+        variable!(m, -10.0 <= x <= 10.0);
+        variable!(m, -10.0 <= y <= 10.0);
+        variable!(m, t >= 0.0);
+        m.add_soc_constraint("cone", [x, y], t);
+        constraint!(m, c, x + y >= 1.0);
+        objective!(m, Min, t);
+        assert_eq!(m.kind(), ModelKind::SOCP);
+
+        let bar = render(&m);
+        assert!(bar.contains("EQUATIONS c0, soc0, soc0_sign;"), "declares SOC rows last:\n{bar}");
+        assert!(bar.contains("soc0: "), "emits SOC row:\n{bar}");
+        assert!(bar.contains(")^2"), "squares members:\n{bar}");
+        assert!(bar.contains(")^2 <= 0;"), "row against 0:\n{bar}");
+        assert!(bar.contains("soc0_sign: "), "emits sign row:\n{bar}");
+        assert!(bar.contains(">= 0;"), "sign row nonneg:\n{bar}");
     }
 
     #[test]

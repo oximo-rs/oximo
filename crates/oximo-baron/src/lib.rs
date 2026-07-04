@@ -42,6 +42,22 @@ impl Baron {
 /// and the `solver_name` stamped on every [`SolverResult`].
 pub(crate) const NAME: &str = "BARON";
 
+pub(crate) const fn supported(kind: ModelKind) -> bool {
+    matches!(
+        kind,
+        ModelKind::LP
+            | ModelKind::MILP
+            | ModelKind::QP
+            | ModelKind::MIQP
+            | ModelKind::QCP
+            | ModelKind::MIQCP
+            | ModelKind::SOCP
+            | ModelKind::MISOCP
+            | ModelKind::NLP
+            | ModelKind::MINLP
+    )
+}
+
 impl Solver for Baron {
     type Options = BaronOptions;
 
@@ -50,16 +66,7 @@ impl Solver for Baron {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        // BARON is a global solver for all of the following model classes.
-        matches!(
-            kind,
-            ModelKind::LP
-                | ModelKind::MILP
-                | ModelKind::QP
-                | ModelKind::MIQP
-                | ModelKind::NLP
-                | ModelKind::MINLP
-        )
+        supported(kind)
     }
 
     fn solve(&mut self, model: &Model, opts: &BaronOptions) -> Result<SolverResult, SolverError> {
