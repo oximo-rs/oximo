@@ -1,7 +1,8 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use highs::{
-    HessianFormat, HighsModelStatus, HighsSolutionStatus, RowProblem, Sense as HighsSense,
+    HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
+    Sense as HighsSense,
 };
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId, Variable};
 use oximo_expr::{
@@ -38,8 +39,49 @@ use crate::options::apply as apply_options;
 /// # Panics
 ///
 /// Panics if model variable IDs overflow `u32`.
-#[allow(clippy::too_many_lines)]
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+    let (prob, meta) = build_problem(model)?;
+    let live = make_live(prob, opts)?;
+    let started = Instant::now();
+    let solved =
+        live.try_solve().map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
+    let elapsed = started.elapsed();
+    Ok(extract_result(&solved, meta.obj_constant, meta.num_constraints, elapsed))
+}
+
+/// The HiGHS [`RowProblem`] plus the inputs needed to build and configure a live
+/// model: the QP Hessian, warm-start values, and objective sense. Consumed by
+/// [`make_live`].
+pub(crate) struct Prob {
+    pb: RowProblem,
+    sense: HighsSense,
+    hessian_cols: HessianCols,
+    has_hessian: bool,
+    has_initial: bool,
+    init_vals: Vec<f64>,
+}
+
+/// Per-solve metadata that outlives [`Prob`]: the column handles (in model column
+/// order, used by the persistent fast path to push deltas), the objective constant
+/// added back onto HiGHS' objective value, and the constraint count for reading
+/// duals. The incremental fast path's snapshot/fingerprint lives in
+/// [`oximo_solver::snapshot`], shared across backends.
+pub(crate) struct Meta {
+    pub cols: Vec<highs::Col>,
+    pub obj_constant: f64,
+    pub num_constraints: usize,
+}
+
+/// Translate `model` into a HiGHS [`RowProblem`] and the [`Meta`] needed to read the
+/// result and to drive incremental re-solves.
+///
+/// Supports LP, MILP, and (convex, continuous) QP.
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] if the model kind is unsupported, a domain cannot be
+/// represented, or an expression is not linear/quadratic as required.
+pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> {
     let kind = model.kind();
     if !matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP) {
         return Err(SolverError::UnsupportedKind(kind));
@@ -49,20 +91,24 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let vars = model.variables();
     reject_semi_domains(&vars)?;
     let constraints = model.constraints();
-    let objective = model.try_objective().map_err(SolverError::Core)?;
 
-    let (obj_coeffs, obj_constant, hessian_cols) =
-        objective_terms(kind, &arena, objective.expr, vars.len())?;
+    let objective = model.objective();
+    let obj = objective.as_ref();
+    let sense = obj.map_or(HighsSense::Minimise, |o| sense_of(o.sense));
+    let (obj_by_id, obj_constant, hessian_cols) = match obj {
+        Some(o) => objective_terms(kind, &arena, o.expr, vars.len())?,
+        None => (vec![0.0; vars.len()], 0.0, Vec::new()),
+    };
     let has_hessian = hessian_cols.iter().any(|col| !col.is_empty());
 
-    // Build the HiGHS row problem
+    // Build the HiGHS row problem from the variables and constraints.
     let mut pb = RowProblem::new();
     let mut cols: Vec<highs::Col> = Vec::with_capacity(vars.len());
     let mut has_initial = false;
     let mut init_vals: Vec<f64> = vec![0.0; vars.len()];
     for (i, v) in vars.iter().enumerate() {
+        let coef = obj_by_id[v.id.index()];
         let bounds = v.lb..=v.ub;
-        let coef = obj_coeffs[v.id.index()];
         let col = if v.domain.is_integer() {
             pb.add_integer_column(coef, bounds)
         } else {
@@ -81,49 +127,58 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         .map(|c| extract_linear(arena_ref, c.lhs).ok_or(SolverError::Nonlinear))
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (c, t) in constraints.iter().zip(con_terms) {
+    for (c, t) in constraints.iter().zip(&con_terms) {
         let lower = c.lower - t.constant;
         let upper = c.upper - t.constant;
         let factors = t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co));
         pb.add_row(lower..=upper, factors);
     }
-
-    // The arena / vars / constraints borrows are released before we move into
-    // HiGHS land, `pb` already owns the matrix data.
-    drop(arena);
-    drop(vars);
     let num_constraints = constraints.len();
-    drop(constraints);
 
-    let sense = match objective.sense {
-        ObjectiveSense::Minimize => HighsSense::Minimise,
-        ObjectiveSense::Maximize => HighsSense::Maximise,
-    };
+    Ok((
+        Prob { pb, sense, hessian_cols, has_hessian, has_initial, init_vals },
+        Meta { cols, obj_constant, num_constraints },
+    ))
+}
 
-    let started = Instant::now();
-    let mut hmodel = pb
-        .try_optimise(sense)
+/// Turn a [`Prob`] into a live, configured-but-unsolved HiGHS model: upload the
+/// Hessian (QP), apply the warm-start values, and set the options.
+///
+/// # Errors
+///
+/// Returns a [`SolverError::Backend`] if HiGHS rejects the problem, Hessian,
+/// warm-start, or an option.
+pub(crate) fn make_live(prob: Prob, opts: &HighsOptions) -> Result<HighsModel, SolverError> {
+    let mut hmodel = prob
+        .pb
+        .try_optimise(prob.sense)
         .map_err(|e| SolverError::Backend(format!("HiGHS model setup failed: {e:?}")))?;
-    if has_hessian {
+    if prob.has_hessian {
         // QP: pass Q for the `c'x + 0.5 x'Q x` objective. Lower triangle only.
         hmodel
             .try_pass_hessian(
                 HessianFormat::Triangular,
-                hessian_cols.iter().map(|col| col.iter().copied()),
+                prob.hessian_cols.iter().map(|col| col.iter().copied()),
             )
             .map_err(|e| SolverError::Backend(format!("HiGHS Hessian upload failed: {e}")))?;
     }
-    if has_initial {
+    if prob.has_initial {
         hmodel
-            .try_set_solution(Some(&init_vals), None, None, None)
+            .try_set_solution(Some(&prob.init_vals), None, None, None)
             .map_err(|e| SolverError::Backend(format!("HiGHS initial solution failed: {e:?}")))?;
     }
     apply_options(&mut hmodel, opts)?;
-    let solved = hmodel
-        .try_solve()
-        .map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
-    let elapsed = started.elapsed();
+    Ok(hmodel)
+}
 
+/// Map a solved HiGHS model into the generic [`SolverResult`], adding `obj_constant`
+/// back onto HiGHS' objective value.
+pub(crate) fn extract_result(
+    solved: &highs::SolvedModel,
+    obj_constant: f64,
+    num_constraints: usize,
+    elapsed: Duration,
+) -> SolverResult {
     let termination = map_status(solved.status());
     let has_point = solved.primal_solution_status() == HighsSolutionStatus::Feasible;
     let solution = solved.get_solution();
@@ -147,7 +202,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let raw_gap = solved.mip_gap();
     let gap = raw_gap.is_finite().then_some(raw_gap);
     let best_bound = solved.double_info_value(c"mip_dual_bound").ok().filter(|b| b.is_finite());
-    Ok(SolverResult {
+    SolverResult {
         termination,
         primal_status,
         solutions,
@@ -156,10 +211,17 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         best_bound,
         gap,
         solve_time: elapsed,
-        iterations: total_iterations(&solved),
+        iterations: total_iterations(solved),
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
-    })
+    }
+}
+
+fn sense_of(sense: ObjectiveSense) -> HighsSense {
+    match sense {
+        ObjectiveSense::Minimize => HighsSense::Minimise,
+        ObjectiveSense::Maximize => HighsSense::Maximise,
+    }
 }
 
 /// HiGHS supports semicontinuous/semi-integer variables, but the `highs` crate

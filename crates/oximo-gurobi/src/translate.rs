@@ -13,7 +13,7 @@ use crate::GurobiOptions;
 use crate::nonlinear::{LoweredExpr, LoweringCtx, lower};
 use crate::options::apply as apply_options;
 
-fn map_grb_err(e: grb::Error) -> SolverError {
+pub(crate) fn map_grb_err(e: grb::Error) -> SolverError {
     SolverError::Backend(e.to_string())
 }
 
@@ -31,16 +31,44 @@ fn map_grb_err(e: grb::Error) -> SolverError {
 /// Panics if model variable or constraint indices overflow `u32`.
 pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
+    let env = default_env()?;
+    let mut built = build(model, opts, &env)?;
+    run_and_collect(&mut built, kind)
+}
+
+/// Create the default Gurobi [`Env`].
+pub(crate) fn default_env() -> Result<Env, SolverError> {
+    Env::new("").map_err(|e| SolverError::Backend(format!("Gurobi env: {e}")))
+}
+
+/// A built Gurobi model plus the handles needed to read its solution and to drive
+/// incremental re-solves.
+pub(crate) struct Built {
+    pub model: grb::Model,
+    pub vars: Vec<grb::Var>,
+    pub constrs: Vec<GrbRow>,
+    pub obj_constant: f64,
+    pub has_semi: bool,
+}
+
+/// Translate `model` into a configured-but-unsolved Gurobi model.
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] if the model contains nonlinear expressions Gurobi
+/// cannot represent or Gurobi reports an error during setup.
+pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
+    let kind = model.kind();
     let nonlinear_kind =
         matches!(kind, ModelKind::QP | ModelKind::MIQP | ModelKind::NLP | ModelKind::MINLP);
 
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
-    let objective = model.try_objective().map_err(SolverError::Core)?;
+    let objective = model.objective();
+    let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
-    let env = Env::new("").map_err(|e| SolverError::Backend(format!("Gurobi env: {e}")))?;
-    let mut grb_model = grb::Model::with_env("oximo", &env).map_err(map_grb_err)?;
+    let mut grb_model = grb::Model::with_env("oximo", env).map_err(map_grb_err)?;
 
     let gurobi_vars = add_variables(&mut grb_model, &vars)?;
 
@@ -50,14 +78,12 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
     let gurobi_constrs =
         add_constraints(&arena, &constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
 
-    let obj_constant = set_objective(
-        &arena,
-        objective.expr,
-        objective.sense,
-        &mut grb_model,
-        &gurobi_vars,
-        &mut aux_counter,
-    )?;
+    let obj_constant = match objective.as_ref() {
+        Some(o) => {
+            set_objective(&arena, o.expr, o.sense, &mut grb_model, &gurobi_vars, &mut aux_counter)?
+        }
+        None => 0.0,
+    };
 
     apply_options(&mut grb_model, opts).map_err(map_grb_err)?;
     if nonlinear_kind {
@@ -69,19 +95,38 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
         }
     }
 
+    Ok(Built {
+        model: grb_model,
+        vars: gurobi_vars,
+        constrs: gurobi_constrs,
+        obj_constant,
+        has_semi,
+    })
+}
+
+/// Optimize a built model and assemble the generic [`SolverResult`]. Shared by the
+/// one-shot [`solve`] and the persistent handle's re-solve.
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] if Gurobi reports an error during optimization.
+pub(crate) fn run_and_collect(
+    built: &mut Built,
+    kind: ModelKind,
+) -> Result<SolverResult, SolverError> {
     let started = Instant::now();
-    grb_model.optimize().map_err(map_grb_err)?;
+    built.model.optimize().map_err(map_grb_err)?;
     let elapsed = started.elapsed();
 
-    let termination = map_status(&grb_model)?;
+    let termination = map_status(&built.model)?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let iterations = grb_model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
+    let iterations = built.model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
     let (solutions, reduced_costs, dual) =
-        collect_solution(kind, &mut grb_model, &gurobi_vars, &gurobi_constrs, obj_constant);
+        collect_solution(kind, &mut built.model, &built.vars, &built.constrs, built.obj_constant);
 
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
-    let best_bound = grb_model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
-    let gap = grb_model.get_attr(attr::MIPGap).ok().filter(|g| g.is_finite());
+    let best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
+    let gap = built.model.get_attr(attr::MIPGap).ok().filter(|g| g.is_finite());
 
     Ok(SolverResult {
         termination,
@@ -130,7 +175,7 @@ fn add_variables(
 
 /// Gurobi's handle for an added constraint, kept so its dual can be queried
 /// after the solve (`Pi` for linear rows, `QCPi` for quadratic rows).
-enum GrbRow {
+pub(crate) enum GrbRow {
     Lin(grb::Constr),
     Quad(grb::QConstr),
 }
