@@ -9,8 +9,8 @@ use std::{fs, io};
 static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense, VarId,
-    Variable,
+    Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense,
+    SocConstraint, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
@@ -44,6 +44,7 @@ pub fn solve(
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
+    let socs = model.soc_constraints();
     let objective = model.try_objective().map_err(SolverError::Core)?;
     let sense = objective.sense;
 
@@ -59,6 +60,7 @@ pub fn solve(
         &arena,
         &vars,
         &constraints,
+        &socs,
         &objective,
         sense_kw,
         opts,
@@ -105,6 +107,7 @@ pub fn solve(
     drop(arena);
     drop(vars);
     drop(constraints);
+    drop(socs);
 
     // - Write .gms file
     let gms_path = tmp_dir.join("model.gms");
@@ -509,6 +512,7 @@ fn build_model_section(
     arena: &ExprArena,
     vars: &[Variable],
     constraints: &[Constraint],
+    socs: &[SocConstraint],
     objective: &Objective,
     sense_kw: &str,
     opts: &GamsOptions,
@@ -519,7 +523,7 @@ fn build_model_section(
     write_preamble(gms);
     write_var_declarations(gms, vars);
     write_bounds_and_initials(gms, vars);
-    write_equations(gms, arena, constraints, objective);
+    write_equations(gms, arena, constraints, socs, objective);
     write_options(gms, opts, solve_type);
     write_model_and_solve(gms, solve_type, sense_kw, solver_opt.is_some());
 
@@ -530,8 +534,8 @@ pub(crate) fn gams_solve_type(kind: ModelKind) -> &'static str {
     match kind {
         ModelKind::LP => "LP",
         ModelKind::MILP => "MIP",
-        ModelKind::QP => "QCP",
-        ModelKind::MIQP => "MIQCP",
+        ModelKind::QP | ModelKind::QCP | ModelKind::SOCP => "QCP",
+        ModelKind::MIQP | ModelKind::MIQCP | ModelKind::MISOCP => "MIQCP",
         ModelKind::NLP => "NLP",
         ModelKind::MINLP => "MINLP",
     }
@@ -665,6 +669,7 @@ fn write_equations(
     gms: &mut String,
     arena: &ExprArena,
     constraints: &[Constraint],
+    socs: &[SocConstraint],
     objective: &Objective,
 ) {
     write!(gms, "Equations\n    eq_obj").unwrap();
@@ -674,6 +679,9 @@ fn write_equations(
         } else {
             write!(gms, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
         }
+    }
+    for i in 0..socs.len() {
+        write!(gms, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
     }
     writeln!(gms, ";").unwrap();
     writeln!(gms).unwrap();
@@ -725,7 +733,36 @@ fn write_equations(
             }
         }
     }
+    write_soc_equations(gms, arena, socs);
     writeln!(gms).unwrap();
+}
+
+// TODO: Report SOC duals
+
+/// Emit each explicit SOC constraint `||terms||_2 <= bound` as the quadratic
+/// row `sqr(term_1) + ... =l= sqr(bound)` plus the sign row `bound =g= 0`
+/// (squaring loses the sign of the bound side).
+fn write_soc_equations(gms: &mut String, arena: &ExprArena, socs: &[SocConstraint]) {
+    for (i, s) in socs.iter().enumerate() {
+        write!(gms, "eq_soc{i}.. ").unwrap();
+        for (k, &term) in s.terms.iter().enumerate() {
+            if k > 0 {
+                write!(gms, " +").unwrap();
+            }
+            let t = extract_linear(arena, term).expect("SOC members are validated affine");
+            write!(gms, " sqr(").unwrap();
+            write_linear(gms, &t, true);
+            write!(gms, " )").unwrap();
+        }
+        let b = extract_linear(arena, s.bound).expect("SOC bound is validated affine");
+        write!(gms, " =l= sqr(").unwrap();
+        write_linear(gms, &b, true);
+        writeln!(gms, " );").unwrap();
+
+        write!(gms, "eq_soc{i}_sign..").unwrap();
+        write_linear(gms, &b, true);
+        writeln!(gms, " =g= 0;").unwrap();
+    }
 }
 
 fn write_model_and_solve(gms: &mut String, solve_type: &str, sense_kw: &str, has_opt: bool) {
@@ -939,6 +976,7 @@ mod tests {
         let arena = model.arena();
         let vars = model.variables();
         let constraints = model.constraints();
+        let socs = model.soc_constraints();
         let objective = model.try_objective().expect("objective set");
         let sense_kw = match objective.sense {
             ObjectiveSense::Minimize => "minimizing",
@@ -951,6 +989,7 @@ mod tests {
             &arena,
             &vars,
             &constraints,
+            &socs,
             &objective,
             sense_kw,
             opts,
@@ -1044,6 +1083,53 @@ mod tests {
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using MINLP maximizing v_obj;"), "got:\n{gms}");
         assert!(gms.contains("log("), "expected log(...) in objective:\n{gms}");
+    }
+
+    #[test]
+    fn solve_type_map_is_total_over_all_kinds() {
+        assert_eq!(gams_solve_type(ModelKind::LP), "LP");
+        assert_eq!(gams_solve_type(ModelKind::MILP), "MIP");
+        assert_eq!(gams_solve_type(ModelKind::QP), "QCP");
+        assert_eq!(gams_solve_type(ModelKind::MIQP), "MIQCP");
+        assert_eq!(gams_solve_type(ModelKind::QCP), "QCP");
+        assert_eq!(gams_solve_type(ModelKind::MIQCP), "MIQCP");
+        assert_eq!(gams_solve_type(ModelKind::SOCP), "QCP");
+        assert_eq!(gams_solve_type(ModelKind::MISOCP), "MIQCP");
+        assert_eq!(gams_solve_type(ModelKind::NLP), "NLP");
+        assert_eq!(gams_solve_type(ModelKind::MINLP), "MINLP");
+    }
+
+    #[test]
+    fn explicit_soc_emits_sqr_rows_and_sign_row() {
+        let m = Model::new("socp");
+        variable!(m, -10.0 <= x <= 10.0);
+        variable!(m, -10.0 <= y <= 10.0);
+        variable!(m, t >= 0.0);
+        m.add_soc_constraint("cone", [x, y], t);
+        objective!(m, Min, x + y);
+        assert_eq!(m.kind(), ModelKind::SOCP);
+
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("eq_soc0, eq_soc0_sign"), "declares SOC equations:\n{gms}");
+        assert!(gms.contains("eq_soc0.. "), "emits SOC row:\n{gms}");
+        assert!(gms.contains("sqr("), "uses sqr():\n{gms}");
+        assert!(gms.contains("=l= sqr("), "bound side squared:\n{gms}");
+        assert!(gms.contains("eq_soc0_sign.."), "emits sign row:\n{gms}");
+        assert!(gms.contains("=g= 0;"), "sign row nonneg:\n{gms}");
+        assert!(gms.contains("Solve oximo_m using QCP minimizing v_obj;"), "got:\n{gms}");
+    }
+
+    #[test]
+    fn subsolver_capabilities_cover_new_kinds() {
+        use crate::GamsSolver;
+        use crate::solver_options::GamsSolverConfig;
+        let cplex = GamsSolverConfig::from(GamsSolver::Cplex);
+        assert!(cplex.supports(ModelKind::QCP));
+        assert!(cplex.supports(ModelKind::SOCP), "SOCP routes through QCP");
+        assert!(cplex.supports(ModelKind::MISOCP));
+        let highs = GamsSolverConfig::from(GamsSolver::Highs);
+        assert!(!highs.supports(ModelKind::QCP), "HiGHS under GAMS is LP/MIP only");
+        assert!(!highs.supports(ModelKind::SOCP));
     }
 
     #[test]
