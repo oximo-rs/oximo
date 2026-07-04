@@ -42,8 +42,12 @@ pub struct Snapshot {
 /// # Errors
 ///
 /// Returns [`SolverError::Nonlinear`] if the objective or any constraint is not
-/// linear.
+/// linear, or [`SolverError::UnsupportedKind`] if the model carries
+/// second-order cone constraints.
 pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
+    if model.num_soc_constraints() > 0 {
+        return Err(SolverError::UnsupportedKind(model.kind()));
+    }
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
@@ -180,6 +184,19 @@ mod tests {
         variable!(m, x >= 0.0);
         objective!(m, Min, x.powi(2));
         assert!(snapshot(&m).is_err());
+    }
+
+    #[test]
+    fn soc_constraint_is_rejected() {
+        let m = Model::new("t");
+        variable!(m, x >= 0.0);
+        variable!(m, t >= 0.0);
+        m.add_soc_constraint("cone", [x], t);
+        objective!(m, Min, t);
+        assert!(matches!(
+            snapshot(&m),
+            Err(crate::status::SolverError::UnsupportedKind(ModelKind::SOCP))
+        ));
     }
 
     #[test]
