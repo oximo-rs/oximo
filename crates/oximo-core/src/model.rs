@@ -12,18 +12,35 @@ use crate::indexed::{IndexedFamily, IndexedParam, IndexedVar, build_storage};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
+use crate::soc::{SocConstraint, SocConstraintId, detect_soc};
 use crate::var::{VarBuilder, Variable};
 
 /// The kind of mathematical program a `Model` represents.
 ///
 /// This is inferred from the variables and expressions in the model, not set
-/// explicitly by the user. See [`Model::kind`] for details.
+/// explicitly by the user. See [`Model::kind`] for the exact decision ladder.
+///
+/// The `MI*` variant of each class is picked when any variable has an integer
+/// domain. The continuous classes are, from most to least general:
+///
+/// - `NLP`: some expression is nonlinear (degree > 2, transcendental, division)
+/// - `QCP`: some constraint is quadratic and not recognized as a second-order
+///   cone
+/// - `SOCP`: second-order cone constraints are present (explicit
+///   [`crate::SocConstraint`]s or SOC-shaped quadratic constraints recognized
+///   by [`crate::detect_soc`]); the objective may be linear or quadratic
+/// - `QP`: quadratic objective, linear constraints
+/// - `LP`: everything linear
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ModelKind {
     LP,
     MILP,
     QP,
     MIQP,
+    QCP,
+    MIQCP,
+    SOCP,
+    MISOCP,
     NLP,
     MINLP,
 }
@@ -45,6 +62,8 @@ pub struct Model {
     pub(crate) param_names: RefCell<FxHashMap<SmolStr, ParamId>>,
     pub(crate) constraints: RefCell<Vec<Constraint>>,
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
+    pub(crate) soc_constraints: RefCell<Vec<SocConstraint>>,
+    pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     cached_kind: Cell<Option<ModelKind>>,
     /// Monotonic counter for auto-naming anonymous constraints registered via
@@ -59,6 +78,7 @@ impl std::fmt::Debug for Model {
             .field("vars", &self.variables.borrow().len())
             .field("params", &self.parameters.borrow().len())
             .field("constraints", &self.constraints.borrow().len())
+            .field("soc_constraints", &self.soc_constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
             .finish()
     }
@@ -75,6 +95,8 @@ impl Model {
             param_names: RefCell::new(FxHashMap::default()),
             constraints: RefCell::new(Vec::new()),
             constraint_names: RefCell::new(FxHashMap::default()),
+            soc_constraints: RefCell::new(Vec::new()),
+            soc_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
             cached_kind: Cell::new(None),
             auto_seq: Cell::new(0),
@@ -175,6 +197,8 @@ impl Model {
         let v = &mut vars[id.index()];
         v.lb = value;
         v.ub = value;
+        drop(vars);
+        self.cached_kind.set(None);
     }
 
     /// Set the initial (warm-start) value of a single-variable expression.
@@ -196,6 +220,8 @@ impl Model {
         let v = &mut vars[id.index()];
         v.lb = lb;
         v.ub = ub;
+        drop(vars);
+        self.cached_kind.set(None);
     }
 
     // Parameters
@@ -531,6 +557,72 @@ impl Model {
         self.constraint_names.borrow().get(name).copied()
     }
 
+    // Second-order cone constraints
+
+    /// Register the explicit second-order cone constraint
+    /// `||terms||_2 <= bound`.
+    ///
+    /// Every member of `terms` and the `bound` must be affine; the bound is
+    /// additionally constrained to be nonnegative by the cone itself, so
+    /// backends emit a `bound >= 0` side condition where needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a SOC constraint with the same name is already registered, if
+    /// `terms` is empty, if any term or the bound is not affine, or if the
+    /// count exceeds `u32::MAX`.
+    pub fn add_soc_constraint<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        terms: impl IntoIterator<Item = Expr<'a>>,
+        bound: Expr<'a>,
+    ) -> SocConstraintId {
+        let name = name.into();
+        let arena = self.arena.borrow();
+        let terms: Vec<ExprId> = terms
+            .into_iter()
+            .map(|e| {
+                assert!(
+                    classify(&arena, e.id) == ExprClass::Linear,
+                    "SOC constraint {name:?} has a non-affine term"
+                );
+                e.id
+            })
+            .collect();
+        assert!(!terms.is_empty(), "SOC constraint {name:?} has no terms");
+        assert!(
+            classify(&arena, bound.id) == ExprClass::Linear,
+            "SOC constraint {name:?} has a non-affine bound"
+        );
+        drop(arena);
+
+        let mut by_name = self.soc_names.borrow_mut();
+        assert!(!by_name.contains_key(&name), "SOC constraint name {name:?} already registered");
+        let mut all = self.soc_constraints.borrow_mut();
+        let id = SocConstraintId(u32::try_from(all.len()).expect("SOC constraint count overflow"));
+        all.push(SocConstraint { name: name.clone(), terms, bound: bound.id, active: true });
+        by_name.insert(name, id);
+        self.cached_kind.set(None);
+        id
+    }
+
+    pub fn soc_constraints(&self) -> Ref<'_, Vec<SocConstraint>> {
+        self.soc_constraints.borrow()
+    }
+
+    pub fn num_soc_constraints(&self) -> usize {
+        self.soc_constraints.borrow().len()
+    }
+
+    pub fn soc_constraint_id(&self, name: &str) -> Option<SocConstraintId> {
+        self.soc_names.borrow().get(name).copied()
+    }
+
+    /// Whether the model carries any explicit second-order cone constraints.
+    pub fn has_cones(&self) -> bool {
+        !self.soc_constraints.borrow().is_empty()
+    }
+
     // Objective
 
     /// Macro-facing entry point backing `objective!(m, Min, ..)`. Not part of the
@@ -570,33 +662,64 @@ impl Model {
     /// Infer the [`ModelKind`] from current variables and expressions.
     /// Result is cached and invalidated whenever variables, constraints, or the
     /// objective change.
+    ///
+    /// The decision ladder, top-down (any integer variable picks the `MI*`
+    /// column):
+    ///
+    /// 1. any nonlinear expression (objective or constraint) -> `NLP`
+    /// 2. any quadratic constraint not recognized as SOC (see
+    ///    [`crate::detect_soc`]) -> `QCP`
+    /// 3. cones present (explicit or detected) -> `SOCP`
+    /// 4. quadratic objective -> `QP`
+    /// 5. otherwise -> `LP`
     pub fn kind(&self) -> ModelKind {
         if let Some(k) = self.cached_kind.get() {
             return k;
         }
         let arena = self.arena.borrow();
-        let has_int = self.variables.borrow().iter().any(|v| v.domain.is_integer());
+        let vars = self.variables.borrow();
+        let has_int = vars.iter().any(|v| v.domain.is_integer());
+        let obj_class = self
+            .objective
+            .borrow()
+            .as_ref()
+            .map_or(ExprClass::Linear, |o| classify(&arena, o.expr));
 
-        // Highest expression class across the objective and every constraint
-        // determines the model class
-        let mut class = ExprClass::Linear;
-        if let Some(o) = self.objective.borrow().as_ref() {
-            class = class.max(classify(&arena, o.expr));
-        }
-        for c in self.constraints.borrow().iter() {
-            if class == ExprClass::Nonlinear {
-                break;
+        let mut any_nonlinear = obj_class == ExprClass::Nonlinear;
+        // A quadratic constraint that is not SOC-shaped.
+        let mut plain_quad_con = false;
+        let mut detected_soc = false;
+        if !any_nonlinear {
+            for c in self.constraints.borrow().iter() {
+                match classify(&arena, c.lhs) {
+                    ExprClass::Linear => {}
+                    ExprClass::Quadratic => {
+                        if detect_soc(&arena, &vars, c).is_some() {
+                            detected_soc = true;
+                        } else {
+                            plain_quad_con = true;
+                        }
+                    }
+                    ExprClass::Nonlinear => {
+                        any_nonlinear = true;
+                        break;
+                    }
+                }
             }
-            class = class.max(classify(&arena, c.lhs));
         }
+        let has_soc = detected_soc || !self.soc_constraints.borrow().is_empty();
 
-        let k = match (has_int, class) {
-            (false, ExprClass::Linear) => ModelKind::LP,
-            (true, ExprClass::Linear) => ModelKind::MILP,
-            (false, ExprClass::Quadratic) => ModelKind::QP,
-            (true, ExprClass::Quadratic) => ModelKind::MIQP,
-            (false, ExprClass::Nonlinear) => ModelKind::NLP,
-            (true, ExprClass::Nonlinear) => ModelKind::MINLP,
+        let pick = |cont, int| if has_int { int } else { cont };
+        let k = if any_nonlinear {
+            pick(ModelKind::NLP, ModelKind::MINLP)
+        } else if plain_quad_con {
+            pick(ModelKind::QCP, ModelKind::MIQCP)
+        } else if has_soc {
+            pick(ModelKind::SOCP, ModelKind::MISOCP)
+        } else if obj_class == ExprClass::Quadratic {
+            pick(ModelKind::QP, ModelKind::MIQP)
+        } else {
+            pick(ModelKind::LP, ModelKind::MILP)
         };
         self.cached_kind.set(Some(k));
         k

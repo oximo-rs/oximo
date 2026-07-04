@@ -6,6 +6,7 @@ pub use crate::model::{IndexedVarBuilder, Model, ModelKind, display_index_key};
 pub use crate::objective::{Objective, ObjectiveSense};
 pub use crate::param::Parameter;
 pub use crate::set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
+pub use crate::soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
 pub use crate::sum::SumDomain;
 pub use crate::var::{VarBuilder, Variable};
 pub use oximo_expr::{Expr, ExprId, ParamId, VarId, dot};
