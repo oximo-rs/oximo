@@ -28,6 +28,28 @@ fn explicit_socp_min_linear_over_disk() {
 }
 
 #[test]
+fn explicit_soc_dual_matches_norm_form_multiplier() {
+    // KKT gives z0 = ||grad obj|| = sqrt(2)
+    let m = Model::new("socp_dual");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= y <= 10.0);
+    variable!(m, t >= 0.0);
+    m.fix(t, 1.0);
+    let disk = m.add_soc_constraint("disk", [x, y], t);
+    objective!(m, Min, x + y);
+
+    let opts = GurobiOptions::default().qcp_dual(1);
+    let r = Gurobi.solve(&m, &opts).expect("solve");
+    assert!(r.has_solution());
+    let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
+    assert!(close(z0, std::f64::consts::SQRT_2, 1e-4), "z0 = {z0}");
+
+    // Without QCPDual=1 Gurobi computes no QCP duals; the map stays empty.
+    let r = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve");
+    assert!(r.soc_dual.is_empty());
+}
+
+#[test]
 fn detected_socp_hypotenuse() {
     let m = Model::new("socp_detected");
     variable!(m, x);

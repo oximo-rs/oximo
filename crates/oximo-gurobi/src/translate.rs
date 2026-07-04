@@ -4,7 +4,7 @@ use grb::expr::{LinExpr, QuadExpr};
 use grb::prelude::*;
 use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
-    VarId, Variable,
+    SocConstraintId, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, extract_linear};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
@@ -48,6 +48,7 @@ pub(crate) struct Built {
     pub model: grb::Model,
     pub vars: Vec<grb::Var>,
     pub constrs: Vec<GrbRow>,
+    pub soc_rows: Vec<(grb::QConstr, LinearTerms)>,
     pub obj_constant: f64,
     pub has_semi: bool,
 }
@@ -86,7 +87,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let mut aux_counter = 0_u32;
     let gurobi_constrs =
         add_constraints(&arena, &constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
-    add_soc_rows(&arena, &socs, &mut grb_model, &gurobi_vars)?;
+    let soc_rows = add_soc_rows(&arena, &socs, &mut grb_model, &gurobi_vars)?;
 
     let obj_constant = match objective.as_ref() {
         Some(o) => {
@@ -109,6 +110,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         model: grb_model,
         vars: gurobi_vars,
         constrs: gurobi_constrs,
+        soc_rows,
         obj_constant,
         has_semi,
     })
@@ -131,8 +133,14 @@ pub(crate) fn run_and_collect(
     let termination = map_status(&built.model)?;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = built.model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
-    let (solutions, reduced_costs, dual) =
-        collect_solution(kind, &mut built.model, &built.vars, &built.constrs, built.obj_constant);
+    let (solutions, reduced_costs, dual, soc_dual) = collect_solution(
+        kind,
+        &mut built.model,
+        &built.vars,
+        &built.constrs,
+        &built.soc_rows,
+        built.obj_constant,
+    );
 
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
     let best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
@@ -143,6 +151,7 @@ pub(crate) fn run_and_collect(
         primal_status,
         solutions,
         dual,
+        soc_dual,
         reduced_costs,
         best_bound,
         gap,
@@ -256,17 +265,20 @@ fn add_constraints(
     Ok(gurobi_constrs)
 }
 
-// TODO: Report SOC duals
-
 /// Lower each explicit SOC constraint `||terms||_2 <= bound` to the quadratic
 /// row `sum(term_i^2) - bound^2 <= 0` plus the linear side condition
 /// `bound >= 0`.
+///
+/// Returns each cone's quadratic-row handle plus its affine bound side, in
+/// `SocConstraintId` order, so `collect_solution` can rescale the squared-form
+/// `QCPi` multiplier back to the norm form.
 fn add_soc_rows(
     arena: &ExprArena,
     socs: &[SocConstraint],
     grb_model: &mut grb::Model,
     gurobi_vars: &[grb::Var],
-) -> Result<(), SolverError> {
+) -> Result<Vec<(grb::QConstr, LinearTerms)>, SolverError> {
+    let mut rows = Vec::with_capacity(socs.len());
     for (i, s) in socs.iter().enumerate() {
         let mut q = QuadExpr::new();
         for &term in &s.terms {
@@ -275,15 +287,16 @@ fn add_soc_rows(
         }
         let b = extract_linear(arena, s.bound).ok_or(SolverError::Nonlinear)?;
         add_squared_affine(&mut q, &b, -1.0, gurobi_vars);
-        grb_model.add_qconstr(&format!("soc{i}"), c!(q <= 0.0)).map_err(map_grb_err)?;
+        let qrow = grb_model.add_qconstr(&format!("soc{i}"), c!(q <= 0.0)).map_err(map_grb_err)?;
 
         let mut e = LinExpr::new();
         for &(v, co) in &b.coeffs {
             e.add_term(co, gurobi_vars[v.index()]);
         }
         grb_model.add_constr(&format!("soc{i}_sign"), c!(e >= -b.constant)).map_err(map_grb_err)?;
+        rows.push((qrow, b));
     }
-    Ok(())
+    Ok(rows)
 }
 
 /// Expand `sign * (a'x + c)^2` into `q`.
@@ -376,27 +389,38 @@ fn set_objective(
     Ok(0.0)
 }
 
-/// Build `(solutions, reduced_costs, dual)` from a solved Gurobi model.
+/// Build `(solutions, reduced_costs, dual, soc_dual)` from a solved Gurobi
+/// model.
 ///
 /// `solutions` holds every point in Gurobi's solution pool, best first (index 0
 /// is the incumbent). The pool is populated automatically during a MIP solve,
 /// set `PoolSearchMode`/`PoolSolutions` (via [`crate::GurobiOptions`]) to force
 /// Gurobi to enumerate alternative optima. Duals and reduced costs are returned
 /// for continuous models (`LP` and `QP`). For quadratically constrained models
-/// Gurobi computes duals only with `QCPDual=1`.
+/// (`QCP`/`SOCP`, including the lowered SOC rows) Gurobi computes duals only
+/// with `QCPDual=1`.
+/// `(solutions, reduced_costs, dual, soc_dual)` bundle read from a solved model.
+type Collected = (
+    Vec<SolutionPoint>,
+    FxHashMap<VarId, f64>,
+    FxHashMap<ConstraintId, f64>,
+    FxHashMap<SocConstraintId, f64>,
+);
+
 fn collect_solution(
     kind: ModelKind,
     model: &mut grb::Model,
     vars: &[grb::Var],
     constrs: &[GrbRow],
+    soc_rows: &[(grb::QConstr, LinearTerms)],
     obj_constant: f64,
-) -> (Vec<SolutionPoint>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
+) -> Collected {
     // A primal point exists only when Gurobi actually stored one. `SolCount` is
     // the number of available solutions and it stays `> 0` for an incumbent
     // kept at a time/iteration/node limit.
     let sol_count = model.get_attr(attr::SolCount).unwrap_or(0);
     if sol_count <= 0 {
-        return (Vec::new(), FxHashMap::default(), FxHashMap::default());
+        return (Vec::new(), FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
     }
 
     let solutions = collect_pool(model, vars, obj_constant, sol_count);
@@ -406,7 +430,7 @@ fn collect_solution(
     // LP/QP always have duals, QCP/SOCP rows only when the user opted into
     // `QCPDual=1`.
     if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP) {
-        return (solutions, FxHashMap::default(), FxHashMap::default());
+        return (solutions, FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
     }
 
     let reduced_costs = model
@@ -425,7 +449,24 @@ fn collect_solution(
         }
     }
 
-    (solutions, reduced_costs, dual)
+    // Convert the squared-form multiplier back to the norm-form
+    // bound multiplier `z0 = 2 * bound_value * |QCPi|`.
+    // Available only under `QCPDual=1`.
+    let mut soc_dual = FxHashMap::default();
+    let primal = &solutions[0].primal;
+    for (i, (qrow, bound)) in soc_rows.iter().enumerate() {
+        if let Ok(pi) = model.get_obj_attr(attr::QCPi, qrow) {
+            let b_val = bound.constant
+                + bound
+                    .coeffs
+                    .iter()
+                    .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
+                    .sum::<f64>();
+            soc_dual.insert(SocConstraintId(u32::try_from(i).unwrap()), 2.0 * b_val * pi.abs());
+        }
+    }
+
+    (solutions, reduced_costs, dual, soc_dual)
 }
 
 /// Collect the `n` pooled primal points, best first.
