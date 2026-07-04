@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "HiGHS LP/MILP backend for oximo"
+description = "HiGHS LP/MILP/QP backend for oximo"
 readme = "README.md"
 
 [dependencies]
