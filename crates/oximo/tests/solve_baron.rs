@@ -80,3 +80,26 @@ fn baron_milp_duals_at_best_point() {
     assert!(result.dual_of(cap).is_some(), "dual missing for cap");
     assert!(!result.reduced_costs.is_empty(), "reduced costs missing");
 }
+
+#[test]
+#[allow(clippy::many_single_char_names)]
+fn baron_soc_dual_matches_norm_form_multiplier() {
+    // min x + y  s.t.  ||(x, y)||_2 <= 1 (explicit SOC, lowered to squared
+    // rows). KKT: z0 = ||grad obj|| = sqrt(2), the soc0 row's price is
+    // rescaled by 2 * bound_value.
+    let m = Model::new("socp_dual");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= y <= 10.0);
+    variable!(m, t >= 0.0);
+    m.fix(t, 1.0);
+    let disk = m.add_soc_constraint("disk", [x, y], t);
+    objective!(m, Min, x + y);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let opts = BaronOptions::default().want_dual(true).time_limit(Duration::from_secs(30));
+    let r = Baron::new().solve(&m, &opts).unwrap();
+    assert!(r.has_solution());
+    assert!((r.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
+    let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
+    assert!((z0 - std::f64::consts::SQRT_2).abs() < 1e-3, "z0 = {z0}");
+}

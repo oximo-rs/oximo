@@ -253,3 +253,25 @@ fn gams_reads_cplex_solution_pool() {
         prev = obj;
     }
 }
+
+#[test]
+#[allow(clippy::many_single_char_names)]
+fn gams_soc_dual_matches_norm_form_multiplier() {
+    // min x + y  s.t.  ||(x, y)||_2 <= 1 (explicit SOC, lowered to sqr rows).
+    // KKT: z0 = ||grad obj|| = sqrt(2); the eq_soc0 marginal is rescaled by
+    // 2 * bound_value.
+    let m = Model::new("socp_dual");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= y <= 10.0);
+    variable!(m, t >= 0.0);
+    m.fix(t, 1.0);
+    let disk = m.add_soc_constraint("disk", [x, y], t);
+    objective!(m, Min, x + y);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let r = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
+    assert!(r.has_solution());
+    assert!((r.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
+    let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
+    assert!((z0 - std::f64::consts::SQRT_2).abs() < 1e-4, "z0 = {z0}");
+}
