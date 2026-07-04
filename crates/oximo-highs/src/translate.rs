@@ -207,6 +207,7 @@ pub(crate) fn extract_result(
         primal_status,
         solutions,
         dual,
+        soc_dual: FxHashMap::default(),
         reduced_costs,
         best_bound,
         gap,
