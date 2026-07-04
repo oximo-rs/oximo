@@ -72,20 +72,14 @@ impl HighsPersistent {
         self.state = Some(State { live: Some(live), meta, snap });
         Ok(())
     }
-}
 
-impl Solver for HighsPersistent {
-    type Options = HighsOptions;
-
-    fn name(&self) -> &str {
-        NAME
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
-    }
-
-    fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+    /// Re-read the model, update the resident instance in place (or rebuild), and
+    /// solve.
+    fn solve_resident(
+        &mut self,
+        model: &Model,
+        opts: &HighsOptions,
+    ) -> Result<SolverResult, SolverError> {
         // The fast path is sound only for linear models (the snapshot extracts a
         // linear objective) once a resident model exists. A quadratic objective or
         // any structural change falls back to a full rebuild.
@@ -123,18 +117,36 @@ impl Solver for HighsPersistent {
         let st = self.state.as_mut().expect("state present before solve");
         let live = st.live.take().expect("live model present before solve");
         let started = Instant::now();
-        let solved = match live.try_solve() {
-            Ok(s) => s,
-            Err(e) => {
-                self.state = None;
-                return Err(SolverError::Backend(format!("HiGHS solve failed: {e:?}")));
-            }
-        };
+        let solved = live
+            .try_solve()
+            .map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
         let elapsed = started.elapsed();
         let result =
             extract_result(&solved, st.meta.obj_constant, st.meta.num_constraints, elapsed);
         st.live = Some(HighsModel::from(solved));
         Ok(result)
+    }
+}
+
+impl Solver for HighsPersistent {
+    type Options = HighsOptions;
+
+    fn name(&self) -> &str {
+        NAME
+    }
+
+    fn supports(&self, kind: ModelKind) -> bool {
+        matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+    }
+
+    fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+        match self.solve_resident(model, opts) {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                self.state = None;
+                Err(e)
+            }
+        }
     }
 }
 
