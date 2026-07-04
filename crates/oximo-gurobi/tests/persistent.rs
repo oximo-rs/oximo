@@ -82,6 +82,47 @@ fn persistent_feasibility_no_objective() {
 }
 
 #[test]
+fn persistent_reset_rebuilds_cleanly() {
+    let m = Model::new("reset");
+    variable!(m, x1 >= 0.0);
+    variable!(m, x2 >= 0.0);
+    constraint!(m, labor, 2.0 * x1 + x2 <= 100.0);
+    constraint!(m, material, x1 + 3.0 * x2 <= 90.0);
+    objective!(m, Max, 3.0 * x1 + 5.0 * x2);
+
+    let mut solver = Gurobi.persistent();
+    solver.solve(&m, &GurobiOptions::default()).expect("first solve");
+    solver.reset();
+    let s = solver.solve(&m, &GurobiOptions::default()).expect("solve after reset");
+    let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
+    assert_eq!(s.termination, TerminationStatus::Optimal);
+    assert!((s.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x1).unwrap() - cold.value_of(x1).unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x2).unwrap() - cold.value_of(x2).unwrap()).abs() < 1e-6);
+}
+
+#[test]
+fn persistent_rebuilds_on_new_constraint() {
+    let m = Model::new("grow");
+    variable!(m, x1 >= 0.0);
+    variable!(m, x2 >= 0.0);
+    constraint!(m, labor, 2.0 * x1 + x2 <= 100.0);
+    objective!(m, Max, 3.0 * x1 + 5.0 * x2);
+
+    let mut solver = Gurobi.persistent();
+    let first = solver.solve(&m, &GurobiOptions::default()).expect("first solve");
+    assert_eq!(first.termination, TerminationStatus::Optimal);
+
+    constraint!(m, material, x1 + 3.0 * x2 <= 90.0);
+    let s = solver.solve(&m, &GurobiOptions::default()).expect("solve after new row");
+    let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
+    assert_eq!(s.termination, TerminationStatus::Optimal);
+    assert!((s.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x1).unwrap() - cold.value_of(x1).unwrap()).abs() < 1e-6);
+    assert!((s.value_of(x2).unwrap() - cold.value_of(x2).unwrap()).abs() < 1e-6);
+}
+
+#[test]
 fn persistent_milp_objective_sweep() {
     let m = Model::new("knap");
     param!(m, v0 = 1.0);
