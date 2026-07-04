@@ -31,8 +31,14 @@ pub(crate) fn map_grb_err(e: grb::Error) -> SolverError {
 /// Panics if model variable or constraint indices overflow `u32`.
 pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
-    let mut built = build(model, opts)?;
+    let env = default_env()?;
+    let mut built = build(model, opts, &env)?;
     run_and_collect(&mut built, kind)
+}
+
+/// Create the default Gurobi [`Env`].
+pub(crate) fn default_env() -> Result<Env, SolverError> {
+    Env::new("").map_err(|e| SolverError::Backend(format!("Gurobi env: {e}")))
 }
 
 /// A built Gurobi model plus the handles needed to read its solution and to drive
@@ -51,7 +57,7 @@ pub(crate) struct Built {
 ///
 /// Returns a [`SolverError`] if the model contains nonlinear expressions Gurobi
 /// cannot represent or Gurobi reports an error during setup.
-pub(crate) fn build(model: &Model, opts: &GurobiOptions) -> Result<Built, SolverError> {
+pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
     let kind = model.kind();
     let nonlinear_kind =
         matches!(kind, ModelKind::QP | ModelKind::MIQP | ModelKind::NLP | ModelKind::MINLP);
@@ -62,8 +68,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions) -> Result<Built, Solver
     let objective = model.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
-    let env = Env::new("").map_err(|e| SolverError::Backend(format!("Gurobi env: {e}")))?;
-    let mut grb_model = grb::Model::with_env("oximo", &env).map_err(map_grb_err)?;
+    let mut grb_model = grb::Model::with_env("oximo", env).map_err(map_grb_err)?;
 
     let gurobi_vars = add_variables(&mut grb_model, &vars)?;
 

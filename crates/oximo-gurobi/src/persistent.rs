@@ -4,7 +4,7 @@ use oximo_solver::{Snapshot, Solver, SolverError, SolverResult, snapshot};
 
 use crate::GurobiOptions;
 use crate::options::apply as apply_options;
-use crate::translate::{Built, build, map_grb_err, run_and_collect};
+use crate::translate::{Built, build, default_env, map_grb_err, run_and_collect};
 
 /// The resident Gurobi model plus the baseline snapshot the fast path diffs against
 /// (`None` when the fast path is ineligible).
@@ -28,6 +28,9 @@ struct State {
 /// A failed `solve` leaves the handle without a resident model and the next call rebuilds.
 #[derive(Default)]
 pub struct GurobiPersistent {
+    /// Created once on the first rebuild and reused for every subsequent rebuild, so
+    /// a structural change doesn't create a fresh Gurobi environment.
+    env: Option<Env>,
     state: Option<State>,
 }
 
@@ -52,7 +55,11 @@ impl GurobiPersistent {
 
     /// Discard any resident instance and rebuild from the current model state.
     fn rebuild(&mut self, model: &Model, opts: &GurobiOptions) -> Result<(), SolverError> {
-        let built = build(model, opts)?;
+        let env = match self.env.as_ref() {
+            Some(env) => env,
+            None => self.env.insert(default_env()?),
+        };
+        let built = build(model, opts, env)?;
         // The fast path needs a linear snapshot and is unsafe for SC/SI variables
         // (whose Gurobi lower bound is the gap floor, not `Variable::lb`), so
         // those rebuild every solve.
