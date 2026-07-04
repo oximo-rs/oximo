@@ -606,6 +606,55 @@ impl Model {
         id
     }
 
+    /// A fresh unique auto-name `_soc{n}` in the SOC namespace, skipping any a
+    /// user already took. Shares `auto_seq` with [`Self::next_auto_name`]; the
+    /// prefixes differ, so the two namespaces never collide.
+    fn next_auto_soc_name(&self) -> SmolStr {
+        loop {
+            let n = self.auto_seq.get();
+            self.auto_seq.set(n + 1);
+            let candidate: SmolStr = format!("_soc{n}").into();
+            if !self.soc_names.borrow().contains_key(&candidate) {
+                break candidate;
+            }
+        }
+    }
+
+    /// Register an anonymous SOC constraint, deriving a unique name `_soc{n}`
+    /// from an internal counter. Backs the name-less form of the
+    /// `soc_constraint!` macro. Not part of the stable public API.
+    #[doc(hidden)]
+    pub fn __add_soc_constraint_auto<'a>(
+        &'a self,
+        terms: impl IntoIterator<Item = Expr<'a>>,
+        bound: Expr<'a>,
+    ) -> SocConstraintId {
+        self.add_soc_constraint(self.next_auto_soc_name(), terms, bound)
+    }
+
+    /// Macro-facing entry point backing the indexed-family form of the
+    /// `soc_constraint!` macro: one cone per key, named `{prefix}[{key}]`. The
+    /// closure returns the cone's `(terms, bound)` pair for each typed key.
+    /// Not part of the stable public API.
+    #[doc(hidden)]
+    pub fn __add_soc_constraints_over<'a, K, T, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        mut rule: F,
+    ) where
+        K: FromIndexKey,
+        T: IntoIterator<Item = Expr<'a>>,
+        F: FnMut(K) -> (T, Expr<'a>),
+    {
+        for key in set {
+            let typed = K::from_index_key(&key);
+            let (terms, bound) = rule(typed);
+            let name: SmolStr = format_index_name(name_prefix, &key).into();
+            self.add_soc_constraint(name, terms, bound);
+        }
+    }
+
     pub fn soc_constraints(&self) -> Ref<'_, Vec<SocConstraint>> {
         self.soc_constraints.borrow()
     }

@@ -11,4 +11,4 @@ pub use crate::sum::SumDomain;
 pub use crate::var::{VarBuilder, Variable};
 pub use oximo_expr::{Expr, ExprId, ParamId, VarId, dot};
 
-pub use oximo_macros::{constraint, objective, param, set, sum, variable};
+pub use oximo_macros::{constraint, objective, param, set, soc_constraint, sum, variable};
