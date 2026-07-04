@@ -136,7 +136,7 @@ impl Solver for HighsPersistent {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+        crate::supported(kind)
     }
 
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
