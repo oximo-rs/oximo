@@ -41,8 +41,8 @@ use crate::options::apply as apply_options;
 /// Panics if model variable IDs overflow `u32`.
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
     let (prob, meta) = build_problem(model)?;
-    let started = Instant::now();
     let live = make_live(prob, opts)?;
+    let started = Instant::now();
     let solved =
         live.try_solve().map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
     let elapsed = started.elapsed();
