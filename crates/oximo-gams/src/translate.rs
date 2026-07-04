@@ -10,7 +10,7 @@ static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense,
-    SocConstraint, VarId, Variable,
+    SocConstraint, SocConstraintId, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
@@ -102,7 +102,16 @@ pub fn solve(
             writeln!(gms, "Put 'D{i}=' eq_c{i}.m:0:15 /;").unwrap();
         }
     }
+    write_soc_marginal_puts(&mut gms, socs.len());
     writeln!(gms, "Putclose oximo_sol;").unwrap();
+
+    // The affine bound side of each explicit SOC constraint, kept to rescale
+    // the squared-form `eq_soc{i}` marginal back to the norm form after the
+    // solve (see `parseoximo_solution`).
+    let soc_bounds: Vec<LinearTerms> = socs
+        .iter()
+        .map(|s| extract_linear(&arena, s.bound).expect("SOC bound is validated affine"))
+        .collect();
 
     drop(arena);
     drop(vars);
@@ -175,7 +184,7 @@ pub fn solve(
     let mut result = if sol_path.exists() {
         let content = fs::read_to_string(&sol_path)
             .map_err(|e| SolverError::Backend(format!("cannot read solution file: {e}")))?;
-        let mut result = parseoximo_solution(&content, elapsed, raw_log);
+        let mut result = parseoximo_solution(&content, &soc_bounds, elapsed, raw_log);
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
@@ -257,9 +266,21 @@ fn summarize_listing(listing: &str) -> String {
     out.join("\n")
 }
 
+/// Emit `Z{i}=` PUT lines reading each lowered SOC row's marginal, mirroring
+/// the `D{i}` constraint-dual lines.
+fn write_soc_marginal_puts(gms: &mut String, n: usize) {
+    for i in 0..n {
+        writeln!(gms, "Put 'Z{i}=' eq_soc{i}.m:0:15 /;").unwrap();
+    }
+}
+
 /// Parse the PUT-generated solution file.
+///
+/// `soc_bounds` holds the affine bound side of each explicit SOC constraint
+/// (in `SocConstraintId` order), the squared-row marginal parsed is rescaled.
 fn parseoximo_solution(
     content: &str,
+    soc_bounds: &[LinearTerms],
     elapsed: std::time::Duration,
     raw_log: Option<String>,
 ) -> SolverResult {
@@ -269,6 +290,7 @@ fn parseoximo_solution(
     let mut iterations: u64 = 0;
     let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
+    let mut soc_marginals: FxHashMap<u32, f64> = FxHashMap::default();
     let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
 
     for line in content.lines() {
@@ -299,6 +321,14 @@ fn parseoximo_solution(
                     }
                 }
             }
+        } else if let Some(rest) = line.strip_prefix('Z') {
+            if let Some(eq) = rest.find('=') {
+                if let Ok(idx) = rest[..eq].parse::<u32>() {
+                    if let Some(val) = parse_gams_float(rest[eq + 1..].trim()) {
+                        soc_marginals.insert(idx, val);
+                    }
+                }
+            }
         } else if let Some(eq) = line.find('=') {
             let key = line[..eq].trim();
             if let Ok(idx) = key.parse::<u32>() {
@@ -313,6 +343,24 @@ fn parseoximo_solution(
     let termination = map_status(modelstat, solvestat.unwrap_or(0));
     let has_sol = modelstat_has_solution(modelstat);
 
+    // Rescale each lowered SOC row's marginal to the norm-form bound
+    // multiplier using the bound's value at the primal point.
+    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
+    if has_sol {
+        for (i, bound) in soc_bounds.iter().enumerate() {
+            let idx = u32::try_from(i).expect("SOC count overflow");
+            if let Some(m) = soc_marginals.get(&idx) {
+                let b_val = bound.constant
+                    + bound
+                        .coeffs
+                        .iter()
+                        .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
+                        .sum::<f64>();
+                soc_dual.insert(SocConstraintId(idx), 2.0 * b_val * m.abs());
+            }
+        }
+    }
+
     // The PUT solution file holds only the incumbent. `solve` augments this with
     // a sub-solver solution pool (if one was written) read from the run dir's GDX.
     let solutions =
@@ -321,6 +369,7 @@ fn parseoximo_solution(
     SolverResult {
         solutions,
         dual: if has_sol { dual } else { FxHashMap::default() },
+        soc_dual,
         reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
         termination,
         primal_status,
@@ -1001,9 +1050,26 @@ mod tests {
     fn parses_iterations_from_put_file() {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
-        let r = parseoximo_solution(content, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &[], std::time::Duration::ZERO, None);
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.iterations, 42);
+    }
+
+    #[test]
+    fn soc_marginal_is_rescaled_to_norm_form() {
+        let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\n0=-1.0\n1=1.5\nZ0=-0.75\n";
+        let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)], constant: 0.5 }];
+        let r = parseoximo_solution(content, &bounds, std::time::Duration::ZERO, None);
+        let z0 = r.soc_dual_of(SocConstraintId(0)).expect("SOC dual missing");
+        assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");
+    }
+
+    #[test]
+    fn put_section_reads_soc_marginals() {
+        let mut gms = String::new();
+        write_soc_marginal_puts(&mut gms, 2);
+        assert!(gms.contains("Put 'Z0=' eq_soc0.m:0:15 /;"), "{gms}");
+        assert!(gms.contains("Put 'Z1=' eq_soc1.m:0:15 /;"), "{gms}");
     }
 
     #[test]
