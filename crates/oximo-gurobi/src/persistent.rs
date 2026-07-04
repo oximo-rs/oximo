@@ -64,6 +64,35 @@ impl GurobiPersistent {
         self.state = Some(State { built, snap });
         Ok(())
     }
+
+    /// Re-read the model, update the resident instance in place (or rebuild), and
+    /// solve.
+    fn solve_resident(
+        &mut self,
+        model: &Model,
+        opts: &GurobiOptions,
+    ) -> Result<SolverResult, SolverError> {
+        let kind = model.kind();
+        let mut updated = false;
+        if matches!(kind, ModelKind::LP | ModelKind::MILP) {
+            if let Some(st) = self.state.as_mut() {
+                if let Some(base) = st.snap.as_ref() {
+                    let snap = snapshot(model)?;
+                    if snap.fingerprint == base.fingerprint {
+                        push_deltas(&mut st.built, base, &snap, opts)?;
+                        st.snap = Some(snap);
+                        updated = true;
+                    }
+                }
+            }
+        }
+        if !updated {
+            self.rebuild(model, opts)?;
+        }
+
+        let st = self.state.as_mut().expect("state present before solve");
+        run_and_collect(&mut st.built, kind)
+    }
 }
 
 impl Solver for GurobiPersistent {
@@ -86,26 +115,17 @@ impl Solver for GurobiPersistent {
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
-        let kind = model.kind();
-        let mut updated = false;
-        if matches!(kind, ModelKind::LP | ModelKind::MILP) {
-            if let Some(st) = self.state.as_mut() {
-                if let Some(base) = st.snap.as_ref() {
-                    let snap = snapshot(model)?;
-                    if snap.fingerprint == base.fingerprint {
-                        push_deltas(&mut st.built, base, &snap, opts)?;
-                        st.snap = Some(snap);
-                        updated = true;
-                    }
-                }
+        // A mid-update failure (a failed rebuild, a partial delta push, or a solve
+        // error) can leave the resident model partially modified or its snapshot
+        // stale. Drop the resident state on any error so the next solve rebuilds from
+        // a clean slate, honoring the documented contract.
+        match self.solve_resident(model, opts) {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                self.state = None;
+                Err(e)
             }
         }
-        if !updated {
-            self.rebuild(model, opts)?;
-        }
-
-        let st = self.state.as_mut().expect("state present before solve");
-        run_and_collect(&mut st.built, kind)
     }
 }
 
