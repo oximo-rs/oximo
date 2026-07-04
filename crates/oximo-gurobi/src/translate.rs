@@ -1,11 +1,12 @@
 use std::time::Instant;
 
-use grb::expr::LinExpr;
+use grb::expr::{LinExpr, QuadExpr};
 use grb::prelude::*;
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, VarId, Variable,
+    Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
+    VarId, Variable,
 };
-use oximo_expr::{ExprArena, ExprId, extract_linear};
+use oximo_expr::{ExprArena, ExprId, LinearTerms, extract_linear};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::FxHashMap;
 
@@ -59,12 +60,20 @@ pub(crate) struct Built {
 /// cannot represent or Gurobi reports an error during setup.
 pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
     let kind = model.kind();
-    let nonlinear_kind =
-        matches!(kind, ModelKind::QP | ModelKind::MIQP | ModelKind::NLP | ModelKind::MINLP);
+    let nonlinear_kind = matches!(
+        kind,
+        ModelKind::QP
+            | ModelKind::MIQP
+            | ModelKind::QCP
+            | ModelKind::MIQCP
+            | ModelKind::NLP
+            | ModelKind::MINLP
+    );
 
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
+    let socs = model.soc_constraints();
     let objective = model.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
@@ -77,6 +86,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let mut aux_counter = 0_u32;
     let gurobi_constrs =
         add_constraints(&arena, &constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
+    add_soc_rows(&arena, &socs, &mut grb_model, &gurobi_vars)?;
 
     let obj_constant = match objective.as_ref() {
         Some(o) => {
@@ -246,6 +256,52 @@ fn add_constraints(
     Ok(gurobi_constrs)
 }
 
+// TODO: Report SOC duals
+
+/// Lower each explicit SOC constraint `||terms||_2 <= bound` to the quadratic
+/// row `sum(term_i^2) - bound^2 <= 0` plus the linear side condition
+/// `bound >= 0`.
+fn add_soc_rows(
+    arena: &ExprArena,
+    socs: &[SocConstraint],
+    grb_model: &mut grb::Model,
+    gurobi_vars: &[grb::Var],
+) -> Result<(), SolverError> {
+    for (i, s) in socs.iter().enumerate() {
+        let mut q = QuadExpr::new();
+        for &term in &s.terms {
+            let t = extract_linear(arena, term).ok_or(SolverError::Nonlinear)?;
+            add_squared_affine(&mut q, &t, 1.0, gurobi_vars);
+        }
+        let b = extract_linear(arena, s.bound).ok_or(SolverError::Nonlinear)?;
+        add_squared_affine(&mut q, &b, -1.0, gurobi_vars);
+        grb_model.add_qconstr(&format!("soc{i}"), c!(q <= 0.0)).map_err(map_grb_err)?;
+
+        let mut e = LinExpr::new();
+        for &(v, co) in &b.coeffs {
+            e.add_term(co, gurobi_vars[v.index()]);
+        }
+        grb_model.add_constr(&format!("soc{i}_sign"), c!(e >= -b.constant)).map_err(map_grb_err)?;
+    }
+    Ok(())
+}
+
+/// Expand `sign * (a'x + c)^2` into `q`.
+fn add_squared_affine(q: &mut QuadExpr, t: &LinearTerms, sign: f64, gurobi_vars: &[grb::Var]) {
+    for (i, &(vi, ci)) in t.coeffs.iter().enumerate() {
+        q.add_qterm(sign * ci * ci, gurobi_vars[vi.index()], gurobi_vars[vi.index()]);
+        for &(vj, cj) in &t.coeffs[i + 1..] {
+            q.add_qterm(sign * 2.0 * ci * cj, gurobi_vars[vi.index()], gurobi_vars[vj.index()]);
+        }
+        if t.constant != 0.0 {
+            q.add_term(sign * 2.0 * ci * t.constant, gurobi_vars[vi.index()]);
+        }
+    }
+    if t.constant != 0.0 {
+        q.add_constant(sign * t.constant * t.constant);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_nonlinear_constraint(
     arena: &ExprArena,
@@ -345,9 +401,11 @@ fn collect_solution(
 
     let solutions = collect_pool(model, vars, obj_constant, sol_count);
 
-    // Skip retrieval of duals and reduced costs for any model
-    // class where Gurobi will either return zeros or refuse the attribute.
-    if !matches!(kind, ModelKind::LP | ModelKind::QP) {
+    // Skip retrieval of duals and reduced costs for integer model classes,
+    // where Gurobi refuses the attributes.
+    // LP/QP always have duals, QCP/SOCP rows only when the user opted into
+    // `QCPDual=1`.
+    if !matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP) {
         return (solutions, FxHashMap::default(), FxHashMap::default());
     }
 

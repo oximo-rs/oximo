@@ -110,15 +110,7 @@ impl Solver for GurobiPersistent {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(
-            kind,
-            ModelKind::LP
-                | ModelKind::MILP
-                | ModelKind::QP
-                | ModelKind::MIQP
-                | ModelKind::NLP
-                | ModelKind::MINLP
-        )
+        crate::supported(kind)
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
