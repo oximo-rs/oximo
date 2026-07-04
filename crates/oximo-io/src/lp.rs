@@ -31,13 +31,18 @@ use crate::error::IoError;
 /// - `Binaries` (binary vars)
 /// - `End`
 ///
-/// LP only represents linear LP/MILP. Nonlinear nodes raise [`IoError::Nonlinear`].
+/// LP only represents linear LP/MILP. Nonlinear nodes raise
+/// [`IoError::Nonlinear`], second-order cone constraints [`IoError::Conic`].
 ///
 /// # Errors
 ///
-/// Returns [`IoError`] on I/O failure, missing objective, or nonlinear constructs.
+/// Returns [`IoError`] on I/O failure, missing objective, or nonlinear/conic
+/// constructs.
 #[allow(clippy::too_many_lines)]
 pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
+    if model.num_soc_constraints() > 0 {
+        return Err(IoError::Conic);
+    }
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();

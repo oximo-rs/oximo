@@ -6,6 +6,8 @@ pub enum IoError {
     NoObjective,
     #[error("nonlinear nodes are not representable in this format")]
     Nonlinear,
+    #[error("second-order cone constraints cannot be represented in this format")]
+    Conic,
     #[error("unsupported expression node in NL writer: {0}")]
     UnsupportedNode(&'static str),
     #[error("variable domain {0} is not representable in NL")]
