@@ -14,7 +14,7 @@
 
 use std::io::Write;
 
-use oximo_core::{Constraint, Model, ObjectiveSense, Sense};
+use oximo_core::{Constraint, Model, ModelKind, ObjectiveSense, Sense};
 use oximo_expr::{LinearTerms, VarId, extract_linear};
 use rustc_hash::FxHashMap;
 
@@ -33,7 +33,9 @@ use crate::error::IoError;
 ///
 #[allow(clippy::too_many_lines)]
 pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
-    if model.num_soc_constraints() > 0 {
+    if model.num_soc_constraints() > 0
+        || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
+    {
         return Err(IoError::Conic);
     }
     let arena = model.arena();

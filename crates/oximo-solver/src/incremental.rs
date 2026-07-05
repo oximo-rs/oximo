@@ -1,6 +1,6 @@
 use std::hash::Hasher;
 
-use oximo_core::{Model, ObjectiveSense, Variable};
+use oximo_core::{Model, ModelKind, ObjectiveSense, Variable};
 use oximo_expr::{ExprArena, VarId, extract_linear};
 use rustc_hash::FxHasher;
 
@@ -42,11 +42,13 @@ pub struct Snapshot {
 /// # Errors
 ///
 /// Returns [`SolverError::Nonlinear`] if the objective or any constraint is not
-/// linear, or [`SolverError::UnsupportedKind`] if the model carries
-/// second-order cone constraints.
+/// linear, or [`SolverError::UnsupportedKind`] if the model is a second-order
+/// cone program (explicit [`oximo_core::SocConstraint`]s or SOC-shaped
+/// quadratic constraints detected by [`Model::kind`]).
 pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
-    if model.num_soc_constraints() > 0 {
-        return Err(SolverError::UnsupportedKind(model.kind()));
+    let kind = model.kind();
+    if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
+        return Err(SolverError::UnsupportedKind(kind));
     }
     let arena = model.arena();
     let vars = model.variables();
