@@ -259,8 +259,6 @@ fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
     }
 }
 
-// TODO: Report SOC duals
-
 /// Write the `EQUATIONS` block, returning the emit-order map.
 /// The `ConstraintId` behind each emitted equation, in BARON's 1-based
 /// "Constraint no." order. BARON has no two-sided equation,
