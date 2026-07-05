@@ -1,7 +1,8 @@
 # oximo-macros
 
 Internal procedural macros backing oximo's modeling surface:
-`variable!`, `constraint!`, `objective!`, `sum!`, `set!`, and `param!`.
+`variable!`, `constraint!`, `soc_constraint!`, `objective!`, `sum!`, `set!`,
+and `param!`.
 
 This crate is an implementation detail, do not depend on it directly.
 The macros are re-exported through `oximo-core` and `oximo::prelude`, which is the

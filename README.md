@@ -172,15 +172,17 @@ let sparse = Set::from_ints([0, 2, 4, 8]);
 ### Nonlinear expressions
 
 `Pow`, `Sin`, `Cos`, `Exp`, `Log`, `Abs`, and bilinear products are first-class. The
-model's kind (`LP`/`MILP`/`QP`/`MIQP`/`NLP`/`MINLP`) is inferred from the
-expressions.
+model's kind is inferred from the expressions.
 
 ```rust,ignore
 // Rosenbrock NLP
 objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
-// Quadratic constraint
+// Quadratic constraint (model kind: QCP)
 constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
+
+// Second-order cone ||(x, y)|| <= t (model kind: SOCP)
+soc_constraint!(m, cone, [x, y] <= t);
 
 // Transcendental utility (MINLP when any variable is integer/binary)
 objective!(m, Max, sum!(u[i] * (1.0 + w[i] * x[i]).log() for i in items));
@@ -198,13 +200,14 @@ pub trait Solver {
 
 ## Features
 
-| Feature  | What it adds                                                          | Default |
-|----------|-----------------------------------------------------------------------|---------|
-| `highs`  | HiGHS - LP/MILP/QP solver (bundled, no install)                       | yes     |
-| `io`     | MPS and LP file writers                                               | yes     |
-| `gurobi` | Gurobi - LP/MILP/QP/MIQP/NLP/MINLP solver (requires licensed install) | no      |
-| `gams`   | GAMS bridge - LP/MILP/QP/MIQP/NLP/MINLP depending on solver           | no      |
-| `baron`  | BARON  - LP/MILP/QP/MIQP/NLP/MINLP solver (requires licensed install) | no      |
+| Feature    | What it adds                                                 | Default |
+|------------|--------------------------------------------------------------|---------|
+| `highs`    | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
+| `io`       | MPS and LP file writers                                      | yes     |
+| `gurobi`   | Gurobi solver (requires licensed install)                    | no      |
+| `gams`     | GAMS bridge - solve type depends on the selected sub-solver  | no      |
+| `baron`    | BARON - global LP...MINLP solver (requires licensed install) | no      |
+| `clarabel` | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
 
 ### HiGHS (default)
 
@@ -220,6 +223,12 @@ let result = Highs.solve(&m, &HighsOptions::default()
     .mip_gap(0.01)
     .method(HighsMethod::Ipm))?;
 ```
+
+### Clarabel
+
+Pure-Rust conic interior-point solver, no install or license. Solves continuous
+LP, QP (convex quadratic objectives), and SOCP models. See
+[`crates/oximo-clarabel/README.md`](crates/oximo-clarabel/README.md).
 
 ### Gurobi
 
