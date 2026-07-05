@@ -25,6 +25,11 @@ pub struct Highs;
 /// and the `solver_name` stamped on every [`SolverResult`].
 pub(crate) const NAME: &str = "HiGHS";
 
+/// The model kinds HiGHS can solve: linear models and quadratic-objective QP.
+pub(crate) const fn supported(kind: ModelKind) -> bool {
+    matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+}
+
 impl Solver for Highs {
     type Options = HighsOptions;
 
@@ -33,7 +38,7 @@ impl Solver for Highs {
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+        supported(kind)
     }
 
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {

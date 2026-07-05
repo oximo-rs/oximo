@@ -18,6 +18,8 @@ io = ["dep:oximo-io"]
 gurobi = ["dep:oximo-gurobi"]
 gams = ["dep:oximo-gams"]
 baron = ["dep:oximo-baron"]
+clarabel = ["dep:oximo-clarabel"]
+clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
 
 [dependencies]
 oximo-expr.workspace = true
@@ -27,6 +29,7 @@ oximo-highs = { workspace = true, optional = true }
 oximo-gurobi = { workspace = true, optional = true }
 oximo-gams = { workspace = true, optional = true }
 oximo-baron = { workspace = true, optional = true }
+oximo-clarabel = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
 
 [lints]

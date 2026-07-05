@@ -13,6 +13,7 @@ mod index;
 mod objective;
 mod param;
 mod set;
+mod soc;
 mod sum;
 mod variable;
 
@@ -52,6 +53,15 @@ pub fn variable(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn constraint(input: TokenStream) -> TokenStream {
     constraint::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `soc_constraint!(model, [name|name = expr|name[idx]], [terms] <= bound)`,
+/// register the second-order cone constraint `||terms||_2 <= bound` (every
+/// term and the bound must be affine), an auto-named anonymous cone, or an
+/// indexed family of cones.
+#[proc_macro]
+pub fn soc_constraint(input: TokenStream) -> TokenStream {
+    soc::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// `objective!(model, Min|Max, expr)`, set the model objective and sense.

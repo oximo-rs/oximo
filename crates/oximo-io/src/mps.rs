@@ -14,7 +14,7 @@
 
 use std::io::Write;
 
-use oximo_core::{Constraint, Model, ObjectiveSense, Sense};
+use oximo_core::{Constraint, Model, ModelKind, ObjectiveSense, Sense};
 use oximo_expr::{LinearTerms, VarId, extract_linear};
 use rustc_hash::FxHashMap;
 
@@ -23,8 +23,9 @@ use crate::error::IoError;
 /// Write `model` to `out` in fixed-format MPS.
 ///
 /// MPS only represents linear LP / MILP. Nonlinear expressions in the
-/// objective or constraints raise [`IoError::Nonlinear`]. The objective row
-/// is named `OBJ`. Constraint rows take their oximo names.
+/// objective or constraints raise [`IoError::Nonlinear`], second-order cone
+/// constraints [`IoError::Conic`]. The objective row is named `OBJ`.
+/// Constraint rows take their oximo names.
 ///
 /// # Errors
 ///
@@ -32,6 +33,11 @@ use crate::error::IoError;
 ///
 #[allow(clippy::too_many_lines)]
 pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
+    if model.num_soc_constraints() > 0
+        || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
+    {
+        return Err(IoError::Conic);
+    }
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();

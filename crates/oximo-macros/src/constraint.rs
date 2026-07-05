@@ -54,7 +54,8 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
 /// Detect the computed-name form `name = EXPR` in the name slot, returning the
 /// `EXPR` tokens. The literal marker `name` keeps a bare ident a literal name.
-fn computed_name(first: &TokenStream2) -> Option<TokenStream2> {
+/// Shared with `soc_constraint!`.
+pub(crate) fn computed_name(first: &TokenStream2) -> Option<TokenStream2> {
     let mut it = first.clone().into_iter();
     match it.next()? {
         TokenTree::Ident(id) if id == "name" => {}

@@ -83,7 +83,7 @@ pub(crate) struct Meta {
 /// represented, or an expression is not linear/quadratic as required.
 pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> {
     let kind = model.kind();
-    if !matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP) {
+    if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
     }
 
@@ -207,6 +207,7 @@ pub(crate) fn extract_result(
         primal_status,
         solutions,
         dual,
+        soc_dual: FxHashMap::default(),
         reduced_costs,
         best_bound,
         gap,
@@ -441,5 +442,30 @@ mod tests {
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
         assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MIQP)));
+    }
+
+    #[test]
+    fn qcp_is_unsupported() {
+        let m = Model::new("qcp");
+        variable!(m, x >= 0.0);
+        constraint!(m, c, x.powi(2) <= 4.0);
+        objective!(m, Min, x);
+        assert_eq!(m.kind(), ModelKind::QCP);
+
+        let err = solve(&m, &HighsOptions::default()).unwrap_err();
+        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::QCP)));
+    }
+
+    #[test]
+    fn socp_is_unsupported() {
+        let m = Model::new("socp");
+        variable!(m, x);
+        variable!(m, t >= 0.0);
+        m.add_soc_constraint("cone", [x], t);
+        objective!(m, Min, t);
+        assert_eq!(m.kind(), ModelKind::SOCP);
+
+        let err = solve(&m, &HighsOptions::default()).unwrap_err();
+        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::SOCP)));
     }
 }

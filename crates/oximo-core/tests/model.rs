@@ -39,13 +39,158 @@ fn classifies_miqp() {
 }
 
 #[test]
-fn quadratic_constraint_classifies_qp() {
-    let m = Model::new("qp_con");
+fn quadratic_constraint_classifies_qcp() {
+    let m = Model::new("qcp");
     variable!(m, x >= 0.0);
-    // Linear objective but a quadratic constraint still makes the model a QP.
+    // A quadratic constraint (not the objective) makes the model a QCP,
+    // not a QP.
     constraint!(m, c, x.powi(2) <= 4.0);
     objective!(m, Min, x);
-    assert_eq!(m.kind(), ModelKind::QP);
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn quadratic_objective_and_constraint_classifies_qcp() {
+    let m = Model::new("qcp_both");
+    variable!(m, x >= 0.0);
+    variable!(m, y >= 0.0);
+    constraint!(m, c, x * y <= 4.0);
+    objective!(m, Min, x.powi(2));
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn integer_var_promotes_qcp_to_miqcp() {
+    let m = Model::new("miqcp");
+    variable!(m, x >= 0.0);
+    variable!(m, 0.0 <= y <= 1.0, Int);
+    constraint!(m, c, x.powi(2) + y <= 4.0);
+    objective!(m, Min, x);
+    assert_eq!(m.kind(), ModelKind::MIQCP);
+}
+
+#[test]
+fn soc_shaped_quadratic_constraint_classifies_socp() {
+    let m = Model::new("socp_detected");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    constraint!(m, c, x.powi(2) + y.powi(2) <= t.powi(2));
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn soc_detection_requires_nonnegative_bound_var() {
+    let m = Model::new("qcp_signed");
+    variable!(m, x);
+    variable!(m, t);
+    constraint!(m, c, x.powi(2) <= t.powi(2));
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn detected_socp_with_integer_var_is_misocp() {
+    let m = Model::new("misocp");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    variable!(m, 0.0 <= z <= 1.0, Int);
+    constraint!(m, c, x.powi(2) <= t.powi(2));
+    constraint!(m, link, x + z >= 1.0);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::MISOCP);
+}
+
+#[test]
+fn explicit_soc_constraint_classifies_socp() {
+    let m = Model::new("socp_explicit");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    m.add_soc_constraint("cone", [x, y], t);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+    assert!(m.has_cones());
+    assert!(m.soc_constraint_id("cone").is_some());
+}
+
+#[test]
+fn explicit_soc_with_quadratic_objective_stays_socp() {
+    let m = Model::new("socp_qobj");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    m.add_soc_constraint("cone", [x], t);
+    objective!(m, Min, x.powi(2));
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn explicit_soc_with_plain_quadratic_constraint_is_qcp() {
+    let m = Model::new("qcp_over_socp");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    m.add_soc_constraint("cone", [x], t);
+    constraint!(m, c, x * y <= 1.0);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn explicit_soc_with_nonlinear_constraint_is_nlp() {
+    let m = Model::new("nlp_over_socp");
+    variable!(m, x >= 0.1);
+    variable!(m, t >= 0.0);
+    m.add_soc_constraint("cone", [x], t);
+    constraint!(m, c, x.sin() <= 0.5);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::NLP);
+}
+
+#[test]
+#[should_panic(expected = "non-affine term")]
+fn add_soc_constraint_rejects_quadratic_term() {
+    let m = Model::new("bad_soc");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    m.add_soc_constraint("cone", [x * x], t);
+}
+
+#[test]
+fn bound_change_invalidates_kind_cache() {
+    // Kind depends on bounds: `x^2 <= t^2` is SOC only while `t >= 0`, so a
+    // bound mutation after `kind()` was cached must recompute.
+    let m = Model::new("soc_bounds");
+    variable!(m, x);
+    variable!(m, t);
+    constraint!(m, c, x.powi(2) <= t.powi(2));
+    objective!(m, Min, t);
+    // t is free, so the squared form is not a cone.
+    assert_eq!(m.kind(), ModelKind::QCP);
+
+    // Fixing t to a nonnegative value makes the row a cone.
+    m.fix(t, 1.0);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    // Unfixing back to a free variable demotes it again.
+    m.unfix_var(t.var_id().unwrap(), f64::NEG_INFINITY, f64::INFINITY);
+    assert_eq!(m.kind(), ModelKind::QCP);
+
+    // A nonnegative lower bound restores the cone.
+    m.unfix_var(t.var_id().unwrap(), 0.0, f64::INFINITY);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn adding_soc_constraint_invalidates_kind_cache() {
+    let m = Model::new("soc_cache");
+    variable!(m, x >= 0.0);
+    variable!(m, t >= 0.0);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::LP);
+    m.add_soc_constraint("cone", [x], t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
 }
 
 #[test]

@@ -173,6 +173,20 @@ constraint!(m, flow[i in 0..n, j in 0..m], x[i, j] >= 0.0);
 constraint!(m, diag[(i, j) in rc if i == j], x[i, j] <= 1.0);
 ```
 
+### Second-order cone constraints
+
+`soc_constraint!` registers `||terms||_2 <= bound`. Every term and the bound
+must be affine. The model classifies as `SOCP`/`MISOCP`.
+
+```rust,ignore
+soc_constraint!(m, cone, [x, y] <= t);                       // named -> SocConstraintId
+soc_constraint!(m, [x - y, 2.0 * y] <= t + 1.0);             // anonymous (auto-named _soc0, ...)
+soc_constraint!(m, name = format!("c_{k}"), [x] <= t);       // computed run-time name
+soc_constraint!(m, risk[i in assets], [s[i] * w[i]] <= cap); // family: risk[key] per key
+```
+
+The method form `m.add_soc_constraint("cone", [x, y], t)` is equivalent.
+
 ### Summation
 
 `sum!(body for k in domain)` reads as `sum_{k in domain} body`. Nest with extra
@@ -218,16 +232,17 @@ m.param_value_idx(&cost, 1);    // -> Some(9.0)
 
 ## Model kind
 
-Inferred automatically from variables and expressions, cached and invalidated on change:
+Inferred automatically from variables and expressions, cached and invalidated
+on change. The decision ladder runs top-down. Any integer/binary variable
+picks the `MI*` variant of the row that matches:
 
-| Kind    | Conditions                                          |
-|---------|-----------------------------------------------------|
-| `LP`    | All continuous, all linear                          |
-| `MILP`  | Any integer/binary, all linear                      |
-| `QP`    | All continuous, `Mul` with >=2 non-const children   |
-| `MIQP`  | Any integer/binary + quadratic                      |
-| `NLP`   | All continuous, `Pow`/`Sin`/`Cos`/`Exp`/`Log`/`Abs` |
-| `MINLP` | Any integer/binary + nonlinear                      |
+| Kind (continuous/integer) | Conditions                                                       |
+|---------------------------|------------------------------------------------------------------|
+| `NLP`/`MINLP`             | Any nonlinear expression (degree > 2, transcendentals, division) |
+| `QCP`/`MIQCP`             | Any quadratic constraint not recognized as a second-order cone   |
+| `SOCP`/`MISOCP`           | Second-order cones present (explicit or detected)                |
+| `QP`/`MIQP`               | Quadratic objective, linear constraints                          |
+| `LP`/`MILP`               | Everything linear                                                |
 
 ## License
 

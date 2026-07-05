@@ -10,6 +10,7 @@ members = [
     "crates/oximo-gurobi",
     "crates/oximo-gams",
     "crates/oximo-baron",
+    "crates/oximo-clarabel",
     "crates/oximo",
 ]
 
@@ -35,6 +36,7 @@ oximo-io     = { path = "crates/oximo-io",     version = "0.3.0" }
 oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.3.0" }
 oximo-gams   = { path = "crates/oximo-gams",   version = "0.3.0" }
 oximo-baron  = { path = "crates/oximo-baron",  version = "0.3.0" }
+oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.3.0" }
 
 rayon            = "1.12"
 syn              = { version = "2", features = ["full"] }
@@ -49,6 +51,7 @@ thiserror        = "2.0"
 num-traits       = "0.2"
 highs            = "2.3"
 grb              = "3.0"    
+clarabel         = "0.11"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

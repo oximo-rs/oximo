@@ -1,6 +1,6 @@
 use std::hash::Hasher;
 
-use oximo_core::{Model, ObjectiveSense, Variable};
+use oximo_core::{Model, ModelKind, ObjectiveSense, Variable};
 use oximo_expr::{ExprArena, VarId, extract_linear};
 use rustc_hash::FxHasher;
 
@@ -42,8 +42,14 @@ pub struct Snapshot {
 /// # Errors
 ///
 /// Returns [`SolverError::Nonlinear`] if the objective or any constraint is not
-/// linear.
+/// linear, or [`SolverError::UnsupportedKind`] if the model is a second-order
+/// cone program (explicit [`oximo_core::SocConstraint`]s or SOC-shaped
+/// quadratic constraints detected by [`Model::kind`]).
 pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
+    let kind = model.kind();
+    if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
+        return Err(SolverError::UnsupportedKind(kind));
+    }
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
@@ -180,6 +186,19 @@ mod tests {
         variable!(m, x >= 0.0);
         objective!(m, Min, x.powi(2));
         assert!(snapshot(&m).is_err());
+    }
+
+    #[test]
+    fn soc_constraint_is_rejected() {
+        let m = Model::new("t");
+        variable!(m, x >= 0.0);
+        variable!(m, t >= 0.0);
+        m.add_soc_constraint("cone", [x], t);
+        objective!(m, Min, t);
+        assert!(matches!(
+            snapshot(&m),
+            Err(crate::status::SolverError::UnsupportedKind(ModelKind::SOCP))
+        ));
     }
 
     #[test]

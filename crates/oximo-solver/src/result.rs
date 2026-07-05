@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use oximo_core::{
-    ConstraintId, Expr, ExprNode, IndexKey, IndexedVar, Model, ObjectiveSense, VarId,
+    ConstraintId, Expr, ExprNode, IndexKey, IndexedVar, Model, ObjectiveSense, SocConstraintId,
+    VarId,
 };
 use rustc_hash::FxHashMap;
 
@@ -76,6 +77,7 @@ pub struct SolverResult {
     pub primal_status: PrimalStatus,
     pub solutions: Vec<SolutionPoint>,
     pub dual: FxHashMap<ConstraintId, f64>,
+    pub soc_dual: FxHashMap<SocConstraintId, f64>,
     pub reduced_costs: FxHashMap<VarId, f64>,
     pub best_bound: Option<f64>,
     pub gap: Option<f64>,
@@ -92,6 +94,7 @@ impl Default for SolverResult {
             primal_status: PrimalStatus::NoSolution,
             solutions: Vec::new(),
             dual: FxHashMap::default(),
+            soc_dual: FxHashMap::default(),
             reduced_costs: FxHashMap::default(),
             best_bound: None,
             gap: None,
@@ -151,6 +154,12 @@ impl SolverResult {
 
     pub fn dual_of(&self, c: ConstraintId) -> Option<f64> {
         self.dual.get(&c).copied()
+    }
+
+    /// The norm-form bound multiplier of an explicit SOC constraint,
+    /// or `None` when the backend did not compute it.
+    pub fn soc_dual_of(&self, c: SocConstraintId) -> Option<f64> {
+        self.soc_dual.get(&c).copied()
     }
 
     /// Look up the best solution's primal value for a specific index of an
@@ -260,6 +269,18 @@ impl std::fmt::Display for ModelReport<'_> {
                 let id = ConstraintId(u32::try_from(i).expect("constraint index fits u32"));
                 let d = r.dual_of(id).map_or_else(|| "n/a".to_owned(), num);
                 writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
+            }
+        }
+
+        // SOC bound multipliers, only when the solver returned any
+        if !r.soc_dual.is_empty() {
+            let socs = m.soc_constraints();
+            writeln!(f, "\nsoc constraints ({})", socs.len())?;
+            let width = socs.iter().map(|s| s.name.len()).max().unwrap_or(0);
+            for (i, s) in socs.iter().enumerate() {
+                let id = SocConstraintId(u32::try_from(i).expect("soc index fits u32"));
+                let d = r.soc_dual_of(id).map_or_else(|| "n/a".to_owned(), num);
+                writeln!(f, "  {:<width$}  dual = {d}", s.name)?;
             }
         }
 

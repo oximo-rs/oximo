@@ -72,12 +72,17 @@ pub fn to_nl_string(model: &Model) -> Result<String, IoError> {
 ///
 /// # Errors
 ///
-/// Returns [`IoError`] on missing objective, unsupported nodes, or I/O failure.
+/// Returns [`IoError`] on missing objective, unsupported nodes, second-order
+/// cone constraints ([`IoError::Conic`]; the NL format has no conic segment),
+/// or I/O failure.
 pub fn write_nl_with<W: Write>(
     model: &Model,
     out: &mut W,
     opts: &WriteOptions,
 ) -> Result<(), IoError> {
+    if model.num_soc_constraints() > 0 {
+        return Err(IoError::Conic);
+    }
     let vars = model.variables();
     let constraints = model.constraints();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
