@@ -649,12 +649,11 @@ fn parse_solution(
     if let Some(best) = solutions.first() {
         for (i, bound) in soc_bounds.iter().enumerate() {
             if let Some(price) = soc_prices.get(&i) {
-                let b_val = bound.constant
-                    + bound
-                        .coeffs
-                        .iter()
-                        .map(|&(v, c)| c * best.primal.get(&v).copied().unwrap_or(0.0))
-                        .sum::<f64>();
+                let Some(b_val) = bound.coeffs.iter().try_fold(bound.constant, |acc, &(v, c)| {
+                    best.primal.get(&v).map(|value| acc + c * *value)
+                }) else {
+                    continue;
+                };
                 soc_dual.insert(
                     SocConstraintId(u32::try_from(i).expect("SOC count overflow")),
                     2.0 * b_val * price.abs(),
