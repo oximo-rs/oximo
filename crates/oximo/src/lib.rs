@@ -28,6 +28,9 @@ pub use oximo_gams::{GamsOptions, GamsSolver};
 #[cfg(feature = "baron")]
 pub use oximo_baron::BaronOptions;
 
+#[cfg(feature = "clarabel")]
+pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions};
+
 /// GAMS backend types: sub-solver selection and per-solver option structs.
 #[cfg(feature = "gams")]
 pub mod gams {
@@ -59,6 +62,9 @@ pub mod prelude {
 
     #[cfg(feature = "baron")]
     pub use oximo_baron::BaronOptions;
+
+    #[cfg(feature = "clarabel")]
+    pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions, ClarabelPersistent};
 }
 
 pub mod solvers {
@@ -75,4 +81,7 @@ pub mod solvers {
 
     #[cfg(feature = "baron")]
     pub use oximo_baron::Baron;
+
+    #[cfg(feature = "clarabel")]
+    pub use oximo_clarabel::Clarabel;
 }

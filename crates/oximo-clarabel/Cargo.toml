@@ -1,0 +1,25 @@
+[package]
+name = "oximo-clarabel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Clarabel LP/QP/SOCP conic backend for oximo"
+
+[features]
+faer = ["clarabel/faer-sparse"]
+
+[dependencies]
+oximo-expr.workspace = true
+oximo-core.workspace = true
+oximo-solver.workspace = true
+clarabel.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+oximo-highs.workspace = true
+
+[lints]
+workspace = true
