@@ -786,8 +786,6 @@ fn write_equations(
     writeln!(gms).unwrap();
 }
 
-// TODO: Report SOC duals
-
 /// Emit each explicit SOC constraint `||terms||_2 <= bound` as the quadratic
 /// row `sqr(term_1) + ... =l= sqr(bound)` plus the sign row `bound =g= 0`
 /// (squaring loses the sign of the bound side).
