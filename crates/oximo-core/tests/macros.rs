@@ -593,3 +593,87 @@ fn set_macro_comprehension_multi_bind_builds_product() {
     assert_eq!(m.num_variables(), 3);
     assert_eq!(m.num_constraints(), 3);
 }
+
+// - soc_constraint! -----------------------------------------------------------
+
+#[test]
+fn soc_named_scalar() {
+    let m = Model::new("soc_named");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    let id = soc_constraint!(m, cone, [x, y] <= t);
+    assert_eq!(m.soc_constraint_id("cone"), Some(id));
+    assert_eq!(m.num_soc_constraints(), 1);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn soc_anonymous_auto_names() {
+    let m = Model::new("soc_anon");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    soc_constraint!(m, [x] <= t);
+    soc_constraint!(m, [x, t] <= t + 1.0);
+    assert!(m.soc_constraint_id("_soc0").is_some());
+    assert!(m.soc_constraint_id("_soc1").is_some());
+    assert_eq!(m.num_soc_constraints(), 2);
+}
+
+#[test]
+fn soc_computed_name() {
+    let m = Model::new("soc_computed");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    let k = 7;
+    soc_constraint!(m, name = format!("cone_{k}"), [x] <= t);
+    assert!(m.soc_constraint_id("cone_7").is_some());
+}
+
+#[test]
+fn soc_affine_terms_and_bound() {
+    let m = Model::new("soc_affine");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    soc_constraint!(m, cone, [x - y, 2.0 * y + 1.0] <= t + 2.0);
+    let socs = m.soc_constraints();
+    assert_eq!(socs[0].terms.len(), 2);
+}
+
+#[test]
+fn soc_family_over_range() {
+    let m = Model::new("soc_family");
+    let assets = Set::range(0..3);
+    variable!(m, u[i in assets]);
+    variable!(m, v[i in assets]);
+    variable!(m, cap >= 0.0);
+    soc_constraint!(m, risk[i in assets], [u[i], v[i]] <= cap);
+    assert_eq!(m.num_soc_constraints(), 3);
+    assert!(m.soc_constraint_id("risk[0]").is_some());
+    assert!(m.soc_constraint_id("risk[2]").is_some());
+    objective!(m, Min, cap);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn soc_filtered_family() {
+    let m = Model::new("soc_filtered");
+    variable!(m, w[i in 0..4]);
+    variable!(m, t >= 0.0);
+    soc_constraint!(m, even[i in 0..4 if i % 2 == 0], [w[i]] <= t);
+    assert_eq!(m.num_soc_constraints(), 2);
+    assert!(m.soc_constraint_id("even[0]").is_some());
+    assert!(m.soc_constraint_id("even[2]").is_some());
+    assert!(m.soc_constraint_id("even[1]").is_none());
+}
+
+#[test]
+#[should_panic(expected = "non-affine term")]
+fn soc_macro_rejects_quadratic_term() {
+    let m = Model::new("soc_bad");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    soc_constraint!(m, cone, [x * x] <= t);
+}
