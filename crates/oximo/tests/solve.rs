@@ -228,6 +228,31 @@ fn infeasible_returns_status() {
 }
 
 #[test]
+fn feasibility_problem_finds_a_point() {
+    let m = Model::new("feas");
+    variable!(m, 0.0 <= x <= 10.0);
+    variable!(m, 0.0 <= y <= 10.0);
+    constraint!(m, c, x + y == 5.0);
+    objective!(m, Feasibility);
+    let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert!(result.has_solution(), "status: {:?}", result.termination);
+    let (vx, vy) = (result.value_of(x).unwrap(), result.value_of(y).unwrap());
+    assert!((vx + vy - 5.0).abs() < 1e-6, "x + y = {}", vx + vy);
+}
+
+#[test]
+fn no_objective_declared_is_an_error() {
+    let m = Model::new("undeclared");
+    variable!(m, 0.0 <= x <= 1.0);
+    constraint!(m, c, x >= 0.5);
+    let err = Highs.solve(&m, &HighsOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, SolverError::Core(oximo::core::Error::NoObjective)),
+        "expected NoObjective, got {err:?}"
+    );
+}
+
+#[test]
 fn presolve_off_gives_correct_result() {
     let m = Model::new("canon");
     variable!(m, x >= 0.0);
