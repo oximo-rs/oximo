@@ -10,16 +10,16 @@ Most users should depend on the umbrella `oximo` crate with the `highs` feature 
 
 ```toml
 [dependencies]
-oximo = "0.3"
+oximo = "0.4"
 ```
 
 To use this crate directly:
 
 ```toml
 [dependencies]
-oximo-highs = "0.3"
-oximo-core   = "0.3"
-oximo-solver = "0.3"
+oximo-highs = "0.4"
+oximo-core   = "0.4"
+oximo-solver = "0.4"
 ```
 
 ## Quick example

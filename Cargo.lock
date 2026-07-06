@@ -1097,7 +1097,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "oximo"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oximo-baron",
  "oximo-clarabel",
@@ -1112,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-baron"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-clarabel"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clarabel",
  "oximo-core",
@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ndarray",
  "num-traits",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-expr"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rustc-hash",
  "smallvec",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gams"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gurobi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "grb",
  "oximo-core",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-highs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "highs",
  "oximo-core",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-io"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-macros"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-solver"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",

@@ -134,7 +134,7 @@ To use this crate directly (e.g. for a custom backend):
 
 ```toml
 [dependencies]
-oximo-expr = "0.3"
+oximo-expr = "0.4"
 ```
 
 ## License

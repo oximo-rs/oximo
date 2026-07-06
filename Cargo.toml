@@ -15,7 +15,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "A Rust algebraic modeling library for solving optimization problems"
 readme = "README.md"
@@ -27,16 +27,16 @@ repository = "https://github.com/oximo-rs/oximo"
 authors = ["Germán Martín Heim <german.martin.heim@gmail.com>"]
 
 [workspace.dependencies]
-oximo-expr   = { path = "crates/oximo-expr",   version = "0.3.0" }
-oximo-macros = { path = "crates/oximo-macros", version = "0.3.0" }
-oximo-core   = { path = "crates/oximo-core",   version = "0.3.0" }
-oximo-solver = { path = "crates/oximo-solver", version = "0.3.0" }
-oximo-highs  = { path = "crates/oximo-highs",  version = "0.3.0" }
-oximo-io     = { path = "crates/oximo-io",     version = "0.3.0" }
-oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.3.0" }
-oximo-gams   = { path = "crates/oximo-gams",   version = "0.3.0" }
-oximo-baron  = { path = "crates/oximo-baron",  version = "0.3.0" }
-oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.3.0" }
+oximo-expr   = { path = "crates/oximo-expr",   version = "0.4.0" }
+oximo-macros = { path = "crates/oximo-macros", version = "0.4.0" }
+oximo-core   = { path = "crates/oximo-core",   version = "0.4.0" }
+oximo-solver = { path = "crates/oximo-solver", version = "0.4.0" }
+oximo-highs  = { path = "crates/oximo-highs",  version = "0.4.0" }
+oximo-io     = { path = "crates/oximo-io",     version = "0.4.0" }
+oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.4.0" }
+oximo-gams   = { path = "crates/oximo-gams",   version = "0.4.0" }
+oximo-baron  = { path = "crates/oximo-baron",  version = "0.4.0" }
+oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.4.0" }
 
 rayon            = "1.12"
 syn              = { version = "2", features = ["full"] }
