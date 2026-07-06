@@ -46,6 +46,7 @@ pub struct Snapshot {
 /// cone program (explicit [`oximo_core::SocConstraint`]s or SOC-shaped
 /// quadratic constraints detected by [`Model::kind`]).
 pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
+    model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
         return Err(SolverError::UnsupportedKind(kind));
