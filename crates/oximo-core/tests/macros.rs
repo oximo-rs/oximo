@@ -340,20 +340,31 @@ fn objective_sense_aliases_map_correctly() {
 
 #[test]
 fn feasibility_declares_a_problem_without_objective() {
-    for spelling in ["Feasibility", "feasibility", "feas"] {
-        let m = Model::new("feas");
-        variable!(m, 0.0 <= x <= 1.0);
-        constraint!(m, c, x >= 0.5);
-        match spelling {
-            "Feasibility" => objective!(m, Feasibility),
-            "feasibility" => objective!(m, feasibility),
-            _ => objective!(m, feas),
-        }
+    fn check(m: &Model, spelling: &str) {
         assert!(m.is_feasibility(), "{spelling}: expected feasibility");
         assert!(m.objective().is_none(), "{spelling}: no objective expr");
         assert!(m.ensure_objective_declared().is_ok(), "{spelling}");
         assert_eq!(m.kind(), ModelKind::LP, "{spelling}");
     }
+
+    // All three spellings lower to `__feasibility()`.
+    let m = Model::new("feas");
+    variable!(m, 0.0 <= x <= 1.0);
+    constraint!(m, c, x >= 0.5);
+    objective!(m, Feasibility);
+    check(&m, "Feasibility");
+
+    let m = Model::new("feas");
+    variable!(m, 0.0 <= x <= 1.0);
+    constraint!(m, c, x >= 0.5);
+    objective!(m, feasibility);
+    check(&m, "feasibility");
+
+    let m = Model::new("feas");
+    variable!(m, 0.0 <= x <= 1.0);
+    constraint!(m, c, x >= 0.5);
+    objective!(m, feas);
+    check(&m, "feas");
 }
 
 #[test]
