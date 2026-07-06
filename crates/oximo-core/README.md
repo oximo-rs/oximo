@@ -34,7 +34,7 @@ constraint!(m, c1, x + 2.0 * y <= 14.0);
 constraint!(m, c2, 3.0 * x - y >= 0.0);
 constraint!(m, band, 1.0 <= x + y <= 12.0);
 
-// Objective
+// Objective (or `objective!(m, Feasibility)` for a pure feasibility problem)
 objective!(m, Max, 3.0 * x + 4.0 * y);
 
 println!("kind = {:?}", m.kind()); // LP
