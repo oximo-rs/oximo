@@ -137,6 +137,7 @@ pub fn solve(
 type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms>);
 
 fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError> {
+    model.ensure_objective_declared().map_err(SolverError::Core)?;
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
@@ -1113,6 +1114,7 @@ mod tests {
         let m = Model::new("feas");
         variable!(m, 0.0 <= x <= 1.0);
         constraint!(m, c, x <= 1.0);
+        objective!(m, Feasibility);
         let bar = render(&m);
         assert!(bar.contains("OBJ: minimize 0;"), "{bar}");
     }

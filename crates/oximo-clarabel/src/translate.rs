@@ -161,6 +161,7 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
 ///
 /// Panics if variable or constraint indices overflow `u32`.
 pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
+    model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));

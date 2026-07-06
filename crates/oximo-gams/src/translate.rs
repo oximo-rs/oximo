@@ -39,14 +39,15 @@ pub fn solve(
     opts: &GamsOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
+    model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     validate_solver(opts, kind)?;
     let arena = model.arena();
     let vars = model.variables();
     let constraints = model.constraints();
     let socs = model.soc_constraints();
-    let objective = model.try_objective().map_err(SolverError::Core)?;
-    let sense = objective.sense;
+    let objective = model.objective();
+    let sense = objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
 
     let sense_kw = match sense {
         ObjectiveSense::Minimize => "minimizing",
@@ -61,7 +62,7 @@ pub fn solve(
         &vars,
         &constraints,
         &socs,
-        &objective,
+        objective.as_ref(),
         sense_kw,
         opts,
     );
@@ -562,7 +563,7 @@ fn build_model_section(
     vars: &[Variable],
     constraints: &[Constraint],
     socs: &[SocConstraint],
-    objective: &Objective,
+    objective: Option<&Objective>,
     sense_kw: &str,
     opts: &GamsOptions,
 ) -> Option<(String, String)> {
@@ -719,7 +720,7 @@ fn write_equations(
     arena: &ExprArena,
     constraints: &[Constraint],
     socs: &[SocConstraint],
-    objective: &Objective,
+    objective: Option<&Objective>,
 ) {
     write!(gms, "Equations\n    eq_obj").unwrap();
     for (i, c) in constraints.iter().enumerate() {
@@ -735,10 +736,15 @@ fn write_equations(
     writeln!(gms, ";").unwrap();
     writeln!(gms).unwrap();
 
-    let obj_form = ExprForm::from(arena, objective.expr);
-    write!(gms, "eq_obj..  v_obj =e=").unwrap();
-    write_form(gms, arena, &obj_form, true);
-    writeln!(gms, ";").unwrap();
+    match objective {
+        None => writeln!(gms, "eq_obj..  v_obj =e= 0;").unwrap(),
+        Some(obj) => {
+            let obj_form = ExprForm::from(arena, obj.expr);
+            write!(gms, "eq_obj..  v_obj =e=").unwrap();
+            write_form(gms, arena, &obj_form, true);
+            writeln!(gms, ";").unwrap();
+        }
+    }
 
     for (ci, c) in constraints.iter().enumerate() {
         if let Some((sense, rhs)) = c.as_single() {
@@ -1024,8 +1030,8 @@ mod tests {
         let vars = model.variables();
         let constraints = model.constraints();
         let socs = model.soc_constraints();
-        let objective = model.try_objective().expect("objective set");
-        let sense_kw = match objective.sense {
+        let objective = model.objective();
+        let sense_kw = match objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense) {
             ObjectiveSense::Minimize => "minimizing",
             ObjectiveSense::Maximize => "maximizing",
         };
@@ -1037,7 +1043,7 @@ mod tests {
             &vars,
             &constraints,
             &socs,
-            &objective,
+            objective.as_ref(),
             sense_kw,
             opts,
         );
@@ -1113,6 +1119,18 @@ mod tests {
         constraint!(m, c, x + y <= 5.0);
         objective!(m, Min, x + 2.0 * y);
         let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("Solve oximo_m using LP minimizing v_obj;"), "got:\n{gms}");
+    }
+
+    #[test]
+    fn feasibility_minimizes_zero_with_lp_solve_type() {
+        let m = Model::new("feas");
+        variable!(m, 0.0 <= x <= 10.0);
+        variable!(m, 0.0 <= y <= 10.0);
+        constraint!(m, c, x + y == 5.0);
+        objective!(m, Feasibility);
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("eq_obj..  v_obj =e= 0;"), "got:\n{gms}");
         assert!(gms.contains("Solve oximo_m using LP minimizing v_obj;"), "got:\n{gms}");
     }
 
