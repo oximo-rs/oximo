@@ -203,14 +203,26 @@ mod tests {
     }
 
     #[test]
-    fn no_objective_is_a_zero_objective() {
+    fn feasibility_is_a_zero_objective() {
         let m = Model::new("feas");
         variable!(m, x >= 0.0);
         variable!(m, y >= 0.0);
         constraint!(m, c, x + y == 5.0);
+        objective!(m, Feasibility);
 
         let s = snapshot(&m).expect("feasibility model snapshots");
         assert!(s.obj_costs.iter().all(|&c| c.abs() < 1e-12), "costs = {:?}", s.obj_costs);
         assert!(s.obj_constant.abs() < 1e-12, "constant = {}", s.obj_constant);
+    }
+
+    #[test]
+    fn undeclared_objective_is_rejected() {
+        let m = Model::new("undeclared");
+        variable!(m, x >= 0.0);
+        constraint!(m, c, x <= 5.0);
+        assert!(matches!(
+            snapshot(&m),
+            Err(crate::status::SolverError::Core(oximo_core::Error::NoObjective))
+        ));
     }
 }
