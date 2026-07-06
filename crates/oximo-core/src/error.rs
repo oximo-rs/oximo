@@ -13,7 +13,7 @@ pub enum Error {
     UnknownConstraint(SmolStr),
     #[error("objective already set on this model")]
     ObjectiveAlreadySet,
-    #[error("nonlinear nodes are not supported by this backend in v0.1")]
+    #[error("nonlinear nodes are not supported by this backend")]
     NonlinearUnsupported,
     #[error("model has no objective")]
     NoObjective,
