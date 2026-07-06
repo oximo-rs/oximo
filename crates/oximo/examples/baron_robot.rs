@@ -67,7 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     constraint!(m, e7, x5.powi(2) + x6.powi(2) == 1.0);
     constraint!(m, e8, x7.powi(2) + x8.powi(2) == 1.0);
 
-    // Pure feasibility problem: no objective set => `minimize 0`.
+    // Pure feasibility problem.
+    objective!(m, Feasibility);
 
     let opts =
         BaronOptions::default().time_limit(Duration::from_secs(120)).num_sol(20).verbose(true);
