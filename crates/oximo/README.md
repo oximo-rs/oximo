@@ -77,6 +77,8 @@ constraint!(m, band, 1.0 <= x + y <= 10.0); // two-sided range -> one constraint
 objective!(m, Min, 3.0 * x + 5.0 * y);
 // or
 objective!(m, Max, x + 2.0 * y); // also Minimize/min, Maximize/max
+// or, for a pure feasibility problem (no objective to optimize):
+objective!(m, Feasibility); // also `feasibility` / `feas`
 ```
 
 ### Indexed variables
@@ -273,7 +275,7 @@ let result = Highs.solve(&m, &HighsOptions::default())?;
 
 match result.termination {
     TerminationStatus::Optimal => {
-        // `objective()` is `Option` (a model may have no objective), so print it
+        // `objective()` is `Option` (a feasibility problem has none), so print it
         // only when present.
         if let Some(obj) = result.objective() {
             println!("optimal: {obj}");

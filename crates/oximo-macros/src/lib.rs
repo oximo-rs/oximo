@@ -65,6 +65,8 @@ pub fn soc_constraint(input: TokenStream) -> TokenStream {
 }
 
 /// `objective!(model, Min|Max, expr)`, set the model objective and sense.
+/// `objective!(model, Feasibility)` (also `feasibility`/`feas`) declares a
+/// feasibility problem with no objective to optimize.
 #[proc_macro]
 pub fn objective(input: TokenStream) -> TokenStream {
     objective::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()

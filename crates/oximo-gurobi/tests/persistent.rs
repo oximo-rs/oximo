@@ -70,6 +70,7 @@ fn persistent_feasibility_no_objective() {
     variable!(m, 0.0 <= x <= 10.0);
     variable!(m, 0.0 <= y <= 10.0);
     constraint!(m, c, x + y == 5.0);
+    objective!(m, Feasibility);
 
     let mut solver = Gurobi.persistent();
     let r = solver.solve(&m, &GurobiOptions::default()).expect("feasibility solve");

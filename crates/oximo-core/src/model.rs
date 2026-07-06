@@ -65,6 +65,7 @@ pub struct Model {
     pub(crate) soc_constraints: RefCell<Vec<SocConstraint>>,
     pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
     pub(crate) objective: RefCell<Option<Objective>>,
+    objective_declared: Cell<bool>,
     cached_kind: Cell<Option<ModelKind>>,
     /// Monotonic counter for auto-naming anonymous constraints registered via
     /// the `constraint!` macro.
@@ -80,6 +81,7 @@ impl std::fmt::Debug for Model {
             .field("constraints", &self.constraints.borrow().len())
             .field("soc_constraints", &self.soc_constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
+            .field("feasibility", &self.is_feasibility())
             .finish()
     }
 }
@@ -98,6 +100,7 @@ impl Model {
             soc_constraints: RefCell::new(Vec::new()),
             soc_names: RefCell::new(FxHashMap::default()),
             objective: RefCell::new(None),
+            objective_declared: Cell::new(false),
             cached_kind: Cell::new(None),
             auto_seq: Cell::new(0),
         }
@@ -688,9 +691,37 @@ impl Model {
         self.set_objective(expr, ObjectiveSense::Maximize);
     }
 
+    /// Macro-facing entry point backing `objective!(m, Feasibility)`. Declares
+    /// the model a feasibility problem (no objective to optimize), clearing any
+    /// previously set objective. Not part of the stable public API.
+    #[doc(hidden)]
+    pub fn __feasibility(&self) {
+        *self.objective.borrow_mut() = None;
+        self.objective_declared.set(true);
+        self.cached_kind.set(None);
+    }
+
     fn set_objective(&self, expr: Expr<'_>, sense: ObjectiveSense) {
         *self.objective.borrow_mut() = Some(Objective { expr: expr.id, sense });
+        self.objective_declared.set(true);
         self.cached_kind.set(None);
+    }
+
+    /// Whether feasibility was declared explicitly via `objective!(m, Feasibility)`,
+    /// as opposed to a model that simply has no objective set.
+    pub fn is_feasibility(&self) -> bool {
+        self.objective_declared.get() && self.objective.borrow().is_none()
+    }
+
+    /// Ensure the model has a solve direction declared: either an objective
+    /// (`Min`/`Max`) or an explicit feasibility problem.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoObjective`] if neither an objective nor
+    /// `objective!(m, Feasibility)` was declared.
+    pub fn ensure_objective_declared(&self) -> Result<()> {
+        if self.objective_declared.get() { Ok(()) } else { Err(Error::NoObjective) }
     }
 
     pub fn objective(&self) -> Ref<'_, Option<Objective>> {

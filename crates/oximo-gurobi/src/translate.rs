@@ -60,6 +60,7 @@ pub(crate) struct Built {
 /// Returns a [`SolverError`] if the model contains nonlinear expressions Gurobi
 /// cannot represent or Gurobi reports an error during setup.
 pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
+    model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     let nonlinear_kind = matches!(
         kind,

@@ -82,6 +82,7 @@ pub(crate) struct Meta {
 /// Returns a [`SolverError`] if the model kind is unsupported, a domain cannot be
 /// represented, or an expression is not linear/quadratic as required.
 pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> {
+    model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
