@@ -339,6 +339,45 @@ fn objective_sense_aliases_map_correctly() {
 }
 
 #[test]
+fn feasibility_declares_a_problem_without_objective() {
+    for spelling in ["Feasibility", "feasibility", "feas"] {
+        let m = Model::new("feas");
+        variable!(m, 0.0 <= x <= 1.0);
+        constraint!(m, c, x >= 0.5);
+        match spelling {
+            "Feasibility" => objective!(m, Feasibility),
+            "feasibility" => objective!(m, feasibility),
+            _ => objective!(m, feas),
+        }
+        assert!(m.is_feasibility(), "{spelling}: expected feasibility");
+        assert!(m.objective().is_none(), "{spelling}: no objective expr");
+        assert!(m.ensure_objective_declared().is_ok(), "{spelling}");
+        assert_eq!(m.kind(), ModelKind::LP, "{spelling}");
+    }
+}
+
+#[test]
+fn unset_objective_is_not_declared() {
+    let m = Model::new("unset");
+    variable!(m, x >= 0.0);
+    constraint!(m, c, x <= 1.0);
+    assert!(!m.is_feasibility());
+    assert!(m.ensure_objective_declared().is_err());
+}
+
+#[test]
+fn optimize_after_feasibility_clears_feasibility() {
+    let m = Model::new("switch");
+    variable!(m, x >= 0.0);
+    objective!(m, Feasibility);
+    assert!(m.is_feasibility());
+    objective!(m, Min, x);
+    assert!(!m.is_feasibility());
+    assert!(m.objective().is_some());
+    assert!(m.ensure_objective_declared().is_ok());
+}
+
+#[test]
 fn param_handle_keeps_model_linear() {
     let m = Model::new("param");
     param!(m, rate = 0.05);
