@@ -4,9 +4,10 @@ use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
     Sense as HighsSense,
 };
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId, Variable};
+use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId, Variable, var_name};
 use oximo_expr::{
-    ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
+    ExprArena, ExprId, LinearTerms, QuadraticTerms, describe_nonlinear_term, extract_linear,
+    extract_quadratic,
 };
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rayon::prelude::*;
@@ -97,7 +98,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     let obj = objective.as_ref();
     let sense = obj.map_or(HighsSense::Minimise, |o| sense_of(o.sense));
     let (obj_by_id, obj_constant, hessian_cols) = match obj {
-        Some(o) => objective_terms(kind, &arena, o.expr, vars.len())?,
+        Some(o) => objective_terms(kind, &arena, o.expr, &vars)?,
         None => (vec![0.0; vars.len()], 0.0, Vec::new()),
     };
     let has_hessian = hessian_cols.iter().any(|col| !col.is_empty());
@@ -123,9 +124,16 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     }
 
     let arena_ref: &ExprArena = &arena;
+    let vars_ref: &[Variable] = &vars;
     let con_terms: Vec<LinearTerms> = constraints
         .par_iter()
-        .map(|c| extract_linear(arena_ref, c.lhs).ok_or(SolverError::Nonlinear))
+        .map(|c| {
+            extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
+                location: format!("constraint {:?}", c.name),
+                term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
+                    .unwrap_or_else(|| "<nonlinear>".into()),
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     for (c, t) in constraints.iter().zip(&con_terms) {
@@ -258,18 +266,24 @@ fn objective_terms(
     kind: ModelKind,
     arena: &ExprArena,
     obj_expr: ExprId,
-    num_vars: usize,
+    vars: &[Variable],
 ) -> Result<ObjectiveTerms, SolverError> {
+    let num_vars = vars.len();
+    let nonlinear = || SolverError::Nonlinear {
+        location: "the objective".into(),
+        term: describe_nonlinear_term(arena, obj_expr, &|v| var_name(vars, v))
+            .unwrap_or_else(|| "<nonlinear>".into()),
+    };
     let mut coeffs = vec![0.0; num_vars];
     if matches!(kind, ModelKind::QP) {
-        let quad = extract_quadratic(arena, obj_expr).ok_or(SolverError::Nonlinear)?;
+        let quad = extract_quadratic(arena, obj_expr).ok_or_else(nonlinear)?;
         for (v, c) in &quad.linear {
             coeffs[v.index()] = *c;
         }
         let cols = hessian_columns(&quad, num_vars);
         Ok((coeffs, quad.constant, cols))
     } else {
-        let lin = extract_linear(arena, obj_expr).ok_or(SolverError::Nonlinear)?;
+        let lin = extract_linear(arena, obj_expr).ok_or_else(nonlinear)?;
         for (v, c) in &lin.coeffs {
             coeffs[v.index()] = *c;
         }

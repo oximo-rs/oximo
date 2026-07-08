@@ -25,9 +25,9 @@ use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use oximo_core::{
     ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, detect_soc,
-    explicit_soc_form,
+    explicit_soc_form, var_name,
 };
-use oximo_expr::{LinearTerms, VarId, extract_linear, extract_quadratic};
+use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear, extract_quadratic};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::FxHashMap;
 
@@ -209,7 +209,12 @@ fn objective_data(model: &Model, n: usize) -> Result<(f64, Triplets, Vec<f64>, f
     let Some(obj) = objective.as_ref() else {
         return Ok((sign, Triplets::new(), vec![0.0; n], 0.0));
     };
-    let quad = extract_quadratic(&arena, obj.expr).ok_or(SolverError::Nonlinear)?;
+    let vars = model.variables();
+    let quad = extract_quadratic(&arena, obj.expr).ok_or_else(|| SolverError::Nonlinear {
+        location: "the objective".into(),
+        term: describe_nonlinear_term(&arena, obj.expr, &|v| var_name(&vars, v))
+            .unwrap_or_else(|| "<nonlinear>".into()),
+    })?;
     let mut q = vec![0.0; n];
     for &(var, coef) in &quad.linear {
         q[var.index()] += sign * coef;
@@ -230,7 +235,13 @@ fn classify_rows(model: &Model) -> Result<Vec<Row>, SolverError> {
         .iter()
         .map(|c| match extract_linear(&arena, c.lhs) {
             Some(t) => Ok(Row::Lin(t)),
-            None => detect_soc(&arena, &vars, c).map(Row::Soc).ok_or(SolverError::Nonlinear),
+            None => {
+                detect_soc(&arena, &vars, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
+                    location: format!("constraint {:?}", c.name),
+                    term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
+                        .unwrap_or_else(|| "<nonlinear>".into()),
+                })
+            }
         })
         .collect()
 }

@@ -82,7 +82,10 @@ impl<'a, W: Write> Writer<'a, W> {
                     self.out.write_all(b"n")?;
                     self.out.write_all(&x.to_le_bytes())?;
                 } else {
-                    return Err(IoError::InvalidNumber);
+                    return Err(IoError::InvalidNumber {
+                        value: x,
+                        location: "numeric output".into(),
+                    });
                 }
             }
         }
@@ -108,7 +111,10 @@ impl<'a, W: Write> Writer<'a, W> {
             }
             NlFormat::Binary => {
                 if !x.is_finite() && !self.opts.nonfinite_strings {
-                    return Err(IoError::InvalidNumber);
+                    return Err(IoError::InvalidNumber {
+                        value: x,
+                        location: "numeric output".into(),
+                    });
                 }
                 self.out.write_all(&x.to_le_bytes())?;
             }
@@ -182,7 +188,7 @@ impl<'a, W: Write> Writer<'a, W> {
                     "-Infinity".into()
                 });
             }
-            return Err(IoError::InvalidNumber);
+            return Err(IoError::InvalidNumber { value: x, location: "numeric output".into() });
         }
         if (x - x.trunc()).abs() == 0.0 && x.abs() < 1e16 {
             #[allow(clippy::cast_possible_truncation)]

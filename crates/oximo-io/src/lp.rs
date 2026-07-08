@@ -14,8 +14,8 @@
 
 use std::io::Write;
 
-use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Sense};
-use oximo_expr::{LinearTerms, extract_linear};
+use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Sense, var_name};
+use oximo_expr::{LinearTerms, describe_nonlinear_term, extract_linear};
 use rustc_hash::FxHashSet;
 
 use crate::error::IoError;
@@ -50,7 +50,11 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let constraints = model.constraints();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
-    let obj_terms = extract_linear(&arena, objective.expr).ok_or(IoError::Nonlinear)?;
+    let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
+        location: "the objective".into(),
+        term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
+            .unwrap_or_else(|| "<nonlinear>".into()),
+    })?;
 
     writeln!(out, "\\* OXIMO LP export - model: {} *\\", model.name)?;
 
@@ -74,7 +78,11 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
 
     writeln!(out, "Subject To")?;
     for c in constraints.iter() {
-        let t = extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear)?;
+        let t = extract_linear(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+            location: format!("constraint {:?}", c.name),
+            term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
         if let Some((sense, rhs)) = c.as_single() {
             let op = match sense {
                 Sense::Le => "<=",

@@ -89,8 +89,8 @@ pub enum SolverError {
     UnsupportedKind(oximo_core::ModelKind),
     #[error("model is missing an objective")]
     NoObjective,
-    #[error("nonlinear constructs are not supported by this backend")]
-    Nonlinear,
+    #[error("{location} contains a nonlinear term unsupported by this backend: {term}")]
+    Nonlinear { location: String, term: String },
     #[error("backend error: {0}")]
     Backend(String),
     #[error(transparent)]

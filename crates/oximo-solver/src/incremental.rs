@@ -1,7 +1,7 @@
 use std::hash::Hasher;
 
-use oximo_core::{Model, ModelKind, ObjectiveSense, Variable};
-use oximo_expr::{ExprArena, VarId, extract_linear};
+use oximo_core::{Model, ModelKind, ObjectiveSense, Variable, var_name};
+use oximo_expr::{ExprArena, VarId, describe_nonlinear_term, extract_linear};
 use rustc_hash::FxHasher;
 
 use crate::status::SolverError;
@@ -60,7 +60,11 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     let sense = obj.map_or(ObjectiveSense::Minimize, |o| o.sense);
     let (obj_by_id, obj_constant) = match obj {
         Some(o) => {
-            let lin = extract_linear(&arena, o.expr).ok_or(SolverError::Nonlinear)?;
+            let lin = extract_linear(&arena, o.expr).ok_or_else(|| SolverError::Nonlinear {
+                location: "the objective".into(),
+                term: describe_nonlinear_term(&arena, o.expr, &|v| var_name(&vars, v))
+                    .unwrap_or_else(|| "<nonlinear>".into()),
+            })?;
             let mut by_id = vec![0.0; vars.len()];
             for (v, c) in &lin.coeffs {
                 by_id[v.index()] = *c;
@@ -83,7 +87,11 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
 
     let arena_ref: &ExprArena = &arena;
     for c in constraints.iter() {
-        let t = extract_linear(arena_ref, c.lhs).ok_or(SolverError::Nonlinear)?;
+        let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
+            location: format!("constraint {:?}", c.name),
+            term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(&vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
         hash_row(&mut hasher, c.lower - t.constant, c.upper - t.constant, &t.coeffs);
     }
 

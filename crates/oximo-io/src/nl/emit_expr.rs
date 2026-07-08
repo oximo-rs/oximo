@@ -75,7 +75,10 @@ pub(crate) fn emit_expr<W: Write>(
     match arena.get(id) {
         ExprNode::Const(c) => w.num(*c)?,
         ExprNode::Var(v) => {
-            let idx = var_index.get(v).copied().expect("var missing from permutation");
+            let idx = var_index
+                .get(v)
+                .copied()
+                .ok_or_else(|| IoError::UnknownVar(format!("#{}", v.index())))?;
             w.var(idx)?;
         }
         ExprNode::Param(p) => w.num(arena.param_value(*p))?,
@@ -224,7 +227,8 @@ fn emit_term<W: Write>(
     v: VarId,
     c: f64,
 ) -> Result<(), IoError> {
-    let idx = var_index.get(&v).copied().expect("var missing from permutation");
+    let idx =
+        var_index.get(&v).copied().ok_or_else(|| IoError::UnknownVar(format!("#{}", v.index())))?;
     if (c - 1.0).abs() == 0.0 {
         w.var(idx)?;
     } else {

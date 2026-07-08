@@ -1,7 +1,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::marker::PhantomData;
 
-use oximo_expr::{Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
+use oximo_expr::{EvalError, Expr, ExprArena, ExprClass, ExprId, ParamId, VarId, classify};
 use rustc_hash::FxHashMap;
 use smol_str::SmolStr;
 
@@ -126,7 +126,11 @@ impl Model {
     /// returns its `Expr` handle.
     pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a> {
         let mut names = self.var_names.borrow_mut();
-        assert!(!names.contains_key(&b.name), "variable name {:?} already registered", b.name);
+        assert!(
+            !names.contains_key(&b.name),
+            "variable name {:?} is already registered on this model",
+            b.name
+        );
         let mut vars = self.variables.borrow_mut();
         let id = VarId(u32::try_from(vars.len()).expect("variable count overflow"));
         vars.push(Variable {
@@ -180,6 +184,26 @@ impl Model {
 
     pub fn num_variables(&self) -> usize {
         self.variables.borrow().len()
+    }
+
+    /// Render an [`EvalError`] using this model's registered variable/parameter
+    /// name instead of the bare numeric id it carries.
+    /// Use it when surfacing an evaluation failure to a user.
+    #[must_use]
+    pub fn describe_eval_error(&self, err: &EvalError) -> String {
+        match err {
+            EvalError::UnboundVar(v) => {
+                let name = crate::var::var_name(&self.variables.borrow(), *v);
+                format!("variable {name} has no value bound in the evaluation context")
+            }
+            EvalError::UnboundParam(p) => {
+                let name = self.parameters.borrow().iter().find(|par| par.id == *p).map_or_else(
+                    || format!("parameter #{}", p.index()),
+                    |par| par.name.to_string(),
+                );
+                format!("parameter {name} has no value bound in the evaluation context")
+            }
+        }
     }
 
     /// Fix a single-variable expression to `value`.
@@ -256,7 +280,7 @@ impl Model {
     fn register_param(&self, name: SmolStr, value: f64) -> Expr<'_> {
         assert!(
             !self.param_names.borrow().contains_key(&name),
-            "parameter name {name:?} already registered"
+            "parameter name {name:?} is already registered on this model"
         );
         let (id, node) = {
             let mut a = self.arena.borrow_mut();
@@ -1019,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "parameter name \"dup\" already registered")]
+    #[should_panic(expected = "parameter name \"dup\" is already registered")]
     fn duplicate_param_name_panics() {
         let m = Model::new("p");
         let _a = m.__param("dup", 1.0);

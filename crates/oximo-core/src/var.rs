@@ -17,6 +17,14 @@ pub struct Variable {
     pub initial: Option<f64>,
 }
 
+/// Display name of `v` within `vars`, degrading to `variable #<index>` when the
+/// id is out of range (a foreign or not-yet-registered [`VarId`]). Used to build
+/// human-readable error messages that name the offending variable.
+#[must_use]
+pub fn var_name(vars: &[Variable], v: VarId) -> String {
+    vars.get(v.index()).map_or_else(|| format!("variable #{}", v.index()), |x| x.name.to_string())
+}
+
 /// Builder backing the `variable!` macro. Configure bounds / domain, then call
 /// [`Self::build`] to register the variable and obtain an `Expr` handle.
 #[must_use = "VarBuilder does nothing until you call .build()"]

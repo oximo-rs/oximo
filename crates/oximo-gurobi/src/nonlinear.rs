@@ -43,7 +43,7 @@ impl LoweringCtx<'_> {
 }
 
 fn map_grb(e: grb::Error) -> SolverError {
-    SolverError::Backend(e.to_string())
+    SolverError::Backend(format!("Gurobi: {e}"))
 }
 
 fn linear_from_var(v: Var) -> LinExpr {

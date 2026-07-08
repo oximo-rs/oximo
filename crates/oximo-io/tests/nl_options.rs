@@ -72,7 +72,10 @@ fn nonfinite_constant_in_residual() {
     constraint!(m, c0, x >= 0.0);
 
     assert!(
-        matches!(to_nl_string_with(&m, &WriteOptions::default()), Err(IoError::InvalidNumber)),
+        matches!(
+            to_nl_string_with(&m, &WriteOptions::default()),
+            Err(IoError::InvalidNumber { .. })
+        ),
         "default strict mode must reject the non-finite constant"
     );
 

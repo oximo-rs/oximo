@@ -29,10 +29,12 @@ pub use param::Parameter;
 pub use set::{Axis, FromIndexKey, IndexKey, IndexTuple, KeyCat, ScalarKey, Set, SetIter};
 pub use soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
 pub use sum::SumDomain;
-pub use var::{VarBuilder, Variable};
+pub use var::{VarBuilder, Variable, var_name};
 
 // Re-export the expression handle so downstream code does not need a separate
 // `oximo-expr` import.
-pub use oximo_expr::{Expr, ExprArena, ExprId, ExprNode, ParamId, VarId, dot};
+pub use oximo_expr::{
+    EvalError, Expr, ExprArena, ExprId, ExprNode, ParamId, VarId, describe_nonlinear_term, dot,
+};
 
 pub use oximo_macros::{constraint, objective, param, set, soc_constraint, sum, variable};

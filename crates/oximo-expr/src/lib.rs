@@ -15,7 +15,7 @@ pub use arena::{ExprArena, ExprId, ExprNode, ParamId, VarId};
 pub use classify::{ExprClass, classify};
 pub use eval::{EvalContext, EvalError, evaluate};
 pub use handle::Expr;
-pub use linear::{LinearTerms, SignedExpr, extract_linear, split_linear};
+pub use linear::{LinearTerms, SignedExpr, describe_nonlinear_term, extract_linear, split_linear};
 pub use ops::dot;
 pub use quadratic::{QuadraticTerms, extract_quadratic};
 pub use simplify::simplify;

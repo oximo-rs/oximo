@@ -125,14 +125,18 @@ fn validate(arena: &ExprArena, id: ExprId, nonfinite_strings: bool) -> Result<()
     match arena.get(id) {
         ExprNode::Const(c) => {
             if !nonfinite_strings && !c.is_finite() {
-                return Err(IoError::InvalidNumber);
+                return Err(IoError::InvalidNumber {
+                    value: *c,
+                    location: "an expression constant".into(),
+                });
             }
             Ok(())
         }
         ExprNode::Var(_) => Ok(()),
         ExprNode::Param(p) => {
-            if !nonfinite_strings && !arena.param_value(*p).is_finite() {
-                return Err(IoError::InvalidNumber);
+            let value = arena.param_value(*p);
+            if !nonfinite_strings && !value.is_finite() {
+                return Err(IoError::InvalidNumber { value, location: "a parameter".into() });
             }
             Ok(())
         }
@@ -158,7 +162,10 @@ fn validate(arena: &ExprArena, id: ExprId, nonfinite_strings: bool) -> Result<()
         }
         ExprNode::Linear { coeffs: _, constant } => {
             if !nonfinite_strings && !constant.is_finite() {
-                return Err(IoError::InvalidNumber);
+                return Err(IoError::InvalidNumber {
+                    value: *constant,
+                    location: "a linear expression constant".into(),
+                });
             }
             Ok(())
         }

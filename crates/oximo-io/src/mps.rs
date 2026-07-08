@@ -14,8 +14,8 @@
 
 use std::io::Write;
 
-use oximo_core::{Constraint, Model, ModelKind, ObjectiveSense, Sense};
-use oximo_expr::{LinearTerms, VarId, extract_linear};
+use oximo_core::{Constraint, Model, ModelKind, ObjectiveSense, Sense, var_name};
+use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear};
 use rustc_hash::FxHashMap;
 
 use crate::error::IoError;
@@ -43,12 +43,22 @@ pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     let constraints = model.constraints();
     let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
 
-    let obj_terms = extract_linear(&arena, objective.expr).ok_or(IoError::Nonlinear)?;
+    let obj_terms = extract_linear(&arena, objective.expr).ok_or_else(|| IoError::Nonlinear {
+        location: "the objective".into(),
+        term: describe_nonlinear_term(&arena, objective.expr, &|v| var_name(&vars, v))
+            .unwrap_or_else(|| "<nonlinear>".into()),
+    })?;
 
     // Pre-compute constraint linear terms once, reused for COLUMNS and RHS.
     let con_terms: Vec<LinearTerms> = constraints
         .iter()
-        .map(|c| extract_linear(&arena, c.lhs).ok_or(IoError::Nonlinear))
+        .map(|c| {
+            extract_linear(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+                location: format!("constraint {:?}", c.name),
+                term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
+                    .unwrap_or_else(|| "<nonlinear>".into()),
+            })
+        })
         .collect::<Result<_, _>>()?;
 
     // Build column index: VarId to [(row_name, coef)] in row order (OBJ first, then constraints).

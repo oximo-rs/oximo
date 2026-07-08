@@ -4,9 +4,9 @@ use grb::expr::{LinExpr, QuadExpr};
 use grb::prelude::*;
 use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
-    SocConstraintId, VarId, Variable,
+    SocConstraintId, VarId, Variable, var_name,
 };
-use oximo_expr::{ExprArena, ExprId, LinearTerms, extract_linear};
+use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term, extract_linear};
 use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use rustc_hash::FxHashMap;
 
@@ -15,7 +15,7 @@ use crate::nonlinear::{LoweredExpr, LoweringCtx, lower};
 use crate::options::apply as apply_options;
 
 pub(crate) fn map_grb_err(e: grb::Error) -> SolverError {
-    SolverError::Backend(e.to_string())
+    SolverError::Backend(format!("Gurobi: {e}"))
 }
 
 /// Translate `model` into a Gurobi model, solve, and return the generic
@@ -88,7 +88,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let mut aux_counter = 0_u32;
     let gurobi_constrs =
         add_constraints(&arena, &constraints, &mut grb_model, &gurobi_vars, &mut aux_counter)?;
-    let soc_rows = add_soc_rows(&arena, &socs, &mut grb_model, &gurobi_vars)?;
+    let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut grb_model, &gurobi_vars)?;
 
     let obj_constant = match objective.as_ref() {
         Some(o) => {
@@ -275,6 +275,7 @@ fn add_constraints(
 /// `QCPi` multiplier back to the norm form.
 fn add_soc_rows(
     arena: &ExprArena,
+    vars: &[Variable],
     socs: &[SocConstraint],
     grb_model: &mut grb::Model,
     gurobi_vars: &[grb::Var],
@@ -283,10 +284,18 @@ fn add_soc_rows(
     for (i, s) in socs.iter().enumerate() {
         let mut q = QuadExpr::new();
         for &term in &s.terms {
-            let t = extract_linear(arena, term).ok_or(SolverError::Nonlinear)?;
+            let t = extract_linear(arena, term).ok_or_else(|| SolverError::Nonlinear {
+                location: format!("second-order cone {:?} term {i}", s.name),
+                term: describe_nonlinear_term(arena, term, &|v| var_name(vars, v))
+                    .unwrap_or_else(|| "<nonlinear>".into()),
+            })?;
             add_squared_affine(&mut q, &t, 1.0, gurobi_vars);
         }
-        let b = extract_linear(arena, s.bound).ok_or(SolverError::Nonlinear)?;
+        let b = extract_linear(arena, s.bound).ok_or_else(|| SolverError::Nonlinear {
+            location: format!("second-order cone {:?} bound", s.name),
+            term: describe_nonlinear_term(arena, s.bound, &|v| var_name(vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
         add_squared_affine(&mut q, &b, -1.0, gurobi_vars);
         let qrow = grb_model.add_qconstr(&format!("soc{i}"), c!(q <= 0.0)).map_err(map_grb_err)?;
 
