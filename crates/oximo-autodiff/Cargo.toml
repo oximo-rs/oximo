@@ -1,0 +1,26 @@
+[package]
+name = "oximo-autodiff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Automatic differentiation (gradients, sparse Jacobians and Hessians) for oximo models via std::autodiff"
+readme = "README.md"
+
+[features]
+# Enables the std::autodiff (Enzyme) derivative engine. Requires a nightly
+# toolchain with the `enzyme` component, RUSTFLAGS="-Zautodiff=Enable",
+# and a fat-LTO profile (the workspace provides `--profile enzyme`).
+enzyme = ["dep:rayon"]
+
+[dependencies]
+oximo-expr.workspace = true
+oximo-core.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+rayon = { workspace = true, optional = true }
+
+[lints]
+workspace = true
