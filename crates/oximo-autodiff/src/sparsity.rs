@@ -44,11 +44,11 @@ fn norm(i: u32, j: u32) -> (u32, u32) {
 }
 
 fn add_clique(vars: &FxHashSet<u32>, pairs: &mut FxHashSet<(u32, u32)>) {
-    for &i in vars {
-        for &j in vars {
-            if i >= j {
-                pairs.insert((i, j));
-            }
+    let mut sorted: Vec<u32> = vars.iter().copied().collect();
+    sorted.sort_unstable();
+    for (i, &row) in sorted.iter().enumerate() {
+        for &col in &sorted[..=i] {
+            pairs.insert((row, col));
         }
     }
 }
