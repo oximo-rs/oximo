@@ -131,14 +131,12 @@ fn compute_node_sparsity(
         }
         // a/b = a * (1/b), and 1/b is nonlinear in all of b's variables.
         ExprNode::Div(num, den) => {
-            let n = node_sparsity(arena, *num, memo).clone();
+            let mut acc = node_sparsity(arena, *num, memo).clone();
             let d = node_sparsity(arena, *den, memo);
-            let mut acc = NodeSparsity {
-                vars: n.vars.union(&d.vars).copied().collect(),
-                pairs: n.pairs.union(&d.pairs).copied().collect(),
-            };
+            acc.pairs.extend(d.pairs.iter().copied());
             add_clique(&d.vars, &mut acc.pairs);
-            add_cross(&n.vars, &d.vars, &mut acc.pairs);
+            add_cross(&acc.vars, &d.vars, &mut acc.pairs);
+            acc.vars.extend(d.vars.iter().copied());
             acc
         }
         // phi(g) for smooth nonlinear phi: phi''*g_i'g_j' + phi'·g''_ij.
@@ -159,12 +157,10 @@ fn compute_node_sparsity(
             } else {
                 // g^e = exp(e*ln g): the first-derivative products alone fill
                 // the clique over vars(g) U vars(e).
-                let b = node_sparsity(arena, *base, memo).clone();
+                let mut acc = node_sparsity(arena, *base, memo).clone();
                 let e = node_sparsity(arena, *exp, memo);
-                let mut acc = NodeSparsity {
-                    vars: b.vars.union(&e.vars).copied().collect(),
-                    pairs: b.pairs.union(&e.pairs).copied().collect(),
-                };
+                acc.vars.extend(e.vars.iter().copied());
+                acc.pairs.extend(e.pairs.iter().copied());
                 add_clique(&acc.vars, &mut acc.pairs);
                 acc
             }
