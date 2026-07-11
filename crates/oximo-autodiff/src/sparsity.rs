@@ -317,30 +317,12 @@ fn greedy_star_coloring(adj: &FxHashMap<usize, FxHashSet<usize>>) -> FxHashMap<u
         // Proper coloring forbids neighbor colors outright.
         let mut forbidden: FxHashSet<usize> = nbr_count.keys().copied().collect();
 
+        // Each colored neighbor `w` of `v` (with color `b = color[w]`) can close
+        // a two-colored path on four vertices in two distinct ways.
         for &w in nbrs {
             let Some(&b) = color.get(&w) else { continue };
-            // Endpoint P4  v-w-x-y  colored c,b,c,b: forbid color(x) = c when x has
-            // another b-colored neighbor y != w (assigning c to v closes the P4).
-            for &x in &adj[&w] {
-                if x == v {
-                    continue;
-                }
-                let Some(&cx) = color.get(&x) else { continue };
-                if adj[&x].iter().any(|&y| y != w && color.get(&y) == Some(&b)) {
-                    forbidden.insert(cx);
-                }
-            }
-            // Internal P4  u-v-w-x  colored b,c,b,c: if v already has another
-            // b-colored neighbor (u), forbid color(x) for x adjacent to w.
-            if nbr_count[&b] >= 2 {
-                for &x in &adj[&w] {
-                    if x != v {
-                        if let Some(&cx) = color.get(&x) {
-                            forbidden.insert(cx);
-                        }
-                    }
-                }
-            }
+            forbid_endpoint_p4(adj, &color, v, w, b, &mut forbidden);
+            forbid_internal_p4(adj, &color, v, w, nbr_count[&b] >= 2, &mut forbidden);
         }
 
         let mut c = 0;
@@ -350,6 +332,58 @@ fn greedy_star_coloring(adj: &FxHashMap<usize, FxHashSet<usize>>) -> FxHashMap<u
         color.insert(v, c);
     }
     color
+}
+
+/// Endpoint-P4 rule while choosing `v`'s color, for a candidate path
+/// `v - w - x - y` colored `c, b, c, b` (with `b = color[w]`).
+///
+/// For each colored neighbor `x` of `w` (`x != v`): if `x` has some other
+/// `b`-colored neighbor `y != w`, then giving `v` the color `c = color[x]` would
+/// complete the two-colored P4 `v-w-x-y`. Forbid `color[x]`.
+fn forbid_endpoint_p4(
+    adj: &FxHashMap<usize, FxHashSet<usize>>,
+    color: &FxHashMap<usize, usize>,
+    v: usize,
+    w: usize,
+    b: usize,
+    forbidden: &mut FxHashSet<usize>,
+) {
+    for &x in &adj[&w] {
+        if x == v {
+            continue;
+        }
+        let Some(&cx) = color.get(&x) else { continue };
+        if adj[&x].iter().any(|&y| y != w && color.get(&y) == Some(&b)) {
+            forbidden.insert(cx);
+        }
+    }
+}
+
+/// Internal-P4 rule while choosing `v`'s color, for a candidate path
+/// `u - v - w - x` colored `b, c, b, c` (with `b = color[w]`).
+///
+/// Applies only when `v` already has another `b`-colored neighbor `u`. Then
+/// giving `v` the color `c = color[x]` of any colored neighbor `x != v` of `w`
+/// completes the two-colored P4 `u-v-w-x`. Forbid every such `color[x]`.
+fn forbid_internal_p4(
+    adj: &FxHashMap<usize, FxHashSet<usize>>,
+    color: &FxHashMap<usize, usize>,
+    v: usize,
+    w: usize,
+    v_has_another_b_neighbor: bool,
+    forbidden: &mut FxHashSet<usize>,
+) {
+    if !v_has_another_b_neighbor {
+        return;
+    }
+    for &x in &adj[&w] {
+        if x == v {
+            continue;
+        }
+        if let Some(&cx) = color.get(&x) {
+            forbidden.insert(cx);
+        }
+    }
 }
 
 /// Index of the seed group for color `col`, creating it on first use.
