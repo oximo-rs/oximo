@@ -5,8 +5,15 @@ use oximo_solver::{HasUniversal, UniversalOptions};
 /// Direct linear (KKT) solver method for Clarabel.
 ///
 /// Selects the sparse LDL factorization backend. The built-in `qdldl` and the
-/// `auto` default are always present, while [`Faer`](Self::Faer) requires this
-/// crate's `faer` feature.
+/// `auto` default are always present.
+#[cfg_attr(
+    feature = "faer",
+    doc = "The [`Faer`](Self::Faer) backend requires this crate's `faer` feature."
+)]
+#[cfg_attr(
+    not(feature = "faer"),
+    doc = "A `Faer` backend is also available behind this crate's `faer` feature."
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClarabelDirectSolve {
     /// Let Clarabel choose (`"auto"`). Clarabel default.
@@ -15,6 +22,7 @@ pub enum ClarabelDirectSolve {
     Qdldl,
     /// faer sparse LDL factorization (`"faer"`). Requires the `faer` feature.
     #[cfg(feature = "faer")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "faer")))]
     Faer,
 }
 

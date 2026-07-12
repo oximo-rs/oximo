@@ -12,6 +12,10 @@ readme = "README.md"
 [features]
 faer = ["clarabel/faer-sparse"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 oximo-expr.workspace = true
 oximo-core.workspace = true

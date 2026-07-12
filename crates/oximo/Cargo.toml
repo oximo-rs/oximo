@@ -21,6 +21,10 @@ baron = ["dep:oximo-baron"]
 clarabel = ["dep:oximo-clarabel"]
 clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
 
+[package.metadata.docs.rs]
+features = ["gams", "baron", "clarabel", "clarabel-faer"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 oximo-expr.workspace = true
 oximo-core.workspace = true
