@@ -310,17 +310,20 @@ With the `io` feature (default), you can export models to MPS, LP and NL format 
 
 ## Workspace layout
 
-| Crate          | Role                                                  |
-|----------------|-------------------------------------------------------|
-| `oximo`        | Umbrella crate                                        |
-| `oximo-expr`   | Arena-allocated expression tree                       |
-| `oximo-core`   | `Model`, `Variable`, `Constraint`, `Objective`, `Set` |
-| `oximo-solver` | `Solver` trait, `SolverResult`, `SolverOptions`       |
-| `oximo-io`     | MPS, LP and NL writers                                |
-| `oximo-highs`  | HiGHS backend                                         |
-| `oximo-gurobi` | Gurobi backend                                        |
-| `oximo-gams`   | GAMS writer and backend                               |
-| `oximo-baron`  | BARON writer and backend                              |
+| Crate            | Role                                                      |
+|------------------|-----------------------------------------------------------|
+| `oximo`          | Umbrella crate                                            |
+| `oximo-expr`     | Arena-allocated expression tree                           |
+| `oximo-core`     | `Model`, `Variable`, `Constraint`, `Objective`, `Set`     |
+| `oximo-macros`   | `variable!`, `constraint!`, `objective!` and other macros |
+| `oximo-autodiff` | Gradients, sparse Jacobians/Hessians via Enzyme           |
+| `oximo-solver`   | `Solver` trait, `SolverResult`, `SolverOptions`           |
+| `oximo-io`       | MPS, LP and NL writers                                    |
+| `oximo-highs`    | HiGHS backend                                             |
+| `oximo-gurobi`   | Gurobi backend                                            |
+| `oximo-gams`     | GAMS writer and backend                                   |
+| `oximo-baron`    | BARON writer and backend                                  |
+| `oximo-clarabel` | Clarabel backend                                          |
 
 ## Requirements
 

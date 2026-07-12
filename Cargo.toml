@@ -11,6 +11,7 @@ members = [
     "crates/oximo-gams",
     "crates/oximo-baron",
     "crates/oximo-clarabel",
+    "crates/oximo-autodiff",
     "crates/oximo",
 ]
 
@@ -37,6 +38,7 @@ oximo-gurobi = { path = "crates/oximo-gurobi", version = "0.4.0" }
 oximo-gams   = { path = "crates/oximo-gams",   version = "0.4.0" }
 oximo-baron  = { path = "crates/oximo-baron",  version = "0.4.0" }
 oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.4.0" }
+oximo-autodiff = { path = "crates/oximo-autodiff", version = "0.4.0" }
 
 rayon            = "1.12"
 syn              = { version = "2", features = ["full"] }
@@ -75,3 +77,11 @@ missing_fields_in_debug = "allow"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# std::autodiff (Enzyme) needs fat LTO so the differentiated
+# tape interpreter is visible across crate boundaries.
+# Used by the `enzyme` features of oximo-autodiff.
+[profile.enzyme]
+inherits = "release"
+lto = "fat"
+codegen-units = 16
