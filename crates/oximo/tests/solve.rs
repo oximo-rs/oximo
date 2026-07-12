@@ -80,16 +80,18 @@ fn indexed_param_rebind_changes_solution() {
 }
 
 #[test]
-fn highs_rejects_semi_domains() {
-    // HiGHS can't represent the semicontinuity gap through the `highs` crate, so
-    // a semicontinuous (or semi-integer) variable must error.
+fn highs_solves_semi_domains() {
     let m = Model::new("semi");
     variable!(m, s <= 10.0, SemiCont(2.0));
+    variable!(m, t <= 5.0, SemiInt(1.0));
     constraint!(m, c, s >= 3.0);
-    objective!(m, Min, s);
+    objective!(m, Min, s + t);
 
-    let err = Highs.solve(&m, &HighsOptions::default()).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(_)), "expected Backend error, got {err:?}");
+    let r = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(r.termination, TerminationStatus::Optimal);
+    assert!((r.value_of(s).unwrap() - 3.0).abs() < 1e-6, "s = {:?}", r.value_of(s));
+    assert!(r.value_of(t).unwrap().abs() < 1e-9, "t = {:?}", r.value_of(t));
+    assert!((r.objective().unwrap() - 3.0).abs() < 1e-6);
 }
 
 #[test]
