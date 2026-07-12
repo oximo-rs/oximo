@@ -85,3 +85,5 @@ codegen-units = 1
 inherits = "release"
 lto = "fat"
 codegen-units = 16
+
+exclude = ["gams_scraper"]
