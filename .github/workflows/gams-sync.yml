@@ -1,0 +1,44 @@
+name: Verify GAMS solver options
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout oximo
+        uses: actions/checkout@v4
+
+      - name: Checkout gams_scraper
+        uses: actions/checkout@v4
+        with:
+          repository: Godwinss24/GAM-SOLVERS
+          path: gams_scraper
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run scraper for each solver
+        run: |
+          mkdir -p /tmp/scraped
+          for solver in BARON GUROBI HIGHS; do
+            echo "Scraping $solver..."
+            cargo run --manifest-path gams_scraper/Cargo.toml -- "$solver" > "/tmp/scraped/${solver}.txt"
+          done
+
+      - name: Diff against checked-in snapshots
+        run: |
+          for solver in BARON GUROBI HIGHS; do
+            snapshot="crates/${solver,,}/src/options_snapshot.txt"
+            new="/tmp/scraped/${solver}.txt"
+            if [ ! -f "$snapshot" ]; then
+              echo "No snapshot for $solver yet, skipping diff."
+              continue
+            fi
+            echo "Checking $solver..."
+            diff "$snapshot" "$new" || {
+              echo "::error::$solver options are out of date. Regenerate and update options_snapshot.txt and options.rs."
+              exit 1
+            }
+          done
