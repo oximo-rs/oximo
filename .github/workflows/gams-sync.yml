@@ -30,7 +30,7 @@ jobs:
       - name: Diff against checked-in snapshots
         run: |
           for solver in BARON GUROBI HIGHS; do
-            snapshot="crates/${solver,,}/src/options_snapshot.txt"
+            snapshot="snapshots/${solver,,}.txt"
             new="/tmp/scraped/${solver}.txt"
             if [ ! -f "$snapshot" ]; then
               echo "No snapshot for $solver yet, skipping diff."
@@ -38,7 +38,7 @@ jobs:
             fi
             echo "Checking $solver..."
             diff "$snapshot" "$new" || {
-              echo "::error::$solver options are out of date. Regenerate and update options_snapshot.txt and options.rs."
+              echo "::error::$solver options are out of date. Regenerate and update ${snapshot} and the corresponding options.rs."
               exit 1
             }
           done
