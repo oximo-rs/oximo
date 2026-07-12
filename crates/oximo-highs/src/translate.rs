@@ -4,7 +4,9 @@ use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
     Sense as HighsSense,
 };
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, VarId, Variable, var_name};
+use oximo_core::{
+    ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable, var_name,
+};
 use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, describe_nonlinear_term, extract_linear,
     extract_quadratic,
@@ -23,9 +25,7 @@ use crate::options::apply as apply_options;
 /// Hessian is passed via `Highs_passHessian`. Nonlinear constraints or
 /// objectives, quadratic constraints (HiGHS has no quadratic constraints), and
 /// integer + quadratic (MIQP) models produce [`SolverError::Nonlinear`] or
-/// [`SolverError::UnsupportedKind`]. Semicontinuous / semi-integer variables are
-/// rejected with [`SolverError::Backend`] (the `highs` crate exposes no way to
-/// set them).
+/// [`SolverError::UnsupportedKind`].
 ///
 /// HiGHS supports only convex QPs.
 /// For minimization, `Q` must be positive semidefinite (PSD),
@@ -91,7 +91,6 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     let arena = model.arena();
     let vars = model.variables();
-    reject_semi_domains(&vars)?;
     let constraints = model.constraints();
 
     let objective = model.objective();
@@ -110,11 +109,13 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     let mut init_vals: Vec<f64> = vec![0.0; vars.len()];
     for (i, v) in vars.iter().enumerate() {
         let coef = obj_by_id[v.id.index()];
-        let bounds = v.lb..=v.ub;
-        let col = if v.domain.is_integer() {
-            pb.add_integer_column(coef, bounds)
-        } else {
-            pb.add_column(coef, bounds)
+        let col = match v.domain {
+            Domain::SemiContinuous { threshold } => {
+                pb.add_semi_continuous_column(coef, threshold..=v.ub)
+            }
+            Domain::SemiInteger { threshold } => pb.add_semi_integer_column(coef, threshold..=v.ub),
+            _ if v.domain.is_integer() => pb.add_integer_column(coef, v.lb..=v.ub),
+            _ => pb.add_column(coef, v.lb..=v.ub),
         };
         cols.push(col);
         if let Some(val) = v.initial {
@@ -232,22 +233,6 @@ fn sense_of(sense: ObjectiveSense) -> HighsSense {
         ObjectiveSense::Minimize => HighsSense::Minimise,
         ObjectiveSense::Maximize => HighsSense::Maximise,
     }
-}
-
-/// HiGHS supports semicontinuous/semi-integer variables, but the `highs` crate
-/// only exposes continuous/integer integrality, so we cannot mark them. Reject
-/// such a model.
-fn reject_semi_domains(vars: &[Variable]) -> Result<(), SolverError> {
-    for v in vars {
-        if v.domain.semi_threshold().is_some() {
-            return Err(SolverError::Backend(format!(
-                "variable x{} has a semicontinuous/semi-integer domain, \
-                 which the HiGHS backend does not support yet",
-                v.id.index()
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// HiGHS Hessian in compressed-sparse-column form: one `(row, value)` list per
@@ -469,6 +454,46 @@ mod tests {
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
         assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::QCP)));
+    }
+
+    #[test]
+    fn semi_continuous_forced_on() {
+        // min x  s.t.  x >= 3,  x in {0} U [5, 10]  ->  x = 5.
+        let m = Model::new("sc_on");
+        variable!(m, x <= 10.0, SemiCont(5.0));
+        constraint!(m, c, x >= 3.0);
+        objective!(m, Min, x);
+        assert_eq!(m.kind(), ModelKind::LP);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.termination, TerminationStatus::Optimal);
+        assert!((res.value_of(x).unwrap() - 5.0).abs() < 1e-6, "x = {:?}", res.value_of(x));
+    }
+
+    #[test]
+    fn semi_continuous_off() {
+        // min x, x in {0} U [5, 10], nothing forces it on  ->  x = 0.
+        let m = Model::new("sc_off");
+        variable!(m, x <= 10.0, SemiCont(5.0));
+        objective!(m, Min, x);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.termination, TerminationStatus::Optimal);
+        assert!(res.value_of(x).unwrap().abs() < 1e-9, "x = {:?}", res.value_of(x));
+    }
+
+    #[test]
+    fn semi_integer() {
+        // max x  s.t.  x <= 7.5,  x in {0} U {5, 6, ..., 10}  ->  x = 7.
+        let m = Model::new("si");
+        variable!(m, x <= 10.0, SemiInt(5.0));
+        constraint!(m, c, x <= 7.5);
+        objective!(m, Max, x);
+        assert_eq!(m.kind(), ModelKind::MILP);
+
+        let res = solve(&m, &HighsOptions::default()).unwrap();
+        assert_eq!(res.termination, TerminationStatus::Optimal);
+        assert!((res.value_of(x).unwrap() - 7.0).abs() < 1e-6, "x = {:?}", res.value_of(x));
     }
 
     #[test]
