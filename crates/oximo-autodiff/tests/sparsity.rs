@@ -93,6 +93,54 @@ fn pattern_of_quadratic_matches_extract_quadratic() {
     assert_eq!(hessian_pattern(&arena, root), from_extract);
 }
 
+#[test]
+fn triple_product_has_no_diagonal() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 0);
+    let y = var(&mut arena, 1);
+    let z = var(&mut arena, 2);
+    let prod = arena.push(ExprNode::Mul([x, y, z].into_iter().collect()));
+    assert_eq!(hessian_pattern(&arena, prod), vec![(1, 0), (2, 0), (2, 1)]);
+}
+
+#[test]
+fn sum_of_variables_has_empty_hessian() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 0);
+    let y = var(&mut arena, 1);
+    let sum = arena.push(ExprNode::Add([x, y].into_iter().collect()));
+    assert_eq!(hessian_pattern(&arena, sum), vec![]);
+}
+
+#[test]
+fn sin_of_sum_is_a_full_clique() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 0);
+    let y = var(&mut arena, 1);
+    let sum = arena.push(ExprNode::Add([x, y].into_iter().collect()));
+    let s = arena.push(ExprNode::Sin(sum));
+    assert_eq!(hessian_pattern(&arena, s), vec![(0, 0), (1, 0), (1, 1)]);
+}
+
+#[test]
+fn square_of_sum_matches_the_smooth_unary_clique() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 0);
+    let y = var(&mut arena, 1);
+    let sum = arena.push(ExprNode::Add([x, y].into_iter().collect()));
+    let two = arena.constant(2.0);
+    let sq = arena.push(ExprNode::Pow(sum, two));
+    assert_eq!(hessian_pattern(&arena, sq), vec![(0, 0), (1, 0), (1, 1)]);
+}
+
+#[test]
+fn self_division_keeps_its_structural_entry() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 0);
+    let div = arena.push(ExprNode::Div(x, x));
+    assert_eq!(hessian_pattern(&arena, div), vec![(0, 0)]);
+}
+
 /// Exact recovery check, fill a deterministic (pseudo-random, collision-free)
 /// symmetric matrix on `pattern`, simulate one HVP per group
 /// (`b[g][row] = sum_{col in group} H[row][col]`), and confirm the coloring's
@@ -189,4 +237,48 @@ fn randomized_patterns_recover_exactly() {
         pattern.sort_unstable();
         assert_recovers(&pattern);
     }
+}
+
+/// Build a normalized lower-triangle Hessian pattern for an `n`-vertex graph.
+fn graph_pattern(n: usize, edges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut set: FxHashSet<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
+    for &(a, b) in edges {
+        set.insert((a.max(b), a.min(b)));
+    }
+    let mut pattern: Vec<(usize, usize)> = set.into_iter().collect();
+    pattern.sort_unstable();
+    pattern
+}
+
+#[test]
+fn path_graph_recovers_exactly() {
+    let edges: Vec<(usize, usize)> = (1..6).map(|i| (i, i - 1)).collect();
+    let coloring = assert_recovers(&graph_pattern(6, &edges));
+    assert!(coloring.groups.len() <= 3, "path needs <= 3 groups, got {}", coloring.groups.len());
+}
+
+#[test]
+fn cycle_graph_recovers_exactly() {
+    let mut edges: Vec<(usize, usize)> = (1..6).map(|i| (i, i - 1)).collect();
+    edges.push((5, 0));
+    assert_recovers(&graph_pattern(6, &edges));
+}
+
+#[test]
+fn complete_graph_recovers_exactly() {
+    let n = 5;
+    let mut edges = Vec::new();
+    for i in 0..n {
+        for j in 0..i {
+            edges.push((i, j));
+        }
+    }
+    let coloring = assert_recovers(&graph_pattern(n, &edges));
+    assert_eq!(coloring.groups.len(), n, "dense block needs one seed per column");
+}
+
+#[test]
+fn disconnected_graph_recovers_exactly() {
+    let edges = [(1, 0), (2, 0), (2, 1), (4, 3), (5, 3), (5, 4)];
+    assert_recovers(&graph_pattern(6, &edges));
 }
