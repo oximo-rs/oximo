@@ -51,7 +51,7 @@ rustc-hash       = "2.1"
 ndarray          = "0.17"
 thiserror        = "2.0"
 num-traits       = "0.2"
-highs            = "2.3"
+highs            = "2.4"
 grb              = "3.0"    
 clarabel         = "0.11"
 
