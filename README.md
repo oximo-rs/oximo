@@ -331,6 +331,35 @@ With the `io` feature (default), you can export models to MPS, LP and NL format 
 - GAMS feature: GAMS on `PATH`, valid license
 - BARON feature: BARON on `PATH`, valid license
 
+## Keeping solver options in sync
+
+BARON, Gurobi, and HiGHS options in this repo are defined by hand in each
+backend's `options.rs` (e.g. [`crates/oximo-gurobi/src/options.rs`](crates/oximo-gurobi/src/options.rs)),
+using a `*_params!` macro. Since GAMS periodically adds or renames solver
+options in its docs, this repo uses a small external tool,
+[gams_scraper](https://github.com/Godwinss24/GAM-SOLVERS), to check whether
+those hand-written option lists have fallen out of date.
+
+A manually-triggered CI workflow
+([`.github/workflows/gams-sync.yml`](.github/workflows/gams-options.yml))
+scrapes the current GAMS docs for each supported solver and diffs the result
+against a checked-in snapshot in [`snapshots/`](snapshots). If GAMS has added
+or changed options since the last snapshot, the workflow fails and flags the
+difference.
+
+This check does **not** auto-update any code. When it fails:
+
+1. Run the workflow's diff output (or the scraper locally) to see what
+   changed.
+2. Manually update the relevant `*_params!` macro invocation in the
+   backend's `options.rs`.
+3. Update the corresponding file in `snapshots/` to match the new scraper
+   output.
+4. Open a PR with both changes.
+
+To trigger the check manually, go to **Actions → Verify GAMS solver options
+→ Run workflow**.
+
 ## License
 
 MIT OR Apache-2.0
