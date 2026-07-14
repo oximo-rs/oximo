@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout oximo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Checkout gams_scraper
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Godwinss24/GAM-SOLVERS
           path: gams_scraper
