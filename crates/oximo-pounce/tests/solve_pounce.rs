@@ -84,6 +84,10 @@ fn lp_duals_match_lp_convention() {
     assert_close(res.value_of(y).unwrap(), 8.0, 1e-3, "y");
     assert_close(res.dual_of(labor).unwrap(), 20.0, 1e-3, "labor dual");
     assert_close(res.dual_of(material).unwrap(), 10.0, 1e-3, "material dual");
+
+    let z_id = m.variable_id("z").unwrap();
+    assert_close(res.reduced_costs[&z_id], -30.0, 1e-3, "z reduced cost");
+    assert!(res.iterations > 0, "iteration count should be reported");
 }
 
 #[test]
@@ -221,6 +225,39 @@ fn invalid_option_value_is_rejected() {
 }
 
 #[test]
+fn verbose_captures_raw_log() {
+    let m = Model::new("logged");
+    variable!(m, -10.0 <= x <= 10.0, initial = -1.2);
+    objective!(m, Min, (x - 2.0).powi(2));
+
+    let quiet = PounceSolver.solve(&m, &PounceOptions::default()).unwrap();
+    assert!(quiet.raw_log.is_none(), "no log capture without verbose");
+
+    let mut opts = PounceOptions::default();
+    opts.universal.verbose = Some(true);
+    let res = PounceSolver.solve(&m, &opts).unwrap();
+    assert!(res.iterations > 0, "TNLP solve reports iterations");
+    let log = res.raw_log.expect("verbose solve should capture a log");
+    assert!(log.contains("Number of Iterations....:"), "log has the summary: {log}");
+    assert!(log.contains("objective function evaluations"), "log has eval counts: {log}");
+    assert!(log.contains("EXIT:"), "log has the exit status: {log}");
+}
+
+#[test]
+fn verbose_builder_path_logs_exit_status() {
+    let m = Model::new("logged_builder");
+    variable!(m, -10.0 <= x <= 10.0, initial = -1.2);
+    variable!(m, -10.0 <= y <= 10.0, initial = 1.0);
+    objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
+
+    let mut opts = PounceOptions::default();
+    opts.universal.verbose = Some(true);
+    let res = PounceSolver.solve(&m, &opts).unwrap();
+    let log = res.raw_log.expect("verbose solve should capture a log");
+    assert!(log.contains("EXIT:"), "log has the exit status: {log}");
+}
+
+#[test]
 fn persistent_reset_then_solve_ok() {
     let m = Model::new("reset");
     param!(m, w = 1.0);
@@ -235,4 +272,25 @@ fn persistent_reset_then_solve_ok() {
     solver.reset();
     let after = solver.solve(&m, &PounceOptions::default()).unwrap();
     assert!(close(first.objective().unwrap(), after.objective().unwrap()));
+}
+
+#[test]
+fn persistent_sweep_reclassifies_nonlinear_objective() {
+    let m = Model::new("kind_flip");
+    param!(m, w = 1.0);
+    variable!(m, 0.1 <= x <= 10.0, initial = 1.0);
+    variable!(m, 0.1 <= y <= 10.0, initial = 1.0);
+    constraint!(m, prod, x * y >= 4.0);
+    objective!(m, Min, x + y + w * x.powi(3));
+
+    let mut solver = PounceSolver.persistent();
+    for wv in [1.0, 0.0, 2.0] {
+        w.set_param_value(wv);
+        let warm = solver.solve(&m, &PounceOptions::default()).unwrap();
+        let cold = PounceSolver.solve(&m, &PounceOptions::default()).unwrap();
+        assert!(warm.has_solution(), "w {wv}: no solution");
+        assert!(close(warm.objective().unwrap(), cold.objective().unwrap()), "w {wv}: objective");
+        assert!(close(warm.value_of(x).unwrap(), cold.value_of(x).unwrap()), "w {wv}: x");
+        assert!(close(warm.value_of(y).unwrap(), cold.value_of(y).unwrap()), "w {wv}: y");
+    }
 }

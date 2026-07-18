@@ -1,7 +1,7 @@
 //! Model to POUNCE adapter.
 //! Shared setup, status/result mapping, and the option helpers used by
 //! both the exact-derivative path ([`crate::exact`], enzyme) and the
-//! finite-difference path ([`crate::stable`], POUNCE's `builder`).
+//! stable hybrid path ([`crate::stable`]).
 
 use std::time::{Duration, Instant};
 
@@ -32,17 +32,13 @@ pub(crate) struct Prepared {
     pub x0: Vec<f64>,
 }
 
-/// A full primal-dual point, kept by a persistent handle to warm-start the next
-/// solve. The finite-difference path can only reuse the primal `x`, so the dual
-/// components are read only on the exact (enzyme) path.
+/// A full primal-dual point, kept by a persistent handle to warm-start the
+/// next solve. Both derivative paths reuse the whole point.
 #[derive(Clone, Debug)]
 pub(crate) struct WarmStart {
     pub x: Vec<f64>,
-    #[cfg_attr(not(feature = "enzyme"), expect(dead_code))]
     pub z_l: Vec<f64>,
-    #[cfg_attr(not(feature = "enzyme"), expect(dead_code))]
     pub z_u: Vec<f64>,
-    #[cfg_attr(not(feature = "enzyme"), expect(dead_code))]
     pub lambda: Vec<f64>,
 }
 
@@ -59,6 +55,8 @@ pub(crate) struct Outcome {
     pub objective: Option<f64>,
     pub iterations: u64,
     pub warm: Option<WarmStart>,
+    /// Reconstructed solver log (minimization sense), captured when `verbose`.
+    pub raw_log: Option<String>,
 }
 
 /// Translate `model`, solve with POUNCE (cold), and map the outcome.
@@ -176,7 +174,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
         gap: None,
         solve_time: elapsed,
         iterations: o.iterations,
-        raw_log: None,
+        raw_log: o.raw_log,
         solver_name: Some("pounce".into()),
     }
 }
@@ -210,7 +208,7 @@ fn set_int(list: &mut OptionsList, name: &str, v: i32) -> Result<(), SolverError
     list.set_integer_value(name, v, true, true).map(|_| ()).map_err(|e| opt_error(name, &e))
 }
 
-fn set_str(list: &mut OptionsList, name: &str, v: &str) -> Result<(), SolverError> {
+pub(crate) fn set_str(list: &mut OptionsList, name: &str, v: &str) -> Result<(), SolverError> {
     list.set_string_value(name, v, true, true).map(|_| ()).map_err(|e| opt_error(name, &e))
 }
 
@@ -220,10 +218,7 @@ fn set_bool(list: &mut OptionsList, name: &str, v: bool) -> Result<(), SolverErr
 
 /// Apply [`PounceOptions`] onto POUNCE's option list (from `IpoptApplication::options_mut()`),
 /// surfacing an invalid name or out-of-range value as a [`SolverError::Backend`].
-/// Used by both derivative paths.
-/// The exact path applies onto the live application, and the finite-difference
-/// path applies onto a throwaway application to validate before the builder
-/// solve (which silently ignores option errors).
+/// Both derivative paths apply onto the live application via [`crate::tnlp::run`].
 pub(crate) fn apply_options(
     list: &mut OptionsList,
     opts: &PounceOptions,

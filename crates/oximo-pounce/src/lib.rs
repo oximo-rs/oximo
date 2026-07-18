@@ -3,23 +3,26 @@
 
 mod options;
 mod persistent;
+mod tnlp;
 mod translate;
 
 #[cfg(feature = "enzyme")]
 mod exact;
 #[cfg(not(feature = "enzyme"))]
-mod stable;
+mod hybrid;
 #[cfg(not(feature = "enzyme"))]
-mod values;
+mod stable;
 
 pub use options::{MuStrategy, PounceOptionValue, PounceOptions};
 pub use persistent::PouncePersistent;
 
 /// The POUNCE interior-point backend: a pure-Rust IPOPT port.
 /// Solves continuous LP/QP/QCP/NLP models.
-/// On stable Rust POUNCE finite-differences the derivatives.
-/// With the `enzyme` feature it uses exact first and second
-/// derivatives from `oximo-autodiff`.
+/// On stable Rust an all-linear/quadratic model gets exact analytic
+/// derivatives (including the Hessian).
+/// A model with nonlinear functions is handed to POUNCE's builder, which
+/// finite-differences them with an L-BFGS Hessian. With the `enzyme`
+/// feature everything is exact via `oximo-autodiff`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PounceSolver;
 

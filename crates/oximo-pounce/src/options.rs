@@ -13,7 +13,8 @@ use oximo_solver::{HasUniversal, UniversalOptions};
 ///
 /// `UniversalOptions` mapping:
 ///     `time_limit` -> `max_cpu_time`,
-///     `verbose` -> `print_level` 5 (else 0)
+///     `verbose` -> `print_level` 5 (else 0) and captures the iteration log
+///     into [`SolverResult::raw_log`](oximo_solver::SolverResult::raw_log),
 ///     `threads` is ignored.
 #[derive(Clone, Debug, Default)]
 pub struct PounceOptions {

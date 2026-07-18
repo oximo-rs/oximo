@@ -1,7 +1,11 @@
-//! Finite-difference path: POUNCE's `builder` surface. We supply objective and
-//! constraint values only, and POUNCE finite-differences the gradient/Jacobian
-//! and uses a limited-memory (L-BFGS) Hessian. The value oracle lives in a
-//! shared cell so a persistent handle can reuse the compiled tapes across solves.
+//! Stable-Rust path
+//! 
+//! One resident [`HybridOracle`], two solve surfaces.
+//! A model whose objective and constraints are all linear/quadratic solves on
+//! POUNCE's low-level `TNLP` surface with exact derivatives.
+//! A model with a nonlinear function solves through POUNCE's `builder`
+//! surface instead, where POUNCE's finite differences cover what the oracle
+//! cannot fill exactly, and the Hessian is limited-memory L-BFGS.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -11,33 +15,52 @@ use oximo_solver::SolverError;
 use pounce_rs::IpoptApplication;
 use pounce_rs::builder::{Nlp, Problem};
 
+use crate::hybrid::HybridOracle;
 use crate::options::{PounceOptionValue, PounceOptions};
+use crate::tnlp::{self, DerivativeOracle};
 use crate::translate::{
     Outcome, Prepared, WarmStart, apply_options, map_status, mu_strategy_str, print_level,
 };
-use crate::values::ValueOracle;
 
-/// The resident value oracle, shared between the handle and the `Problem`.
-pub(crate) type Oracle = Rc<RefCell<ValueOracle>>;
+/// The resident derivative oracle, shared between the handle and the solve.
+pub(crate) type Oracle = Rc<RefCell<HybridOracle>>;
 
 // `Result` for signature parity with the exact path, which can fail to build.
 #[expect(clippy::unnecessary_wraps)]
 pub(crate) fn build(model: &Model) -> Result<Oracle, SolverError> {
-    Ok(Rc::new(RefCell::new(ValueOracle::new(model))))
+    Ok(Rc::new(RefCell::new(HybridOracle::new(model))))
 }
 
-/// Reuse the resident tapes when the model's expression graph is unchanged,
-/// refreshing only the parameter snapshot.
+/// Reuse the resident oracle when the model's expression graph is unchanged,
+/// re-extracting the slots at the current parameter values.
 pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
     let mut o = oracle.borrow_mut();
     if o.matches(model) {
-        o.refresh_params(model);
+        o.refresh(model);
         true
     } else {
         false
     }
 }
 
+/// Solve on the exact `TNLP` path when the whole model is closed-form,
+/// otherwise through POUNCE's builder.
+pub(crate) fn run(
+    oracle: &Oracle,
+    prep: &Prepared,
+    opts: &PounceOptions,
+    warm: Option<&WarmStart>,
+) -> Result<Outcome, SolverError> {
+    if oracle.borrow().all_closed_form() {
+        tnlp::run(oracle, prep, opts, warm)
+    } else {
+        run_builder(oracle, prep, opts, warm)
+    }
+}
+
+/// The oracle behind POUNCE's builder [`Problem`]: values from the slots, and
+/// exact derivatives for whatever is closed-form (`false` hands the rest to
+/// POUNCE's finite differences).
 struct OximoProblem {
     oracle: Oracle,
     sign: f64,
@@ -46,22 +69,33 @@ struct OximoProblem {
 
 impl Problem for OximoProblem {
     fn objective(&self, x: &[f64]) -> f64 {
-        self.sign * self.oracle.borrow().objective(x)
+        self.sign * self.oracle.borrow_mut().eval_objective(x)
     }
 
     fn n_constraints(&self) -> usize {
         self.m
     }
 
-    fn constraints(&self, x: &[f64], g: &mut [f64]) {
-        let o = self.oracle.borrow();
-        for (i, out) in g.iter_mut().enumerate() {
-            *out = o.constraint(i, x);
+    fn constraints(&self, x: &[f64], out: &mut [f64]) {
+        self.oracle.borrow_mut().eval_constraints(x, out);
+    }
+
+    fn gradient(&self, x: &[f64], grad: &mut [f64]) -> bool {
+        let filled = self.oracle.borrow().try_exact_objective_gradient(x, grad);
+        if filled {
+            for g in grad.iter_mut() {
+                *g *= self.sign;
+            }
         }
+        filled
+    }
+
+    fn jacobian(&self, x: &[f64], jac: &mut [f64]) -> bool {
+        self.oracle.borrow().try_exact_dense_jacobian(x, jac)
     }
 }
 
-pub(crate) fn run(
+fn run_builder(
     oracle: &Oracle,
     prep: &Prepared,
     opts: &PounceOptions,
@@ -76,7 +110,7 @@ pub(crate) fn run(
     let m = oracle.borrow().num_constraints();
     let problem = OximoProblem { oracle: Rc::clone(oracle), sign: prep.sign, m };
 
-    // The builder finite-difference path can only warm-start the primal point.
+    // The builder path can only warm-start the primal point.
     let x0 = warm.map_or_else(|| prep.x0.clone(), |w| w.x.clone());
     let mut nlp = Nlp::new(problem)
         .var_bounds(&prep.x_l, &prep.x_u)
@@ -117,8 +151,12 @@ pub(crate) fn run(
         };
     }
 
+    // TODO: Add iterations to the builder path once POUNCE exposes them.
     let sol = nlp.solve();
+
     let termination = map_status(sol.status);
+    let raw_log =
+        (opts.universal.verbose == Some(true)).then(|| format!("EXIT: {:?}\n", sol.status));
     let warm = sol.success.then(|| WarmStart {
         x: sol.x.clone(),
         z_l: Vec::new(),
@@ -133,5 +171,6 @@ pub(crate) fn run(
         objective: Some(sol.objective),
         iterations: 0,
         warm,
+        raw_log,
     })
 }
