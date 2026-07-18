@@ -51,6 +51,13 @@ pub mod gams {
     };
 }
 
+#[cfg(feature = "pounce")]
+pub mod pounce {
+    pub use oximo_pounce::{
+        MuStrategy, PounceOptionValue, PounceOptions, PouncePersistent, PounceSolver,
+    };
+}
+
 pub mod prelude {
     //! Glob-import target. Brings the modeling and solver surface into scope.
     pub use oximo_core::prelude::*;
@@ -78,6 +85,9 @@ pub mod prelude {
     #[cfg(feature = "clarabel")]
     #[cfg_attr(docsrs, doc(cfg(feature = "clarabel")))]
     pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions, ClarabelPersistent};
+
+    #[cfg(feature = "pounce")]
+    pub use oximo_pounce::{PounceOptions, PouncePersistent, PounceSolver};
 }
 
 pub mod solvers {
@@ -102,4 +112,7 @@ pub mod solvers {
     #[cfg(feature = "clarabel")]
     #[cfg_attr(docsrs, doc(cfg(feature = "clarabel")))]
     pub use oximo_clarabel::Clarabel;
+
+    #[cfg(feature = "pounce")]
+    pub use oximo_pounce::PounceSolver;
 }
