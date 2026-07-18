@@ -117,10 +117,9 @@ fn initial_guess(lb: f64, ub: f64) -> f64 {
 pub(crate) fn map_status(s: ApplicationReturnStatus) -> TerminationStatus {
     use ApplicationReturnStatus as A;
     match s {
-        A::SolveSucceeded => TerminationStatus::Optimal,
-        A::SolvedToAcceptableLevel | A::FeasiblePointFound => TerminationStatus::LocallyOptimal,
+        A::SolveSucceeded | A::SolvedToAcceptableLevel => TerminationStatus::LocallyOptimal,
+        A::FeasiblePointFound => TerminationStatus::Feasible,
         A::InfeasibleProblemDetected => TerminationStatus::Infeasible,
-        A::DivergingIterates => TerminationStatus::Unbounded,
         A::MaximumIterationsExceeded => TerminationStatus::IterationLimit,
         A::MaximumCpuTimeExceeded | A::MaximumWallTimeExceeded => TerminationStatus::TimeLimit,
         A::UserRequestedStop => TerminationStatus::Interrupted,
