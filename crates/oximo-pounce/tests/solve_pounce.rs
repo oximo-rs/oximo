@@ -48,7 +48,7 @@ fn rosenbrock_unconstrained() {
     objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
     let res = PounceSolver.solve(&m, &PounceOptions::default()).unwrap();
-    assert_eq!(res.termination, TerminationStatus::Optimal);
+    assert_eq!(res.termination, TerminationStatus::LocallyOptimal);
     assert_close(res.value_of(x).unwrap(), 1.0, 1e-4, "x");
     assert_close(res.value_of(y).unwrap(), 1.0, 1e-4, "y");
     assert!(res.objective().unwrap().abs() < 1e-6, "objective");
@@ -62,7 +62,7 @@ fn maximize_flips_sign_back() {
     objective!(m, Max, 4.0 * x - x.powi(2));
 
     let res = PounceSolver.solve(&m, &PounceOptions::default()).unwrap();
-    assert_eq!(res.termination, TerminationStatus::Optimal);
+    assert_eq!(res.termination, TerminationStatus::LocallyOptimal);
     assert_close(res.value_of(x).unwrap(), 2.0, 1e-4, "x");
     assert_close(res.objective().unwrap(), 4.0, 1e-5, "objective");
 }
