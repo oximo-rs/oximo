@@ -68,6 +68,16 @@ fn maximize_flips_sign_back() {
 }
 
 #[test]
+fn overflowed_print_level_is_rejected() {
+    let m = Model::new("overflow");
+    variable!(m, x >= 0.0);
+    objective!(m, Min, x);
+
+    let err = PounceSolver.solve(&m, &PounceOptions::default().print_level(u32::MAX)).unwrap_err();
+    assert!(matches!(err, SolverError::Backend(_)), "{err}");
+}
+
+#[test]
 fn lp_duals_match_lp_convention() {
     let m = Model::new("product_mix");
     variable!(m, x >= 0.0);

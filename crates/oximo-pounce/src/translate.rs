@@ -182,7 +182,7 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
 /// Explicit `print_level`, else 5 when `verbose`, else 0 (quiet).
 pub(crate) fn print_level(opts: &PounceOptions) -> i32 {
     opts.print_level.map_or(if opts.universal.verbose == Some(true) { 5 } else { 0 }, |v| {
-        i32::try_from(v).unwrap_or(12)
+        i32::try_from(v).unwrap_or(i32::MAX)
     })
 }
 
