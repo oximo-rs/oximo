@@ -1,5 +1,5 @@
 //! Stable-Rust path
-//! 
+//!
 //! One resident [`HybridOracle`], two solve surfaces.
 //! A model whose objective and constraints are all linear/quadratic solves on
 //! POUNCE's low-level `TNLP` surface with exact derivatives.
