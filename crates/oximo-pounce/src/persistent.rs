@@ -62,19 +62,15 @@ impl PouncePersistent {
         let prep = setup(model)?;
         let started = Instant::now();
 
-        let reused = matches!(&self.state, Some(s) if backend::try_reuse(&s.oracle, model));
-        if !reused {
-            self.state = Some(State { oracle: backend::build(model)?, warm: None });
-        }
-
-        let state = self.state.as_ref().expect("state present after build");
-        let outcome = backend::run(&state.oracle, &prep, opts, state.warm.as_ref())?;
+        let state = match &mut self.state {
+            Some(state) if backend::try_reuse(&state.oracle, model) => state,
+            state => state.insert(State { oracle: backend::build(model)?, warm: None }),
+        };
+        let mut outcome = backend::run(&state.oracle, &prep, opts, state.warm.as_ref())?;
         let elapsed = started.elapsed();
 
-        let next_warm = outcome.warm.clone();
-        let result = assemble(prep.sign, outcome, elapsed);
-        self.state.as_mut().expect("state present after solve").warm = next_warm;
-        Ok(result)
+        state.warm = outcome.warm.take();
+        Ok(assemble(prep.sign, outcome, elapsed))
     }
 }
 
