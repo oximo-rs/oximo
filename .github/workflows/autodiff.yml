@@ -1,8 +1,8 @@
 name: Autodiff (nightly)
 
-# Exercises the `enzyme` feature of oximo-autodiff, which needs a nightly
-# toolchain with the Enzyme engine (`-Zautodiff=Enable`) and the fat-LTO
-# `enzyme` profile.
+# Exercises the `enzyme` features of oximo-autodiff and oximo-pounce, which
+# need a nightly toolchain with the Enzyme engine (`-Zautodiff=Enable`) and
+# the fat-LTO `enzyme` profile.
 
 on:
   push:
@@ -28,5 +28,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test oximo-autodiff with Enzyme
         run: cargo test -p oximo-autodiff --features enzyme --profile enzyme
+        env:
+          RUSTFLAGS: "-Zautodiff=Enable"
+
+  pounce:
+    name: Cargo test (oximo-pounce, enzyme)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: enzyme
+      - uses: Swatinem/rust-cache@v2
+      - name: Test oximo-pounce with Enzyme
+        run: cargo test -p oximo-pounce --features enzyme --profile enzyme
+        env:
+          RUSTFLAGS: "-Zautodiff=Enable"
+      - name: Test umbrella POUNCE tests with Enzyme
+        run: cargo test -p oximo --no-default-features --features pounce-enzyme --profile enzyme --test solve_pounce
         env:
           RUSTFLAGS: "-Zautodiff=Enable"
