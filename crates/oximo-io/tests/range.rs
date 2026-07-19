@@ -4,8 +4,6 @@
 //! via a `RANGES` section. CPLEX LP has no portable single-row range so the
 //! writer expands it to two rows. The AMPL `.nl` writer uses bound-type code 0.
 
-#![allow(clippy::float_cmp)]
-
 use oximo_core::prelude::*;
 use oximo_io::{to_lp_string, to_mps_string};
 

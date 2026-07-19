@@ -1,7 +1,5 @@
 //! Indexed parameters built with `param!(m, name[i in dom[, ...]][ if cond] = value)`.
 
-#![allow(clippy::float_cmp)]
-
 use oximo_core::prelude::*;
 
 #[test]

@@ -33,8 +33,6 @@
 //! ```
 //! Requires a licensed GAMS installation with CPLEX on PATH.
 
-#![allow(clippy::cast_precision_loss)]
-
 #[cfg(any(feature = "gams", feature = "highs"))]
 use oximo::prelude::*;
 
