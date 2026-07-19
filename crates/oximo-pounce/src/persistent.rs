@@ -20,7 +20,7 @@ struct State {
 }
 
 /// A stateful POUNCE handle that keeps the derivative build resident across
-/// solves. Created by [`PounceSolver::persistent`](crate::PounceSolver).
+/// solves. Created by [`Pounce::persistent`](crate::Pounce).
 ///
 /// When the next model has the same variables, objective, and constraint
 /// expressions with an unchanged sparsity pattern, the resident oracle

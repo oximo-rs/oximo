@@ -22,10 +22,10 @@ pure-Rust port of IPOPT, so this backend solves continuous LP/QP/QCP/NLP models.
   from `oximo-autodiff` using `TNLP`.
 
 ```rust,ignore
-use oximo_pounce::PounceSolver;
+use oximo_pounce::Pounce;
 use oximo_solver::Solver;
 
-let res = PounceSolver.solve(&model, &Default::default())?;
+let res = Pounce.solve(&model, &Default::default())?;
 ```
 
 ## Options
@@ -38,7 +38,7 @@ presolve/FBBT/auxiliary preprocessing, and FERAL backend tuning).
 Each method is named exactly like the POUNCE option:
 
 ```rust,ignore
-use oximo_pounce::{MuStrategy, PounceOptions, PounceSolver};
+use oximo_pounce::{MuStrategy, PounceOptions, Pounce};
 use oximo_solver::Solver;
 
 let opts = PounceOptions::default()
@@ -51,7 +51,7 @@ let opts = PounceOptions::default()
 // Escape hatch:
 let opts = opts.set("acceptable_tol", 1e-5);
 
-let res = PounceSolver.solve(&model, &opts)?;
+let res = Pounce.solve(&model, &opts)?;
 ```
 
 A few options are managed by this backend and should not be set by hand:

@@ -24,9 +24,9 @@ pub use persistent::PouncePersistent;
 /// finite-differences them with an L-BFGS Hessian. With the `enzyme`
 /// feature everything is exact via `oximo-autodiff`.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PounceSolver;
+pub struct Pounce;
 
-impl oximo_solver::Solver for PounceSolver {
+impl oximo_solver::Solver for Pounce {
     type Options = PounceOptions;
 
     fn name(&self) -> &str {
@@ -47,7 +47,7 @@ impl oximo_solver::Solver for PounceSolver {
     }
 }
 
-impl oximo_solver::PersistentSolver for PounceSolver {
+impl oximo_solver::PersistentSolver for Pounce {
     type Handle = PouncePersistent;
 
     fn persistent(&self) -> Self::Handle {
