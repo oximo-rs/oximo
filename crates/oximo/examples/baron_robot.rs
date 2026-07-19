@@ -25,9 +25,8 @@
 //! Run (requires a licensed BARON on PATH):
 //!   cargo run -p oximo --example baron_robot --features baron
 
-#![allow(clippy::unreadable_literal)]
-
 #[cfg(feature = "baron")]
+#[expect(clippy::unreadable_literal)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use oximo::prelude::*;
     use oximo::solvers::Baron;

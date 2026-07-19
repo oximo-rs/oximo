@@ -589,7 +589,7 @@ fn fmt(v: f64) -> String {
 /// branch-and-reduce iterations, `[11]` node where the optimum was found
 /// (`-3` => no solution), last = wall time. The termination reason comes from
 /// the `res.lst` banner (see [`map_status`]), not the numeric `[7]` solver status.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn parse_solution(
     tim: &str,
     res: &str,

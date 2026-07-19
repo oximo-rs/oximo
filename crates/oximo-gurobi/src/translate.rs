@@ -132,7 +132,7 @@ pub(crate) fn run_and_collect(
     let elapsed = started.elapsed();
 
     let termination = map_status(&built.model)?;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let iterations = built.model.get_attr(attr::IterCount).unwrap_or(0.0) as u64;
     let (solutions, reduced_costs, dual, soc_dual) = collect_solution(
         kind,
@@ -182,7 +182,7 @@ fn add_variables(
         // is Gurobi's lower bound: the value is 0 or in `[lb, ub]`.
         let floor = v.domain.semi_threshold().unwrap_or(v.lb);
         // `add_var!` expands the f64 bounds with an `as f64` cast.
-        #[allow(clippy::unnecessary_cast)]
+        #[expect(clippy::unnecessary_cast)]
         let gvar = add_var!(grb_model, vtype, bounds: floor..v.ub, name: &format!("x{i}"))
             .map_err(map_grb_err)?;
         gurobi_vars.push(gvar);
@@ -257,7 +257,7 @@ fn add_constraints(
             for (v, co) in t.coeffs {
                 expr.add_term(co, gurobi_vars[v.index()]);
             }
-            #[allow(clippy::unnecessary_cast)]
+            #[expect(clippy::unnecessary_cast)]
             let (_slack, constr) =
                 grb_model.add_range(&name, c!(expr in lower..upper)).map_err(map_grb_err)?;
             gurobi_constrs.push(GrbRow::Lin(constr));
@@ -325,7 +325,7 @@ fn add_squared_affine(q: &mut QuadExpr, t: &LinearTerms, sign: f64, gurobi_vars:
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn add_nonlinear_constraint(
     arena: &ExprArena,
     lhs: ExprId,

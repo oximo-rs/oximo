@@ -191,7 +191,7 @@ impl<'a, W: Write> Writer<'a, W> {
             return Err(IoError::InvalidNumber { value: x, location: "numeric output".into() });
         }
         if (x - x.trunc()).abs() == 0.0 && x.abs() < 1e16 {
-            #[allow(clippy::cast_possible_truncation)]
+            #[expect(clippy::cast_possible_truncation)]
             let n = x as i64;
             return Ok(format!("{n}"));
         }
@@ -221,7 +221,7 @@ where
 
 fn as_short(x: f64) -> Option<i16> {
     if (x - x.trunc()).abs() == 0.0 && (-32768.0..=32767.0).contains(&x) {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         let v = x as i16;
         Some(v)
     } else {
@@ -231,7 +231,7 @@ fn as_short(x: f64) -> Option<i16> {
 
 fn as_long(x: f64) -> Option<i32> {
     if (x - x.trunc()).abs() == 0.0 && (-2_147_483_648.0..=2_147_483_647.0).contains(&x) {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         let v = x as i32;
         Some(v)
     } else {

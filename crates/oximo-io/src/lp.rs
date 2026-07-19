@@ -38,7 +38,7 @@ use crate::error::IoError;
 ///
 /// Returns [`IoError`] on I/O failure, missing objective, or nonlinear/conic
 /// constructs.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if model.num_soc_constraints() > 0
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)

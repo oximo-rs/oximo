@@ -1,4 +1,4 @@
-#![allow(clippy::float_cmp)]
+#![expect(clippy::float_cmp)]
 
 use std::cell::RefCell;
 

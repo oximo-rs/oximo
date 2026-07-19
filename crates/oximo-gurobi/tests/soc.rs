@@ -1,6 +1,6 @@
 //! Live Gurobi tests for second-order cone models (explicit and detected).
 
-#![allow(clippy::many_single_char_names)]
+#![expect(clippy::many_single_char_names)]
 
 use oximo_core::prelude::*;
 use oximo_gurobi::{Gurobi, GurobiOptions};

@@ -31,7 +31,7 @@ use crate::error::IoError;
 ///
 /// Returns [`IoError`] if there is an error writing the MPS data or if the model contains unsupported features.
 ///
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn write_mps<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     if model.num_soc_constraints() > 0
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)

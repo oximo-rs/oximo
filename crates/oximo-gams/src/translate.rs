@@ -33,7 +33,7 @@ use crate::options::write_options;
 /// # Panics
 ///
 /// Panics if variable indices overflow `u32`.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn solve(
     model: &Model,
     opts: &GamsOptions,
@@ -555,7 +555,7 @@ fn modelstat_has_solution(modelstat: i32) -> bool {
 /// (`"LP"` / `"MIP"` / `"NLP"` / `"MINLP"` / `"QCP"` / `"MIQCP"`) and any
 /// solver-options file pair `(filename, content)` the caller should also
 /// persist alongside the `.gms`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn build_model_section(
     gms: &mut String,
     kind: ModelKind,
