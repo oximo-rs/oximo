@@ -1,0 +1,25 @@
+[package]
+name = "oximo-pounce"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "POUNCE (pure-Rust IPOPT) NLP backend for oximo. Finite differences on stable, exact derivatives via oximo-autodiff with the `enzyme` feature"
+readme = "README.md"
+
+[features]
+enzyme = ["oximo-autodiff/enzyme"]
+
+[dependencies]
+oximo-expr.workspace = true
+oximo-core.workspace = true
+oximo-solver.workspace = true
+oximo-autodiff.workspace = true
+pounce-rs.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

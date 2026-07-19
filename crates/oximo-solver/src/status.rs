@@ -7,6 +7,8 @@ pub enum TerminationStatus {
     Optimal,
     /// A local optimum.
     LocallyOptimal,
+    /// Stopped with a feasible point, without any optimality claim.
+    Feasible,
     /// Proven infeasible.
     Infeasible,
     /// Proven unbounded.
@@ -31,14 +33,15 @@ pub enum TerminationStatus {
 
 impl TerminationStatus {
     /// Whether a solver that stopped for this reason may still return a usable
-    /// primal point. `true` for optimality and for the various limits (which
-    /// keep the best incumbent found so far), `false` for infeasible/unbounded/
-    /// error/unsolved states.
+    /// primal point. `true` for optimality, plain feasibility, and the various
+    /// limits (which keep the best incumbent found so far), `false` for
+    /// infeasible/unbounded/error/unsolved states.
     pub fn admits_primal(&self) -> bool {
         matches!(
             self,
             Self::Optimal
                 | Self::LocallyOptimal
+                | Self::Feasible
                 | Self::IterationLimit
                 | Self::TimeLimit
                 | Self::NodeLimit
@@ -119,6 +122,7 @@ mod tests {
         match t {
             T::Optimal => (true, PrimalStatus::OptimalPoint),
             T::LocallyOptimal
+            | T::Feasible
             | T::IterationLimit
             | T::TimeLimit
             | T::NodeLimit
@@ -137,6 +141,7 @@ mod tests {
         vec![
             T::Optimal,
             T::LocallyOptimal,
+            T::Feasible,
             T::Infeasible,
             T::Unbounded,
             T::InfeasibleOrUnbounded,

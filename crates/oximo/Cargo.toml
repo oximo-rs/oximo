@@ -20,9 +20,11 @@ gams = ["dep:oximo-gams"]
 baron = ["dep:oximo-baron"]
 clarabel = ["dep:oximo-clarabel"]
 clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
+pounce = ["dep:oximo-pounce"]
+pounce-enzyme = ["pounce", "oximo-pounce/enzyme"]
 
 [package.metadata.docs.rs]
-features = ["gams", "baron", "clarabel", "clarabel-faer"]
+features = ["gams", "baron", "clarabel", "clarabel-faer", "pounce"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -34,6 +36,7 @@ oximo-gurobi = { workspace = true, optional = true }
 oximo-gams = { workspace = true, optional = true }
 oximo-baron = { workspace = true, optional = true }
 oximo-clarabel = { workspace = true, optional = true }
+oximo-pounce = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
 
 [lints]
