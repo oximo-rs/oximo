@@ -52,6 +52,7 @@ pub mod gams {
 }
 
 #[cfg(feature = "pounce")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
 pub mod pounce {
     pub use oximo_pounce::{
         MuStrategy, Pounce, PounceOptionValue, PounceOptions, PouncePersistent,
@@ -87,6 +88,7 @@ pub mod prelude {
     pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions, ClarabelPersistent};
 
     #[cfg(feature = "pounce")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
     pub use oximo_pounce::{Pounce, PounceOptions, PouncePersistent};
 }
 
@@ -114,5 +116,6 @@ pub mod solvers {
     pub use oximo_clarabel::Clarabel;
 
     #[cfg(feature = "pounce")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
     pub use oximo_pounce::Pounce;
 }
