@@ -529,8 +529,8 @@ fn map_status(model: &grb::Model) -> Result<TerminationStatus, SolverError> {
         Status::TimeLimit => TerminationStatus::TimeLimit,
         Status::IterationLimit => TerminationStatus::IterationLimit,
         Status::NodeLimit => TerminationStatus::NodeLimit,
-        // Gurobi could not meet optimality tolerances but holds a usable point.
-        Status::SubOptimal => TerminationStatus::Interrupted,
+        // Gurobi could not meet optimality tolerances but holds a feasible point.
+        Status::SubOptimal => TerminationStatus::Feasible,
         Status::Loaded => TerminationStatus::NotSolved,
         _ => TerminationStatus::Other(format!("Status: {status:?}")),
     })

@@ -535,7 +535,8 @@ fn map_status(modelstat: i32, solvestat: i32) -> TerminationStatus {
 fn modelstat_termination(modelstat: i32) -> TerminationStatus {
     match modelstat {
         1 | 8 | 15 | 16 | 17 => TerminationStatus::Optimal,
-        2 | 7 | 9 => TerminationStatus::LocallyOptimal,
+        2 => TerminationStatus::LocallyOptimal,
+        7 => TerminationStatus::Feasible,
         3 | 18 => TerminationStatus::Unbounded,
         4 | 5 | 6 | 10 | 19 => TerminationStatus::Infeasible,
         11 => TerminationStatus::Other("gams_license_error".into()),
@@ -545,7 +546,7 @@ fn modelstat_termination(modelstat: i32) -> TerminationStatus {
 
 /// GAMS model-status codes that carry a usable primal point.
 fn modelstat_has_solution(modelstat: i32) -> bool {
-    matches!(modelstat, 1 | 2 | 7 | 8 | 9 | 15 | 16 | 17)
+    matches!(modelstat, 1 | 2 | 7 | 8 | 15 | 16 | 17)
 }
 
 // - Helpers
@@ -1082,6 +1083,8 @@ mod tests {
         // Normal completion defers to modelstat.
         assert_eq!(map_status(1, 1), TerminationStatus::Optimal);
         assert_eq!(map_status(2, 1), TerminationStatus::LocallyOptimal);
+        assert_eq!(map_status(7, 1), TerminationStatus::Feasible);
+        assert_eq!(map_status(9, 1), TerminationStatus::Other("gams_modelstat_9".into()));
         assert_eq!(map_status(8, 1), TerminationStatus::Optimal);
         assert_eq!(map_status(4, 1), TerminationStatus::Infeasible);
         assert_eq!(map_status(3, 1), TerminationStatus::Unbounded);
@@ -1092,6 +1095,12 @@ mod tests {
         assert_eq!(map_status(1, 5), TerminationStatus::NumericError);
         assert_eq!(map_status(1, 12), TerminationStatus::NotSolved);
         assert_eq!(map_status(1, 7), TerminationStatus::Other("gams_license_error".into()));
+    }
+
+    #[test]
+    fn intermediate_noninteger_carries_no_solution() {
+        assert!(!modelstat_has_solution(9));
+        assert!(modelstat_has_solution(8));
     }
 
     #[test]
