@@ -304,6 +304,32 @@ for i in 0..result.result_count() {
 }
 ```
 
+## Inspecting a model
+
+`Model` implements `Display`, printing the whole model as readable algebra. Adapters give the same rendering for single pieces: `display_constraint`, `display_objective`, `display_expr`, `display_soc`.
+
+```rust
+use oximo::prelude::*;
+
+let m = Model::new("diet");
+variable!(m, x >= 0.0);
+variable!(m, y >= 0.0);
+constraint!(m, c1, x + 2.0 * y <= 14.0);
+objective!(m, Min, 3.0 * x + 4.0 * y);
+
+println!("{m}");
+// Model 'diet' (LP)
+// min 3 x + 4 y
+// s.t.
+//   c1: x + 2 y <= 14
+// vars
+//   x >= 0
+//   y >= 0
+
+let c1 = m.constraint_id("c1").unwrap();
+assert_eq!(m.display_constraint(c1).to_string(), "c1: x + 2 y <= 14");
+```
+
 ## Model export
 
 With the `io` feature (default), you can export models to MPS, LP and NL format for inspection or use with external solvers.
