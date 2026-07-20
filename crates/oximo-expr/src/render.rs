@@ -102,6 +102,9 @@ pub(crate) fn render_node(
                         parts.push((true, render_node(arena, *inner, resolve, PREC_UNARY)));
                     }
                     ExprNode::Const(v) if *v < 0.0 => parts.push((true, fmt_num(-v))),
+                    ExprNode::Param(p) if arena.param_value(*p) < 0.0 => {
+                        parts.push((true, fmt_num(-arena.param_value(*p))));
+                    }
                     ExprNode::Linear { coeffs, constant } => parts.extend(linear_parts(
                         &LinearTerms { coeffs: coeffs.clone(), constant: *constant },
                         resolve,
@@ -264,6 +267,20 @@ mod tests {
         let sum = arena.push(ExprNode::Add(smallvec::smallvec![prod, neg_z]));
         let s = arena.push(ExprNode::Sin(sum));
         assert_eq!(render_expr(&arena, s, &names), "sin(x * y - z)");
+    }
+
+    #[test]
+    fn negative_param_in_nonlinear_add_is_sign_aware() {
+        let mut arena = ExprArena::new();
+        let x = arena.push(ExprNode::Var(VarId(0)));
+        let pid = arena.new_param(-3.0);
+        let p = arena.param(pid);
+        let sum = arena.push(ExprNode::Add(smallvec::smallvec![x, p]));
+        let s = arena.push(ExprNode::Sin(sum));
+        assert_eq!(render_expr(&arena, s, &names), "sin(x - 3)");
+
+        arena.set_param_value(pid, 3.0);
+        assert_eq!(render_expr(&arena, s, &names), "sin(x + 3)");
     }
 
     #[test]
