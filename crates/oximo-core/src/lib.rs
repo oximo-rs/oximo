@@ -7,6 +7,7 @@ extern crate self as oximo_core;
 #[path = "macro_support.rs"]
 pub mod __macro_support;
 pub mod constraint;
+pub mod display;
 pub mod domain;
 pub mod error;
 pub mod indexed;
@@ -20,6 +21,7 @@ pub mod sum;
 pub mod var;
 
 pub use constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
+pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay};
 pub use domain::Domain;
 pub use error::{Error, Result};
 pub use indexed::{IndexedParam, IndexedVar};
@@ -35,6 +37,7 @@ pub use var::{VarBuilder, Variable, var_name};
 // `oximo-expr` import.
 pub use oximo_expr::{
     EvalError, Expr, ExprArena, ExprId, ExprNode, ParamId, VarId, describe_nonlinear_term, dot,
+    render_expr, render_linear_terms,
 };
 
 pub use oximo_macros::{constraint, objective, param, set, soc_constraint, sum, variable};
