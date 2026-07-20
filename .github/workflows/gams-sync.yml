@@ -19,32 +19,26 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Godwinss24/GAM-SOLVERS
+          ref: 9c99a7df802119ff98c34f31afd5aae97318a06c
           path: gams_scraper
           persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run scraper for each solver
+      - name: Scrape each solver and diff against its snapshot
         run: |
           mkdir -p /tmp/scraped
-          for solver in BARON GUROBI HIGHS; do
-            echo "Scraping $solver..."
-            cargo run --manifest-path gams_scraper/Cargo.toml -- "$solver" > "/tmp/scraped/${solver}.txt"
-          done
-
-      - name: Diff against checked-in snapshots
-        run: |
-          for solver in BARON GUROBI HIGHS; do
-            snapshot="snapshots/${solver,,}.txt"
+          fail=0
+          for snapshot in crates/oximo-gams/option-snapshots/*.txt; do
+            solver=$(basename "$snapshot" .txt)
+            upper=$(echo "$solver" | tr '[:lower:]' '[:upper:]')
             new="/tmp/scraped/${solver}.txt"
-            if [ ! -f "$snapshot" ]; then
-              echo "No snapshot for $solver yet, skipping diff."
-              continue
+            echo "Checking ${upper}..."
+            cargo run --quiet --manifest-path gams_scraper/Cargo.toml -- "$upper" > "$new"
+            if ! diff --strip-trailing-cr "$snapshot" "$new"; then
+              echo "::error::${upper} options are out of date. Regenerate ${snapshot} from the scraper and update any typed options in crates/oximo-gams/src/solver_options.rs."
+              fail=1
             fi
-            echo "Checking $solver..."
-            diff "$snapshot" "$new" || {
-              echo "::error::$solver options are out of date. Regenerate and update ${snapshot} and the corresponding options.rs."
-              exit 1
-            }
           done
+          exit $fail
