@@ -34,13 +34,7 @@ pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions};
 /// GAMS backend types: sub-solver selection and per-solver option structs.
 #[cfg(feature = "gams")]
 pub mod gams {
-    pub use oximo_gams::{
-        GamsBaronOptions, GamsCbcCuts, GamsCbcOptions, GamsCbcPresolve, GamsCplexMipEmphasis,
-        GamsCplexOptions, GamsGurobiMipFocus, GamsGurobiOptions, GamsHighsOptions,
-        GamsHighsPresolve, GamsHighsSolver, GamsIpoptLinearSolver, GamsIpoptMuStrategy,
-        GamsIpoptOptions, GamsKnitroAlgorithm, GamsKnitroOptions, GamsMosekOptions, GamsOptions,
-        GamsScipOptions, GamsSolver, GamsSolverConfig, GamsXpressOptions,
-    };
+    pub use oximo_gams::*;
 }
 
 pub mod prelude {
