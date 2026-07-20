@@ -275,11 +275,11 @@ fn keyword_initial_and_fix() {
     variable!(m, q, fix = 5.0);
     variable!(m, r, init = 2.0);
     objective!(m, Min, p + q + r);
-    let v = m.variables();
-    assert_eq!(v[0].initial, Some(3.0));
-    assert!((v[1].lb - 5.0).abs() < f64::EPSILON);
-    assert!((v[1].ub - 5.0).abs() < f64::EPSILON);
-    assert_eq!(v[2].initial, Some(2.0));
+    let vars = m.variables();
+    assert_eq!(vars[0].initial, Some(3.0));
+    assert!((vars[1].lb - 5.0).abs() < f64::EPSILON);
+    assert!((vars[1].ub - 5.0).abs() < f64::EPSILON);
+    assert_eq!(vars[2].initial, Some(2.0));
 }
 
 #[test]
