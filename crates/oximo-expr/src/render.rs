@@ -35,6 +35,7 @@ pub fn render_expr(arena: &ExprArena, id: ExprId, resolve: &impl Fn(VarId) -> St
 /// - unit magnitudes omitted,
 /// - multiplication implicit,
 /// - the constant last.
+///
 /// An empty expression renders as `0`.
 pub fn render_linear_terms(t: &LinearTerms, resolve: &impl Fn(VarId) -> String) -> String {
     join_parts(&linear_parts(t, resolve))
