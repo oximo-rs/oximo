@@ -117,10 +117,7 @@ mod model {
 
         let opts = GamsOptions::default()
             .time_limit(Duration::from_secs(120))
-            .solver(GamsSolverConfig::Baron(GamsBaronOptions {
-                eps_r: Some(1e-4),
-                ..Default::default()
-            }))
+            .solver(GamsSolverConfig::Baron(GamsBaronOptions::default().eps_r(1e-4)))
             .verbose(true);
         solve_and_report("GAMS + BARON", Gams::new(), &opts)
     }
