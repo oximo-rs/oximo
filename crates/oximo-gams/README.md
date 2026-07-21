@@ -117,7 +117,8 @@ let opts = GamsOptions::default().solver(GamsSolver::Custom("MOSEK".into()));
 ### Per-solver typed options
 
 Wrap the sub-solver's options struct in `GamsSolverConfig` to have oximo write a
-`<solver>.opt` file. GAMS picks it up via `model.optfile = 1`.
+`<solver>.opt` file. GAMS picks it up via `model.optfile = 1`. Each struct exposes
+one builder setter per documented GAMS option.
 
 ```rust
 use oximo_gams::{GamsBaronOptions, GamsSolverConfig, GamsOptions};
@@ -126,14 +127,10 @@ use oximo_solver::UniversalOptionsExt;
 
 let opts = GamsOptions::default()
     .time_limit(Duration::from_secs(120))
-    .solver(GamsSolverConfig::Baron(GamsBaronOptions {
-        eps_r: Some(1e-4),
-        threads: Some(4),
-        ..Default::default()
-    }));
+    .solver(GamsSolverConfig::Baron(
+        GamsBaronOptions::default().eps_r(1e-4).threads(4),
+    ));
 ```
-
-Supported typed-option structs:
 
 For any option without a generated setter, push a verbatim line onto the public
 `raw` field:
