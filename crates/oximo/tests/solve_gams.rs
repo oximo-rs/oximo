@@ -254,7 +254,7 @@ fn gams_reads_cplex_solution_pool() {
 }
 
 #[test]
-#[allow(clippy::many_single_char_names)]
+#[expect(clippy::many_single_char_names)]
 fn gams_soc_dual_matches_norm_form_multiplier() {
     // min x + y  s.t.  ||(x, y)||_2 <= 1 (explicit SOC, lowered to sqr rows).
     // KKT: z0 = ||grad obj|| = sqrt(2); the eq_soc0 marginal is rescaled by

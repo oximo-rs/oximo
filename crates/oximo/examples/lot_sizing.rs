@@ -42,8 +42,6 @@
 //! "The capacitated lot sizing problem: a review of models
 //! and algorithms", Omega, 31(5), 365-378, 2003.
 
-#![allow(clippy::many_single_char_names)]
-
 #[cfg(any(feature = "gurobi", feature = "highs"))]
 use oximo::prelude::*;
 

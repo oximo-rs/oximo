@@ -589,7 +589,7 @@ fn fmt(v: f64) -> String {
 /// branch-and-reduce iterations, `[11]` node where the optimum was found
 /// (`-3` => no solution), last = wall time. The termination reason comes from
 /// the `res.lst` banner (see [`map_status`]), not the numeric `[7]` solver status.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn parse_solution(
     tim: &str,
     res: &str,
@@ -730,7 +730,7 @@ fn map_status(res: &str, model_status: i64) -> TerminationStatus {
     } else if has("heuristic termination") {
         // *** Heuristic termination ***, feasible found, global optimality not
         // guaranteed (DeltaTerm).
-        TerminationStatus::Interrupted
+        TerminationStatus::Feasible
     } else if has("insufficient memory") {
         // *** Insufficient Memory for Data structures ***
         TerminationStatus::Other("baron_insufficient_memory".into())
@@ -1221,7 +1221,7 @@ mod tests {
             map_status("*** Search interrupted by user ***", 4),
             TerminationStatus::Interrupted
         );
-        assert_eq!(map_status("*** Heuristic termination ***", 4), TerminationStatus::Interrupted);
+        assert_eq!(map_status("*** Heuristic termination ***", 4), TerminationStatus::Feasible);
         assert_eq!(
             map_status("*** User did not provide appropriate variable bounds ***", 4),
             TerminationStatus::Other("baron_missing_bounds".into())

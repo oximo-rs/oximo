@@ -71,7 +71,7 @@ pub(crate) fn computed_name(first: &TokenStream2) -> Option<TokenStream2> {
 
 /// A constraint relation: a single `lhs <op> rhs`, or a two-sided range that
 /// lowers to two rows.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 enum Relations {
     Single(TokenStream2),
     Range { mid: Expr, lo: Expr, hi: Expr },

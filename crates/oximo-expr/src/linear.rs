@@ -273,6 +273,7 @@ pub fn describe_nonlinear_term(
     id: ExprId,
     resolve: &impl Fn(VarId) -> String,
 ) -> Option<String> {
+    use crate::render::{PREC_ADD, PREC_UNARY, render_node};
     let (_, residual) = split_linear(arena, id);
     residual.first().map(|s| {
         if s.neg {
@@ -281,86 +282,6 @@ pub fn describe_nonlinear_term(
             render_node(arena, s.id, resolve, PREC_ADD)
         }
     })
-}
-
-// Precedence levels for parenthesizing `render_node` output.
-const PREC_ADD: u8 = 1;
-const PREC_MUL: u8 = 2;
-const PREC_UNARY: u8 = 3;
-
-/// Render an arena node as an infix string. `parent_prec` is the precedence of
-/// the surrounding context.
-fn render_node(
-    arena: &ExprArena,
-    id: ExprId,
-    resolve: &impl Fn(VarId) -> String,
-    parent_prec: u8,
-) -> String {
-    let (text, prec) = match arena.get(id) {
-        ExprNode::Const(c) => (fmt_num(*c), PREC_UNARY),
-        ExprNode::Var(v) => (resolve(*v), PREC_UNARY),
-        ExprNode::Param(p) => (fmt_num(arena.param_value(*p)), PREC_UNARY),
-        ExprNode::Neg(x) => {
-            (format!("-{}", render_node(arena, *x, resolve, PREC_UNARY)), PREC_UNARY)
-        }
-        ExprNode::Add(children) => {
-            let parts: Vec<String> =
-                children.iter().map(|c| render_node(arena, *c, resolve, PREC_ADD)).collect();
-            (parts.join(" + "), PREC_ADD)
-        }
-        ExprNode::Mul(children) => {
-            let parts: Vec<String> =
-                children.iter().map(|c| render_node(arena, *c, resolve, PREC_MUL)).collect();
-            (parts.join(" * "), PREC_MUL)
-        }
-        ExprNode::Pow(b, e) => {
-            let base = render_node(arena, *b, resolve, PREC_UNARY);
-            let exp = render_node(arena, *e, resolve, PREC_UNARY);
-            (format!("{base}^{exp}"), PREC_UNARY)
-        }
-        ExprNode::Div(num, den) => {
-            let n = render_node(arena, *num, resolve, PREC_MUL);
-            let d = render_node(arena, *den, resolve, PREC_MUL);
-            (format!("{n} / {d}"), PREC_MUL)
-        }
-        ExprNode::Sin(x) => (fmt_call("sin", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Cos(x) => (fmt_call("cos", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Exp(x) => (fmt_call("exp", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Log(x) => (fmt_call("log", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Abs(x) => (fmt_call("abs", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Linear { coeffs, constant } => {
-            let mut parts: Vec<String> = coeffs
-                .iter()
-                .map(|(v, c)| {
-                    if (*c - 1.0).abs() < f64::EPSILON {
-                        resolve(*v)
-                    } else {
-                        format!("{} * {}", fmt_num(*c), resolve(*v))
-                    }
-                })
-                .collect();
-            if *constant != 0.0 || parts.is_empty() {
-                parts.push(fmt_num(*constant));
-            }
-            (parts.join(" + "), if parts.len() > 1 { PREC_ADD } else { PREC_MUL })
-        }
-    };
-    if prec < parent_prec { format!("({text})") } else { text }
-}
-
-/// Format a call-like node `name(arg)`.
-fn fmt_call(
-    name: &str,
-    arena: &ExprArena,
-    arg: ExprId,
-    resolve: &impl Fn(VarId) -> String,
-) -> String {
-    format!("{name}({})", render_node(arena, arg, resolve, PREC_ADD))
-}
-
-/// Render an `f64` compactly, used inside term descriptions.
-fn fmt_num(v: f64) -> String {
-    format!("{v}")
 }
 
 #[cfg(test)]

@@ -3,8 +3,6 @@
 //! Range / product-of-range domains store densely; string, sparse `from_ints`,
 //! and `filter`ed families stay sparse.
 
-#![allow(clippy::float_cmp)]
-
 use oximo_core::prelude::*;
 
 #[test]

@@ -18,7 +18,7 @@ use super::permute::Permutation;
 use super::writer::Writer;
 use crate::error::IoError;
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn write_segments<W: Write>(
     w: &mut Writer<'_, W>,
     arena: &ExprArena,

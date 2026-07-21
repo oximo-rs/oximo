@@ -36,7 +36,7 @@ impl LoweringCtx<'_> {
     fn new_aux(&mut self, tag: &str, lb: f64, ub: f64) -> Result<Var, grb::Error> {
         let name = self.next_name(tag);
         let m = &mut *self.model;
-        #[allow(clippy::unnecessary_cast)]
+        #[expect(clippy::unnecessary_cast)]
         let v = add_ctsvar!(m, name: &name, bounds: lb..ub)?;
         Ok(v)
     }

@@ -1,4 +1,4 @@
-#![allow(clippy::float_cmp)]
+#![expect(clippy::float_cmp)]
 
 use oximo_core::prelude::*;
 
@@ -170,7 +170,7 @@ fn indexed_var_per_key_bounds() {
         .__indexed_var("x", &set)
         .lb(0.0)
         .ub_by(|k: usize| {
-            #[allow(clippy::cast_precision_loss)]
+            #[expect(clippy::cast_precision_loss)]
             {
                 k as f64
             }
@@ -298,7 +298,7 @@ fn tuple_product_associativity_shape() {
 }
 
 #[test]
-#[allow(clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_wrap)]
 fn large_product_preserves_lex_order() {
     // Crosses the rayon threshold in Set::product (4096) so the parallel
     // path runs. Order must still be lex (outer = a, inner = b).

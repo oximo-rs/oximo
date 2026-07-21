@@ -1,7 +1,7 @@
 //! Tests for SOC pattern detection (`detect_soc`) and the normalized
 //! `SocForm` views backends translate from.
 
-#![allow(clippy::float_cmp, clippy::many_single_char_names)]
+#![expect(clippy::float_cmp)]
 
 use oximo_core::prelude::*;
 

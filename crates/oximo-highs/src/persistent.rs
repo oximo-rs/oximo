@@ -65,9 +65,11 @@ impl HighsPersistent {
     fn rebuild(&mut self, model: &Model, opts: &HighsOptions) -> Result<(), SolverError> {
         let (prob, meta) = build_problem(model)?;
         let live = make_live(prob, opts)?;
-        let snap = match model.kind() {
-            ModelKind::LP | ModelKind::MILP => Some(snapshot(model)?),
-            _ => None,
+        let has_semi = model.variables().iter().any(|v| v.domain.semi_threshold().is_some());
+        let snap = if matches!(model.kind(), ModelKind::LP | ModelKind::MILP) && !has_semi {
+            Some(snapshot(model)?)
+        } else {
+            None
         };
         self.state = Some(State { live: Some(live), meta, snap });
         Ok(())
@@ -243,6 +245,37 @@ mod tests {
         let after = solver.solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(after.termination, TerminationStatus::Optimal);
         assert!((first.objective().unwrap() - after.objective().unwrap()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn persistent_semi_matches_cold_across_bound_change() {
+        // s in {0} U [5, ub], forced on by s >= 3, min s -> s = 5 while ub >= 5.
+        let m = Model::new("sc_persist");
+        variable!(m, s <= 10.0, SemiCont(5.0));
+        constraint!(m, c, s >= 3.0);
+        objective!(m, Min, s);
+        let sid = s.var_id().unwrap();
+
+        let mut solver = Highs.persistent();
+        for ub in [10.0, 8.0, 12.0] {
+            m.unfix_var(sid, 0.0, ub);
+            let warm = solver.solve(&m, &HighsOptions::default()).unwrap();
+            let cold = Highs.solve(&m, &HighsOptions::default()).unwrap();
+            assert_eq!(warm.termination, TerminationStatus::Optimal, "ub {ub}");
+            assert!(
+                (warm.value_of(s).unwrap() - 5.0).abs() < 1e-6,
+                "ub {ub}: s = {:?}",
+                warm.value_of(s)
+            );
+            assert!(
+                (warm.value_of(s).unwrap() - cold.value_of(s).unwrap()).abs() < 1e-9,
+                "ub {ub}"
+            );
+            assert!(
+                (warm.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-9,
+                "ub {ub}"
+            );
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! RUSTFLAGS="-Zautodiff=Enable" cargo +nightly test -p oximo-autodiff --features enzyme --profile enzyme
 //! ```
 #![cfg(feature = "enzyme")]
-#![allow(clippy::cast_precision_loss)]
+#![expect(clippy::cast_precision_loss)]
 
 use oximo_autodiff::{AutodiffError, NlpEvaluator, gradient_at};
 use oximo_core::Model;

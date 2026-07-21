@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const BUDGET: f64 = 3.0;
 
     // Substrate inflow profiles Sin_i(t), indexed sin[i][p] with paper time t=p+1.
-    #[allow(clippy::needless_range_loop, clippy::cast_precision_loss)]
+    #[expect(clippy::needless_range_loop, clippy::cast_precision_loss)]
     let sin: Vec<Vec<f64>> = {
         let pi = std::f64::consts::PI;
         let tau = TAU as f64;

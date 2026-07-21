@@ -122,8 +122,8 @@ impl Tape {
 
     /// The raw tape slices, in [`eval_tape`] argument order. Used by the
     /// `enzyme` module to drive the differentiated interpreter.
-    #[cfg_attr(not(feature = "enzyme"), allow(dead_code))]
-    #[allow(clippy::type_complexity)]
+    #[cfg_attr(not(feature = "enzyme"), expect(dead_code))]
+    #[expect(clippy::type_complexity)]
     pub(crate) fn parts(&self) -> (&[u32], &[u32], &[u32], &[f64], &[u32], &[f64]) {
         (&self.ops, &self.a, &self.b, &self.consts, &self.lin_vars, &self.lin_coeffs)
     }
@@ -142,7 +142,7 @@ impl Tape {
 ///   starts from the first product, not a `0.0` literal, and there is no
 ///   `n == 0` fallback (builder emits at least one instruction), both would
 ///   store-sink into untyped-`0.0` phis.
-#[allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[inline]
 pub(crate) fn eval_tape(
     ops: &[u32],

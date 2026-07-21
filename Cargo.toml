@@ -12,6 +12,7 @@ members = [
     "crates/oximo-baron",
     "crates/oximo-clarabel",
     "crates/oximo-autodiff",
+    "crates/oximo-pounce",
     "crates/oximo",
 ]
 exclude = ["gams_scraper"]
@@ -40,9 +41,10 @@ oximo-gams   = { path = "crates/oximo-gams",   version = "0.4.0" }
 oximo-baron  = { path = "crates/oximo-baron",  version = "0.4.0" }
 oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.4.0" }
 oximo-autodiff = { path = "crates/oximo-autodiff", version = "0.4.0" }
+oximo-pounce = { path = "crates/oximo-pounce", version = "0.4.0" }
 
 rayon            = "1.12"
-syn              = { version = "2", features = ["full"] }
+syn              = { version = "3", features = ["full"] }
 quote            = "1"
 proc-macro2      = "1"
 proc-macro-crate = "3"
@@ -55,6 +57,7 @@ num-traits       = "0.2"
 highs            = "2.4"
 grb              = "3.0"    
 clarabel         = "0.11"
+pounce-rs        = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

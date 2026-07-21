@@ -8,7 +8,7 @@
 //! marker global that Enzyme cannot shadow when the forward-over-reverse
 //! pass runs in a downstream crate's fat-LTO step.
 
-#![allow(clippy::too_many_arguments)]
+#![expect(clippy::too_many_arguments)]
 
 use std::autodiff::{autodiff_forward, autodiff_reverse};
 
@@ -30,7 +30,7 @@ use crate::tape::Tape;
     Duplicated,
     Duplicated
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[inline(never)]
 pub fn eval_tape_ad(
     ops: &[u32],
@@ -72,7 +72,7 @@ pub fn eval_tape_ad(
     Dual,
     Dual
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[inline(never)]
 pub fn grad_eval_tape(
     ops: &[u32],
@@ -129,7 +129,7 @@ pub(crate) fn tape_gradient(
 /// Forward-over-reverse Hessian-vector product of `tape` at `x` along `dir`.
 /// `grad_out` receives the gradient, `hv_out` receives `H*dir` (both
 /// overwritten).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn tape_hvp(
     tape: &Tape,
     x: &[f64],

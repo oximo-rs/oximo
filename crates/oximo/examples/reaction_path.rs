@@ -33,8 +33,6 @@
 //! ```
 //! Requires a licensed GAMS installation with CPLEX on PATH.
 
-#![allow(clippy::cast_precision_loss)]
-
 #[cfg(any(feature = "gams", feature = "highs"))]
 use oximo::prelude::*;
 
@@ -47,6 +45,7 @@ use oximo::solvers::Gams;
 use oximo::solvers::Highs;
 
 #[cfg(any(feature = "gams", feature = "highs"))]
+#[expect(clippy::cast_precision_loss)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 34 chemicals: index = yXX - 1 (y01 -> 0, ..., y34 -> 33).
     const CHEMICALS: [&str; 34] = [

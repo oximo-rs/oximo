@@ -179,7 +179,7 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
                 "lb" => &mut lb,
                 "ub" => &mut ub,
                 "domain" => &mut kw_domain,
-                "initial" => &mut initial,
+                "initial" | "init" => &mut initial,
                 "fix" => &mut fix,
                 _ => unreachable!("parse_keyword only returns known keywords"),
             };
@@ -215,7 +215,7 @@ fn parse_keyword(seg: &TokenStream2) -> Option<(proc_macro2::Ident, TokenStream2
     let TokenTree::Ident(kw) = tts.first()? else {
         return None;
     };
-    if !matches!(kw.to_string().as_str(), "lb" | "ub" | "domain" | "initial" | "fix") {
+    if !matches!(kw.to_string().as_str(), "lb" | "ub" | "domain" | "initial" | "init" | "fix") {
         return None;
     }
     match tts.get(1)? {

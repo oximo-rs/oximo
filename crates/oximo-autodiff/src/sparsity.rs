@@ -91,7 +91,7 @@ fn node_sparsity<'m>(
 
 // Exact 0.0/1.0 exponent bucketing matches the semantics of `classify` and
 // the tape's PowC lowering.
-#[allow(clippy::float_cmp)]
+#[expect(clippy::float_cmp)]
 fn compute_node_sparsity(
     arena: &ExprArena,
     id: ExprId,

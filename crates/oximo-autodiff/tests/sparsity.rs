@@ -1,6 +1,6 @@
 //! Stable tests for the exact structural Hessian pattern and the star-coloring
 //! compression of the Hessian into Hessian-vector-product seeds.
-#![allow(clippy::unreadable_literal, clippy::cast_precision_loss)]
+#![expect(clippy::unreadable_literal, clippy::cast_precision_loss)]
 
 use oximo_autodiff::sparsity::{HessianColoring, hessian_pattern, star_hessian_coloring};
 use oximo_expr::{ExprArena, ExprNode, VarId, extract_quadratic};
