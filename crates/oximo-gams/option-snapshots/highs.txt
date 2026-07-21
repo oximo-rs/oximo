@@ -134,4 +134,4 @@
 (any, start_crossover_tolerance, "start_crossover_tolerance"),
 (any, timeless_log, "timeless_log"),
 (any, use_implied_bounds_from_presolve, "use_implied_bounds_from_presolve"),
-(any, use_original_hf_actor_logic, "use_original_HFactor_logic"),
+(any, use_original_h_factor_logic, "use_original_HFactor_logic"),
