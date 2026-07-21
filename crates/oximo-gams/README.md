@@ -135,20 +135,28 @@ let opts = GamsOptions::default()
 
 Supported typed-option structs:
 
-| Struct                | Sub-solver | Reference                                         |
-|-----------------------|------------|---------------------------------------------------|
-| `GamsBaronOptions`    | BARON      | <https://www.gams.com/latest/docs/S_BARON.html>   |
-| `GamsCbcOptions`      | CBC        | <https://www.gams.com/latest/docs/S_CBC.html>     |
-| `GamsCplexOptions`    | CPLEX      | <https://www.gams.com/latest/docs/S_CPLEX.html>   |
-| `GamsGurobiOptions`   | GUROBI     | <https://www.gams.com/latest/docs/S_GUROBI.html>  |
-| `GamsHighsOptions`    | HIGHS      | <https://www.gams.com/latest/docs/S_HIGHS.html>   |
-| `GamsIpoptOptions`    | IPOPT      | <https://www.gams.com/latest/docs/S_IPOPT.html>   |
-| `GamsKnitroOptions`   | KNITRO     | <https://www.gams.com/latest/docs/S_KNITRO.html>  |
-| `GamsMosekOptions`    | MOSEK      | <https://www.gams.com/latest/docs/S_MOSEK.html>   |
-| `GamsScipOptions`     | SCIP       | <https://www.gams.com/latest/docs/S_SCIP.html>    |
-| `GamsXpressOptions`   | XPRESS     | <https://www.gams.com/latest/docs/S_XPRESS.html>  |
+For any option without a generated setter, push a verbatim line onto the public
+`raw` field:
 
-For any other solver, use `GamsSolverConfig::Named(GamsSolver::Custom("NAME".into()))`.
+```rust
+use oximo_gams::{GamsCplexOptions, GamsSolverConfig};
+
+let cfg = GamsSolverConfig::Cplex(GamsCplexOptions {
+    raw: vec!["solnpool out.gdx".into(), "solnpoolpop 2".into()],
+    ..Default::default()
+});
+```
+
+The `Gams<Name>Options` structs and `GamsSolverConfig` are generated at build
+time from the checked-in [`option-snapshots/`](option-snapshots), one struct per
+GAMS solver oximo supports from a modelling standpoint: ALPHAECP, ANTIGONE, BARON,
+CBC, CONOPT, CONOPT3, COPT, CPLEX, DECIS, DICOPT, GUROBI, HIGHS, IPOPT, KNITRO,
+LINDO, MINOS, MOSEK, ODHCPLEX, SBB, SCIP, SHOT, SNOPT, SOPLEX and XPRESS. Each
+solver's options are documented at `https://www.gams.com/latest/docs/S_<NAME>.html`.
+
+For any other solver, select it by name with
+`GamsSolverConfig::Named(GamsSolver::Custom("NAME".into()))`, or write verbatim
+option lines with `GamsSolverConfig::Raw(GamsSolver::Custom("NAME".into()), vec![..])`.
 
 ## Result
 
