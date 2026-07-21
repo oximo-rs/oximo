@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/github/actions/workflow/status/oximo-rs/oximo/ci.yml?branch=main&label=oximo%20CI&logo=github" alt="CI" />
 </a>
 
-oximo is a Rust algebraic modeling library for mathematical optimization. Build LP, MILP, QP/MIQP, NLP, and MINLP models with a concise macro API, then solve them with bundled or commercial solvers.
+oximo is a Rust algebraic modeling library for mathematical optimization.
 
 ```rust,no_run
 use oximo::prelude::*;
