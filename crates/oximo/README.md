@@ -200,14 +200,17 @@ pub trait Solver {
 
 ## Features
 
-| Feature    | What it adds                                                 | Default |
-|------------|--------------------------------------------------------------|---------|
-| `highs`    | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
-| `io`       | MPS and LP file writers                                      | yes     |
-| `gurobi`   | Gurobi solver (requires licensed install)                    | no      |
-| `gams`     | GAMS bridge - solve type depends on the selected sub-solver  | no      |
-| `baron`    | BARON - global LP...MINLP solver (requires licensed install) | no      |
-| `clarabel` | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
+| Feature         | What it adds                                                 | Default |
+|-----------------|--------------------------------------------------------------|---------|
+| `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
+| `io`            | MPS and LP file writers                                      | yes     |
+| `gurobi`        | Gurobi solver (requires licensed install)                    | no      |
+| `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
+| `baron`         | BARON - global LP...MINLP solver (requires licensed install) | no      |
+| `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
+| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend         | no      |
+| `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)      | no      |
+| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)               | no      |
 
 ### HiGHS (default)
 

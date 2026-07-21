@@ -200,71 +200,17 @@ pub trait Solver {
 
 ## Features
 
-| Feature    | What it adds                                                 | Default |
-|------------|--------------------------------------------------------------|---------|
-| `highs`    | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
-| `io`       | MPS and LP file writers                                      | yes     |
-| `gurobi`   | Gurobi solver (requires licensed install)                    | no      |
-| `gams`     | GAMS bridge - solve type depends on the selected sub-solver  | no      |
-| `baron`    | BARON - global LP...MINLP solver (requires licensed install) | no      |
-| `clarabel` | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
-
-### HiGHS (default)
-
-No install required, HiGHS is compiled from source via the `highs` crate.
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Highs;
-
-let result = Highs.solve(&m, &HighsOptions::default()
-    .time_limit(Duration::from_secs(60))
-    .threads(4)
-    .mip_gap(0.01)
-    .method(HighsMethod::Ipm))?;
-```
-
-### Clarabel
-
-Pure-Rust conic interior-point solver, no install or license. Solves continuous
-LP, QP (convex quadratic objectives), and SOCP models. See
-[`crates/oximo-clarabel/README.md`](crates/oximo-clarabel/README.md).
-
-### Gurobi
-
-Requires a licensed Gurobi install and `GUROBI_HOME` set. See [`crates/oximo-gurobi/README.md`](crates/oximo-gurobi/README.md).
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Gurobi;
-
-let result = Gurobi.solve(&m, &GurobiOptions::default()
-    .time_limit(Duration::from_secs(120))
-    .mip_focus(1)
-    .seed(101))?;
-```
-
-### GAMS
-
-Requires GAMS on `PATH`. Supports solving models via GAMS solvers (CPLEX, BARON, etc.). See [`crates/oximo-gams/README.md`](crates/oximo-gams/README.md).
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Gams;
-
-let result = Gams.solve(&m, &GamsOptions::default())?;
-```
-
-### BARON
-
-Requires a licensed BARON install on `PATH`. Global solver for nonconvex LP/MILP/QP/MIQP/NLP/MINLP. See [`crates/oximo-baron/README.md`](crates/oximo-baron/README.md).
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Baron;
-
-let result = Baron::new().solve(&m, &BaronOptions::default())?;
-```
+| Feature         | What it adds                                                 | Default |
+|-----------------|--------------------------------------------------------------|---------|
+| `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
+| `io`            | MPS and LP file writers                                      | yes     |
+| `gurobi`        | Gurobi solver (requires licensed install)                    | no      |
+| `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
+| `baron`         | BARON - global LP...MINLP solver (requires licensed install) | no      |
+| `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
+| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend         | no      |
+| `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)      | no      |
+| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)               | no      |
 
 ## Reading results
 
@@ -324,6 +270,7 @@ With the `io` feature (default), you can export models to MPS, LP and NL format 
 | `oximo-gams`     | GAMS writer and backend                                   |
 | `oximo-baron`    | BARON writer and backend                                  |
 | `oximo-clarabel` | Clarabel backend                                          |
+| `oximo-pounce`   | POUNCE (pure-Rust IPOPT) backend                          |
 
 ## Requirements
 
