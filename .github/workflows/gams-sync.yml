@@ -31,13 +31,23 @@ jobs:
           mkdir -p /tmp/scraped
           fail=0
           for snapshot in crates/oximo-gams/option-snapshots/*.txt; do
+            [ -e "$snapshot" ] || continue
             solver=$(basename "$snapshot" .txt)
             upper=$(echo "$solver" | tr '[:lower:]' '[:upper:]')
             new="/tmp/scraped/${solver}.txt"
             echo "Checking ${upper}..."
-            cargo run --quiet --manifest-path gams_scraper/Cargo.toml -- "$upper" > "$new"
-            if ! diff --strip-trailing-cr "$snapshot" "$new"; then
+            if ! cargo run --quiet --manifest-path gams_scraper/Cargo.toml -- "$upper" > "$new"; then
+              echo "::error::${upper}: scraper failed, skipping comparison against ${snapshot}."
+              fail=1
+              continue
+            fi
+            status=0
+            diff --strip-trailing-cr "$snapshot" "$new" || status=$?
+            if [ "$status" -eq 1 ]; then
               echo "::error::${upper} options are out of date. Regenerate ${snapshot} from the scraper and update any typed options in crates/oximo-gams/src/solver_options.rs."
+              fail=1
+            elif [ "$status" -ne 0 ]; then
+              echo "::error::${upper}: could not compare ${snapshot} with ${new} (diff exit ${status}). This is a scrape or I/O failure, not option drift."
               fail=1
             fi
           done
