@@ -42,13 +42,7 @@ pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions};
 #[cfg(feature = "gams")]
 #[cfg_attr(docsrs, doc(cfg(feature = "gams")))]
 pub mod gams {
-    pub use oximo_gams::{
-        GamsBaronOptions, GamsCbcCuts, GamsCbcOptions, GamsCbcPresolve, GamsCplexMipEmphasis,
-        GamsCplexOptions, GamsGurobiMipFocus, GamsGurobiOptions, GamsHighsOptions,
-        GamsHighsPresolve, GamsHighsSolver, GamsIpoptLinearSolver, GamsIpoptMuStrategy,
-        GamsIpoptOptions, GamsKnitroAlgorithm, GamsKnitroOptions, GamsMosekOptions, GamsOptions,
-        GamsScipOptions, GamsSolver, GamsSolverConfig, GamsXpressOptions,
-    };
+    pub use oximo_gams::*;
 }
 
 #[cfg(feature = "pounce")]

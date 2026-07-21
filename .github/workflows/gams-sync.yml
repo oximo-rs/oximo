@@ -1,0 +1,54 @@
+name: Verify GAMS solver options
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout oximo
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Checkout gams_scraper
+        uses: actions/checkout@v6
+        with:
+          repository: Godwinss24/GAM-SOLVERS
+          ref: eb79a4d0fab8f0d938dcb99e519d8607f3cd89e3
+          path: gams_scraper
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Scrape each solver and diff against its snapshot
+        run: |
+          mkdir -p /tmp/scraped
+          fail=0
+          for snapshot in crates/oximo-gams/option-snapshots/*.txt; do
+            [ -e "$snapshot" ] || continue
+            solver=$(basename "$snapshot" .txt)
+            upper=$(echo "$solver" | tr '[:lower:]' '[:upper:]')
+            new="/tmp/scraped/${solver}.txt"
+            echo "Checking ${upper}..."
+            if ! cargo run --quiet --manifest-path gams_scraper/Cargo.toml -- "$upper" > "$new"; then
+              echo "::error::${upper}: scraper failed, skipping comparison against ${snapshot}."
+              fail=1
+              continue
+            fi
+            status=0
+            diff --strip-trailing-cr "$snapshot" "$new" || status=$?
+            if [ "$status" -eq 1 ]; then
+              echo "::error::${upper} options are out of date. Regenerate ${snapshot} from the scraper and update any typed options in crates/oximo-gams/src/solver_options.rs."
+              fail=1
+            elif [ "$status" -ne 0 ]; then
+              echo "::error::${upper}: could not compare ${snapshot} with ${new} (diff exit ${status}). This is a scrape or I/O failure, not option drift."
+              fail=1
+            fi
+          done
+          exit $fail

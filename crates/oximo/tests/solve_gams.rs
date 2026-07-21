@@ -190,10 +190,9 @@ fn gams_highs_opt_file_simplex() {
     constraint!(m, c3, x - y <= 2.0);
     objective!(m, Max, 3.0 * x + 4.0 * y);
 
-    let opts = GamsOptions::default().solver(GamsSolverConfig::Highs(GamsHighsOptions {
-        solver: Some(GamsHighsSolver::Simplex),
-        ..Default::default()
-    }));
+    let opts = GamsOptions::default().solver(GamsSolverConfig::Highs(
+        GamsHighsOptions::default().solver(GamsHighsSolver::Simplex),
+    ));
     let result = Gams::new().solve(&m, &opts).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     assert!((result.objective().unwrap() - 34.0).abs() < 1e-4, "obj={:?}", result.objective());

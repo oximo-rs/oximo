@@ -1,0 +1,11 @@
+// DECIS
+(int, ib_ug, "IBug"),
+(bool, ir_eg, "IReg"),
+(int, is_cratch, "IScratch"),
+(int, is_trat, "IStrat"),
+(int, iw_rite, "IWrite"),
+(int, ns_amples, "NSamples"),
+(int, nzr_ows, "NZRows"),
+(dbl, rho, "Rho"),
+(dbl, tol_ben, "TolBen"),
+(dbl, tol_w, "TolW"),

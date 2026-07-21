@@ -6,13 +6,10 @@ mod solver_options;
 mod translate;
 
 pub use options::{GamsOptions, GamsSolver};
-pub use solver_options::{
-    GamsBaronOptions, GamsCbcCuts, GamsCbcOptions, GamsCbcPresolve, GamsCplexMipEmphasis,
-    GamsCplexOptions, GamsGurobiMipFocus, GamsGurobiOptions, GamsHighsOptions, GamsHighsPresolve,
-    GamsHighsSolver, GamsIpoptLinearSolver, GamsIpoptMuStrategy, GamsIpoptOptions,
-    GamsKnitroAlgorithm, GamsKnitroOptions, GamsMosekOptions, GamsScipOptions, GamsSolverConfig,
-    GamsXpressOptions,
-};
+
+// The per-solver `Gams<Name>Options` structs and `GamsSolverConfig` are generated
+// from `option-snapshots/` (see `build.rs`).
+pub use solver_options::*;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
