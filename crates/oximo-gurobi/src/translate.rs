@@ -208,11 +208,17 @@ pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverErr
 pub(crate) fn compute_iis_resident(built: &mut Built) -> Result<Iis, SolverError> {
     let mut termination = map_status(&built.model)?;
     if matches!(termination, TerminationStatus::InfeasibleOrUnbounded) {
-        // Dual reductions can leave "infeasible or unbounded".
-        // Turn them off and re-optimize so we know it is genuinely infeasible.
+        // Dual reductions can leave "infeasible or unbounded". Turn them off just
+        // for a disambiguating re-optimize, then restore the saved value so the
+        // resident model's parameter state is unchanged for later solves.
+        let saved = built.model.get_param(grb::param::DualReductions).map_err(map_grb_err)?;
         built.model.set_param(grb::param::DualReductions, 0).map_err(map_grb_err)?;
-        built.model.optimize().map_err(map_grb_err)?;
-        termination = map_status(&built.model)?;
+        let outcome = (|| {
+            built.model.optimize().map_err(map_grb_err)?;
+            map_status(&built.model)
+        })();
+        built.model.set_param(grb::param::DualReductions, saved).map_err(map_grb_err)?;
+        termination = outcome?;
     }
     if !termination.is_infeasible() {
         return Err(SolverError::Backend(format!(
