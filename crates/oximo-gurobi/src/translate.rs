@@ -7,7 +7,9 @@ use oximo_core::{
     SocConstraintId, VarId, Variable, var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term, extract_linear};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
+use oximo_solver::{
+    Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus, VarBoundKind,
+};
 use rustc_hash::FxHashMap;
 
 use crate::GurobiOptions;
@@ -161,6 +163,79 @@ pub(crate) fn run_and_collect(
         raw_log: None,
         solver_name: Some(crate::NAME.into()),
     })
+}
+
+/// Build `model`, solve it, and when Gurobi finds it infeasible compute an
+/// irreducible infeasible subsystem via Gurobi's `computeIIS`.
+///
+/// `DualReductions` is turned off so an ambiguous "infeasible or unbounded" presolve
+/// outcome is resolved to a definite status before the IIS is requested.
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] if the model is unsupported, Gurobi errors during setup
+/// or optimization, or the model is not infeasible.
+///
+/// # Panics
+///
+/// Panics if a constraint, SOC, or variable index overflows `u32`.
+pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverError> {
+    let env = default_env()?;
+    let mut built = build(model, opts, &env)?;
+    // Force a definite Infeasible/Unbounded verdict so we don't ask for an IIS on an
+    // unbounded model.
+    built.model.set_param(grb::param::DualReductions, 0).map_err(map_grb_err)?;
+    built.model.optimize().map_err(map_grb_err)?;
+
+    let termination = map_status(&built.model)?;
+    if !termination.is_infeasible() {
+        return Err(SolverError::Backend(format!(
+            "cannot compute an IIS: model is not infeasible ({termination:?})"
+        )));
+    }
+
+    built.model.compute_iis().map_err(map_grb_err)?;
+    read_iis(&built)
+}
+
+/// Read the IIS membership attributes off a model on which `computeIIS` has already
+/// run, mapping Gurobi's per-row and per-column flags back to oximo ids through the
+/// 1:1 handle vectors on [`Built`].
+fn read_iis(built: &Built) -> Result<Iis, SolverError> {
+    let model = &built.model;
+    let mut iis = Iis::default();
+
+    for (i, row) in built.constrs.iter().enumerate() {
+        let in_iis = match row {
+            GrbRow::Lin(c) => model.get_obj_attr(attr::IISConstr, c),
+            GrbRow::Quad(q) => model.get_obj_attr(attr::IISQConstr, q),
+        }
+        .map_err(map_grb_err)?;
+        if in_iis != 0 {
+            iis.constraints
+                .push(ConstraintId(u32::try_from(i).expect("constraint index fits u32")));
+        }
+    }
+
+    for (i, (qrow, _)) in built.soc_rows.iter().enumerate() {
+        if model.get_obj_attr(attr::IISQConstr, qrow).map_err(map_grb_err)? != 0 {
+            iis.soc_constraints
+                .push(SocConstraintId(u32::try_from(i).expect("soc index fits u32")));
+        }
+    }
+
+    // Only model variables are scanned.
+    for (i, v) in built.vars.iter().enumerate() {
+        let id = VarId(u32::try_from(i).expect("var index fits u32"));
+        if model.get_obj_attr(attr::IISLB, v).map_err(map_grb_err)? != 0 {
+            iis.var_bounds.push((id, VarBoundKind::Lower));
+        }
+        if model.get_obj_attr(attr::IISUB, v).map_err(map_grb_err)? != 0 {
+            iis.var_bounds.push((id, VarBoundKind::Upper));
+        }
+    }
+
+    Ok(iis)
 }
 
 /// Add one Gurobi variable per model variable, in `VarId` order, applying its
