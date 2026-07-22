@@ -4,7 +4,9 @@ use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult, snapshot};
 
 use crate::GurobiOptions;
 use crate::options::apply as apply_options;
-use crate::translate::{Built, build, compute_iis_resident, default_env, map_grb_err, run_and_collect};
+use crate::translate::{
+    Built, build, compute_iis_resident, default_env, map_grb_err, run_and_collect,
+};
 
 /// The resident Gurobi model plus the baseline snapshot the fast path diffs against
 /// (`None` when the fast path is ineligible).
