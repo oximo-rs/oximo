@@ -186,8 +186,34 @@ pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverErr
     // unbounded model.
     built.model.set_param(grb::param::DualReductions, 0).map_err(map_grb_err)?;
     built.model.optimize().map_err(map_grb_err)?;
+    compute_iis_resident(&mut built)
+}
 
-    let termination = map_status(&built.model)?;
+/// Run Gurobi's `computeIIS` on an already-optimized [`Built`] and read the IIS
+/// membership back. Shared by the one-shot [`compute_iis`] and the persistent handle.
+///
+/// If the last optimize left the ambiguous `INF_OR_UNBD` status (the standalone path
+/// forces `DualReductions` off up front, but a persistent handle's prior `solve` may
+/// not have), this turns `DualReductions` off and re-optimizes to get a definite
+/// verdict first, since Gurobi's `computeIIS` requires a proven-infeasible model.
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] if the model is not infeasible or Gurobi errors
+/// during IIS computation.
+///
+/// # Panics
+///
+/// Panics if a constraint, SOC, or variable index overflows `u32`.
+pub(crate) fn compute_iis_resident(built: &mut Built) -> Result<Iis, SolverError> {
+    let mut termination = map_status(&built.model)?;
+    if matches!(termination, TerminationStatus::InfeasibleOrUnbounded) {
+        // Dual reductions can leave "infeasible or unbounded".
+        // Turn them off and re-optimize so we know it is genuinely infeasible.
+        built.model.set_param(grb::param::DualReductions, 0).map_err(map_grb_err)?;
+        built.model.optimize().map_err(map_grb_err)?;
+        termination = map_status(&built.model)?;
+    }
     if !termination.is_infeasible() {
         return Err(SolverError::Backend(format!(
             "cannot compute an IIS: model is not infeasible ({termination:?})"
@@ -195,7 +221,7 @@ pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverErr
     }
 
     built.model.compute_iis().map_err(map_grb_err)?;
-    read_iis(&built)
+    read_iis(built)
 }
 
 /// Read the IIS membership attributes off a model on which `computeIIS` has already

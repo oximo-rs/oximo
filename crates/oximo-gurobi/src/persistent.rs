@@ -1,10 +1,10 @@
 use grb::prelude::*;
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{Snapshot, Solver, SolverError, SolverResult, snapshot};
+use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult, snapshot};
 
 use crate::GurobiOptions;
 use crate::options::apply as apply_options;
-use crate::translate::{Built, build, default_env, map_grb_err, run_and_collect};
+use crate::translate::{Built, build, compute_iis_resident, default_env, map_grb_err, run_and_collect};
 
 /// The resident Gurobi model plus the baseline snapshot the fast path diffs against
 /// (`None` when the fast path is ineligible).
@@ -51,6 +51,32 @@ impl GurobiPersistent {
     /// scratch, clearing any solver options carried on the Gurobi instance.
     pub fn reset(&mut self) {
         self.state = None;
+    }
+
+    /// Compute an irreducible infeasible subsystem for the resident model, reusing the
+    /// build and solve from the previous [`solve`](Solver::solve).
+    ///
+    /// Call this after a [`solve`](Solver::solve) that returned an infeasible status
+    /// (see [`TerminationStatus::is_infeasible`](oximo_solver::TerminationStatus::is_infeasible)).
+    /// It runs Gurobi's `computeIIS` directly on the resident instance. If the prior
+    /// solve left the ambiguous `INF_OR_UNBD` status, it re-optimizes with dual
+    /// reductions off to get a definite verdict first.
+    ///
+    /// For a one-shot diagnosis that builds and solves in a single call, use
+    /// [`Gurobi::compute_iis`](oximo_solver::InfeasibilityDiagnosis::compute_iis) instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SolverError`] if there is no resident model (never solved, or a
+    /// prior solve failed and cleared it), the resident model is not infeasible, or
+    /// Gurobi errors during the IIS computation.
+    pub fn compute_iis(&mut self) -> Result<Iis, SolverError> {
+        let st = self.state.as_mut().ok_or_else(|| {
+            SolverError::Backend(
+                "no resident model to diagnose; call solve first (it must be infeasible)".into(),
+            )
+        })?;
+        compute_iis_resident(&mut st.built)
     }
 
     /// Discard any resident instance and rebuild from the current model state.
