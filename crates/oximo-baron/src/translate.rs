@@ -9,8 +9,10 @@ use oximo_core::{
     SocConstraintId, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
-use oximo_solver::{PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
-use rustc_hash::FxHashMap;
+use oximo_solver::{
+    Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus, VarBoundKind,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::BaronOptions;
 use crate::options::write_options;
@@ -44,7 +46,83 @@ pub fn solve(
 ) -> Result<SolverResult, SolverError> {
     let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
     let (bar, var_order, con_order, soc_bounds) = build_bar(model, opts)?;
+    let run = run_baron(&bar, opts, exec)?;
+    Ok(parse_solution(
+        &run.tim,
+        &run.res,
+        sense,
+        run.elapsed,
+        run.raw_log,
+        &var_order,
+        &con_order,
+        &soc_bounds,
+    ))
+}
 
+/// Build `model`, run BARON with IIS search enabled, and when BARON reports the
+/// model infeasible, parse the irreducible infeasible subsystem it prints in the
+/// results file.
+///
+/// If the caller has not set `CompIIS`, it is enabled (`CompIIS: 1`). A user-chosen
+/// `CompIIS` algorithm is left untouched.
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] on the same conditions as [`solve`], or when the model is
+/// not infeasible (there is nothing to diagnose).
+///
+/// # Panics
+///
+/// Panics if variable indices overflow `u32`.
+pub fn compute_iis(
+    model: &Model,
+    opts: &BaronOptions,
+    exec: Option<&str>,
+) -> Result<Iis, SolverError> {
+    let iis_opts = if opts.has_comp_iis() { opts.clone() } else { opts.clone().comp_iis(1) };
+    let (bar, _var_order, _con_order, _soc_bounds) = build_bar(model, &iis_opts)?;
+    let run = run_baron(&bar, &iis_opts, exec)?;
+
+    let termination = map_status(&run.res, tim_model_status(&run.tim));
+    if !termination.is_infeasible() {
+        return Err(SolverError::Backend(format!(
+            "cannot compute an IIS: model is not infeasible ({termination:?})"
+        )));
+    }
+
+    let iis = parse_iis(&run.res);
+    if iis.is_empty() {
+        return Err(SolverError::Backend(
+            "BARON reported the model infeasible but emitted no IIS block \
+             (CompIIS may have failed or been unable to isolate a subsystem)"
+                .to_string(),
+        ));
+    }
+    Ok(iis)
+}
+
+/// The text files BARON leaves in its working directory after a run.
+struct BaronRun {
+    /// Contents of the times file (`tim.lst`): the single status line.
+    tim: String,
+    /// Contents of the results file (`res.lst`): the primal/dual blocks and, when
+    /// `CompIIS` is on, the IIS listing.
+    res: String,
+    elapsed: std::time::Duration,
+    /// Captured stdout/stderr, surfaced on failure (`None` when the run succeeded or
+    /// output was streamed in verbose mode).
+    raw_log: Option<String>,
+}
+
+/// Write `bar` to a fresh temp directory, execute BARON, read back its times and
+/// results files, then remove the directory. Shared by [`solve`] and [`compute_iis`].
+///
+/// # Errors
+///
+/// Returns a [`SolverError`] if the temp directory or `.bar` file cannot be written,
+/// the `baron` executable is missing, or BARON produced no times file (a syntax or
+/// license error that never reached the solve).
+fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<BaronRun, SolverError> {
     // - Temp directory. Combine a timestamp with a per-process atomic counter so
     //   concurrent invocations never share a directory.
     let ts = std::time::SystemTime::now()
@@ -56,7 +134,7 @@ pub fn solve(
         .map_err(|e| SolverError::Backend(format!("cannot create temp dir: {e}")))?;
 
     let bar_path = tmp_dir.join(BAR_NAME);
-    fs::write(&bar_path, &bar)
+    fs::write(&bar_path, bar)
         .map_err(|e| SolverError::Backend(format!("cannot write .bar file: {e}")))?;
 
     // - Execute BARON.
@@ -121,11 +199,9 @@ pub fn solve(
     let tim = fs::read_to_string(&tim_path)
         .map_err(|e| SolverError::Backend(format!("cannot read times file: {e}")))?;
     let res = fs::read_to_string(tmp_dir.join(RES_NAME)).unwrap_or_default();
-    let result =
-        parse_solution(&tim, &res, sense, elapsed, raw_log, &var_order, &con_order, &soc_bounds);
 
     let _ = fs::remove_dir_all(&tmp_dir);
-    Ok(result)
+    Ok(BaronRun { tim, res, elapsed, raw_log })
 }
 
 /// Everything `solve` needs from the `.bar` writer: the file text, the
@@ -583,6 +659,13 @@ fn fmt(v: f64) -> String {
 
 /// Parse BARON's times file (`tim.lst`) and results file (`res.lst`).
 ///
+/// Read BARON's model status from the times file (`tim.lst`). The 9th whitespace
+/// token of its single status line. Defaults to `5` (a BARON status oximo maps to an
+/// `Other` termination) when the field is absent or unparseable.
+fn tim_model_status(tim: &str) -> i64 {
+    tim.split_whitespace().nth(8).and_then(|s| s.parse::<i64>().ok()).unwrap_or(5)
+}
+
 /// The times file is a single whitespace-separated line. Field positions follow
 /// the BARON convention (0-indexed here):
 /// `[5]` lower bound, `[6]` upper bound, `[8]` model status, `[10]`
@@ -604,7 +687,7 @@ fn parse_solution(
     let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
     let float_at = |i: usize| tokens.get(i).and_then(|s| parse_baron_float(s));
 
-    let model_status = int_at(8).unwrap_or(5);
+    let model_status = tim_model_status(tim);
     let lower = float_at(5);
     let upper = float_at(6);
     let iterations = int_at(10).and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
@@ -944,6 +1027,86 @@ fn parse_best_table(res: &str) -> Option<SolutionPoint> {
         }
     }
     (!primal.is_empty() || objective.is_some()).then_some(SolutionPoint { primal, objective })
+}
+
+/// Parse BARON's IIS listing from the results file (`res.lst`).
+///
+/// For an infeasible model solved with `CompIIS`, BARON prints:
+///
+/// ```text
+///  IIS contains 1 row and 2 columns as follows:
+///   c0   Upper
+///   x0   Lower
+///   x1   Lower
+/// ```
+///
+/// Each entry is `<name>   <side>`. Names follow the writer's convention
+/// ([`write_equations`]/[`write_var_section`]). `c{n}`/`c{n}_lo`/`c{n}_hi` are
+/// constraint rows, `soc{n}`/`soc{n}_sign` are SOC rows, and `x{n}` are variable
+/// columns whose `side` (`Lower`/`Upper`) selects the bound. Row entries carry a side
+/// too, but it is informational. Returns an empty [`Iis`] when no IIS block is present.
+///
+/// The banner is matched on `"IS contains"` so both `"IIS contains ..."` (a proven
+/// irreducible set) and `"(I)IS contains ..."` (BARON's label when irreducibility
+/// cannot be guaranteed) are handled.
+fn parse_iis(res: &str) -> Iis {
+    let mut iis = Iis::default();
+    let Some(pos) = res.find("IS contains") else {
+        return iis;
+    };
+    let start = res[pos..].find("as follows:").map_or(res.len(), |a| pos + a + "as follows:".len());
+
+    let mut seen_con: FxHashSet<u32> = FxHashSet::default();
+    let mut seen_soc: FxHashSet<u32> = FxHashSet::default();
+    let mut started = false;
+    for line in res[start..].lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            if started {
+                break;
+            }
+            continue;
+        }
+        if t.starts_with("***") {
+            break;
+        }
+        let mut parts = t.split_whitespace();
+        let Some(name) = parts.next() else { continue };
+        let side = parts.next();
+        // Classify by name prefix (check `x` and `soc` before the bare `c`).
+        if name.starts_with('x') {
+            if let Some(i) = extract_index(name) {
+                iis.var_bounds.push((VarId(i), side_kind(side)));
+                started = true;
+            }
+        } else if name.starts_with("soc") {
+            if let Some(i) = extract_index(name) {
+                if seen_soc.insert(i) {
+                    iis.soc_constraints.push(SocConstraintId(i));
+                }
+                started = true;
+            }
+        } else if name.starts_with('c') {
+            if let Some(i) = extract_index(name) {
+                if seen_con.insert(i) {
+                    iis.constraints.push(ConstraintId(i));
+                }
+                started = true;
+            }
+        } else if started {
+            break;
+        }
+    }
+    iis
+}
+
+/// Map BARON's IIS bound-side label (`Lower`/`Upper`) to a [`VarBoundKind`],
+/// defaulting to the lower bound for anything unrecognized.
+fn side_kind(side: Option<&str>) -> VarBoundKind {
+    match side {
+        Some(s) if s.eq_ignore_ascii_case("upper") => VarBoundKind::Upper,
+        _ => VarBoundKind::Lower,
+    }
 }
 
 /// Recover the variable index from a synthetic `x{i}` name by reading its digits.
@@ -1491,6 +1654,69 @@ The above solution has an objective value of:  0.0
         assert_eq!(r.reduced_costs.get(&VarId(1)), Some(&1.5));
         assert_eq!(r.dual.get(&ConstraintId(0)), Some(&-3.0));
         assert_eq!(r.dual.len(), 1);
+    }
+
+    #[test]
+    fn parse_iis_extracts_rows_and_columns() {
+        // Captured from a real BARON run (CompIIS: 1) on an infeasible model.
+        let res = "\
+ >>> Problem solved during preprocessing
+ Lower bound is   infinity
+ IIS contains 1 row and 2 columns as follows:
+  c0   Upper
+  x0   Lower
+  x1   Lower
+
+
+                         *** Normal completion ***
+";
+        let iis = parse_iis(res);
+        assert_eq!(iis.constraints, vec![ConstraintId(0)]);
+        assert!(iis.soc_constraints.is_empty());
+        assert_eq!(
+            iis.var_bounds,
+            vec![(VarId(0), VarBoundKind::Lower), (VarId(1), VarBoundKind::Lower)]
+        );
+    }
+
+    #[test]
+    fn parse_iis_maps_ranges_and_socs_and_dedups() {
+        let res = "\
+ IIS contains 3 rows and 1 column as follows:
+  c2_lo   Lower
+  c2_hi   Upper
+  soc0   Upper
+  soc0_sign   Lower
+  x5   Upper
+";
+        let iis = parse_iis(res);
+        assert_eq!(iis.constraints, vec![ConstraintId(2)]);
+        assert_eq!(iis.soc_constraints, vec![SocConstraintId(0)]);
+        assert_eq!(iis.var_bounds, vec![(VarId(5), VarBoundKind::Upper)]);
+    }
+
+    #[test]
+    fn parse_iis_handles_non_guaranteed_banner() {
+        let res = "\
+ >>> Problem solved during preprocessing
+ Lower bound is   infinity
+ Irreducibility of the IS provided cannot be guaranteed
+ (I)IS contains 2 rows and 0 columns as follows:
+  c0   Lower
+  c1   Upper
+
+
+                         *** Normal completion ***
+";
+        let iis = parse_iis(res);
+        assert_eq!(iis.constraints, vec![ConstraintId(0), ConstraintId(1)]);
+        assert!(iis.var_bounds.is_empty());
+    }
+
+    #[test]
+    fn parse_iis_absent_block_is_empty() {
+        let res = "*** Normal completion ***\nThe best solution found is:\n";
+        assert!(parse_iis(res).is_empty());
     }
 
     #[test]

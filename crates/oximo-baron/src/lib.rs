@@ -12,7 +12,7 @@ pub use options::BaronOptions;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{Solver, SolverError, SolverResult};
+use oximo_solver::{Iis, InfeasibilityDiagnosis, Solver, SolverError, SolverResult};
 
 /// BARON backend. Writes an oximo [`Model`] to a temporary `.bar` file, invokes
 /// the `baron` executable, and parses the result.
@@ -71,5 +71,11 @@ impl Solver for Baron {
 
     fn solve(&mut self, model: &Model, opts: &BaronOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts, self.exec.as_deref())
+    }
+}
+
+impl InfeasibilityDiagnosis for Baron {
+    fn compute_iis(&mut self, model: &Model, opts: &BaronOptions) -> Result<Iis, SolverError> {
+        translate::compute_iis(model, opts, self.exec.as_deref())
     }
 }
