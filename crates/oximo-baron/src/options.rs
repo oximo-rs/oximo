@@ -3,9 +3,6 @@ use std::path::PathBuf;
 
 use oximo_solver::{HasUniversal, UniversalOptions};
 
-// TODO: CompIIS writes IIS to the summary file.
-// oximo emits the option but doesn't parse/return the IIS (temp dir deleted).
-
 /// BARON-specific solver options.
 ///
 /// Universal options (`time_limit`, `threads`, `verbose`) come from the embedded
@@ -265,6 +262,14 @@ impl BaronOptions {
     pub fn raw(mut self, keyword: impl Into<String>, value: impl Into<String>) -> Self {
         self.raw.push((keyword.into(), value.into()));
         self
+    }
+
+    /// Whether `CompIIS` has been set (to any value) via [`comp_iis`](Self::comp_iis)
+    /// or [`raw`](Self::raw). The IIS backend uses this to avoid overriding a
+    /// user-chosen algorithm when it enables IIS search.
+    pub(crate) fn has_comp_iis(&self) -> bool {
+        self.int_opts.iter().any(|(k, _)| *k == "CompIIS")
+            || self.raw.iter().any(|(k, _)| k.eq_ignore_ascii_case("CompIIS"))
     }
 }
 

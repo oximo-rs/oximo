@@ -115,3 +115,63 @@ fn gurobi_qcp_duals_skipped_by_default() {
     assert!((result.objective().unwrap() + 2.0).abs() < 1e-5);
     assert!(result.dual.is_empty(), "QCP duals must be empty without .qcp_dual(1)");
 }
+
+#[test]
+fn gurobi_iis_pinpoints_conflicting_constraints() {
+    // Infeasible: x >= 2 and x <= 1 cannot both hold. The unique minimal IIS is the
+    // two conflicting constraints (the x >= 0 bound is not needed).
+    let m = Model::new("iis");
+    variable!(m, x >= 0.0);
+    let floor = constraint!(m, floor, x >= 2.0);
+    let ceil = constraint!(m, ceil, x <= 1.0);
+    objective!(m, Min, x);
+
+    let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute_iis");
+    assert!(!iis.is_empty());
+    assert!(iis.constraints.contains(&floor), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil), "ceil missing from IIS: {iis:?}");
+
+    let report = iis.report(&m).to_string();
+    assert!(report.contains("floor") && report.contains("ceil"), "{report}");
+}
+
+#[test]
+fn gurobi_iis_errors_on_feasible_model() {
+    let m = Model::new("feasible");
+    variable!(m, 0.0 <= x <= 10.0);
+    constraint!(m, c, x <= 5.0);
+    objective!(m, Min, x);
+
+    let err = Gurobi.compute_iis(&m, &GurobiOptions::default()).unwrap_err();
+    match err {
+        SolverError::Backend(msg) => assert!(msg.contains("not infeasible"), "{msg}"),
+        other => panic!("expected Backend error, got {other:?}"),
+    }
+}
+
+#[test]
+fn gurobi_persistent_iis_reuses_resident_model() {
+    let m = Model::new("iis_persist");
+    variable!(m, x >= 0.0);
+    let floor = constraint!(m, floor, x >= 2.0);
+    let ceil = constraint!(m, ceil, x <= 1.0);
+    objective!(m, Min, x);
+
+    let mut h = Gurobi.persistent();
+    let r = h.solve(&m, &GurobiOptions::default()).unwrap();
+    assert!(r.termination.is_infeasible(), "expected infeasible, got {:?}", r.termination);
+
+    let iis = h.compute_iis().expect("compute_iis on resident model");
+    assert!(iis.constraints.contains(&floor), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil), "ceil missing from IIS: {iis:?}");
+}
+
+#[test]
+fn gurobi_persistent_iis_without_solve_errors() {
+    let mut h = Gurobi.persistent();
+    let err = h.compute_iis().unwrap_err();
+    match err {
+        SolverError::Backend(msg) => assert!(msg.contains("no resident model"), "{msg}"),
+        other => panic!("expected Backend error, got {other:?}"),
+    }
+}

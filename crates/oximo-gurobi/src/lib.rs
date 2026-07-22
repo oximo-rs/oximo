@@ -11,7 +11,9 @@ pub use persistent::GurobiPersistent;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
+use oximo_solver::{
+    Iis, InfeasibilityDiagnosis, PersistentSolver, Solver, SolverError, SolverResult,
+};
 
 /// Gurobi solver handle.
 ///
@@ -65,5 +67,11 @@ impl PersistentSolver for Gurobi {
 
     fn persistent(&self) -> GurobiPersistent {
         GurobiPersistent::new()
+    }
+}
+
+impl InfeasibilityDiagnosis for Gurobi {
+    fn compute_iis(&mut self, model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverError> {
+        translate::compute_iis(model, opts)
     }
 }

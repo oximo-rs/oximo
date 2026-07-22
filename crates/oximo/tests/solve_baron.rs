@@ -103,3 +103,38 @@ fn baron_soc_dual_matches_norm_form_multiplier() {
     let z0 = r.soc_dual_of(disk).expect("SOC dual missing");
     assert!((z0 - std::f64::consts::SQRT_2).abs() < 1e-3, "z0 = {z0}");
 }
+
+#[test]
+fn baron_iis_pinpoints_conflicting_constraints() {
+    // Infeasible: x >= 2 and x <= 1 cannot both hold. BARON's CompIIS reports the two
+    // conflicting rows. The backend maps them back to their ConstraintIds.
+    let m = Model::new("iis");
+    variable!(m, x >= 0.0);
+    let floor = constraint!(m, floor, x >= 2.0);
+    let ceil = constraint!(m, ceil, x <= 1.0);
+    objective!(m, Min, x);
+
+    let opts = BaronOptions::default().time_limit(Duration::from_secs(30));
+    let iis = Baron::new().compute_iis(&m, &opts).expect("compute_iis");
+    assert!(!iis.is_empty());
+    assert!(iis.constraints.contains(&floor), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil), "ceil missing from IIS: {iis:?}");
+
+    let report = iis.report(&m).to_string();
+    assert!(report.contains("floor") && report.contains("ceil"), "{report}");
+}
+
+#[test]
+fn baron_iis_errors_on_feasible_model() {
+    let m = Model::new("feasible");
+    variable!(m, 0.0 <= x <= 10.0);
+    constraint!(m, c, x <= 5.0);
+    objective!(m, Min, x);
+
+    let opts = BaronOptions::default().time_limit(Duration::from_secs(30));
+    let err = Baron::new().compute_iis(&m, &opts).unwrap_err();
+    match err {
+        SolverError::Backend(msg) => assert!(msg.contains("not infeasible"), "{msg}"),
+        other => panic!("expected Backend error, got {other:?}"),
+    }
+}
