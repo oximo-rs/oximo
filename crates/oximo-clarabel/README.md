@@ -13,7 +13,7 @@ Enable the `clarabel` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = { version = "0.4", features = ["clarabel"] }
+oximo = { version = "0.5", features = ["clarabel"] }
 ```
 
 To use this crate directly:

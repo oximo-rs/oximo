@@ -25,7 +25,7 @@ Enable the `baron` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = { version = "0.4", features = ["baron"] }
+oximo = { version = "0.5", features = ["baron"] }
 ```
 
 To use this crate directly:

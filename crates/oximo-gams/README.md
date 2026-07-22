@@ -27,7 +27,7 @@ Enable the `gams` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = { version = "0.4", features = ["gams"] }
+oximo = { version = "0.5", features = ["gams"] }
 ```
 
 To use this crate directly:

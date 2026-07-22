@@ -34,7 +34,7 @@ Enable the `gurobi` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = { version = "0.4", features = ["gurobi"] }
+oximo = { version = "0.5", features = ["gurobi"] }
 ```
 
 To use this crate directly:

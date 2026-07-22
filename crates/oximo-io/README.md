@@ -17,7 +17,7 @@ To opt out:
 
 ```toml
 [dependencies]
-oximo = { version = "0.4", default-features = false, features = ["highs"] }
+oximo = { version = "0.5", default-features = false, features = ["highs"] }
 ```
 
 To use this crate directly:
