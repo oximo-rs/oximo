@@ -48,6 +48,16 @@ impl TerminationStatus {
                 | Self::Interrupted
         )
     }
+
+    /// Whether this status proves the model infeasible, so a conflict/IIS
+    /// diagnosis is meaningful. Treats the ambiguous [`InfeasibleOrUnbounded`]
+    /// as infeasible.
+    ///
+    /// [`InfeasibleOrUnbounded`]: Self::InfeasibleOrUnbounded
+    #[must_use]
+    pub fn is_infeasible(&self) -> bool {
+        matches!(self, Self::Infeasible | Self::InfeasibleOrUnbounded)
+    }
 }
 
 /// The status of the primal point held in a [`crate::SolverResult`].
@@ -185,6 +195,15 @@ mod tests {
                 (true, _) => PrimalStatus::FeasiblePoint,
             };
             assert_eq!(primal, expected, "inferred primal for {t:?}");
+        }
+    }
+
+    #[test]
+    fn is_infeasible_covers_infeasible_and_ambiguous() {
+        use TerminationStatus as T;
+        for t in all_terminations() {
+            let expected = matches!(t, T::Infeasible | T::InfeasibleOrUnbounded);
+            assert_eq!(t.is_infeasible(), expected, "is_infeasible for {t:?}");
         }
     }
 
