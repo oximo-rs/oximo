@@ -221,8 +221,6 @@ let result = Highs.solve(&m, &HighsOptions::default())?;
 
 match result.termination {
     TerminationStatus::Optimal => {
-        // `objective()` is `Option` (a model may have no objective), so print it
-        // only when present.
         if let Some(obj) = result.objective() {
             println!("optimal: {obj}");
         }
@@ -249,10 +247,6 @@ for i in 0..result.result_count() {
     println!("objective {:?}", point.objective);
 }
 ```
-
-## Model export
-
-With the `io` feature (default), you can export models to MPS, LP and NL format for inspection or use with external solvers.
 
 ## Workspace layout
 

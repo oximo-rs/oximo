@@ -201,12 +201,12 @@ pub trait Solver {
 ## Features
 
 | Feature         | What it adds                                                 | Default |
-|-----------------|--------------------------------------------------------------|---------|
+| --------------- | ------------------------------------------------------------ | ------- |
 | `highs`         | HiGHS - LP/MILP/QP solver (bundled, no install)              | yes     |
-| `io`            | MPS and LP file writers                                      | yes     |
+| `io`            | NL, MPS, and LP file writers                                 | yes     |
 | `gurobi`        | Gurobi solver (requires licensed install)                    | no      |
 | `gams`          | GAMS bridge - solve type depends on the selected sub-solver  | no      |
-| `baron`         | BARON - global LP...MINLP solver (requires licensed install) | no      |
+| `baron`         | BARON - Global non-convex solver (requires licensed install) | no      |
 | `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)   | no      |
 | `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend         | no      |
 | `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)      | no      |
@@ -227,47 +227,7 @@ let result = Highs.solve(&m, &HighsOptions::default()
     .method(HighsMethod::Ipm))?;
 ```
 
-### Clarabel
-
-Pure-Rust conic interior-point solver, no install or license. Solves continuous
-LP, QP (convex quadratic objectives), and SOCP models. See
-[`crates/oximo-clarabel/README.md`](crates/oximo-clarabel/README.md).
-
-### Gurobi
-
-Requires a licensed Gurobi install and `GUROBI_HOME` set. See [`crates/oximo-gurobi/README.md`](crates/oximo-gurobi/README.md).
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Gurobi;
-
-let result = Gurobi.solve(&m, &GurobiOptions::default()
-    .time_limit(Duration::from_secs(120))
-    .mip_focus(1)
-    .seed(101))?;
-```
-
-### GAMS
-
-Requires GAMS on `PATH`. Supports solving models via GAMS solvers (CPLEX, BARON, etc.). See [`crates/oximo-gams/README.md`](crates/oximo-gams/README.md).
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Gams;
-
-let result = Gams.solve(&m, &GamsOptions::default())?;
-```
-
-### BARON
-
-Requires a licensed BARON install on `PATH`. Global solver for nonconvex LP/MILP/QP/MIQP/NLP/MINLP. See [`crates/oximo-baron/README.md`](crates/oximo-baron/README.md).
-
-```rust,ignore
-use oximo::prelude::*;
-use oximo::solvers::Baron;
-
-let result = Baron::new().solve(&m, &BaronOptions::default())?;
-```
+For other backends, see their respective documentation.
 
 ## Reading results
 
@@ -278,8 +238,6 @@ let result = Highs.solve(&m, &HighsOptions::default())?;
 
 match result.termination {
     TerminationStatus::Optimal => {
-        // `objective()` is `Option` (a feasibility problem has none), so print it
-        // only when present.
         if let Some(obj) = result.objective() {
             println!("optimal: {obj}");
         }
