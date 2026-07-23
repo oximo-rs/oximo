@@ -41,3 +41,7 @@ oximo-io = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "baron_robot"
+doc-scrape-examples = false
