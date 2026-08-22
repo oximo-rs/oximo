@@ -671,7 +671,8 @@ fn build_model(
         );
     }
     let e = lower(&m, &vars, obj)?;
-    match p.sense.unwrap() {
+    let sense = p.sense.ok_or_else(|| invalid_lp(1, 1, "missing Minimize or Maximize section"))?;
+    match sense {
         ObjectiveSense::Minimize => m.__minimize(e),
         ObjectiveSense::Maximize => m.__maximize(e),
     }

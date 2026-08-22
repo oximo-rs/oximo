@@ -206,6 +206,18 @@ fn content_after_end_is_rejected() {
 }
 
 #[test]
+fn missing_objective_sense_is_invalid_lp() {
+    let err = read_lp("Subject To\n c: x <= 1\nEnd\n".as_bytes()).unwrap_err();
+    match err {
+        IoError::InvalidLp { line, column, message } => {
+            assert_eq!((line, column), (1, 1));
+            assert!(message.contains("missing Minimize or Maximize section"));
+        }
+        other => panic!("expected InvalidLp, got {other:?}"),
+    }
+}
+
+#[test]
 fn malformed_input_has_lp_diagnostic() {
     let err =
         read_lp("Minimize\n obj: x\nSubject To\n bad: x <= nope\nEnd\n".as_bytes()).unwrap_err();
