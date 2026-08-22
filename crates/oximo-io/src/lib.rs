@@ -14,7 +14,7 @@ pub use mps::{
     write_mps_with,
 };
 pub use nl::{
-    Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,
-    WriteOptions, read_nl, read_nl_file, to_nl_string, to_nl_string_with, write_nl, write_nl_files,
-    write_nl_with,
+    Complementarity, DefinedVar, ImportedFunction, NlFormat, NlReadData, SuffixData, SuffixFlavour,
+    SuffixKind, WriteOptions, read_nl, read_nl_data, read_nl_file, read_nl_file_data, to_nl_string,
+    to_nl_string_with, write_nl, write_nl_files, write_nl_with,
 };

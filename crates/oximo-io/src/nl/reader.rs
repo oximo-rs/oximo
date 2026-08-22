@@ -17,6 +17,8 @@ use oximo_core::{Domain, Expr, Model, ObjectiveSense};
 
 use crate::error::IoError;
 
+use super::options::{SuffixData, SuffixFlavour, SuffixKind, WriteOptions};
+
 #[derive(Debug, Clone, Copy)]
 struct Header {
     n_var: usize,
@@ -46,6 +48,8 @@ struct Parsed {
     objective: Option<(ObjectiveSense, Node)>,
     jac: Vec<Vec<(usize, f64)>>,
     grad: Vec<(usize, f64)>,
+    suffixes: Vec<SuffixData>,
+    dual_init: Vec<(u32, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,13 +61,56 @@ enum Node {
     Sum(Vec<Node>),
 }
 
-/// Read an ASCII NL stream.
+/// Result of reading an NL stream when caller-supplied writer metadata should
+/// be retained for a later rewrite.
+#[derive(Debug)]
+pub struct NlReadData {
+    pub model: Model,
+    pub suffixes: Vec<SuffixData>,
+    pub dual_init: Vec<(u32, f64)>,
+}
+
+impl NlReadData {
+    /// Build writer options that re-emit retained NL metadata.
+    #[must_use]
+    pub fn write_options(&self) -> WriteOptions {
+        WriteOptions {
+            suffixes: self.suffixes.clone(),
+            dual_init: self.dual_init.clone(),
+            ..WriteOptions::default()
+        }
+    }
+
+    /// Consume the read data and build writer options that re-emit retained NL
+    /// metadata.
+    #[must_use]
+    pub fn into_write_options(self) -> WriteOptions {
+        WriteOptions {
+            suffixes: self.suffixes,
+            dual_init: self.dual_init,
+            ..WriteOptions::default()
+        }
+    }
+}
+
+/// Read an NL stream.
 ///
 /// # Errors
 ///
 /// Returns [`IoError`] when the stream is malformed or uses unsupported NL
 /// semantics.
-pub fn read_nl<R: Read>(mut input: R) -> Result<Model, IoError> {
+pub fn read_nl<R: Read>(input: R) -> Result<Model, IoError> {
+    Ok(read_nl_data(input)?.model)
+}
+
+/// Read an NL stream, retaining suffix and dual-seed metadata for rewrite
+/// workflows.
+///
+/// # Errors
+///
+/// Returns [`IoError`] when the stream is malformed or uses unsupported NL
+/// semantics.
+pub fn read_nl_data<R: Read>(mut input: R) -> Result<NlReadData, IoError> {
     let mut bytes = Vec::new();
     input.read_to_end(&mut bytes)?;
     parse_bytes(&bytes, None, None)
@@ -76,6 +123,17 @@ pub fn read_nl<R: Read>(mut input: R) -> Result<Model, IoError> {
 /// Returns [`IoError`] for I/O failures, malformed input, or unsupported NL
 /// sections.
 pub fn read_nl_file(path: impl AsRef<Path>) -> Result<Model, IoError> {
+    Ok(read_nl_file_data(path)?.model)
+}
+
+/// Read an NL file and optional sibling `.col`/`.row` sidecars, retaining
+/// suffix and dual-seed metadata for rewrite workflows.
+///
+/// # Errors
+///
+/// Returns [`IoError`] for I/O failures, malformed input, or unsupported NL
+/// sections.
+pub fn read_nl_file_data(path: impl AsRef<Path>) -> Result<NlReadData, IoError> {
     let path = path.as_ref();
     let mut bytes = Vec::new();
     File::open(path)?.read_to_end(&mut bytes)?;
@@ -106,7 +164,7 @@ fn parse_bytes(
     bytes: &[u8],
     stem: Option<&Path>,
     names: Option<(&[String], &[String])>,
-) -> Result<Model, IoError> {
+) -> Result<NlReadData, IoError> {
     let first_end = bytes
         .iter()
         .position(|b| *b == b'\n')
@@ -141,7 +199,10 @@ fn parse_bytes(
         let mut lines = text.lines().map(str::to_owned).collect::<Vec<_>>();
         parse_body(&mut lines, &mut p)?;
     }
-    build_model(p, stem, names)
+    let suffixes = std::mem::take(&mut p.suffixes);
+    let dual_init = std::mem::take(&mut p.dual_init);
+    let model = build_model(p, stem, names)?;
+    Ok(NlReadData { model, suffixes, dual_init })
 }
 
 fn parse_header(lines: &[String]) -> Result<(Header, Option<String>), IoError> {
@@ -234,8 +295,8 @@ fn parse_ascii_segment(
             *pos += 1 + parse_suffix(line, 'k')?;
             Ok(())
         }
-        'S' => parse_ascii_suffix(line, lines, pos),
-        'd' => parse_ascii_dual(line, lines, pos),
+        'S' => parse_ascii_suffix(line, lines, pos, parsed, header),
+        'd' => parse_ascii_dual(line, lines, pos, parsed, header),
         'F' => Err(IoError::UnsupportedNl {
             section: "F".into(),
             feature: "imported functions".into(),
@@ -244,8 +305,6 @@ fn parse_ascii_segment(
             section: tag.to_string(),
             feature: "logical/network constraints".into(),
         }),
-        // TODO: retain suffixes/duals and model defined variables once the
-        // core model has a representation for these semantic sections.
         'V' => {
             Err(IoError::UnsupportedNl { section: "V".into(), feature: "defined variables".into() })
         }
@@ -383,24 +442,60 @@ fn parse_ascii_jg(
     Ok(())
 }
 
-fn parse_ascii_suffix(line: &str, lines: &[String], pos: &mut usize) -> Result<(), IoError> {
+fn parse_ascii_suffix(
+    line: &str,
+    lines: &[String],
+    pos: &mut usize,
+    parsed: &mut Parsed,
+    header: Header,
+) -> Result<(), IoError> {
     let fields = line[1..].split_whitespace().collect::<Vec<_>>();
-    if fields.len() < 2 {
-        return Err(invalid("S", "missing suffix count"));
+    if fields.len() < 3 {
+        return Err(invalid("S", "missing suffix metadata"));
     }
+    let (kind, flavour) = decode_suffix_kind(fields[0])?;
     let n = fields[1].parse::<usize>().map_err(|_| invalid("S", "invalid suffix count"))?;
+    let name = fields[2].to_owned();
     *pos += 1;
+    let mut values = Vec::with_capacity(bounded_capacity(n, lines.len().saturating_sub(*pos)));
     for _ in 0..n {
-        let _ = record(lines, pos, "S")?;
+        let record = record(lines, pos, "S")?;
+        if record.len() != 2 {
+            return Err(invalid("S", "expected suffix index and value"));
+        }
+        let index = as_index(record[0])?;
+        validate_suffix_index(kind, index, header)?;
+        if record[1].is_nan() {
+            return Err(invalid("S", "NaN suffix value"));
+        }
+        values.push((as_u32_index("S", index)?, record[1]));
     }
+    parsed.suffixes.push(SuffixData { name, kind, flavour, values });
     Ok(())
 }
 
-fn parse_ascii_dual(line: &str, lines: &[String], pos: &mut usize) -> Result<(), IoError> {
+fn parse_ascii_dual(
+    line: &str,
+    lines: &[String],
+    pos: &mut usize,
+    parsed: &mut Parsed,
+    header: Header,
+) -> Result<(), IoError> {
     let n = parse_suffix(line, 'd')?;
     *pos += 1;
     for _ in 0..n {
-        let _ = record(lines, pos, "d")?;
+        let record = record(lines, pos, "d")?;
+        if record.len() != 2 {
+            return Err(invalid("d", "expected constraint index and value"));
+        }
+        let index = as_index(record[0])?;
+        if index >= header.n_con {
+            return Err(invalid("d", "constraint index out of range"));
+        }
+        if record[1].is_nan() {
+            return Err(invalid("d", "NaN dual value"));
+        }
+        parsed.dual_init.push((as_u32_index("d", index)?, record[1]));
     }
     Ok(())
 }
@@ -462,8 +557,8 @@ fn parse_binary_segment(
         'b' => parse_binary_b(b, p, h),
         'x' => parse_binary_x(b, p),
         'k' => skip_binary_ints(b, "k"),
-        'd' => skip_binary_duals(b),
-        'S' => skip_binary_suffix(b),
+        'd' => parse_binary_duals(b, p, h),
+        'S' => parse_binary_suffix(b, p, h),
         'J' => parse_binary_j(b, p, h),
         'G' => parse_binary_g(b, p),
         'F' | 'V' | 'L' | 'N' => Err(IoError::UnsupportedNl {
@@ -559,30 +654,85 @@ fn skip_binary_ints(b: &mut Bin<'_>, section: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn skip_binary_duals(b: &mut Bin<'_>) -> Result<(), IoError> {
+fn parse_binary_duals(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoError> {
     let n = nonneg(b.i32()?, "d count")?;
     for _ in 0..n {
-        let _ = b.i32()?;
-        let _ = b.f64()?;
+        let index = nonneg(b.i32()?, "d index")?;
+        if index >= h.n_con {
+            return Err(invalid("d", "constraint index out of range"));
+        }
+        let value = b.f64()?;
+        if value.is_nan() {
+            return Err(invalid("d", "NaN dual value"));
+        }
+        p.dual_init.push((as_u32_index("d", index)?, value));
     }
     Ok(())
 }
 
-fn skip_binary_suffix(b: &mut Bin<'_>) -> Result<(), IoError> {
-    let _kind = b.i32()?;
+fn parse_binary_suffix(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoError> {
+    let (kind, flavour) = decode_suffix_kind_word(b.i32()?)?;
     let n = nonneg(b.i32()?, "S count")?;
     let name_len = nonneg(b.i32()?, "S name length")?;
     let end =
         b.pos.checked_add(name_len).ok_or_else(|| invalid("binary", "suffix name overflow"))?;
-    if b.bytes.get(b.pos..end).is_none() {
-        return Err(invalid("binary", "truncated suffix name"));
+    let name_bytes =
+        b.bytes.get(b.pos..end).ok_or_else(|| invalid("binary", "truncated suffix name"))?;
+    let name =
+        std::str::from_utf8(name_bytes).map_err(|_| invalid("S", "suffix name is not UTF-8"))?;
+    if name.is_empty() {
+        return Err(invalid("S", "empty suffix name"));
     }
     b.pos = end;
+    let mut values = Vec::with_capacity(bounded_capacity(n, b.bytes.len().saturating_sub(b.pos)));
     for _ in 0..n {
-        let _ = b.i32()?;
-        let _ = b.f64()?;
+        let index = nonneg(b.i32()?, "S index")?;
+        validate_suffix_index(kind, index, h)?;
+        let value = b.f64()?;
+        if value.is_nan() {
+            return Err(invalid("S", "NaN suffix value"));
+        }
+        values.push((as_u32_index("S", index)?, value));
+    }
+    p.suffixes.push(SuffixData { name: name.to_owned(), kind, flavour, values });
+    Ok(())
+}
+
+fn decode_suffix_kind(raw: &str) -> Result<(SuffixKind, SuffixFlavour), IoError> {
+    let word = raw.parse::<i32>().map_err(|_| invalid("S", "invalid suffix kind"))?;
+    decode_suffix_kind_word(word)
+}
+
+fn decode_suffix_kind_word(word: i32) -> Result<(SuffixKind, SuffixFlavour), IoError> {
+    if word < 0 || (word & !7) != 0 {
+        return Err(invalid("S", "invalid suffix kind"));
+    }
+    let kind = match word & 3 {
+        0 => SuffixKind::Variable,
+        1 => SuffixKind::Constraint,
+        2 => SuffixKind::Objective,
+        3 => SuffixKind::Problem,
+        _ => unreachable!(),
+    };
+    let flavour = if word & 4 == 0 { SuffixFlavour::Int } else { SuffixFlavour::Real };
+    Ok((kind, flavour))
+}
+
+fn validate_suffix_index(kind: SuffixKind, index: usize, h: Header) -> Result<(), IoError> {
+    let limit = match kind {
+        SuffixKind::Variable => h.n_var,
+        SuffixKind::Constraint => h.n_con,
+        SuffixKind::Objective => h.n_obj,
+        SuffixKind::Problem => 1,
+    };
+    if index >= limit {
+        return Err(invalid("S", "suffix index out of range"));
     }
     Ok(())
+}
+
+fn as_u32_index(section: &str, index: usize) -> Result<u32, IoError> {
+    u32::try_from(index).map_err(|_| invalid(section, "index out of range"))
 }
 
 fn parse_binary_j(b: &mut Bin<'_>, p: &mut Parsed, h: Header) -> Result<(), IoError> {

@@ -44,7 +44,7 @@ pub use options::{
     Complementarity, DefinedVar, ImportedFunction, NlFormat, SuffixData, SuffixFlavour, SuffixKind,
     WriteOptions,
 };
-pub use reader::{read_nl, read_nl_file};
+pub use reader::{NlReadData, read_nl, read_nl_data, read_nl_file, read_nl_file_data};
 
 use std::io::Write;
 use std::path::Path;

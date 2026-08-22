@@ -4,7 +4,8 @@
 use oximo_core::prelude::*;
 use oximo_io::{
     Complementarity, DefinedVar, ImportedFunction, IoError, NlFormat, SuffixData, SuffixFlavour,
-    SuffixKind, WriteOptions, to_nl_string_with, write_nl_files, write_nl_with,
+    SuffixKind, WriteOptions, read_nl, read_nl_data, to_nl_string_with, write_nl_files,
+    write_nl_with,
 };
 use tempfile::TempDir;
 
@@ -214,6 +215,87 @@ fn d_segment_hook() {
     opts.dual_init = vec![(0, 0.5)];
     let s = to_nl_string_with(&m, &opts).expect("write");
     assert!(s.contains("d1\n0 0.5\n"), "d segment: {s}");
+}
+
+#[test]
+fn reader_retains_suffixes_and_duals_for_rewrite() {
+    let m = simple_lp();
+    let mut opts = WriteOptions::ascii_lean();
+    opts.suffixes.push(SuffixData {
+        name: "priority".into(),
+        kind: SuffixKind::Variable,
+        flavour: SuffixFlavour::Int,
+        values: vec![(0, 5.0), (1, 3.0)],
+    });
+    opts.dual_init = vec![(0, 0.5)];
+
+    let original = to_nl_string_with(&m, &opts).expect("write");
+    let model_only = read_nl(original.as_bytes()).expect("model-only read");
+    assert_eq!(model_only.num_variables(), 2);
+    assert_eq!(model_only.num_constraints(), 1);
+
+    let data = read_nl_data(original.as_bytes()).expect("metadata read");
+    assert_eq!(data.model.num_variables(), 2);
+    assert_eq!(data.model.num_constraints(), 1);
+    assert_eq!(data.suffixes.len(), 1);
+    assert_eq!(data.suffixes[0].name, "priority");
+    assert_eq!(data.suffixes[0].kind, SuffixKind::Variable);
+    assert_eq!(data.suffixes[0].flavour, SuffixFlavour::Int);
+    assert_eq!(data.suffixes[0].values, vec![(0, 5.0), (1, 3.0)]);
+    assert_eq!(data.dual_init, vec![(0, 0.5)]);
+
+    let rewritten = to_nl_string_with(&data.model, &data.write_options()).expect("rewrite");
+    assert!(rewritten.contains("S0 2 priority"), "S header retained: {rewritten}");
+    assert!(rewritten.contains("\n0 5\n"));
+    assert!(rewritten.contains("\n1 3\n"));
+    assert!(rewritten.contains("d1\n0 0.5\n"), "d segment retained: {rewritten}");
+}
+
+#[test]
+fn binary_reader_retains_suffixes_and_duals() {
+    let m = simple_lp();
+    let mut opts = WriteOptions::binary();
+    opts.suffixes.push(SuffixData {
+        name: "scale".into(),
+        kind: SuffixKind::Constraint,
+        flavour: SuffixFlavour::Real,
+        values: vec![(0, 2.25)],
+    });
+    opts.dual_init = vec![(0, -1.5)];
+
+    let mut bytes = Vec::new();
+    write_nl_with(&m, &mut bytes, &opts).expect("binary write");
+    let data = read_nl_data(&bytes[..]).expect("binary metadata read");
+
+    assert_eq!(data.suffixes.len(), 1);
+    assert_eq!(data.suffixes[0].name, "scale");
+    assert_eq!(data.suffixes[0].kind, SuffixKind::Constraint);
+    assert_eq!(data.suffixes[0].flavour, SuffixFlavour::Real);
+    assert_eq!(data.suffixes[0].values, vec![(0, 2.25)]);
+    assert_eq!(data.dual_init, vec![(0, -1.5)]);
+}
+
+#[test]
+fn reader_rejects_malformed_retained_suffix() {
+    let m = simple_lp();
+    let mut opts = WriteOptions::ascii_lean();
+    opts.suffixes.push(SuffixData {
+        name: "priority".into(),
+        kind: SuffixKind::Variable,
+        flavour: SuffixFlavour::Int,
+        values: vec![(0, 5.0)],
+    });
+
+    let original = to_nl_string_with(&m, &opts).expect("write");
+    let malformed = original.replace("\n0 5\n", "\n2 5\n");
+    assert!(
+        matches!(
+            read_nl_data(malformed.as_bytes()),
+            Err(IoError::InvalidNl { section, message })
+                if section == "S" && message == "suffix index out of range"
+        ),
+        "out-of-range retained suffix must remain invalid"
+    );
 }
 
 #[test]
