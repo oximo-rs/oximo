@@ -728,21 +728,65 @@ pub mod benchmark_support {
     /// Crossover candidate used only to size the preprocessing benchmark cases.
     pub const THRESHOLD: usize = 1_024;
 
-    pub fn model(rows: usize, degree: usize) -> Model {
-        let model = Model::new("enzyme_classification_bench");
-        let x = model.__var("x").lb(-3.0).ub(3.0).build();
-        let y = model.__var("y").lb(-3.0).ub(3.0).build();
-        let z = model.__var("z").lb(-3.0).ub(3.0).build();
-        model.__minimize(x + y + z);
+    /// Workload kinds used by the runtime benchmarks.
+    pub const KINDS: [(&str, u8); 4] = [("lp", 0), ("qcp", 1), ("nlp", 2), ("mixed", 3)];
+
+    /// `(name, variables, constraints)` cases used by the runtime benchmarks.
+    pub const SHAPES: [(&str, usize, usize); 3] =
+        [("small", 3, 16), ("medium", 32, 64), ("large", 64, 256)];
+
+    /// Build a deterministic model with controlled variable width and row count.
+    ///
+    /// The parameter keeps refresh benchmarks representative of a resident
+    /// evaluator: its value is read again, but the expression graph and tapes
+    /// remain unchanged.
+    pub fn runtime_model(rows: usize, n_vars: usize, kind: u8) -> Model {
+        assert!(n_vars >= 3);
+        let model = Model::new("enzyme_runtime_bench");
+        let vars: Vec<_> =
+            (0..n_vars).map(|i| model.__var(format!("x{i}")).lb(-3.0).ub(3.0).build()).collect();
+        let scale = model.__param("scale", 1.25);
+
+        let objective = expression(&vars, scale, 0, if kind == 3 { 2 } else { kind });
+        model.__minimize(objective);
         for i in 0..rows {
-            let lhs = match degree {
-                1 => x + 2.0 * y - z,
-                2 => x.powi(2) + y * z,
-                _ => x * y * z + x.sin(),
-            };
+            let lhs = expression(
+                &vars,
+                scale,
+                i,
+                if kind == 3 { u8::try_from(i % 3).unwrap() } else { kind },
+            );
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
         model
+    }
+
+    fn expression<'a>(
+        vars: &[oximo_expr::Expr<'a>],
+        scale: oximo_expr::Expr<'a>,
+        i: usize,
+        kind: u8,
+    ) -> oximo_expr::Expr<'a> {
+        let a = vars[i % vars.len()];
+        let b = vars[(i + 1) % vars.len()];
+        let c = vars[(i + 2) % vars.len()];
+        match kind {
+            0 => a + 2.0 * b - c + scale,
+            1 => a.powi(2) + b * c + scale * a,
+            2 => {
+                let mut sum = scale + vars[0];
+                for &var in &vars[1..] {
+                    sum = sum + var;
+                }
+                sum.sin() + sum.powi(2) * 0.01 + a * b * c
+            }
+            _ => unreachable!("mixed expressions are selected per row"),
+        }
+    }
+
+    /// Compatibility workload for the existing classification benchmarks.
+    pub fn model(rows: usize, degree: usize) -> Model {
+        runtime_model(rows, 3, u8::try_from(degree.saturating_sub(1).min(2)).unwrap())
     }
 
     pub fn classify(model: &Model, parallel: bool) -> usize {
@@ -798,6 +842,108 @@ pub mod benchmark_support {
                 .collect()
         } else {
             slots.iter().zip(exprs).map(|(slot, &expr)| slot.reclassify(arena, expr)).collect()
+        }
+    }
+
+    /// Preallocated evaluator inputs and outputs for one runtime benchmark.
+    #[derive(Debug)]
+    pub struct Runtime {
+        pub evaluator: NlpEvaluator,
+        pub point: Vec<f64>,
+        pub lambda: Vec<f64>,
+        pub gradient: Vec<f64>,
+        pub constraint_values: Vec<f64>,
+        pub jacobian: Vec<f64>,
+        pub hessian: Vec<f64>,
+    }
+
+    impl Runtime {
+        pub fn new(model: &Model) -> Self {
+            let evaluator = NlpEvaluator::new(model).unwrap();
+            let point = (0..evaluator.num_variables()).map(|i| 0.1 + i as f64 * 0.001).collect();
+            let lambda = vec![0.5; evaluator.num_constraints()];
+            let gradient = vec![0.0; evaluator.num_variables()];
+            let constraint_values = vec![0.0; evaluator.num_constraints()];
+            let jacobian = vec![0.0; evaluator.jacobian_structure().len()];
+            let hessian = vec![0.0; evaluator.hessian_lagrangian_structure().len()];
+            Self { evaluator, point, lambda, gradient, constraint_values, jacobian, hessian }
+        }
+    }
+
+    pub fn objective_value(runtime: &Runtime) -> f64 {
+        runtime.evaluator.eval_objective(&runtime.point)
+    }
+
+    pub fn objective_gradient(runtime: &mut Runtime) -> f64 {
+        runtime.evaluator.eval_objective_gradient(&runtime.point, &mut runtime.gradient);
+        runtime.gradient.iter().sum()
+    }
+
+    pub fn constraint_values_auto(runtime: &mut Runtime) -> f64 {
+        runtime.evaluator.eval_constraint(&runtime.point, &mut runtime.constraint_values);
+        runtime.constraint_values.iter().sum()
+    }
+
+    pub fn constraint_values(runtime: &mut Runtime, parallel: bool) -> f64 {
+        if parallel {
+            runtime
+                .evaluator
+                .eval_constraint_parallel(&runtime.point, &mut runtime.constraint_values);
+        } else {
+            runtime
+                .evaluator
+                .eval_constraint_serial(&runtime.point, &mut runtime.constraint_values);
+        }
+        runtime.constraint_values.iter().sum()
+    }
+
+    pub fn constraint_jacobian(runtime: &mut Runtime, parallel: bool) -> f64 {
+        if parallel {
+            runtime
+                .evaluator
+                .eval_constraint_jacobian_parallel(&runtime.point, &mut runtime.jacobian);
+        } else {
+            runtime
+                .evaluator
+                .eval_constraint_jacobian_serial(&runtime.point, &mut runtime.jacobian);
+        }
+        runtime.jacobian.iter().sum()
+    }
+
+    pub fn constraint_jacobian_auto(runtime: &mut Runtime) -> f64 {
+        runtime.evaluator.eval_constraint_jacobian(&runtime.point, &mut runtime.jacobian);
+        runtime.jacobian.iter().sum()
+    }
+
+    pub fn hessian(runtime: &mut Runtime) -> f64 {
+        runtime.evaluator.eval_hessian_lagrangian(
+            &runtime.point,
+            1.0,
+            &runtime.lambda,
+            &mut runtime.hessian,
+        );
+        runtime.hessian.iter().sum()
+    }
+
+    pub fn build(model: &Model) -> NlpEvaluator {
+        NlpEvaluator::new(model).unwrap()
+    }
+
+    /// Resident evaluator used to measure full parameter refreshes.
+    #[derive(Debug)]
+    pub struct EvaluatorRefresh {
+        pub model: Model,
+        pub evaluator: NlpEvaluator,
+    }
+
+    impl EvaluatorRefresh {
+        pub fn new(model: Model) -> Self {
+            let evaluator = NlpEvaluator::new(&model).unwrap();
+            Self { model, evaluator }
+        }
+
+        pub fn run(&mut self) -> bool {
+            self.evaluator.try_refresh(&self.model)
         }
     }
 }

@@ -23,5 +23,10 @@ rustc-hash.workspace = true
 thiserror.workspace = true
 rayon = { workspace = true, optional = true }
 
+[[bin]]
+name = "enzyme-bench"
+path = "src/bin/enzyme-bench.rs"
+required-features = ["enzyme", "benchmark-support"]
+
 [lints]
 workspace = true
