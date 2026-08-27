@@ -18,7 +18,9 @@ use crate::slot::{
     FunctionSlot, SlotKind, linear_gradient_add, linear_value, quadratic_gradient_add,
     quadratic_value,
 };
-use crate::sparsity::{hessian_lagrangian_structure, jacobian_structure, star_hessian_coloring};
+use crate::sparsity::{
+    SparsityWorkspace, hessian_lagrangian_structure, jacobian_structure, star_hessian_coloring,
+};
 use crate::tape::Tape;
 
 // Above these counts a derivative call fans its independent units of work out
@@ -154,12 +156,15 @@ impl NlpEvaluator {
         let constraint_exprs: Vec<ExprId> =
             model.constraints().algebraic().iter().map(|c| c.lhs).collect();
 
+        let mut sparsity_workspace = SparsityWorkspace::default();
         let objective = match objective_expr {
-            Some(e) => FunctionSlot::classify(&arena, e),
+            Some(e) => FunctionSlot::classify_with_workspace(&arena, e, &mut sparsity_workspace),
             None => FunctionSlot::zero(),
         };
-        let constraints: Vec<FunctionSlot> =
-            constraint_exprs.iter().map(|&e| FunctionSlot::classify(&arena, e)).collect();
+        let constraints: Vec<FunctionSlot> = constraint_exprs
+            .iter()
+            .map(|&e| FunctionSlot::classify_with_workspace(&arena, e, &mut sparsity_workspace))
+            .collect();
 
         // Lagrangian tape over the nonlinear functions only.
         let mut nl_sources = Vec::new();
@@ -1005,5 +1010,20 @@ mod tests {
         ev.hessian_seeds_serial(&POINT, sigma, &lambda, &mut serial);
         ev.hessian_seeds_parallel(&POINT, sigma, &lambda, &mut parallel);
         assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn wide_sparse_objective_builds_the_expected_pattern() {
+        let model = Model::new("wide_sparse");
+        let vars: Vec<_> = (0..1_025).map(|i| model.__var(format!("x{i}")).build()).collect();
+        let mut linear = vars[0];
+        for &var in &vars[1..] {
+            linear = linear + var;
+        }
+        model.__minimize((vars[0] + vars[1_024]).sin() + linear);
+
+        let evaluator = NlpEvaluator::new(&model).unwrap();
+        assert_eq!(evaluator.num_variables(), 1_025);
+        assert_eq!(evaluator.hessian_lagrangian_structure(), &[(0, 0), (1_024, 0), (1_024, 1_024)]);
     }
 }

@@ -4,7 +4,7 @@ use oximo_expr::{
     ExprArena, ExprId, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
 };
 
-use crate::sparsity::{hessian_pattern, variable_support};
+use crate::sparsity::{SparsityWorkspace, structural_sparsity_with_workspace};
 use crate::tape::Tape;
 
 /// One objective or constraint function, classified for derivative purposes.
@@ -49,11 +49,22 @@ impl FunctionSlot {
     /// their current values, so linear and quadratic slots must be
     /// re-classified after `set_param`.
     pub fn classify(arena: &ExprArena, root: ExprId) -> Self {
+        Self::classify_with_workspace(arena, root, &mut SparsityWorkspace::default())
+    }
+
+    pub(crate) fn classify_with_workspace(
+        arena: &ExprArena,
+        root: ExprId,
+        workspace: &mut SparsityWorkspace,
+    ) -> Self {
         Self::closed_form(arena, root).unwrap_or_else(|| {
             let tape = Tape::compile(arena, root);
-            let support = variable_support(arena, root);
-            let hess_pairs = hessian_pattern(arena, root);
-            Self { kind: SlotKind::Nonlinear(tape), support, hess_pairs }
+            let sparsity = structural_sparsity_with_workspace(arena, root, workspace);
+            Self {
+                kind: SlotKind::Nonlinear(tape),
+                support: sparsity.support,
+                hess_pairs: sparsity.hess_pairs,
+            }
         })
     }
 

@@ -2,7 +2,9 @@
 //! compression of the Hessian into Hessian-vector-product seeds.
 #![expect(clippy::unreadable_literal, clippy::cast_precision_loss)]
 
-use oximo_autodiff::sparsity::{HessianColoring, hessian_pattern, star_hessian_coloring};
+use oximo_autodiff::sparsity::{
+    HessianColoring, hessian_pattern, star_hessian_coloring, variable_support,
+};
 use oximo_expr::{ExprArena, ExprNode, VarId, extract_quadratic};
 use rustc_hash::FxHashSet;
 
@@ -139,6 +141,70 @@ fn self_division_keeps_its_structural_entry() {
     let x = var(&mut arena, 0);
     let div = arena.push(ExprNode::Div(x, x));
     assert_eq!(hessian_pattern(&arena, div), vec![(0, 0)]);
+}
+
+#[test]
+fn packed_support_spans_multiple_words() {
+    let mut arena = ExprArena::new();
+    let vars: Vec<_> = (0..70).map(|i| var(&mut arena, i)).collect();
+    let sum = arena.push(ExprNode::Add(vars.into_iter().collect()));
+    let root = arena.push(ExprNode::Sin(sum));
+    let pattern = hessian_pattern(&arena, root);
+    assert_eq!(pattern.len(), 70 * 71 / 2);
+    assert_eq!(pattern.first(), Some(&(0, 0)));
+    assert_eq!(pattern.last(), Some(&(69, 69)));
+    assert!(pattern.contains(&(64, 0)));
+    assert!(pattern.contains(&(69, 64)));
+}
+
+#[test]
+fn wide_sparse_support_avoids_dense_pair_storage() {
+    let mut arena = ExprArena::new();
+    let vars: Vec<_> = (0..1_025).map(|i| var(&mut arena, i)).collect();
+    let endpoints = arena.push(ExprNode::Add([vars[0], vars[1_024]].into_iter().collect()));
+    let nonlinear = arena.push(ExprNode::Sin(endpoints));
+    let root =
+        arena.push(ExprNode::Add(vars.into_iter().chain(std::iter::once(nonlinear)).collect()));
+
+    assert_eq!(variable_support(&arena, root).len(), 1_025);
+    assert_eq!(hessian_pattern(&arena, root), vec![(0, 0), (1_024, 0), (1_024, 1_024)]);
+}
+
+#[test]
+fn sparse_variable_ids_are_coordinate_compressed() {
+    let mut arena = ExprArena::new();
+    let low = var(&mut arena, 7);
+    let high = var(&mut arena, u32::MAX);
+    let sum = arena.push(ExprNode::Add([high, low].into_iter().collect()));
+    let root = arena.push(ExprNode::Sin(sum));
+    assert_eq!(variable_support(&arena, root), vec![7, u32::MAX]);
+    assert_eq!(hessian_pattern(&arena, root), vec![(7, 7), (u32::MAX, 7), (u32::MAX, u32::MAX)]);
+}
+
+#[test]
+fn zero_power_keeps_syntactic_support_but_has_no_hessian() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 11);
+    let nonlinear_base = arena.push(ExprNode::Sin(x));
+    let zero = arena.constant(0.0);
+    let root = arena.push(ExprNode::Pow(nonlinear_base, zero));
+    assert_eq!(variable_support(&arena, root), vec![11]);
+    assert_eq!(hessian_pattern(&arena, root), vec![]);
+
+    let negative_zero = arena.constant(-0.0);
+    let negative_zero_root = arena.push(ExprNode::Pow(nonlinear_base, negative_zero));
+    assert_eq!(hessian_pattern(&arena, negative_zero_root), vec![]);
+}
+
+#[test]
+fn deep_sparsity_walks_are_iterative() {
+    let mut arena = ExprArena::with_capacity(50_001);
+    let mut root = var(&mut arena, 3);
+    for _ in 0..50_000 {
+        root = arena.push(ExprNode::Neg(root));
+    }
+    assert_eq!(variable_support(&arena, root), vec![3]);
+    assert_eq!(hessian_pattern(&arena, root), vec![]);
 }
 
 /// Exact recovery check, fill a deterministic (pseudo-random, collision-free)

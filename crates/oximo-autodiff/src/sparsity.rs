@@ -2,63 +2,290 @@
 //! exact second-order interaction pattern, and the Jacobian/Hessian
 //! patterns derivative-based solvers ask for up front.
 
-use oximo_expr::{ExprArena, ExprId, ExprNode, Visitor, walk};
+use std::ops::Range;
+
+use oximo_expr::{ExprArena, ExprId, ExprNode};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::slot::{FunctionSlot, SlotKind};
 
+// Keeps the dense triangular pair bitmap at or below 64 KiB. Wider expressions
+// use sparse rows and pairs so memory follows actual structural nonzeros.
+const DENSE_SPARSITY_MAX_VARS: usize = 1_024;
+
 /// Sorted, deduplicated indices of the variables appearing under `root`.
 pub fn variable_support(arena: &ExprArena, root: ExprId) -> Vec<u32> {
-    struct Support(FxHashSet<u32>);
-    impl Visitor for Support {
-        fn visit(&mut self, _arena: &ExprArena, _id: ExprId, node: &ExprNode) {
-            match node {
-                ExprNode::Var(v) => {
-                    self.0.insert(v.0);
-                }
-                ExprNode::Linear { coeffs, .. } => {
-                    self.0.extend(coeffs.iter().map(|(v, _)| v.0));
-                }
-                _ => {}
+    let mut seen = vec![false; arena.len()];
+    let mut stack = vec![root];
+    let mut support = Vec::new();
+
+    while let Some(id) = stack.pop() {
+        if std::mem::replace(&mut seen[id.index()], true) {
+            continue;
+        }
+        match arena.get(id) {
+            ExprNode::Var(v) => support.push(v.0),
+            ExprNode::Linear { coeffs, .. } => {
+                support.extend(coeffs.iter().map(|(v, _)| v.0));
             }
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                stack.extend(children.iter().copied());
+            }
+            ExprNode::Neg(inner)
+            | ExprNode::Sin(inner)
+            | ExprNode::Cos(inner)
+            | ExprNode::Exp(inner)
+            | ExprNode::Log(inner)
+            | ExprNode::Abs(inner) => stack.push(*inner),
+            ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) => {
+                stack.push(*base);
+                stack.push(*exp);
+            }
+            ExprNode::Const(_) | ExprNode::Param(_) => {}
         }
     }
-    let mut visitor = Support(FxHashSet::default());
-    walk(arena, root, &mut visitor);
-    let mut support: Vec<u32> = visitor.0.into_iter().collect();
+
     support.sort_unstable();
+    support.dedup();
     support
 }
 
-/// Per-node first/second-order structural sparsity.
-/// `vars` is the gradient support, `pairs` the normalized
-/// lower-triangle second-partial support.
-#[derive(Clone, Debug, Default)]
-struct NodeSparsity {
-    vars: FxHashSet<u32>,
-    pairs: FxHashSet<(u32, u32)>,
+pub(crate) struct StructuralSparsity {
+    pub(crate) support: Vec<u32>,
+    pub(crate) hess_pairs: Vec<(u32, u32)>,
 }
 
-fn norm(i: u32, j: u32) -> (u32, u32) {
-    if i >= j { (i, j) } else { (j, i) }
+pub(crate) fn structural_sparsity(arena: &ExprArena, root: ExprId) -> StructuralSparsity {
+    structural_sparsity_with_workspace(arena, root, &mut SparsityWorkspace::default())
 }
 
-fn add_clique(vars: &FxHashSet<u32>, pairs: &mut FxHashSet<(u32, u32)>) {
-    let mut sorted: Vec<u32> = vars.iter().copied().collect();
-    sorted.sort_unstable();
-    for (i, &row) in sorted.iter().enumerate() {
-        for &col in &sorted[..=i] {
+#[derive(Clone, Copy, Default)]
+struct NodeMeta {
+    syntax_epoch: u32,
+    active_epoch: u32,
+    active_state: u8,
+    row: usize,
+}
+
+#[derive(Clone, Copy)]
+enum WalkAction {
+    ActiveEnter(ExprId),
+    ActiveExit(ExprId),
+    Syntax(ExprId),
+}
+
+#[derive(Default)]
+pub(crate) struct SparsityWorkspace {
+    epoch: u32,
+    meta: Vec<NodeMeta>,
+    walk: Vec<WalkAction>,
+    order: Vec<ExprId>,
+    syntax_vars: Vec<u32>,
+    active_vars: Vec<u32>,
+    supports: Vec<u64>,
+    clique_covered: Vec<bool>,
+    pairs: Vec<u64>,
+    sparse_supports: Vec<usize>,
+    sparse_rows: Vec<Range<usize>>,
+    sparse_scratch: Vec<usize>,
+    sparse_pairs: FxHashSet<(usize, usize)>,
+}
+
+impl SparsityWorkspace {
+    fn begin(&mut self, arena_len: usize) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.meta.fill(NodeMeta::default());
+            self.epoch = 1;
+        }
+        self.meta.resize(arena_len, NodeMeta::default());
+        self.walk.clear();
+        self.order.clear();
+        self.syntax_vars.clear();
+        self.active_vars.clear();
+        self.supports.clear();
+        self.clique_covered.clear();
+        self.pairs.clear();
+        self.sparse_supports.clear();
+        self.sparse_rows.clear();
+        self.sparse_scratch.clear();
+        self.sparse_pairs.clear();
+    }
+
+    fn mark_syntax(&mut self, arena: &ExprArena, id: ExprId) -> bool {
+        let meta = &mut self.meta[id.index()];
+        if meta.syntax_epoch == self.epoch {
+            return false;
+        }
+        meta.syntax_epoch = self.epoch;
+        collect_node_vars(arena.get(id), &mut self.syntax_vars);
+        true
+    }
+
+    fn alloc_row(&mut self, words: usize) -> usize {
+        let row = self.clique_covered.len();
+        let new_len = self
+            .supports
+            .len()
+            .checked_add(words)
+            .expect("dense sparsity support storage size overflow");
+        self.supports.resize(new_len, 0);
+        self.clique_covered.push(false);
+        row
+    }
+
+    fn add_clique_once(&mut self, row: usize, words: usize) {
+        if !self.clique_covered[row] {
+            add_clique(&self.supports, row, words, &mut self.pairs);
+            self.clique_covered[row] = true;
+        }
+    }
+
+    fn add_sparse_clique_once(&mut self, row: usize) {
+        if !self.clique_covered[row] {
+            let range = self.sparse_rows[row].clone();
+            add_sparse_clique(&self.sparse_supports[range], &mut self.sparse_pairs);
+            self.clique_covered[row] = true;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StorageMode {
+    Dense { words: usize },
+    Sparse,
+}
+
+#[derive(Clone, Copy)]
+enum ConstantExponent {
+    Zero,
+    One,
+    Other,
+}
+
+fn constant_exponent(arena: &ExprArena, exp: ExprId) -> Option<ConstantExponent> {
+    let ExprNode::Const(value) = arena.get(exp) else { return None };
+    let bits = value.to_bits();
+    if bits & !(1_u64 << 63) == 0 {
+        Some(ConstantExponent::Zero)
+    } else if bits == 1.0_f64.to_bits() {
+        Some(ConstantExponent::One)
+    } else {
+        Some(ConstantExponent::Other)
+    }
+}
+
+#[inline]
+fn words_for(bits: usize) -> usize {
+    bits.div_ceil(u64::BITS as usize)
+}
+
+#[inline]
+fn set_bit(bits: &mut [u64], bit: usize) {
+    bits[bit / u64::BITS as usize] |= 1 << (bit % u64::BITS as usize);
+}
+
+#[inline]
+fn has_bit(bits: &[u64], bit: usize) -> bool {
+    bits[bit / u64::BITS as usize] & (1 << (bit % u64::BITS as usize)) != 0
+}
+
+#[inline]
+fn row_start(row: usize, words: usize) -> usize {
+    row * words
+}
+
+fn union_rows(supports: &mut [u64], dst: usize, src: usize, words: usize) {
+    let dst = row_start(dst, words);
+    let src = row_start(src, words);
+    for word in 0..words {
+        supports[dst + word] |= supports[src + word];
+    }
+}
+
+fn set_pair(pairs: &mut [u64], i: usize, j: usize) {
+    let (row, col) = if i >= j { (i, j) } else { (j, i) };
+    set_bit(pairs, row * (row + 1) / 2 + col);
+}
+
+fn add_cross(supports: &[u64], a: usize, b: usize, words: usize, pairs: &mut [u64]) {
+    let a = row_start(a, words);
+    let b = row_start(b, words);
+    for aw in 0..words {
+        let mut a_bits = supports[a + aw];
+        while a_bits != 0 {
+            let i = aw * u64::BITS as usize + a_bits.trailing_zeros() as usize;
+            a_bits &= a_bits - 1;
+            for bw in 0..words {
+                let mut b_bits = supports[b + bw];
+                while b_bits != 0 {
+                    let j = bw * u64::BITS as usize + b_bits.trailing_zeros() as usize;
+                    b_bits &= b_bits - 1;
+                    set_pair(pairs, i, j);
+                }
+            }
+        }
+    }
+}
+
+fn add_clique(supports: &[u64], row: usize, words: usize, pairs: &mut [u64]) {
+    let start = row_start(row, words);
+    for iw in 0..words {
+        let mut i_bits = supports[start + iw];
+        while i_bits != 0 {
+            let i = iw * u64::BITS as usize + i_bits.trailing_zeros() as usize;
+            i_bits &= i_bits - 1;
+            for jw in 0..=iw {
+                let mut j_bits = supports[start + jw];
+                while j_bits != 0 {
+                    let j = jw * u64::BITS as usize + j_bits.trailing_zeros() as usize;
+                    j_bits &= j_bits - 1;
+                    if j <= i {
+                        set_pair(pairs, i, j);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn add_sparse_cross(a: &[usize], b: &[usize], pairs: &mut FxHashSet<(usize, usize)>) {
+    for &i in a {
+        for &j in b {
+            pairs.insert(if i >= j { (i, j) } else { (j, i) });
+        }
+    }
+}
+
+fn add_sparse_clique(vars: &[usize], pairs: &mut FxHashSet<(usize, usize)>) {
+    for (index, &row) in vars.iter().enumerate() {
+        for &col in &vars[..=index] {
             pairs.insert((row, col));
         }
     }
 }
 
-fn add_cross(a: &FxHashSet<u32>, b: &FxHashSet<u32>, pairs: &mut FxHashSet<(u32, u32)>) {
-    for &i in a {
-        for &j in b {
-            pairs.insert(norm(i, j));
-        }
-    }
+fn append_sparse_row(
+    supports: &mut Vec<usize>,
+    rows: &mut Vec<Range<usize>>,
+    clique_covered: &mut Vec<bool>,
+    values: &[usize],
+) -> usize {
+    let row = rows.len();
+    let start = supports.len();
+    supports.extend_from_slice(values);
+    rows.push(start..supports.len());
+    clique_covered.push(false);
+    row
+}
+
+fn extend_sparse_row(flat: &[usize], range: Range<usize>, scratch: &mut Vec<usize>) {
+    scratch.extend_from_slice(&flat[range]);
+}
+
+fn finish_sparse_union(scratch: &mut Vec<usize>) {
+    scratch.sort_unstable();
+    scratch.dedup();
 }
 
 /// Exact structural lower-triangle Hessian pattern of the expression rooted
@@ -70,112 +297,388 @@ fn add_cross(a: &FxHashSet<u32>, b: &FxHashSet<u32>, pairs: &mut FxHashSet<(u32,
 /// pattern is independent of current parameter values.
 /// `Abs` contributes only its argument's pattern.
 pub fn hessian_pattern(arena: &ExprArena, root: ExprId) -> Vec<(u32, u32)> {
-    let mut memo: FxHashMap<ExprId, NodeSparsity> = FxHashMap::default();
-    let result = node_sparsity(arena, root, &mut memo);
-    let mut pattern: Vec<(u32, u32)> = result.pairs.iter().copied().collect();
-    pattern.sort_unstable();
-    pattern
+    structural_sparsity(arena, root).hess_pairs
 }
 
-fn node_sparsity<'m>(
-    arena: &ExprArena,
-    id: ExprId,
-    memo: &'m mut FxHashMap<ExprId, NodeSparsity>,
-) -> &'m NodeSparsity {
-    if !memo.contains_key(&id) {
-        let computed = compute_node_sparsity(arena, id, memo);
-        memo.insert(id, computed);
+fn collect_node_vars(node: &ExprNode, vars: &mut Vec<u32>) {
+    match node {
+        ExprNode::Var(v) => vars.push(v.0),
+        ExprNode::Linear { coeffs, .. } => {
+            vars.extend(coeffs.iter().map(|(v, _)| v.0));
+        }
+        _ => {}
     }
-    &memo[&id]
 }
 
-// Exact 0.0/1.0 exponent bucketing matches the semantics of `classify` and
-// the tape's PowC lowering.
-#[expect(clippy::float_cmp)]
-fn compute_node_sparsity(
-    arena: &ExprArena,
-    id: ExprId,
-    memo: &mut FxHashMap<ExprId, NodeSparsity>,
-) -> NodeSparsity {
-    match arena.get(id) {
-        ExprNode::Const(_) | ExprNode::Param(_) => NodeSparsity::default(),
-        ExprNode::Var(v) => {
-            NodeSparsity { vars: std::iter::once(v.0).collect(), pairs: FxHashSet::default() }
+fn push_syntax_children(node: &ExprNode, walk: &mut Vec<WalkAction>) {
+    match node {
+        ExprNode::Add(children) | ExprNode::Mul(children) => {
+            walk.extend(children.iter().copied().map(WalkAction::Syntax));
         }
-        ExprNode::Linear { coeffs, .. } => NodeSparsity {
-            vars: coeffs.iter().map(|(v, _)| v.0).collect(),
-            pairs: FxHashSet::default(),
-        },
-        ExprNode::Neg(inner) | ExprNode::Abs(inner) => node_sparsity(arena, *inner, memo).clone(),
-        ExprNode::Add(children) => {
-            let mut acc = NodeSparsity::default();
-            for &c in children {
-                let s = node_sparsity(arena, c, memo);
-                acc.vars.extend(s.vars.iter().copied());
-                acc.pairs.extend(s.pairs.iter().copied());
-            }
-            acc
-        }
-        // Pairwise left fold is exactly the n-ary rule, at each step the
-        // accumulated vars are the union of earlier factors, so the cross
-        // products cover every distinct factor pair.
-        ExprNode::Mul(children) => {
-            let mut acc = NodeSparsity::default();
-            for &c in children {
-                let s = node_sparsity(arena, c, memo);
-                add_cross(&acc.vars, &s.vars, &mut acc.pairs);
-                acc.vars.extend(s.vars.iter().copied());
-                acc.pairs.extend(s.pairs.iter().copied());
-            }
-            acc
-        }
-        // a/b = a * (1/b), and 1/b is nonlinear in all of b's variables.
-        ExprNode::Div(num, den) => {
-            let mut acc = node_sparsity(arena, *num, memo).clone();
-            let d = node_sparsity(arena, *den, memo);
-            acc.pairs.extend(d.pairs.iter().copied());
-            add_clique(&d.vars, &mut acc.pairs);
-            add_cross(&acc.vars, &d.vars, &mut acc.pairs);
-            acc.vars.extend(d.vars.iter().copied());
-            acc
-        }
-        // phi(g) for smooth nonlinear phi: phi''*g_i'g_j' + phi'·g''_ij.
-        ExprNode::Sin(inner)
+        ExprNode::Neg(inner)
+        | ExprNode::Sin(inner)
         | ExprNode::Cos(inner)
         | ExprNode::Exp(inner)
-        | ExprNode::Log(inner) => smooth_unary(arena, *inner, memo),
-        ExprNode::Pow(base, exp) => {
-            // Constant-exponent detection mirrors the tape's PowC check.
-            if let ExprNode::Const(e) = arena.get(*exp) {
-                if *e == 0.0 {
-                    NodeSparsity::default()
-                } else if *e == 1.0 {
-                    node_sparsity(arena, *base, memo).clone()
-                } else {
-                    smooth_unary(arena, *base, memo)
-                }
-            } else {
-                // g^e = exp(e*ln g): the first-derivative products alone fill
-                // the clique over vars(g) U vars(e).
-                let mut acc = node_sparsity(arena, *base, memo).clone();
-                let e = node_sparsity(arena, *exp, memo);
-                acc.vars.extend(e.vars.iter().copied());
-                acc.pairs.extend(e.pairs.iter().copied());
-                add_clique(&acc.vars, &mut acc.pairs);
-                acc
+        | ExprNode::Log(inner)
+        | ExprNode::Abs(inner) => walk.push(WalkAction::Syntax(*inner)),
+        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) => {
+            walk.push(WalkAction::Syntax(*base));
+            walk.push(WalkAction::Syntax(*exp));
+        }
+        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
+    }
+}
+
+fn push_active_children(arena: &ExprArena, id: ExprId, walk: &mut Vec<WalkAction>) {
+    match arena.get(id) {
+        ExprNode::Add(children) | ExprNode::Mul(children) => {
+            walk.extend(children.iter().rev().copied().map(WalkAction::ActiveEnter));
+        }
+        ExprNode::Neg(inner)
+        | ExprNode::Sin(inner)
+        | ExprNode::Cos(inner)
+        | ExprNode::Exp(inner)
+        | ExprNode::Log(inner)
+        | ExprNode::Abs(inner) => walk.push(WalkAction::ActiveEnter(*inner)),
+        ExprNode::Div(num, den) => {
+            walk.push(WalkAction::ActiveEnter(*den));
+            walk.push(WalkAction::ActiveEnter(*num));
+        }
+        ExprNode::Pow(base, exp) => match arena.get(*exp) {
+            ExprNode::Const(e) if *e == 0.0 => {
+                walk.push(WalkAction::Syntax(*exp));
+                walk.push(WalkAction::Syntax(*base));
             }
+            ExprNode::Const(_) => walk.push(WalkAction::ActiveEnter(*base)),
+            _ => {
+                walk.push(WalkAction::ActiveEnter(*exp));
+                walk.push(WalkAction::ActiveEnter(*base));
+            }
+        },
+        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
+    }
+}
+
+fn build_order_and_variables(arena: &ExprArena, root: ExprId, workspace: &mut SparsityWorkspace) {
+    workspace.walk.push(WalkAction::ActiveEnter(root));
+    while let Some(action) = workspace.walk.pop() {
+        match action {
+            WalkAction::Syntax(id) => {
+                if workspace.mark_syntax(arena, id) {
+                    push_syntax_children(arena.get(id), &mut workspace.walk);
+                }
+            }
+            WalkAction::ActiveEnter(id) => {
+                workspace.mark_syntax(arena, id);
+                let meta = &mut workspace.meta[id.index()];
+                if meta.active_epoch == workspace.epoch {
+                    continue;
+                }
+                meta.active_epoch = workspace.epoch;
+                meta.active_state = 1;
+                collect_node_vars(arena.get(id), &mut workspace.active_vars);
+                workspace.walk.push(WalkAction::ActiveExit(id));
+                push_active_children(arena, id, &mut workspace.walk);
+            }
+            WalkAction::ActiveExit(id) => {
+                let meta = &mut workspace.meta[id.index()];
+                if meta.active_state != 2 {
+                    meta.active_state = 2;
+                    workspace.order.push(id);
+                }
+            }
+        }
+    }
+    workspace.syntax_vars.sort_unstable();
+    workspace.syntax_vars.dedup();
+    workspace.active_vars.sort_unstable();
+    workspace.active_vars.dedup();
+}
+
+fn prepare_storage(workspace: &mut SparsityWorkspace) -> StorageMode {
+    if workspace.active_vars.len() > DENSE_SPARSITY_MAX_VARS {
+        append_sparse_row(
+            &mut workspace.sparse_supports,
+            &mut workspace.sparse_rows,
+            &mut workspace.clique_covered,
+            &[],
+        );
+        return StorageMode::Sparse;
+    }
+
+    let words = words_for(workspace.active_vars.len());
+    let pair_count = workspace
+        .active_vars
+        .len()
+        .checked_add(1)
+        .and_then(|next| workspace.active_vars.len().checked_mul(next))
+        .expect("Hessian sparsity bitset size overflow")
+        / 2;
+    workspace.pairs.resize(words_for(pair_count), 0);
+    workspace.pairs.fill(0);
+    workspace.alloc_row(words); // shared empty support row
+    StorageMode::Dense { words }
+}
+
+fn build_dense_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace, words: usize) {
+    for order_index in 0..workspace.order.len() {
+        let id = workspace.order[order_index];
+        let row = match arena.get(id) {
+            ExprNode::Const(_) | ExprNode::Param(_) => 0,
+            ExprNode::Var(v) => {
+                let row = workspace.alloc_row(words);
+                let bit = workspace.active_vars.binary_search(&v.0).expect("collected variable");
+                set_bit(&mut workspace.supports[row_start(row, words)..][..words], bit);
+                row
+            }
+            ExprNode::Linear { coeffs, .. } => {
+                let row = workspace.alloc_row(words);
+                let dst = &mut workspace.supports[row_start(row, words)..][..words];
+                for (v, _) in coeffs {
+                    let bit =
+                        workspace.active_vars.binary_search(&v.0).expect("collected variable");
+                    set_bit(dst, bit);
+                }
+                row
+            }
+            ExprNode::Neg(inner) | ExprNode::Abs(inner) => workspace.meta[inner.index()].row,
+            ExprNode::Add(children) if children.len() == 1 => {
+                workspace.meta[children[0].index()].row
+            }
+            ExprNode::Add(children) => {
+                let row = workspace.alloc_row(words);
+                for child in children {
+                    union_rows(
+                        &mut workspace.supports,
+                        row,
+                        workspace.meta[child.index()].row,
+                        words,
+                    );
+                }
+                row
+            }
+            ExprNode::Mul(children) => {
+                let row = workspace.alloc_row(words);
+                for child in children {
+                    let child = workspace.meta[child.index()].row;
+                    add_cross(&workspace.supports, row, child, words, &mut workspace.pairs);
+                    union_rows(&mut workspace.supports, row, child, words);
+                }
+                row
+            }
+            ExprNode::Div(num, den) => {
+                let row = workspace.alloc_row(words);
+                let num = workspace.meta[num.index()].row;
+                let den = workspace.meta[den.index()].row;
+                union_rows(&mut workspace.supports, row, num, words);
+                workspace.add_clique_once(den, words);
+                add_cross(&workspace.supports, row, den, words, &mut workspace.pairs);
+                union_rows(&mut workspace.supports, row, den, words);
+                row
+            }
+            ExprNode::Sin(inner)
+            | ExprNode::Cos(inner)
+            | ExprNode::Exp(inner)
+            | ExprNode::Log(inner) => {
+                let row = workspace.meta[inner.index()].row;
+                workspace.add_clique_once(row, words);
+                row
+            }
+            ExprNode::Pow(base, exp) => {
+                if let Some(exponent) = constant_exponent(arena, *exp) {
+                    match exponent {
+                        ConstantExponent::Zero => 0,
+                        ConstantExponent::One => workspace.meta[base.index()].row,
+                        ConstantExponent::Other => {
+                            let row = workspace.meta[base.index()].row;
+                            workspace.add_clique_once(row, words);
+                            row
+                        }
+                    }
+                } else {
+                    let row = workspace.alloc_row(words);
+                    union_rows(
+                        &mut workspace.supports,
+                        row,
+                        workspace.meta[base.index()].row,
+                        words,
+                    );
+                    union_rows(
+                        &mut workspace.supports,
+                        row,
+                        workspace.meta[exp.index()].row,
+                        words,
+                    );
+                    workspace.add_clique_once(row, words);
+                    row
+                }
+            }
+        };
+        workspace.meta[id.index()].row = row;
+    }
+}
+
+fn store_sparse_scratch(workspace: &mut SparsityWorkspace) -> usize {
+    append_sparse_row(
+        &mut workspace.sparse_supports,
+        &mut workspace.sparse_rows,
+        &mut workspace.clique_covered,
+        &workspace.sparse_scratch,
+    )
+}
+
+fn sparse_union_row(
+    workspace: &mut SparsityWorkspace,
+    children: impl IntoIterator<Item = ExprId>,
+) -> usize {
+    workspace.sparse_scratch.clear();
+    for child in children {
+        let range = workspace.sparse_rows[workspace.meta[child.index()].row].clone();
+        extend_sparse_row(&workspace.sparse_supports, range, &mut workspace.sparse_scratch);
+    }
+    finish_sparse_union(&mut workspace.sparse_scratch);
+    store_sparse_scratch(workspace)
+}
+
+fn sparse_product_row(
+    workspace: &mut SparsityWorkspace,
+    children: impl IntoIterator<Item = ExprId>,
+) -> usize {
+    workspace.sparse_scratch.clear();
+    for child in children {
+        let range = workspace.sparse_rows[workspace.meta[child.index()].row].clone();
+        let child = &workspace.sparse_supports[range.clone()];
+        add_sparse_cross(&workspace.sparse_scratch, child, &mut workspace.sparse_pairs);
+        extend_sparse_row(&workspace.sparse_supports, range, &mut workspace.sparse_scratch);
+        finish_sparse_union(&mut workspace.sparse_scratch);
+    }
+    store_sparse_scratch(workspace)
+}
+
+fn sparse_division_row(workspace: &mut SparsityWorkspace, num: ExprId, den: ExprId) -> usize {
+    workspace.sparse_scratch.clear();
+    let num = workspace.sparse_rows[workspace.meta[num.index()].row].clone();
+    let den_row = workspace.meta[den.index()].row;
+    let den = workspace.sparse_rows[den_row].clone();
+    extend_sparse_row(&workspace.sparse_supports, num, &mut workspace.sparse_scratch);
+    workspace.add_sparse_clique_once(den_row);
+    add_sparse_cross(
+        &workspace.sparse_scratch,
+        &workspace.sparse_supports[den.clone()],
+        &mut workspace.sparse_pairs,
+    );
+    extend_sparse_row(&workspace.sparse_supports, den, &mut workspace.sparse_scratch);
+    finish_sparse_union(&mut workspace.sparse_scratch);
+    store_sparse_scratch(workspace)
+}
+
+fn sparse_power_row(
+    arena: &ExprArena,
+    workspace: &mut SparsityWorkspace,
+    base: ExprId,
+    exp: ExprId,
+) -> usize {
+    match constant_exponent(arena, exp) {
+        Some(ConstantExponent::Zero) => 0,
+        Some(ConstantExponent::One) => workspace.meta[base.index()].row,
+        Some(ConstantExponent::Other) => {
+            let row = workspace.meta[base.index()].row;
+            workspace.add_sparse_clique_once(row);
+            row
+        }
+        None => {
+            let row = sparse_union_row(workspace, [base, exp]);
+            workspace.add_sparse_clique_once(row);
+            row
         }
     }
 }
 
-fn smooth_unary(
+fn build_sparse_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace) {
+    for order_index in 0..workspace.order.len() {
+        let id = workspace.order[order_index];
+        let row = match arena.get(id) {
+            ExprNode::Const(_) | ExprNode::Param(_) => 0,
+            ExprNode::Var(v) => {
+                let bit = workspace.active_vars.binary_search(&v.0).expect("collected variable");
+                append_sparse_row(
+                    &mut workspace.sparse_supports,
+                    &mut workspace.sparse_rows,
+                    &mut workspace.clique_covered,
+                    &[bit],
+                )
+            }
+            ExprNode::Linear { coeffs, .. } => {
+                workspace.sparse_scratch.clear();
+                workspace.sparse_scratch.extend(coeffs.iter().map(|(v, _)| {
+                    workspace.active_vars.binary_search(&v.0).expect("collected variable")
+                }));
+                finish_sparse_union(&mut workspace.sparse_scratch);
+                store_sparse_scratch(workspace)
+            }
+            ExprNode::Neg(inner) | ExprNode::Abs(inner) => workspace.meta[inner.index()].row,
+            ExprNode::Add(children) if children.len() == 1 => {
+                workspace.meta[children[0].index()].row
+            }
+            ExprNode::Add(children) => sparse_union_row(workspace, children.iter().copied()),
+            ExprNode::Mul(children) => sparse_product_row(workspace, children.iter().copied()),
+            ExprNode::Div(num, den) => sparse_division_row(workspace, *num, *den),
+            ExprNode::Sin(inner)
+            | ExprNode::Cos(inner)
+            | ExprNode::Exp(inner)
+            | ExprNode::Log(inner) => {
+                let row = workspace.meta[inner.index()].row;
+                workspace.add_sparse_clique_once(row);
+                row
+            }
+            ExprNode::Pow(base, exp) => sparse_power_row(arena, workspace, *base, *exp),
+        };
+        workspace.meta[id.index()].row = row;
+    }
+}
+
+fn materialize_pattern(workspace: &SparsityWorkspace, storage: StorageMode) -> Vec<(u32, u32)> {
+    match storage {
+        StorageMode::Dense { .. } => {
+            let mut pattern = Vec::new();
+            for row in 0..workspace.active_vars.len() {
+                for col in 0..=row {
+                    let bit = row * (row + 1) / 2 + col;
+                    if has_bit(&workspace.pairs, bit) {
+                        pattern.push((workspace.active_vars[row], workspace.active_vars[col]));
+                    }
+                }
+            }
+            pattern
+        }
+        StorageMode::Sparse => {
+            let mut pattern: Vec<(u32, u32)> = workspace
+                .sparse_pairs
+                .iter()
+                .map(|&(row, col)| (workspace.active_vars[row], workspace.active_vars[col]))
+                .collect();
+            pattern.sort_unstable();
+            pattern
+        }
+    }
+}
+
+pub(crate) fn structural_sparsity_with_workspace(
     arena: &ExprArena,
-    inner: ExprId,
-    memo: &mut FxHashMap<ExprId, NodeSparsity>,
-) -> NodeSparsity {
-    let mut acc = node_sparsity(arena, inner, memo).clone();
-    add_clique(&acc.vars, &mut acc.pairs);
-    acc
+    root: ExprId,
+    workspace: &mut SparsityWorkspace,
+) -> StructuralSparsity {
+    workspace.begin(arena.len());
+    build_order_and_variables(arena, root, workspace);
+    let storage = prepare_storage(workspace);
+    match storage {
+        StorageMode::Dense { words } => build_dense_support_rows(arena, workspace, words),
+        StorageMode::Sparse => build_sparse_support_rows(arena, workspace),
+    }
+    StructuralSparsity {
+        support: workspace.syntax_vars.clone(),
+        hess_pairs: materialize_pattern(workspace, storage),
+    }
 }
 
 /// Constraint Jacobian pattern as `(constraint, variable)` index pairs in
