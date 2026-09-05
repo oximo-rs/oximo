@@ -1,6 +1,5 @@
 //! Structural extraction and the specialized POUNCE convex routes.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -12,12 +11,11 @@ use pounce_rs::convex::{
     ActiveSetOverrides, ConeSpec, QpOptions, QpProblem, QpSolution, QpStatus, QpWarmStart, Triplet,
     solve_qp_active_set, solve_qp_ipm, solve_qp_ipm_warm, solve_socp_ipm, solve_socp_ipm_warm,
 };
-use pounce_rs::linsol::{FeralSolverInterface, SparseSymLinearSolverInterface, backend};
+use pounce_rs::linsol::backend;
 
 use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection};
 use crate::translate::{
-    Outcome, POUNCE_INFINITY, apply_options, assemble, selected_algorithm, selected_solver,
-    solve_nlp_since,
+    Outcome, apply_options, assemble, selected_algorithm, selected_solver, solve_nlp_since,
 };
 
 const PSD_TOL: f64 = 1e-9;
@@ -50,22 +48,6 @@ pub(crate) fn route(model: &Model, opts: &PounceOptions) -> Result<Route, Solver
             Err(incompatible("active-set-sqp", "a model with explicit SOC constraints"))
         } else {
             Ok(Route::Nlp)
-        };
-    }
-
-    if opts.universal.time_limit.is_some() {
-        return match selection {
-            PounceSolverSelection::Auto | PounceSolverSelection::Nlp if !has_explicit_soc => {
-                Ok(Route::Nlp)
-            }
-            PounceSolverSelection::Auto | PounceSolverSelection::Nlp => Err(incompatible(
-                selection.as_str(),
-                "explicit SOC constraints (the NLP route cannot represent them)",
-            )),
-            _ => Err(SolverError::Backend(format!(
-                "pounce solver_selection `{}` cannot honor a time limit; the standalone convex engines expose no time-limit hook",
-                selection.as_str()
-            ))),
         };
     }
 
@@ -159,58 +141,20 @@ fn objective_sign(model: &Model) -> f64 {
     }
 }
 
-/// POUNCE's safe classifier.
-/// We do a diagonal sign check, otherwise an inertia certificate of
-/// `H + PSD_TOL I` through the facade's FERAL interface.
+/// POUNCE's safe classifier using the reusable PSD certificate.
 fn hessian_is_psd(hessian: &[(oximo_expr::VarId, oximo_expr::VarId, f64)], sign: f64) -> bool {
-    if hessian.is_empty() {
-        return true;
-    }
-    if hessian.iter().all(|(row, col, _)| row == col) {
-        return hessian.iter().all(|(_, _, value)| sign * value >= -PSD_TOL);
-    }
-
-    let mut active: Vec<usize> =
-        hessian.iter().flat_map(|(row, col, _)| [row.index(), col.index()]).collect();
-    active.sort_unstable();
-    active.dedup();
-    let k = active.len();
-    let mut rows: Vec<BTreeMap<usize, f64>> = (0..k).map(|_| BTreeMap::new()).collect();
-    for &(row, col, value) in hessian {
-        let r = active.binary_search(&row.index()).expect("active Hessian row");
-        let c = active.binary_search(&col.index()).expect("active Hessian column");
-        *rows[r].entry(c).or_default() += sign * value;
-    }
-    for (d, row) in rows.iter_mut().enumerate() {
-        *row.entry(d).or_default() += PSD_TOL;
-    }
-    let mut irn = Vec::new();
-    let mut jcn = Vec::new();
-    let mut values = Vec::new();
-    for (row_index, row) in rows.into_iter().enumerate() {
-        for (col, value) in row {
-            irn.push(i32::try_from(row_index + 1).expect("Hessian dimension overflow"));
-            jcn.push(i32::try_from(col + 1).expect("Hessian dimension overflow"));
-            values.push(value);
-        }
-    }
-
-    let mut solver = FeralSolverInterface::new();
-    let init = solver.initialize_structure(
-        i32::try_from(k).expect("Hessian dimension overflow"),
-        i32::try_from(values.len()).expect("Hessian nonzero count overflow"),
-        &irn,
-        &jcn,
-    );
-    if format!("{init:?}") != "Success" {
-        return false;
-    }
-    solver.values_array_mut().copy_from_slice(&values);
-    let mut rhs = vec![0.0; k];
-    let status = solver.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0);
-    format!("{status:?}") == "Success"
-        && solver.provides_inertia()
-        && solver.number_of_neg_evals() == 0
+    let n = hessian
+        .iter()
+        .flat_map(|(row, col, _)| [row.index(), col.index()])
+        .max()
+        .map_or(0, |index| index + 1);
+    let triplets = hessian
+        .iter()
+        .map(|&(row, col, value)| {
+            Triplet::new(row.index().max(col.index()), row.index().min(col.index()), sign * value)
+        })
+        .collect::<Vec<_>>();
+    pounce_rs::convex::certify_psd_lower_triangle(n, &triplets, PSD_TOL, backend).unwrap_or(false)
 }
 
 #[derive(Clone, Debug)]
@@ -264,7 +208,7 @@ fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms<'_>, scale: 
     reason = "A, b, G, h, c, and n are the conventional standard-form QP symbols"
 )]
 #[expect(clippy::too_many_lines)]
-pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
+pub(crate) fn build_problem(model: &Model, opts: &PounceOptions) -> Result<Problem, SolverError> {
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -314,13 +258,13 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
             if constraint.upper.is_finite() {
                 let row = h.len();
                 push_row(&mut g, row, &terms, 1.0);
-                h.push(constraint.upper - terms.constant);
+                h.push(relaxed_row_upper(constraint.upper, opts) - terms.constant);
                 upper = Some(row);
             }
             if constraint.lower.is_finite() {
                 let row = h.len();
                 push_row(&mut g, row, &terms, -1.0);
-                h.push(-(constraint.lower - terms.constant));
+                h.push(-(relaxed_row_lower(constraint.lower, opts) - terms.constant));
                 lower = Some(row);
             }
             maps[index] = ConstraintMap::Ineq { upper, lower };
@@ -363,8 +307,8 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
             b,
             g,
             h,
-            lb: vars.iter().map(|v| v.lb).collect(),
-            ub: vars.iter().map(|v| v.ub).collect(),
+            lb: vars.iter().map(|v| relaxed_lower(v.lb, opts)).collect(),
+            ub: vars.iter().map(|v| relaxed_upper(v.ub, opts)).collect(),
         },
         cones,
         maps,
@@ -372,6 +316,48 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
         sign,
         objective_constant,
     })
+}
+
+fn variable_relaxation_delta(bound: f64, opts: &PounceOptions) -> f64 {
+    let Some(factor) = num_value(opts, "bound_relax_factor") else {
+        return 0.0;
+    };
+    if !factor.is_finite() || factor <= 0.0 || !bound.is_finite() {
+        return 0.0;
+    }
+    let cap = num_value(opts, "constr_viol_tol").unwrap_or(1e-4).max(0.0);
+    (factor * bound.abs().max(1.0)).min(cap)
+}
+
+fn relaxed_lower(bound: f64, opts: &PounceOptions) -> f64 {
+    if bound.is_finite() { bound - variable_relaxation_delta(bound, opts) } else { bound }
+}
+
+fn relaxed_upper(bound: f64, opts: &PounceOptions) -> f64 {
+    if bound.is_finite() { bound + variable_relaxation_delta(bound, opts) } else { bound }
+}
+
+fn row_relaxation_delta(bound: f64, opts: &PounceOptions) -> f64 {
+    let Some(factor) = num_value(opts, "bound_relax_factor") else {
+        return 0.0;
+    };
+    if !factor.is_finite() || factor <= 0.0 || !bound.is_finite() {
+        return 0.0;
+    }
+    let cap = num_value(opts, "constr_viol_tol").unwrap_or(1e-4).max(0.0);
+    let scale = match bound {
+        0.0 => 1.0,
+        _ => bound.abs(),
+    };
+    (factor * scale).min(cap)
+}
+
+fn relaxed_row_lower(bound: f64, opts: &PounceOptions) -> f64 {
+    if bound.is_finite() { bound - row_relaxation_delta(bound, opts) } else { bound }
+}
+
+fn relaxed_row_upper(bound: f64, opts: &PounceOptions) -> f64 {
+    if bound.is_finite() { bound + row_relaxation_delta(bound, opts) } else { bound }
 }
 
 fn append_soc(g: &mut Vec<Triplet>, h: &mut Vec<f64>, form: &SocForm) {
@@ -391,7 +377,7 @@ pub(crate) fn solve(
     route: Route,
 ) -> Result<SolverResult, SolverError> {
     validate_options(opts)?;
-    let problem = build_problem(model)?;
+    let problem = build_problem(model, opts)?;
     let started = Instant::now();
     let sol = run(&problem, opts, route, None);
     if should_fallback_to_nlp(model, opts, &sol)? {
@@ -565,6 +551,7 @@ pub(crate) fn outcome(
         QpStatus::PrimalInfeasible => TerminationStatus::Infeasible,
         QpStatus::DualInfeasible => TerminationStatus::Unbounded,
         QpStatus::IterationLimit => TerminationStatus::IterationLimit,
+        QpStatus::TimeLimit => TerminationStatus::TimeLimit,
         QpStatus::NumericalFailure => TerminationStatus::NumericError,
     };
     let mut lambda = vec![0.0; problem.maps.len()];
@@ -654,6 +641,10 @@ fn qp_options(opts: &PounceOptions) -> QpOptions {
     if let Some(value) = bool_value(opts, "qp_crossover") {
         out.crossover = value;
     }
+    if let Some(value) = int_value(opts, "qp_gondzio_corr") {
+        out.gondzio_max_corr = usize::try_from(value).unwrap_or(0);
+    }
+    out.time_limit = opts.universal.time_limit;
     out.collect_iterates = opts.universal.verbose == Some(true);
     out
 }
@@ -678,6 +669,7 @@ fn active_set_options(opts: &PounceOptions) -> ActiveSetOverrides {
             "sqp_qp_max_schur_updates_before_refactor",
         )
         .and_then(|v| u32::try_from(v).ok()),
+        certify_second_order: bool_value(opts, "sqp_qp_certify_second_order"),
     }
 }
 
@@ -706,6 +698,8 @@ fn validate_convex_options(opts: &PounceOptions) -> Result<(), SolverError> {
         let expected =
             if matches!(name.as_str(), "qp_tau" | "qp_tau_max" | "qp_reg" | "qp_infeas_tol") {
                 Some("number")
+            } else if name == "qp_gondzio_corr" {
+                Some("integer")
             } else if matches!(
                 name.as_str(),
                 "qp_hsde" | "qp_equilibrate" | "qp_crossover" | "qp_presolve"
@@ -716,6 +710,7 @@ fn validate_convex_options(opts: &PounceOptions) -> Result<(), SolverError> {
             };
         let valid = match expected {
             Some("number") => matches!(value, PounceOptionValue::Num(_)),
+            Some("integer") => matches!(value, PounceOptionValue::Int(_)),
             Some("boolean") => {
                 matches!(value, PounceOptionValue::Bool(_))
                     || matches!(value, PounceOptionValue::Str(v) if matches!(v.as_str(), "yes" | "no" | "true" | "false" | "on" | "off"))
@@ -748,19 +743,26 @@ fn validate_convex_options(opts: &PounceOptions) -> Result<(), SolverError> {
             }
         }
     }
-    if let (Some(tau), Some(tau_max)) = (num_value(opts, "qp_tau"), num_value(opts, "qp_tau_max")) {
-        if tau_max < tau {
-            return Err(SolverError::Backend(
-                "pounce rejected option `qp_tau_max`: it must be at least qp_tau".into(),
-            ));
-        }
+    if let Some(value) = int_value(opts, "qp_gondzio_corr")
+        && !(0..=10).contains(&value)
+    {
+        return Err(SolverError::Backend(
+            "pounce rejected option `qp_gondzio_corr`: value must be between 0 and 10".into(),
+        ));
     }
-    if let Some(value) = str_value(opts, "sqp_qp_anti_cycling") {
-        if !matches!(value.as_str(), "expand" | "bland" | "none") {
-            return Err(SolverError::Backend(format!(
-                "pounce rejected option `sqp_qp_anti_cycling`: `{value}` is invalid"
-            )));
-        }
+    if let (Some(tau), Some(tau_max)) = (num_value(opts, "qp_tau"), num_value(opts, "qp_tau_max"))
+        && tau_max < tau
+    {
+        return Err(SolverError::Backend(
+            "pounce rejected option `qp_tau_max`: it must be at least qp_tau".into(),
+        ));
+    }
+    if let Some(value) = str_value(opts, "sqp_qp_anti_cycling")
+        && !matches!(value.as_str(), "expand" | "bland" | "none")
+    {
+        return Err(SolverError::Backend(format!(
+            "pounce rejected option `sqp_qp_anti_cycling`: `{value}` is invalid"
+        )));
     }
     Ok(())
 }
@@ -786,197 +788,138 @@ pub(crate) fn warm_from_solution(route: Route, problem: &Problem, sol: &QpSoluti
     }
 }
 
-struct ActiveData {
-    n: usize,
-    m: usize,
-    hessian: pounce_rs::qp::SymTMatrix,
-    gradient: Vec<f64>,
-    matrix: pounce_rs::qp::GenTMatrix,
-    lower: Vec<f64>,
-    upper: Vec<f64>,
-    x_lower: Vec<f64>,
-    x_upper: Vec<f64>,
-}
-
-impl ActiveData {
-    fn from_problem(problem: &QpProblem) -> Self {
-        use pounce_rs::qp::{GenTMatrixSpace, SymTMatrixSpace};
-        let h_rows = problem
-            .p_lower
-            .iter()
-            .map(|entry| i32::try_from(entry.row + 1).expect("QP Hessian index overflow"))
-            .collect();
-        let h_cols = problem
-            .p_lower
-            .iter()
-            .map(|entry| i32::try_from(entry.col + 1).expect("QP Hessian index overflow"))
-            .collect();
-        let mut hessian = pounce_rs::qp::SymTMatrix::new(SymTMatrixSpace::new(
-            i32::try_from(problem.n).expect("QP dimension overflow"),
-            h_rows,
-            h_cols,
-        ));
-        hessian.set_values(&problem.p_lower.iter().map(|entry| entry.val).collect::<Vec<_>>());
-
-        let m = problem.b.len() + problem.h.len();
-        let rows = problem
-            .a
-            .iter()
-            .map(|entry| entry.row + 1)
-            .chain(problem.g.iter().map(|entry| problem.b.len() + entry.row + 1))
-            .map(|index| i32::try_from(index).expect("QP row index overflow"))
-            .collect();
-        let cols = problem
-            .a
-            .iter()
-            .chain(&problem.g)
-            .map(|entry| i32::try_from(entry.col + 1).expect("QP column index overflow"))
-            .collect();
-        let mut matrix = pounce_rs::qp::GenTMatrix::new(GenTMatrixSpace::new(
-            i32::try_from(m).expect("QP row count overflow"),
-            i32::try_from(problem.n).expect("QP dimension overflow"),
-            rows,
-            cols,
-        ));
-        matrix.set_values(
-            &problem.a.iter().chain(&problem.g).map(|entry| entry.val).collect::<Vec<_>>(),
-        );
-        let mut lower = problem.b.clone();
-        let mut upper = problem.b.clone();
-        lower.extend(std::iter::repeat_n(-POUNCE_INFINITY, problem.h.len()));
-        upper.extend_from_slice(&problem.h);
-        Self {
-            n: problem.n,
-            m,
-            hessian,
-            gradient: problem.c.clone(),
-            matrix,
-            lower,
-            upper,
-            x_lower: problem.lb.iter().map(|value| value.max(-POUNCE_INFINITY)).collect(),
-            x_upper: problem.ub.iter().map(|value| value.min(POUNCE_INFINITY)).collect(),
-        }
-    }
-
-    fn view(&self) -> pounce_rs::qp::QpProblem<'_> {
-        pounce_rs::qp::QpProblem {
-            n: self.n,
-            m: self.m,
-            h: &self.hessian,
-            g: &self.gradient,
-            a: &self.matrix,
-            bl: &self.lower,
-            bu: &self.upper,
-            xl: &self.x_lower,
-            xu: &self.x_upper,
-            hessian_inertia: pounce_rs::qp::HessianInertia::Psd,
-        }
-    }
-}
-
-/// Resident native active-set engine plus its previous problem/solution.
+/// Resident active-set session.
 pub(crate) struct ActivePersistent {
-    solver: pounce_rs::qp::ParametricActiveSetSolver,
-    previous: Option<(ActiveData, pounce_rs::qp::QpSolution)>,
+    session: pounce_rs::convex::ActiveSetSession,
+    engine: ActiveSetOverrides,
+    presolve: bool,
 }
 
 impl ActivePersistent {
     pub(crate) fn new() -> Self {
-        Self { solver: pounce_rs::qp::ParametricActiveSetSolver::new(backend()), previous: None }
+        let engine = ActiveSetOverrides::default();
+        let presolve = true;
+        let session = pounce_rs::convex::ActiveSetSession::new(backend)
+            .with_engine_overrides(engine)
+            .with_presolve(presolve);
+        Self { session, engine, presolve }
     }
 
-    pub(crate) fn solve(
-        &mut self,
-        problem: &Problem,
-        opts: &PounceOptions,
-    ) -> Result<QpSolution, SolverError> {
-        use pounce_rs::qp::QpSolver;
-        let current = ActiveData::from_problem(&problem.qp);
-        let current_view = current.view();
-        let native_opts = native_active_options(opts);
-        let result = match &self.previous {
-            Some((previous, solution)) => self.solver.solve_parametric(
-                &previous.view(),
-                solution,
-                &current_view,
-                &native_opts,
-            ),
-            None => self.solver.solve(&current_view, None, &native_opts),
+    pub(crate) fn solve(&mut self, problem: &Problem, opts: &PounceOptions) -> QpSolution {
+        let engine = active_set_options(opts);
+        let presolve = presolve_enabled(opts);
+        if engine != self.engine || presolve != self.presolve {
+            self.session = pounce_rs::convex::ActiveSetSession::new(backend)
+                .with_engine_overrides(engine)
+                .with_presolve(presolve);
+            self.engine = engine;
+            self.presolve = presolve;
         }
-        .map_err(|error| SolverError::Backend(format!("pounce active-set QP: {error}")))?;
-        let converted = convert_native_solution(&problem.qp, &result);
-        if result.status == pounce_rs::qp::QpStatus::Optimal {
-            self.previous = Some((current, result));
-        } else {
-            self.previous = None;
-        }
-        Ok(converted)
+        self.session.set_options(qp_options(opts));
+        self.session.solve(&problem.qp)
     }
 }
 
-fn native_active_options(opts: &PounceOptions) -> pounce_rs::qp::QpOptions {
-    use pounce_rs::qp::AntiCyclingChoice;
-    let mut out = pounce_rs::qp::QpOptions::default();
-    if let Some(value) = int_value(opts, "sqp_qp_max_iter").and_then(|v| u32::try_from(v).ok()) {
-        out.max_iter = value;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximo_core::{Model, constraint, objective, variable};
+
+    #[test]
+    fn relaxation_uses_distinct_variable_and_scale_relative_row_formulas() {
+        let opts = PounceOptions::default().bound_relax_factor(1e-8).constr_viol_tol(1e-4);
+
+        for (actual, expected) in [
+            (variable_relaxation_delta(2e-12, &opts), 1e-8),
+            (row_relaxation_delta(2e-12, &opts), 2e-20),
+            (row_relaxation_delta(20_000.0, &opts), 1e-4),
+            (row_relaxation_delta(0.0, &opts), 1e-8),
+        ] {
+            assert!((actual - expected).abs() <= expected * f64::EPSILON);
+        }
+
+        for invalid in [
+            PounceOptions::default(),
+            PounceOptions::default().bound_relax_factor(0.0),
+            PounceOptions::default().bound_relax_factor(-1.0),
+            PounceOptions::default().bound_relax_factor(f64::NAN),
+        ] {
+            assert!(variable_relaxation_delta(1.0, &invalid).abs() <= f64::EPSILON);
+            assert!(row_relaxation_delta(1.0, &invalid).abs() <= f64::EPSILON);
+        }
+        assert!(variable_relaxation_delta(f64::INFINITY, &opts).abs() <= f64::EPSILON);
+        assert!(row_relaxation_delta(f64::NEG_INFINITY, &opts).abs() <= f64::EPSILON);
     }
-    if let Some(value) = num_value(opts, "sqp_qp_feas_tol") {
-        out.feas_tol = value;
+
+    #[test]
+    fn build_problem_applies_relaxations_to_variables_and_rows() {
+        let model = Model::new("relaxed_problem");
+        variable!(model, -2.0 <= x <= 3.0);
+        constraint!(model, band, -4.0 <= x <= 5.0);
+        objective!(model, Min, x.powi(2));
+
+        let opts = PounceOptions::default().bound_relax_factor(0.1).constr_viol_tol(0.2);
+        let problem = build_problem(&model, &opts).unwrap();
+
+        assert_eq!(problem.qp.lb, [-2.2]);
+        assert_eq!(problem.qp.ub, [3.2]);
+        assert_eq!(problem.qp.h, [5.2, 4.2]);
     }
-    if let Some(value) = num_value(opts, "sqp_qp_opt_tol") {
-        out.opt_tol = value;
+
+    #[test]
+    fn convex_options_translate_and_validate_new_controls() {
+        let opts = PounceOptions::default()
+            .tol(1e-7)
+            .max_iter(17)
+            .qp_tau(0.2)
+            .qp_tau_max(0.8)
+            .qp_reg(1e-9)
+            .qp_infeas_tol(1e-6)
+            .qp_hsde(true)
+            .qp_equilibrate(false)
+            .qp_crossover(false)
+            .qp_gondzio_corr(3)
+            .sqp_qp_certify_second_order(true);
+        let qp = qp_options(&opts);
+        assert!((qp.tol - 1e-7).abs() <= f64::EPSILON);
+        assert_eq!(qp.max_iter, 17);
+        assert_eq!(qp.gondzio_max_corr, 3);
+        assert!(qp.use_hsde);
+        assert!(!qp.equilibrate);
+        assert!(!qp.crossover);
+
+        let active = active_set_options(&opts);
+        assert_eq!(active.certify_second_order, Some(true));
+
+        assert!(
+            validate_convex_options(&PounceOptions::default().set("qp_gondzio_corr", "3")).is_err()
+        );
+        assert!(
+            validate_convex_options(&PounceOptions::default().set("qp_gondzio_corr", -1)).is_err()
+        );
+        validate_convex_options(&opts).unwrap();
     }
-    if let Some(value) = num_value(opts, "sqp_qp_elastic_gamma") {
-        out.elastic_gamma = value;
-    }
-    if let Some(value) = bool_value(opts, "sqp_qp_use_schur_updates") {
-        out.use_schur_updates = value;
-    }
-    if let Some(value) = bool_value(opts, "sqp_qp_use_homotopy") {
-        out.use_homotopy = value;
-    }
-    if let Some(value) = int_value(opts, "sqp_qp_max_schur_updates_before_refactor")
-        .and_then(|v| u32::try_from(v).ok())
-    {
-        out.max_schur_updates_before_refactor = value;
-    }
-    if let Some(value) = str_value(opts, "sqp_qp_anti_cycling") {
-        out.anti_cycling = match value.as_str() {
-            "bland" => AntiCyclingChoice::Bland,
-            "none" => AntiCyclingChoice::None,
-            _ => AntiCyclingChoice::Expand,
+
+    #[test]
+    fn outcome_maps_qp_time_limit() {
+        let model = Model::new("time_limit_outcome");
+        variable!(model, x >= 0.0);
+        objective!(model, Min, x);
+        let problem = build_problem(&model, &PounceOptions::default()).unwrap();
+        let solution = QpSolution {
+            status: QpStatus::TimeLimit,
+            x: vec![1.0],
+            y: Vec::new(),
+            z: Vec::new(),
+            z_lb: vec![0.0],
+            z_ub: vec![0.0],
+            obj: 1.0,
+            iters: 2,
+            iterates: Vec::new(),
         };
-    }
-    out
-}
 
-fn convert_native_solution(problem: &QpProblem, native: &pounce_rs::qp::QpSolution) -> QpSolution {
-    let m_eq = problem.b.len();
-    let mut y = vec![0.0; m_eq];
-    y.copy_from_slice(&native.lambda_g[..m_eq]);
-    let z = native.lambda_g[m_eq..].iter().map(|value| value.max(0.0)).collect();
-    let z_lb = native.lambda_x.iter().map(|value| value.max(0.0)).collect();
-    let z_ub = native.lambda_x.iter().map(|value| (-value).max(0.0)).collect();
-    let mut px = vec![0.0; problem.n];
-    problem.p_mul(&native.x, &mut px);
-    let obj =
-        native.x.iter().enumerate().map(|(i, value)| (0.5 * px[i] + problem.c[i]) * value).sum();
-    let status = match native.status {
-        pounce_rs::qp::QpStatus::Optimal => QpStatus::Optimal,
-        pounce_rs::qp::QpStatus::Infeasible => QpStatus::PrimalInfeasible,
-        pounce_rs::qp::QpStatus::Unbounded => QpStatus::DualInfeasible,
-        pounce_rs::qp::QpStatus::MaxIter => QpStatus::IterationLimit,
-        pounce_rs::qp::QpStatus::NumericalError => QpStatus::NumericalFailure,
-    };
-    QpSolution {
-        status,
-        x: native.x.clone(),
-        y,
-        z,
-        z_lb,
-        z_ub,
-        obj,
-        iters: native.stats.n_working_set_changes as usize,
-        iterates: Vec::new(),
+        let result = outcome(&problem, &PounceOptions::default(), Route::QpIpm, &solution);
+        assert_eq!(result.termination, TerminationStatus::TimeLimit);
+        assert_eq!(result.iterations, 2);
     }
 }

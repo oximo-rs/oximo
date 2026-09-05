@@ -873,11 +873,12 @@ fn bound_value(toks: &[Token], pos: &mut usize) -> Option<f64> {
 
 fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoError> {
     let toks = lex(line, line_no)?;
-    if toks.len() == 2 && matches!(&toks[1].kind, Tok::Word(x) if x.eq_ignore_ascii_case("free")) {
-        if let Tok::Word(n) = &toks[0].kind {
-            p.bounds.insert(n.clone(), (f64::NEG_INFINITY, f64::INFINITY));
-            return Ok(());
-        }
+    if toks.len() == 2
+        && matches!(&toks[1].kind, Tok::Word(x) if x.eq_ignore_ascii_case("free"))
+        && let Tok::Word(n) = &toks[0].kind
+    {
+        p.bounds.insert(n.clone(), (f64::NEG_INFINITY, f64::INFINITY));
+        return Ok(());
     }
     if let Tok::Word(n) = &toks[0].kind {
         if matches!(toks.get(1).map(|token| &token.kind), Some(Tok::Eq)) {

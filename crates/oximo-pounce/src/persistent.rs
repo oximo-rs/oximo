@@ -114,7 +114,8 @@ impl PouncePersistent {
                 state
             }
         };
-        let mut outcome = run_nlp_with_retries(&state.oracle, &prep, opts, state.warm.as_ref())?;
+        let mut outcome =
+            run_nlp_with_retries(model, &state.oracle, &prep, opts, state.warm.as_ref())?;
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
         Ok(assemble(prep.sign, outcome, elapsed))
@@ -127,7 +128,7 @@ impl PouncePersistent {
         route: Route,
     ) -> Result<SolverResult, SolverError> {
         self.validate_convex_options(opts)?;
-        let problem = convex::build_problem(model)?;
+        let problem = convex::build_problem(model, opts)?;
         let started = Instant::now();
         let state = match &mut self.state {
             Some(State::Convex(state))
@@ -153,7 +154,7 @@ impl PouncePersistent {
                 .active
                 .as_mut()
                 .expect("active-set state exists for active-set route")
-                .solve(&state.problem, opts)?
+                .solve(&state.problem, opts)
         } else {
             convex::run(&state.problem, opts, route, state.warm.as_ref())
         };

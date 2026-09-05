@@ -200,25 +200,25 @@ pub(crate) fn mul_into(
     lhs: ExprId,
     rhs: ExprId,
 ) -> ExprId {
-    if let ExprNode::Const(c) = *arena.get(lhs) {
-        if let Some(t) = as_linear(arena, rhs, false) {
-            let constant = t.constant * c;
-            let mut coeffs = t.coeffs.into_owned();
-            for (_, co) in &mut coeffs {
-                *co *= c;
-            }
-            return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
+    if let ExprNode::Const(c) = *arena.get(lhs)
+        && let Some(t) = as_linear(arena, rhs, false)
+    {
+        let constant = t.constant * c;
+        let mut coeffs = t.coeffs.into_owned();
+        for (_, co) in &mut coeffs {
+            *co *= c;
         }
+        return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
-    if let ExprNode::Const(c) = *arena.get(rhs) {
-        if let Some(t) = as_linear(arena, lhs, false) {
-            let constant = t.constant * c;
-            let mut coeffs = t.coeffs.into_owned();
-            for (_, co) in &mut coeffs {
-                *co *= c;
-            }
-            return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
+    if let ExprNode::Const(c) = *arena.get(rhs)
+        && let Some(t) = as_linear(arena, lhs, false)
+    {
+        let constant = t.constant * c;
+        let mut coeffs = t.coeffs.into_owned();
+        for (_, co) in &mut coeffs {
+            *co *= c;
         }
+        return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
     arena.push(ExprNode::Mul(smallvec![lhs, rhs]))
 }
@@ -231,20 +231,20 @@ pub(crate) fn div_into(
     num: ExprId,
     den: ExprId,
 ) -> ExprId {
-    if let ExprNode::Const(c) = *arena.get(den) {
-        if c != 0.0 {
-            if let Some(t) = as_linear(arena, num, false) {
-                let inv = 1.0 / c;
-                let constant = t.constant * inv;
-                let mut coeffs = t.coeffs.into_owned();
-                for (_, co) in &mut coeffs {
-                    *co *= inv;
-                }
-                return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
+    if let ExprNode::Const(c) = *arena.get(den)
+        && c != 0.0
+    {
+        if let Some(t) = as_linear(arena, num, false) {
+            let inv = 1.0 / c;
+            let constant = t.constant * inv;
+            let mut coeffs = t.coeffs.into_owned();
+            for (_, co) in &mut coeffs {
+                *co *= inv;
             }
-            let inv = arena.push(ExprNode::Const(1.0 / c));
-            return mul_into(arena, num, inv);
+            return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
         }
+        let inv = arena.push(ExprNode::Const(1.0 / c));
+        return mul_into(arena, num, inv);
     }
     arena.push(ExprNode::Div(num, den))
 }

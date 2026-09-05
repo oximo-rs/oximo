@@ -971,10 +971,10 @@ fn next_expression_depth(depth: usize) -> Result<usize, IoError> {
 fn start_values(starts: &[(usize, f64)], n_var: usize) -> Vec<Option<f64>> {
     let mut values = vec![None; n_var];
     for &(index, value) in starts {
-        if let Some(slot) = values.get_mut(index) {
-            if slot.is_none() {
-                *slot = Some(value);
-            }
+        if let Some(slot) = values.get_mut(index)
+            && slot.is_none()
+        {
+            *slot = Some(value);
         }
     }
     values

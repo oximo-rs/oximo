@@ -112,20 +112,21 @@ pub(crate) fn solve_nlp_since(
 ) -> Result<SolverResult, SolverError> {
     let prep = setup(model, opts)?;
     let oracle = backend::build(model)?;
-    let outcome = run_nlp_with_retries(&oracle, &prep, opts, None)?;
+    let outcome = run_nlp_with_retries(model, &oracle, &prep, opts, None)?;
     Ok(assemble(prep.sign, outcome, started.elapsed()))
 }
 
 /// Mirror POUNCE's two-rung second opinion for a local-infeasibility verdict.
 /// A retry is promoted only when its own convergence check succeeds.
 pub(crate) fn run_nlp_with_retries(
+    model: &Model,
     oracle: &backend::Oracle,
     prep: &Prepared,
     opts: &PounceOptions,
     warm: Option<&WarmStart>,
 ) -> Result<Outcome, SolverError> {
     let started = Instant::now();
-    let mut original = backend::run(oracle, prep, opts, warm)?;
+    let mut original = backend::run(model, oracle, prep, opts, warm)?;
     if original.termination != TerminationStatus::Infeasible {
         return Ok(original);
     }
@@ -141,7 +142,7 @@ pub(crate) fn run_nlp_with_retries(
         && scaling.as_deref() != Some("mc64")
     {
         if let Some(retry_opts) = retry_options(opts, started, "feral_scaling", "mc64") {
-            match backend::run(oracle, prep, &retry_opts, None) {
+            match backend::run(model, oracle, prep, &retry_opts, None) {
                 Ok(mut retry) if retry.termination == TerminationStatus::LocallyOptimal => {
                     merge_retry_log(&original, &mut retry, "MC64 scaling", true);
                     return Ok(retry);
@@ -157,7 +158,7 @@ pub(crate) fn run_nlp_with_retries(
     let adaptive = effective_mu_is_adaptive(opts);
     if effective_bool(opts, "infeasibility_mu_strategy_retry").unwrap_or(true) && !adaptive {
         if let Some(retry_opts) = retry_options(opts, started, "mu_strategy", "adaptive") {
-            match backend::run(oracle, prep, &retry_opts, None) {
+            match backend::run(model, oracle, prep, &retry_opts, None) {
                 Ok(mut retry) if retry.termination == TerminationStatus::LocallyOptimal => {
                     merge_retry_log(&original, &mut retry, "adaptive mu", true);
                     return Ok(retry);
@@ -477,6 +478,7 @@ pub(crate) fn convex_only_option(name: &str) -> bool {
             | "qp_hsde"
             | "qp_equilibrate"
             | "qp_crossover"
+            | "qp_gondzio_corr"
     )
 }
 
@@ -499,7 +501,7 @@ pub(crate) fn apply_options(
         set_int(list, "max_iter", i32::try_from(n).unwrap_or(i32::MAX))?;
     }
     if let Some(limit) = opts.universal.time_limit {
-        set_num(list, "max_cpu_time", limit.as_secs_f64())?;
+        set_num(list, "max_wall_time", limit.as_secs_f64())?;
     }
     if let Some(s) = opts.mu_strategy {
         set_str(list, "mu_strategy", mu_strategy_str(s))?;
@@ -516,7 +518,9 @@ pub(crate) fn apply_options(
         }
     }
     for &(name, v) in opts.int_opts() {
-        set_int(list, name, v)?;
+        if !convex_only_option(name) {
+            set_int(list, name, v)?;
+        }
     }
     for (name, v) in opts.str_opts() {
         set_str(list, name, v)?;
@@ -671,12 +675,21 @@ mod retry_tests {
             "qp_hsde",
             "qp_equilibrate",
             "qp_crossover",
+            "qp_gondzio_corr",
         ] {
             assert!(convex_only_option(name), "{name}");
         }
         for name in ["solver_selection", "feral_infeasibility_scaling_retry", "sqp_qp_max_iter"] {
             assert!(!convex_only_option(name), "{name}");
         }
+    }
+
+    #[test]
+    fn apply_options_skips_convex_only_integer_options_on_the_nlp_path() {
+        let mut app = pounce_rs::IpoptApplication::new();
+        app.initialize().unwrap();
+        let opts = PounceOptions::default().qp_gondzio_corr(3).sqp_qp_max_iter(12);
+        apply_options(app.options_mut(), &opts, false).unwrap();
     }
 
     #[test]

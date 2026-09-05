@@ -1013,10 +1013,9 @@ fn parse_solution_pool(res: &str, var_order: &[VarId]) -> Vec<SolutionPoint> {
                 if let (Some(k), Some(val)) = (
                     parts.first().and_then(|s| s.parse::<usize>().ok()),
                     parts.get(1).and_then(|s| parse_baron_float(s)),
-                ) {
-                    if (1..=var_order.len()).contains(&k) {
-                        primal.insert(var_order[k - 1], val);
-                    }
+                ) && (1..=var_order.len()).contains(&k)
+                {
+                    primal.insert(var_order[k - 1], val);
                 }
             }
             if !primal.is_empty() {
@@ -1088,7 +1087,7 @@ fn parse_dual_solution(res: &str, var_order: &[VarId], con_order: &[ConstraintId
                 // rows per cone. Keep the quadratic row's price, skip the
                 // sign row's.
                 let rel = k - con_order.len() - 1;
-                if rel % 2 == 0 {
+                if rel.is_multiple_of(2) {
                     soc_prices.insert(rel / 2, val);
                 }
             }
@@ -1114,12 +1113,12 @@ fn parse_best_table(res: &str) -> Option<SolutionPoint> {
             break;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if let (Some(&p0), Some(&p2)) = (parts.first(), parts.get(2)) {
-            if let (Some(idx), Some(val)) = (extract_index(p0), parse_baron_float(p2)) {
-                primal.insert(VarId(idx), val);
-                started = true;
-                continue;
-            }
+        if let (Some(&p0), Some(&p2)) = (parts.first(), parts.get(2))
+            && let (Some(idx), Some(val)) = (extract_index(p0), parse_baron_float(p2))
+        {
+            primal.insert(VarId(idx), val);
+            started = true;
+            continue;
         }
         if started {
             break;

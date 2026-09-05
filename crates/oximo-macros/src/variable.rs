@@ -60,13 +60,13 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let ub = merge_bound(rel_ub, kw_ub, "ub")?;
 
     // `fix` pins both bounds, so explicit lb/ub alongside it is contradictory.
-    if let Some(fix_kw) = kw_fix.as_ref() {
-        if lb.is_some() || ub.is_some() {
-            return Err(syn::Error::new(
-                fix_kw.ident.span(),
-                "`fix` sets both bounds. Do not combine it with `lb`/`ub`",
-            ));
-        }
+    if let Some(fix_kw) = kw_fix.as_ref()
+        && (lb.is_some() || ub.is_some())
+    {
+        return Err(syn::Error::new(
+            fix_kw.ident.span(),
+            "`fix` sets both bounds. Do not combine it with `lb`/`ub`",
+        ));
     }
 
     // Bound expressions are value expressions, so `q[i, j]` index sugar applies.
@@ -78,14 +78,14 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
     // `initial`/`fix` lower to scalar `VarBuilder` methods the indexed builder
     // lacks, so reject them on a family with a clear message.
-    if binds.is_some() {
-        if let Some(kw) = kw_initial.as_ref().or(kw_fix.as_ref()) {
-            return Err(syn::Error::new(
-                kw.ident.span(),
-                "`initial`/`fix` is not supported on an indexed family. Use `m.set_initial` / \
-                 `m.fix` per element",
-            ));
-        }
+    if binds.is_some()
+        && let Some(kw) = kw_initial.as_ref().or(kw_fix.as_ref())
+    {
+        return Err(syn::Error::new(
+            kw.ident.span(),
+            "`initial`/`fix` is not supported on an indexed family. Use `m.set_initial` / \
+             `m.fix` per element",
+        ));
     }
 
     let mut idents = Vec::new();

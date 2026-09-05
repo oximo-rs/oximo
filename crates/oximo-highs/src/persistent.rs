@@ -86,28 +86,27 @@ impl HighsPersistent {
         // linear objective) once a resident model exists. A quadratic objective or
         // any structural change falls back to a full rebuild.
         let mut updated = false;
-        if matches!(model.kind(), ModelKind::LP | ModelKind::MILP) {
-            if let Some(st) = self.state.as_mut() {
-                if let Some(base) = st.snap.as_ref() {
-                    let snap = snapshot(model)?;
-                    if snap.fingerprint == base.fingerprint {
-                        let live = st.live.as_mut().expect("live model present on fast path");
-                        for i in 0..st.meta.cols.len() {
-                            if snap.obj_costs[i].to_bits() != base.obj_costs[i].to_bits() {
-                                live.change_column_cost(st.meta.cols[i], snap.obj_costs[i]);
-                            }
-                            if snap.lb[i].to_bits() != base.lb[i].to_bits()
-                                || snap.ub[i].to_bits() != base.ub[i].to_bits()
-                            {
-                                live.change_column_bounds(st.meta.cols[i], snap.lb[i]..=snap.ub[i]);
-                            }
-                        }
-                        apply_options(live, opts)?;
-                        st.meta.obj_constant = snap.obj_constant;
-                        st.snap = Some(snap);
-                        updated = true;
+        if matches!(model.kind(), ModelKind::LP | ModelKind::MILP)
+            && let Some(st) = self.state.as_mut()
+            && let Some(base) = st.snap.as_ref()
+        {
+            let snap = snapshot(model)?;
+            if snap.fingerprint == base.fingerprint {
+                let live = st.live.as_mut().expect("live model present on fast path");
+                for i in 0..st.meta.cols.len() {
+                    if snap.obj_costs[i].to_bits() != base.obj_costs[i].to_bits() {
+                        live.change_column_cost(st.meta.cols[i], snap.obj_costs[i]);
+                    }
+                    if snap.lb[i].to_bits() != base.lb[i].to_bits()
+                        || snap.ub[i].to_bits() != base.ub[i].to_bits()
+                    {
+                        live.change_column_bounds(st.meta.cols[i], snap.lb[i]..=snap.ub[i]);
                     }
                 }
+                apply_options(live, opts)?;
+                st.meta.obj_constant = snap.obj_constant;
+                st.snap = Some(snap);
+                updated = true;
             }
         }
         if !updated {

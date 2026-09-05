@@ -135,11 +135,11 @@ fn split_top_commas(ts: TokenStream2) -> Vec<TokenStream2> {
     let mut out = Vec::new();
     let mut cur = Vec::new();
     for tt in ts {
-        if let TokenTree::Punct(p) = &tt {
-            if p.as_char() == ',' {
-                out.push(cur.drain(..).collect());
-                continue;
-            }
+        if let TokenTree::Punct(p) = &tt
+            && p.as_char() == ','
+        {
+            out.push(cur.drain(..).collect());
+            continue;
         }
         cur.push(tt);
     }
@@ -157,22 +157,22 @@ fn split_relops(ts: &TokenStream2) -> (Vec<TokenStream2>, Vec<RelOp>) {
 
     let mut i = 0;
     while i < tts.len() {
-        if let TokenTree::Punct(p1) = &tts[i] {
-            if p1.spacing() == Spacing::Joint && i + 1 < tts.len() {
-                if let TokenTree::Punct(p2) = &tts[i + 1] {
-                    let op = match (p1.as_char(), p2.as_char()) {
-                        ('<', '=') => Some(RelOp::Le),
-                        ('>', '=') => Some(RelOp::Ge),
-                        ('=', '=') => Some(RelOp::Eq),
-                        _ => None,
-                    };
-                    if let Some(op) = op {
-                        segs.push(cur.drain(..).collect());
-                        ops.push(op);
-                        i += 2;
-                        continue;
-                    }
-                }
+        if let TokenTree::Punct(p1) = &tts[i]
+            && p1.spacing() == Spacing::Joint
+            && i + 1 < tts.len()
+            && let TokenTree::Punct(p2) = &tts[i + 1]
+        {
+            let op = match (p1.as_char(), p2.as_char()) {
+                ('<', '=') => Some(RelOp::Le),
+                ('>', '=') => Some(RelOp::Ge),
+                ('=', '=') => Some(RelOp::Eq),
+                _ => None,
+            };
+            if let Some(op) = op {
+                segs.push(cur.drain(..).collect());
+                ops.push(op);
+                i += 2;
+                continue;
             }
         }
         cur.push(tts[i].clone());

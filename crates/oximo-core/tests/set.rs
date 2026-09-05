@@ -119,7 +119,7 @@ fn filter_typed_decodes_tuple_keys() {
 
 #[test]
 fn filter_typed_decodes_scalar_keys() {
-    let evens = Set::range(0..10).filter_typed(|i: usize| i % 2 == 0);
+    let evens = Set::range(0..10).filter_typed(|i: usize| i.is_multiple_of(2));
     assert!(evens.is_range());
     assert_eq!(evens.len(), 5);
 }

@@ -88,15 +88,15 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
     if collect_iterations {
         app.enable_iter_history();
     }
-    if selected_algorithm(opts)? == PounceAlgorithm::ActiveSetSqp {
-        if let Some(warm) = warm {
-            app.set_sqp_warm_start(pounce_rs::sqp::SqpIterates {
-                x: warm.x.clone(),
-                lambda_g: warm.lambda.clone(),
-                lambda_x: warm.z_l.iter().zip(&warm.z_u).map(|(l, u)| l - u).collect(),
-                working: warm.sqp_working.clone(),
-            });
-        }
+    if selected_algorithm(opts)? == PounceAlgorithm::ActiveSetSqp
+        && let Some(warm) = warm
+    {
+        app.set_sqp_warm_start(pounce_rs::sqp::SqpIterates {
+            x: warm.x.clone(),
+            lambda_g: warm.lambda.clone(),
+            lambda_x: warm.z_l.iter().zip(&warm.z_u).map(|(l, u)| l - u).collect(),
+            working: warm.sqp_working.clone(),
+        });
     }
 
     let status = app.optimize_tnlp(Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>);

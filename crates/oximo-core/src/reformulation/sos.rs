@@ -232,10 +232,10 @@ impl Model {
 }
 
 fn validate_options(options: SosReformulationOptions) -> Result<(), ReformulationError> {
-    if let Some(big_m) = options.fallback_big_m {
-        if !big_m.is_finite() || big_m <= 0.0 {
-            return Err(ReformulationError::InvalidFallbackBigM(big_m));
-        }
+    if let Some(big_m) = options.fallback_big_m
+        && (!big_m.is_finite() || big_m <= 0.0)
+    {
+        return Err(ReformulationError::InvalidFallbackBigM(big_m));
     }
     Ok(())
 }

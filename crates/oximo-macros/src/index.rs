@@ -98,10 +98,10 @@ fn build_ref_tuple(elems: &[TokenStream2]) -> TokenStream2 {
 }
 
 fn ref_elem(e: &TokenStream2) -> TokenStream2 {
-    if let Some(TokenTree::Punct(p)) = e.clone().into_iter().next() {
-        if p.as_char() == '&' {
-            return e.clone();
-        }
+    if let Some(TokenTree::Punct(p)) = e.clone().into_iter().next()
+        && p.as_char() == '&'
+    {
+        return e.clone();
     }
     quote!( &(#e) )
 }
