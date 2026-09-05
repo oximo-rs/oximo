@@ -13,7 +13,7 @@ use std::rc::Rc;
 use oximo_core::Model;
 use oximo_solver::{DualStatus, SolverError};
 use pounce_rs::IpoptApplication;
-use pounce_rs::builder::{Nlp, Problem};
+use pounce_rs::builder::{Nlp, NlpError, Problem};
 
 use crate::hybrid::HybridOracle;
 use crate::options::{PounceOptionValue, PounceOptions};
@@ -24,6 +24,8 @@ use crate::translate::{
 
 /// The resident derivative oracle, shared between the handle and the solve.
 pub(crate) type Oracle = Rc<RefCell<HybridOracle>>;
+
+const GENERATED_FBBT_TAPE_REJECTED: &str = "oximo-pounce: generated FBBT tape rejected";
 
 // `Result` for signature parity with the exact path, which can fail to build.
 #[expect(clippy::unnecessary_wraps)]
@@ -181,9 +183,15 @@ fn run_builder(
         };
     }
 
-    let sol = nlp
-        .try_solve()
-        .map_err(|error| SolverError::Backend(format!("pounce builder: {error}")))?;
+    let sol = nlp.try_solve().map_err(|error| {
+        let message = match error {
+            invalid @ NlpError::InvalidFbbtTape { .. } => {
+                format!("{GENERATED_FBBT_TAPE_REJECTED}: {invalid}")
+            }
+            other => format!("pounce builder: {other}"),
+        };
+        SolverError::Backend(message)
+    })?;
 
     let termination = map_status(sol.status);
     let raw_log = (opts.universal.verbose == Some(true))

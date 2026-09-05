@@ -358,7 +358,8 @@ fn invalid_generated_fbbt_tape_is_returned_as_a_solver_error() {
         .print_level(0);
     let error = Pounce.solve(&m, &options).unwrap_err();
     assert!(
-        matches!(&error, SolverError::Backend(message) if message.contains("invalid FBBT tape")),
+        matches!(&error, SolverError::Backend(message) if
+            message.contains("oximo-pounce: generated FBBT tape rejected")),
         "unexpected error: {error}"
     );
 }
