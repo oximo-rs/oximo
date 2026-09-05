@@ -355,12 +355,12 @@ fn linear_rows(model: &Model, rows: &[Row], mut acc: Rows) -> (Rows, usize, usiz
     let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     // ZeroCone rows: equalities, then fixed variables.
     for (i, (con, row)) in constraints.iter().zip(rows).enumerate() {
-        if let Row::Lin(lt) = row {
-            if let Some((Sense::Eq, rhs)) = con.as_single() {
-                let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
-                acc.push(lt, 1.0, rhs - lt.constant);
-                acc.set_last_dual(id, -1.0);
-            }
+        if let Row::Lin(lt) = row
+            && let Some((Sense::Eq, rhs)) = con.as_single()
+        {
+            let id = ConstraintId(u32::try_from(i).expect("constraint count overflow"));
+            acc.push(lt, 1.0, rhs - lt.constant);
+            acc.set_last_dual(id, -1.0);
         }
     }
     for var in vars.iter().filter(|&v| is_fixed(v)) {

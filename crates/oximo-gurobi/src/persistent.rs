@@ -110,16 +110,15 @@ impl GurobiPersistent {
     ) -> Result<SolverResult, SolverError> {
         let kind = model.kind();
         let mut updated = false;
-        if matches!(kind, ModelKind::LP | ModelKind::MILP) {
-            if let Some(st) = self.state.as_mut() {
-                if let Some(base) = st.snap.as_ref() {
-                    let snap = snapshot(model)?;
-                    if snap.fingerprint == base.fingerprint {
-                        push_deltas(&mut st.built, base, &snap, opts)?;
-                        st.snap = Some(snap);
-                        updated = true;
-                    }
-                }
+        if matches!(kind, ModelKind::LP | ModelKind::MILP)
+            && let Some(st) = self.state.as_mut()
+            && let Some(base) = st.snap.as_ref()
+        {
+            let snap = snapshot(model)?;
+            if snap.fingerprint == base.fingerprint {
+                push_deltas(&mut st.built, base, &snap, opts)?;
+                st.snap = Some(snap);
+                updated = true;
             }
         }
         if !updated {
@@ -142,16 +141,15 @@ impl GurobiPersistent {
     {
         let kind = model.kind();
         let mut updated = false;
-        if matches!(kind, ModelKind::LP | ModelKind::MILP) {
-            if let Some(st) = self.state.as_mut() {
-                if let Some(base) = st.snap.as_ref() {
-                    let snap = snapshot(model)?;
-                    if snap.fingerprint == base.fingerprint {
-                        push_deltas(&mut st.built, base, &snap, opts)?;
-                        st.snap = Some(snap);
-                        updated = true;
-                    }
-                }
+        if matches!(kind, ModelKind::LP | ModelKind::MILP)
+            && let Some(st) = self.state.as_mut()
+            && let Some(base) = st.snap.as_ref()
+        {
+            let snap = snapshot(model)?;
+            if snap.fingerprint == base.fingerprint {
+                push_deltas(&mut st.built, base, &snap, opts)?;
+                st.snap = Some(snap);
+                updated = true;
             }
         }
         if !updated {

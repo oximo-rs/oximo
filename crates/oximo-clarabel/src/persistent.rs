@@ -79,13 +79,12 @@ impl ClarabelPersistent {
         // update (no immutable setting changed) and the data update (structure
         // not altered by presolve / dropped zeros). Any failure means rebuild.
         let mut updated = false;
-        if let Some(state) = self.state.as_mut() {
-            if state.problem.same_structure(&new)
-                && state.solver.update_settings(settings.clone()).is_ok()
-                && state.solver.update_data(&new.p_mat, &new.q, &new.a_mat, &new.b).is_ok()
-            {
-                updated = true;
-            }
+        if let Some(state) = self.state.as_mut()
+            && state.problem.same_structure(&new)
+            && state.solver.update_settings(settings.clone()).is_ok()
+            && state.solver.update_data(&new.p_mat, &new.q, &new.a_mat, &new.b).is_ok()
+        {
+            updated = true;
         }
 
         if updated {

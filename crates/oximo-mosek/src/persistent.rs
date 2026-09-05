@@ -68,20 +68,19 @@ impl MosekPersistent {
         let initial = initial_values(model);
         let mut updated = false;
 
-        if let (Some(fresh), Some(state)) = (fresh, self.state.as_mut()) {
-            if state.snapshot.as_ref().is_some_and(|base| base.fingerprint == fresh.fingerprint)
-                && state.initial == initial
-            {
-                apply_linear_delta(
-                    &mut state.task,
-                    state.snapshot.as_ref().expect("snapshot"),
-                    &fresh,
-                )?;
-                opts.apply_cb(&mut state.task)?;
-                attach_verbose_stream(&mut state.task, opts)?;
-                state.snapshot = Some(fresh);
-                updated = true;
-            }
+        if let (Some(fresh), Some(state)) = (fresh, self.state.as_mut())
+            && state.snapshot.as_ref().is_some_and(|base| base.fingerprint == fresh.fingerprint)
+            && state.initial == initial
+        {
+            apply_linear_delta(
+                &mut state.task,
+                state.snapshot.as_ref().expect("snapshot"),
+                &fresh,
+            )?;
+            opts.apply_cb(&mut state.task)?;
+            attach_verbose_stream(&mut state.task, opts)?;
+            state.snapshot = Some(fresh);
+            updated = true;
         }
 
         if !updated {

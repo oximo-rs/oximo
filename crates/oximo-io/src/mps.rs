@@ -513,7 +513,7 @@ fn parse_rhs(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result<(
         _ => return Err(invalid_mps(line, 1, "RHS records require two to five fields")),
     };
     select_vector(&mut data.rhs_vector, vector, "RHS")?;
-    for pair in pairs.chunks_exact(2) {
+    for pair in pairs.as_chunks::<2>().0 {
         parse_rhs_value(data, &pair[0], &pair[1], line)?;
     }
     Ok(())
@@ -549,7 +549,7 @@ fn parse_ranges(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Resul
         _ => return Err(invalid_mps(line, 1, "RANGES records require two to five fields")),
     };
     select_vector(&mut data.range_vector, vector, "RANGES")?;
-    for pair in pairs.chunks_exact(2) {
+    for pair in pairs.as_chunks::<2>().0 {
         parse_range_value(data, &pair[0], &pair[1], line)?;
     }
     Ok(())

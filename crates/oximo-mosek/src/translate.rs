@@ -440,13 +440,13 @@ fn collect_continuous_duals(
     let mut row_duals = vec![0.0; num_rows];
     task.get_y(solution_type, &mut row_duals).map_err(backend)?;
     for (id, row) in meta.row_by_constraint.iter().enumerate() {
-        if let Some(row) = row {
-            if let Some(&value) = row_duals.get(usize::try_from(*row).unwrap_or(usize::MAX)) {
-                dual.insert(
-                    ConstraintId(u32::try_from(id).map_err(|_| overflow("constraint"))?),
-                    value,
-                );
-            }
+        if let Some(row) = row
+            && let Some(&value) = row_duals.get(usize::try_from(*row).unwrap_or(usize::MAX))
+        {
+            dual.insert(
+                ConstraintId(u32::try_from(id).map_err(|_| overflow("constraint"))?),
+                value,
+            );
         }
     }
 
@@ -469,10 +469,10 @@ fn collect_continuous_soc_duals(
 ) {
     for &(id, acc, dim) in &meta.explicit_accs {
         let mut dot_y = vec![0.0; dim];
-        if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok() {
-            if let Some(&bound_multiplier) = dot_y.first() {
-                soc_dual.insert(id, bound_multiplier);
-            }
+        if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok()
+            && let Some(&bound_multiplier) = dot_y.first()
+        {
+            soc_dual.insert(id, bound_multiplier);
         }
     }
 }

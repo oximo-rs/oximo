@@ -344,35 +344,32 @@ fn parseoximo_solution(
                 iterations = n;
             }
         } else if let Some(rest) = line.strip_prefix('R') {
-            if let Some(eq) = rest.find('=') {
-                if let Ok(idx) = rest[..eq].parse::<u32>() {
-                    if let Some(val) = parse_gams_float(rest[eq + 1..].trim()) {
-                        reduced_costs.insert(VarId(idx), val);
-                    }
-                }
+            if let Some(eq) = rest.find('=')
+                && let Ok(idx) = rest[..eq].parse::<u32>()
+                && let Some(val) = parse_gams_float(rest[eq + 1..].trim())
+            {
+                reduced_costs.insert(VarId(idx), val);
             }
         } else if let Some(rest) = line.strip_prefix('D') {
-            if let Some(eq) = rest.find('=') {
-                if let Ok(idx) = rest[..eq].parse::<u32>() {
-                    if let Some(val) = parse_gams_float(rest[eq + 1..].trim()) {
-                        dual.insert(ConstraintId(idx), val);
-                    }
-                }
+            if let Some(eq) = rest.find('=')
+                && let Ok(idx) = rest[..eq].parse::<u32>()
+                && let Some(val) = parse_gams_float(rest[eq + 1..].trim())
+            {
+                dual.insert(ConstraintId(idx), val);
             }
         } else if let Some(rest) = line.strip_prefix('Z') {
-            if let Some(eq) = rest.find('=') {
-                if let Ok(idx) = rest[..eq].parse::<u32>() {
-                    if let Some(val) = parse_gams_float(rest[eq + 1..].trim()) {
-                        soc_marginals.insert(idx, val);
-                    }
-                }
+            if let Some(eq) = rest.find('=')
+                && let Ok(idx) = rest[..eq].parse::<u32>()
+                && let Some(val) = parse_gams_float(rest[eq + 1..].trim())
+            {
+                soc_marginals.insert(idx, val);
             }
         } else if let Some(eq) = line.find('=') {
             let key = line[..eq].trim();
-            if let Ok(idx) = key.parse::<u32>() {
-                if let Some(val) = parse_gams_float(line[eq + 1..].trim()) {
-                    primal.insert(VarId(idx), val);
-                }
+            if let Ok(idx) = key.parse::<u32>()
+                && let Some(val) = parse_gams_float(line[eq + 1..].trim())
+            {
+                primal.insert(VarId(idx), val);
             }
         }
     }
@@ -708,15 +705,15 @@ pub(crate) fn gams_solve_type(kind: ModelKind) -> &'static str {
 /// invoking GAMS, so the caller gets a clear error naming the solver and model
 /// type instead of a downstream GAMS compilation failure.
 fn validate_solver(opts: &GamsOptions, kind: ModelKind) -> Result<(), SolverError> {
-    if let Some(cfg) = &opts.solver {
-        if !cfg.supports(kind) {
-            let solve_type = gams_solve_type(kind);
-            return Err(SolverError::Backend(format!(
-                "GAMS solver {} does not support {solve_type} models (model kind {kind:?}); \
-                select a solver that supports {solve_type}",
-                cfg.gams_name()
-            )));
-        }
+    if let Some(cfg) = &opts.solver
+        && !cfg.supports(kind)
+    {
+        let solve_type = gams_solve_type(kind);
+        return Err(SolverError::Backend(format!(
+            "GAMS solver {} does not support {solve_type} models (model kind {kind:?}); \
+            select a solver that supports {solve_type}",
+            cfg.gams_name()
+        )));
     }
     Ok(())
 }
@@ -1130,13 +1127,14 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
             //
             // The 1e9 cap keeps the cast safe and rejects nonsense huge exponents
             // that would still satisfy the integer check after f64 rounding.
-            if let ExprNode::Const(c) = arena.get(*exp) {
-                if (c - c.round()).abs() < f64::EPSILON && c.abs() <= 1e9 {
-                    write!(gms, "power(").unwrap();
-                    write_gams_expr(gms, arena, *base, false);
-                    write!(gms, ", {:.0})", c.round()).unwrap();
-                    return;
-                }
+            if let ExprNode::Const(c) = arena.get(*exp)
+                && (c - c.round()).abs() < f64::EPSILON
+                && c.abs() <= 1e9
+            {
+                write!(gms, "power(").unwrap();
+                write_gams_expr(gms, arena, *base, false);
+                write!(gms, ", {:.0})", c.round()).unwrap();
+                return;
             }
             write!(gms, "(").unwrap();
             write_gams_expr(gms, arena, *base, false);
