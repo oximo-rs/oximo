@@ -24,7 +24,7 @@ description = "A Rust algebraic modeling library for solving optimization proble
 readme = "README.md"
 keywords = ["optimization", "math", "science"]
 categories = ["mathematics", "science", "algorithms"]
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/oximo-rs/oximo"
 authors = ["Germán Martín Heim <german.martin.heim@gmail.com>"]
@@ -61,7 +61,7 @@ highs            = "2.4"
 gurobi-rs        = { version = "1.0.0", features = ["gurobi13"] }
 mosek            = "11.2"
 clarabel         = "0.11"
-pounce-rs        = { version = "0.10", features = ["convex", "qp"] }
+pounce-rs        = { version = "0.11", features = ["convex", "qp"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
