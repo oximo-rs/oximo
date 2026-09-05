@@ -349,7 +349,7 @@ fn row_relaxation_delta(bound: f64, opts: &PounceOptions) -> f64 {
         0.0 => 1.0,
         _ => bound.abs(),
     };
-    factor.min(cap) * scale
+    (factor * scale).min(cap)
 }
 
 fn relaxed_row_lower(bound: f64, opts: &PounceOptions) -> f64 {
@@ -831,6 +831,7 @@ mod tests {
         for (actual, expected) in [
             (variable_relaxation_delta(2e-12, &opts), 1e-8),
             (row_relaxation_delta(2e-12, &opts), 2e-20),
+            (row_relaxation_delta(20_000.0, &opts), 1e-4),
             (row_relaxation_delta(0.0, &opts), 1e-8),
         ] {
             assert!((actual - expected).abs() <= expected * f64::EPSILON);
