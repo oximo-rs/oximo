@@ -58,7 +58,7 @@ let res = Pounce.solve(&model, &opts)?;
 ```
 
 A few NLP options are managed by this backend and should not be set by hand:
-`print_level` (via `verbose`/the `print_level` setter), `max_cpu_time` (via `time_limit`),
+`print_level` (via `verbose`/the `print_level` setter), `max_wall_time` (via `time_limit`),
 `warm_start_init_point` (via the persistent handle), and `hessian_approximation`
 (set to `limited-memory` only when the model has a nonlinear function and the
 `enzyme` feature is off).
@@ -81,8 +81,6 @@ Forced routes never change engines: `LpIpm`, `QpIpm`, `QpActiveSet`, and
 `Socp` either run that engine or return a compatibility error. `Nlp` always
 selects the general path.
 
-The standalone convex engines currently expose no time-limit hook. With a time
-limit, `Auto` uses NLP.
 
 ## Licensing
 
