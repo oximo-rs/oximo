@@ -31,6 +31,7 @@ pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
 
 /// Exact derivatives always drive the `TNLP` surface directly.
 pub(crate) fn run(
+    _model: &Model,
     oracle: &Oracle,
     prep: &crate::translate::Prepared,
     opts: &crate::options::PounceOptions,

@@ -46,6 +46,7 @@ pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
 /// Solve on the exact `TNLP` path when the whole model is closed-form,
 /// otherwise through POUNCE's builder.
 pub(crate) fn run(
+    model: &Model,
     oracle: &Oracle,
     prep: &Prepared,
     opts: &PounceOptions,
@@ -54,7 +55,7 @@ pub(crate) fn run(
     if oracle.borrow().all_closed_form() {
         tnlp::run(oracle, prep, opts, warm)
     } else {
-        run_builder(oracle, prep, opts, warm)
+        run_builder(model, oracle, prep, opts, warm)
     }
 }
 
@@ -65,6 +66,7 @@ struct OximoProblem {
     oracle: Oracle,
     sign: f64,
     m: usize,
+    fbbt_constraints: Vec<Option<pounce_rs::FbbtTape>>,
 }
 
 impl Problem for OximoProblem {
@@ -93,9 +95,14 @@ impl Problem for OximoProblem {
     fn jacobian(&self, x: &[f64], jac: &mut [f64]) -> bool {
         self.oracle.borrow().try_exact_dense_jacobian(x, jac)
     }
+
+    fn constraint_expression(&self, index: usize) -> Option<pounce_rs::FbbtTape> {
+        self.fbbt_constraints.get(index).and_then(Clone::clone)
+    }
 }
 
 fn run_builder(
+    model: &Model,
     oracle: &Oracle,
     prep: &Prepared,
     opts: &PounceOptions,
@@ -108,7 +115,14 @@ fn run_builder(
     apply_options(validator.options_mut(), opts, false)?;
 
     let m = oracle.borrow().num_constraints();
-    let problem = OximoProblem { oracle: Rc::clone(oracle), sign: prep.sign, m };
+    let fbbt_constraints = if opts.effective_bool("presolve").unwrap_or(false)
+        && opts.effective_bool("presolve_fbbt").unwrap_or(false)
+    {
+        crate::fbbt::constraint_tapes(model)
+    } else {
+        Vec::new()
+    };
+    let problem = OximoProblem { oracle: Rc::clone(oracle), sign: prep.sign, m, fbbt_constraints };
 
     // The builder path can only warm-start the primal point.
     let x0 = warm.map_or_else(|| prep.x0.clone(), |w| w.x.clone());
@@ -129,7 +143,7 @@ fn run_builder(
         nlp = nlp.option_int("max_iter", i32::try_from(n).unwrap_or(i32::MAX));
     }
     if let Some(limit) = opts.universal.time_limit {
-        nlp = nlp.option_num("max_cpu_time", limit.as_secs_f64());
+        nlp = nlp.option_num("max_wall_time", limit.as_secs_f64());
     }
     if let Some(s) = opts.mu_strategy {
         nlp = nlp.option_str("mu_strategy", mu_strategy_str(s));
@@ -143,7 +157,9 @@ fn run_builder(
         }
     }
     for &(name, v) in opts.int_opts() {
-        nlp = nlp.option_int(name, v);
+        if !crate::translate::convex_only_option(name) {
+            nlp = nlp.option_int(name, v);
+        }
     }
     for (name, v) in opts.str_opts() {
         nlp = nlp.option_str(name, v);
@@ -165,7 +181,9 @@ fn run_builder(
         };
     }
 
-    let sol = nlp.solve();
+    let sol = nlp
+        .try_solve()
+        .map_err(|error| SolverError::Backend(format!("pounce builder: {error}")))?;
 
     let termination = map_status(sol.status);
     let raw_log = (opts.universal.verbose == Some(true))

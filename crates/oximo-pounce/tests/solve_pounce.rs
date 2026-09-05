@@ -293,7 +293,7 @@ fn verbose_captures_raw_log() {
 }
 
 #[test]
-fn time_limit_routes_auto_to_nlp_and_rejects_forced_convex() {
+fn time_limit_is_honored_by_automatic_and_forced_convex_routes() {
     let m = Model::new("time_limited_lp");
     variable!(m, 0.0 <= x <= 10.0);
     objective!(m, Min, x);
@@ -307,10 +307,10 @@ fn time_limit_routes_auto_to_nlp_and_rejects_forced_convex() {
                 .print_level(0),
         )
         .unwrap();
-    assert!(automatic.has_solution(), "automatic NLP route failed: {:?}", automatic.termination);
+    assert!(automatic.has_solution(), "automatic convex route failed: {:?}", automatic.termination);
     assert!(
-        automatic.raw_log.as_deref().is_some_and(|log| !log.contains("POUNCE convex route")),
-        "a time-limited automatic solve must use the NLP route"
+        automatic.raw_log.as_deref().is_some_and(|log| log.contains("POUNCE convex route")),
+        "a time-limited automatic solve should retain the convex route"
     );
 
     let forced = Pounce
@@ -320,11 +320,8 @@ fn time_limit_routes_auto_to_nlp_and_rejects_forced_convex() {
                 .solver_selection(PounceSolverSelection::QpIpm)
                 .time_limit(Duration::from_secs(1)),
         )
-        .unwrap_err();
-    assert!(
-        matches!(forced, SolverError::Backend(ref message) if message.contains("cannot honor a time limit")),
-        "unexpected forced-route error: {forced:?}"
-    );
+        .unwrap();
+    assert!(forced.has_solution(), "forced convex route failed: {:?}", forced.termination);
 }
 
 #[test]
@@ -332,15 +329,38 @@ fn verbose_builder_path_logs_exit_status() {
     let m = Model::new("logged_builder");
     variable!(m, -10.0 <= x <= 10.0, initial = -1.2);
     variable!(m, -10.0 <= y <= 10.0, initial = 1.0);
+    constraint!(m, exp_cap, x.exp() <= 10.0);
     objective!(m, Min, (1.0 - x).powi(2) + 100.0 * (y - x.powi(2)).powi(2));
 
-    let mut opts = PounceOptions::default().print_level(0);
+    let mut opts = PounceOptions::default().print_level(0).presolve(true).presolve_fbbt(true);
     opts.universal.verbose = Some(true);
     let res = Pounce.solve(&m, &opts).unwrap();
     let log = res.raw_log.expect("verbose solve should capture a log");
     assert!(log.contains("KKT error above row noise:"), "log has noise-aware KKT error: {log}");
     assert!(log.contains("Iteration history:"), "log has iteration history: {log}");
     assert!(log.contains("EXIT:"), "log has the exit status: {log}");
+}
+
+#[cfg(not(feature = "enzyme"))]
+#[test]
+fn invalid_generated_fbbt_tape_is_returned_as_a_solver_error() {
+    let m = Model::new("invalid_fbbt_tape");
+    param!(m, offset = 0.0);
+    variable!(m, -2.0 <= x <= 2.0, initial = 0.0);
+    constraint!(m, nonlinear, offset + x.exp() <= 10.0);
+    objective!(m, Min, x.powi(2));
+    offset.set_param_value(f64::NAN);
+
+    let options = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::Nlp)
+        .presolve(true)
+        .presolve_fbbt(true)
+        .print_level(0);
+    let error = Pounce.solve(&m, &options).unwrap_err();
+    assert!(
+        matches!(&error, SolverError::Backend(message) if message.contains("invalid FBBT tape")),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -621,11 +641,13 @@ fn forced_routes_reject_incompatible_models() {
     for options in [
         PounceOptions::default().solver_selection(PounceSolverSelection::Nlp),
         PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp),
-        PounceOptions::default().time_limit(Duration::from_secs(1)),
     ] {
         let error = Pounce.solve(&soc, &options).unwrap_err();
         assert!(matches!(error, SolverError::Backend(_)), "{error:?}");
     }
+    let timed =
+        Pounce.solve(&soc, &PounceOptions::default().time_limit(Duration::from_secs(1))).unwrap();
+    assert!(timed.has_solution(), "automatic SOC route failed: {:?}", timed.termination);
 }
 
 #[test]
@@ -710,7 +732,8 @@ fn convex_options_validate_and_apply_to_each_qp_engine() {
         .qp_infeas_tol(1e-7)
         .qp_hsde(false)
         .qp_equilibrate(false)
-        .qp_crossover(false);
+        .qp_crossover(false)
+        .qp_gondzio_corr(2);
     assert!(Pounce.solve(&m, &ipm).unwrap().has_solution());
 
     let active = PounceOptions::default()
@@ -722,7 +745,8 @@ fn convex_options_validate_and_apply_to_each_qp_engine() {
         .sqp_qp_use_schur_updates(false)
         .sqp_qp_use_homotopy(false)
         .sqp_qp_max_schur_updates_before_refactor(2)
-        .sqp_qp_anti_cycling("bland");
+        .sqp_qp_anti_cycling("bland")
+        .sqp_qp_certify_second_order(true);
     assert!(Pounce.solve(&m, &active).unwrap().has_solution());
     assert!(Pounce.persistent().solve(&m, &active).unwrap().has_solution());
 
