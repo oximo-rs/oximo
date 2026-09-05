@@ -685,6 +685,14 @@ mod retry_tests {
     }
 
     #[test]
+    fn apply_options_skips_convex_only_integer_options_on_the_nlp_path() {
+        let mut app = pounce_rs::IpoptApplication::new();
+        app.initialize().unwrap();
+        let opts = PounceOptions::default().qp_gondzio_corr(3).sqp_qp_max_iter(12);
+        apply_options(app.options_mut(), &opts, false).unwrap();
+    }
+
+    #[test]
     fn assemble_preserves_explicit_dual_status_for_partial_and_limit_points() {
         for (termination, raw_status) in [
             (TerminationStatus::Feasible, "OptimalInaccurate"),

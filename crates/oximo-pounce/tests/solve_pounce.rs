@@ -381,6 +381,20 @@ fn active_set_sqp_solves_a_qp() {
 }
 
 #[test]
+fn persistent_active_set_sqp_warm_starts_the_tnlp_path() {
+    let m = Model::new("active_set_warm_tnlp");
+    variable!(m, -5.0 <= x <= 5.0, initial = 0.0);
+    objective!(m, Min, (x - 2.0).powi(2));
+
+    let opts = PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp);
+    let mut solver = Pounce.persistent();
+    assert!(solver.solve(&m, &opts).unwrap().has_solution());
+    let warm = solver.solve(&m, &opts).unwrap();
+    assert!(warm.has_solution());
+    assert_close(warm.value_of(x).unwrap(), 2.0, 1e-4, "warm x");
+}
+
+#[test]
 fn active_set_sqp_does_not_run_interior_point_infeasibility_retries() {
     let m = Model::new("active_set_infeasible");
     variable!(m, -2.0 <= x <= 2.0, initial = 0.0);

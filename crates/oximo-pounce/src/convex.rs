@@ -823,6 +823,7 @@ impl ActivePersistent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oximo_core::{Model, constraint, objective, variable};
 
     #[test]
     fn relaxation_uses_distinct_variable_and_scale_relative_row_formulas() {
@@ -836,5 +837,89 @@ mod tests {
         ] {
             assert!((actual - expected).abs() <= expected * f64::EPSILON);
         }
+
+        for invalid in [
+            PounceOptions::default(),
+            PounceOptions::default().bound_relax_factor(0.0),
+            PounceOptions::default().bound_relax_factor(-1.0),
+            PounceOptions::default().bound_relax_factor(f64::NAN),
+        ] {
+            assert!(variable_relaxation_delta(1.0, &invalid).abs() <= f64::EPSILON);
+            assert!(row_relaxation_delta(1.0, &invalid).abs() <= f64::EPSILON);
+        }
+        assert!(variable_relaxation_delta(f64::INFINITY, &opts).abs() <= f64::EPSILON);
+        assert!(row_relaxation_delta(f64::NEG_INFINITY, &opts).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn build_problem_applies_relaxations_to_variables_and_rows() {
+        let model = Model::new("relaxed_problem");
+        variable!(model, -2.0 <= x <= 3.0);
+        constraint!(model, band, -4.0 <= x <= 5.0);
+        objective!(model, Min, x.powi(2));
+
+        let opts = PounceOptions::default().bound_relax_factor(0.1).constr_viol_tol(0.2);
+        let problem = build_problem(&model, &opts).unwrap();
+
+        assert_eq!(problem.qp.lb, [-2.2]);
+        assert_eq!(problem.qp.ub, [3.2]);
+        assert_eq!(problem.qp.h, [5.2, 4.2]);
+    }
+
+    #[test]
+    fn convex_options_translate_and_validate_new_controls() {
+        let opts = PounceOptions::default()
+            .tol(1e-7)
+            .max_iter(17)
+            .qp_tau(0.2)
+            .qp_tau_max(0.8)
+            .qp_reg(1e-9)
+            .qp_infeas_tol(1e-6)
+            .qp_hsde(true)
+            .qp_equilibrate(false)
+            .qp_crossover(false)
+            .qp_gondzio_corr(3)
+            .sqp_qp_certify_second_order(true);
+        let qp = qp_options(&opts);
+        assert!((qp.tol - 1e-7).abs() <= f64::EPSILON);
+        assert_eq!(qp.max_iter, 17);
+        assert_eq!(qp.gondzio_max_corr, 3);
+        assert!(qp.use_hsde);
+        assert!(!qp.equilibrate);
+        assert!(!qp.crossover);
+
+        let active = active_set_options(&opts);
+        assert_eq!(active.certify_second_order, Some(true));
+
+        assert!(
+            validate_convex_options(&PounceOptions::default().set("qp_gondzio_corr", "3")).is_err()
+        );
+        assert!(
+            validate_convex_options(&PounceOptions::default().set("qp_gondzio_corr", -1)).is_err()
+        );
+        validate_convex_options(&opts).unwrap();
+    }
+
+    #[test]
+    fn outcome_maps_qp_time_limit() {
+        let model = Model::new("time_limit_outcome");
+        variable!(model, x >= 0.0);
+        objective!(model, Min, x);
+        let problem = build_problem(&model, &PounceOptions::default()).unwrap();
+        let solution = QpSolution {
+            status: QpStatus::TimeLimit,
+            x: vec![1.0],
+            y: Vec::new(),
+            z: Vec::new(),
+            z_lb: vec![0.0],
+            z_ub: vec![0.0],
+            obj: 1.0,
+            iters: 2,
+            iterates: Vec::new(),
+        };
+
+        let result = outcome(&problem, &PounceOptions::default(), Route::QpIpm, &solution);
+        assert_eq!(result.termination, TerminationStatus::TimeLimit);
+        assert_eq!(result.iterations, 2);
     }
 }

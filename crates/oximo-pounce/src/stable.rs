@@ -183,15 +183,7 @@ fn run_builder(
         };
     }
 
-    let sol = nlp.try_solve().map_err(|error| {
-        let message = match error {
-            invalid @ NlpError::InvalidFbbtTape { .. } => {
-                format!("{GENERATED_FBBT_TAPE_REJECTED}: {invalid}")
-            }
-            other => format!("pounce builder: {other}"),
-        };
-        SolverError::Backend(message)
-    })?;
+    let sol = nlp.try_solve().map_err(map_builder_error)?;
 
     let termination = map_status(sol.status);
     let raw_log = (opts.universal.verbose == Some(true))
@@ -222,4 +214,39 @@ fn run_builder(
         warm,
         raw_log,
     })
+}
+
+fn map_builder_error(error: NlpError) -> SolverError {
+    let message = match error {
+        invalid @ NlpError::InvalidFbbtTape { .. } => {
+            format!("{GENERATED_FBBT_TAPE_REJECTED}: {invalid}")
+        }
+        other => format!("pounce builder: {other}"),
+    };
+    SolverError::Backend(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_errors_distinguish_invalid_fbbt_from_other_setup_errors() {
+        let invalid = map_builder_error(NlpError::InvalidFbbtTape {
+            constraint: 2,
+            reason: "last slot is not reachable".into(),
+        });
+        assert!(matches!(
+            invalid,
+            SolverError::Backend(message)
+                if message.contains("oximo-pounce: generated FBBT tape rejected")
+                    && message.contains("constraint 2")
+        ));
+
+        let other = map_builder_error(NlpError::UnknownVariableCount);
+        assert!(matches!(
+            other,
+            SolverError::Backend(message) if message.starts_with("pounce builder:")
+        ));
+    }
 }

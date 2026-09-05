@@ -153,7 +153,7 @@ fn push(ops: &mut Vec<FbbtOp>, op: FbbtOp) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oximo_core::{Model, constraint, objective, variable};
+    use oximo_core::{Model, constraint, objective, param, variable};
 
     #[test]
     fn emits_valid_tape_for_quadratic_constraint() {
@@ -164,5 +164,64 @@ mod tests {
         let tape = constraint_tapes(&model).remove(0).unwrap();
         assert_eq!(tape.first_invalid_slot(), None);
         assert!(tape.ops.iter().any(|op| matches!(op, FbbtOp::Mul(..) | FbbtOp::PowInt(..))));
+    }
+
+    #[test]
+    fn emits_supported_nodes_and_opaque_powers() {
+        let model = Model::new("fbbt_nodes");
+        param!(model, exponent = 3.0);
+        variable!(model, -2.0 <= x <= 2.0);
+        variable!(model, -2.0 <= y <= 2.0);
+
+        let constant = model.__constant(4.0);
+        let arena = model.arena();
+        let constant_tape = tape_for(&arena, &model, constant.id);
+        assert!(matches!(constant_tape.ops.as_slice(), [FbbtOp::Const(4.0)]));
+
+        let shared = x.sin();
+        constraint!(model, unary, -shared + x.cos() + x.exp() + x.log() + x.abs() <= 100.0);
+        constraint!(model, division, x.sin() / (y + 1.0) <= 100.0);
+        constraint!(model, square_root, x.powf(0.5) <= 100.0);
+        constraint!(model, integer_power, x.powi(3) <= 100.0);
+        constraint!(model, parameter_power, x.pow(exponent) <= 100.0);
+        constraint!(model, variable_power, x.pow(y) <= 100.0);
+        constraint!(model, linear, 2.0 * x + 3.0 * y + 1.0 <= 100.0);
+        constraint!(model, constant, model.__constant(1.0) <= 2.0);
+
+        let tapes = constraint_tapes(&model);
+        assert_eq!(tapes.len(), 8);
+        let ops = tapes.into_iter().flatten().flat_map(|tape| tape.ops).collect::<Vec<_>>();
+
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Neg(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Sin(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Cos(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Exp(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Ln(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Abs(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Div(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Sqrt(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::PowInt(_, 3))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Opaque)));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Add(..))));
+        assert!(ops.iter().any(|op| matches!(op, FbbtOp::Mul(..))));
+    }
+
+    #[test]
+    fn memoizes_reused_expression_slots() {
+        let model = Model::new("fbbt_memo");
+        variable!(model, -2.0 <= x <= 2.0);
+        let shared = x.sin();
+        constraint!(model, reused, shared + shared <= 1.0);
+
+        let tape = constraint_tapes(&model).remove(0).unwrap();
+        let sin_slot = tape.ops.iter().position(|op| matches!(op, FbbtOp::Sin(..))).unwrap();
+        assert_eq!(tape.ops.iter().filter(|op| matches!(op, FbbtOp::Sin(..))).count(), 1);
+        assert_eq!(
+            tape.ops
+                .iter()
+                .filter(|op| matches!(op, FbbtOp::Add(left, right) if *left == sin_slot || *right == sin_slot))
+                .count(),
+            2
+        );
     }
 }
