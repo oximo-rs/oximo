@@ -41,6 +41,8 @@ pub use set::{
     Axis, FromIndexKey, FromIndexKeyRef, IndexKey, IndexKeyRef, IndexTuple, KeyCat, ScalarKey, Set,
     SetIter,
 };
+#[doc(hidden)]
+pub use soc::__detect_soc_from_quadratic;
 pub use soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;

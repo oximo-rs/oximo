@@ -10,7 +10,11 @@ fn detect_first(m: &Model) -> Option<SocForm> {
     let vars = m.variables();
     let model_constraints = m.constraints();
     let constraints = model_constraints.algebraic();
-    detect_soc(&arena, &vars, &constraints[0])
+    let form = detect_soc(&arena, &vars, &constraints[0]);
+    let reused = oximo_expr::extract_quadratic(&arena, constraints[0].lhs)
+        .and_then(|q| oximo_core::__detect_soc_from_quadratic(&vars, &constraints[0], &q));
+    assert_eq!(format!("{form:?}"), format!("{reused:?}"));
+    form
 }
 
 #[test]

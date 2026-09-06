@@ -44,16 +44,11 @@ pub struct SocForm {
 
 /// Extract and validate the diagonal quadratic form shared by SOC recognition
 /// and model-kind inference.
-fn soc_quadratic(
-    arena: &ExprArena,
-    vars: &[Variable],
-    c: &Constraint,
-) -> Option<(QuadraticTerms, VarId, f64)> {
+fn soc_quadratic(vars: &[Variable], c: &Constraint, q: &QuadraticTerms) -> Option<(VarId, f64)> {
     let (sense, rhs) = c.as_single()?;
     if sense != Sense::Le {
         return None;
     }
-    let q = extract_quadratic(arena, c.lhs)?;
     if !q.linear.is_empty() || q.constant - rhs != 0.0 {
         return None;
     }
@@ -78,7 +73,7 @@ fn soc_quadratic(
     if positives == 0 || vars[t.index()].lb < 0.0 {
         return None;
     }
-    Some((q, t, n))
+    Some((t, n))
 }
 
 /// Whether an algebraic constraint has the supported detected-SOC shape.
@@ -87,7 +82,10 @@ fn soc_quadratic(
 /// inference only needs this predicate and can avoid allocating one
 /// `LinearTerms` coefficient vector per cone member.
 pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> bool {
-    soc_quadratic(arena, vars, c).is_some()
+    if !matches!(c.as_single(), Some((Sense::Le, _))) {
+        return false;
+    }
+    extract_quadratic(arena, c.lhs).is_some_and(|q| soc_quadratic(vars, c, &q).is_some())
 }
 
 // TODO: Here we are deliberately conservative and purely structural
@@ -106,11 +104,26 @@ pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constrai
 /// `|| sqrt(p_i/n) x_i ||_2 <= t`. Cross-term (Cholesky-factorized) quadratic
 /// forms are not detected, they classify as QCP instead.
 pub fn detect_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> Option<SocForm> {
-    let (q, t, n) = soc_quadratic(arena, vars, c)?;
+    if !matches!(c.as_single(), Some((Sense::Le, _))) {
+        return None;
+    }
+    let q = extract_quadratic(arena, c.lhs)?;
+    __detect_soc_from_quadratic(vars, c, &q)
+}
+
+/// Backend hook for recognizing a row that has already been decomposed.
+/// `q` must describe `c.lhs` at the current parameter values.
+#[doc(hidden)]
+pub fn __detect_soc_from_quadratic(
+    vars: &[Variable],
+    c: &Constraint,
+    q: &QuadraticTerms,
+) -> Option<SocForm> {
+    let (t, n) = soc_quadratic(vars, c, q)?;
     let terms = q
         .hessian
-        .into_iter()
-        .filter_map(|(row, _, h)| {
+        .iter()
+        .filter_map(|&(row, _, h)| {
             let coef = h / 2.0;
             (coef > 0.0).then(|| LinearTerms {
                 coeffs: vec![(row, (coef / n).sqrt())].into(),
