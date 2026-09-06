@@ -32,3 +32,8 @@ workspace = true
 [[bench]]
 name = "indexed_ranges"
 harness = false
+
+[[bench]]
+name = "construction"
+harness = false
+required-features = ["benchmark-support"]
