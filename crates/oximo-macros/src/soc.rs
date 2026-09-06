@@ -7,7 +7,7 @@ use proc_macro2::{Delimiter, Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::Expr;
 
-use crate::bind::{family_closure_param, filtered_set};
+use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
 use crate::constraint::computed_name;
 use crate::{
     Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas,
@@ -57,13 +57,14 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 )),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
+                    let used = mark_bindings_used(&binds);
                     let set = build_set(&binds, &root)?;
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
                     Ok(quote! {
                         (#model).__add_soc_constraints_over(
                             #name_str,
                             &(#set),
-                            |#param| ([#(#terms),*], #bound),
+                            |#param| { #used ([#(#terms),*], #bound) },
                         );
                     })
                 }

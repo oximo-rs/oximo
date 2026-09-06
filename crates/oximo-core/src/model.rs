@@ -10,10 +10,15 @@ use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
-use crate::constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
+use crate::constraint::{
+    Constraint, ConstraintExpr, ConstraintId, IntoRhs, RangeConstraintIds, Relate, Sense,
+};
 use crate::domain::Domain;
 use crate::error::{Error, Result};
-use crate::indexed::{IndexedFamily, IndexedParam, IndexedVar, build_storage};
+use crate::indexed::{
+    IndexedConstraint, IndexedFamily, IndexedParam, IndexedRangeConstraint, IndexedVar,
+    build_storage,
+};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::reformulation::SosReformulationArtifacts;
@@ -102,12 +107,18 @@ impl PendingConstraint {
     }
 }
 
+#[derive(Debug)]
+struct PendingRangeBatch {
+    rows: Vec<PendingConstraint>,
+    row_counts: Vec<u8>,
+}
+
 fn prepare_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
     name: String,
     mid: Expr<'a>,
     lo: B1,
     hi: B2,
-) -> Vec<PendingConstraint> {
+) -> (PendingConstraint, Option<PendingConstraint>) {
     if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
         && mid.__class() == ExprClass::Linear
     {
@@ -115,12 +126,12 @@ fn prepare_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
             !lower.is_nan() && !upper.is_nan(),
             "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
         );
-        vec![PendingConstraint { name: name.into(), lhs: mid.id, lower, upper }]
+        (PendingConstraint { name: name.into(), lhs: mid.id, lower, upper }, None)
     } else {
-        vec![
+        (
             PendingConstraint::from_expr(format!("{name}_lo").into(), mid.ge(lo)),
-            PendingConstraint::from_expr(format!("{name}_hi").into(), mid.le(hi)),
-        ]
+            Some(PendingConstraint::from_expr(format!("{name}_hi").into(), mid.le(hi))),
+        )
     }
 }
 
@@ -899,7 +910,7 @@ impl Model {
         id
     }
 
-    fn register_constraints_batch(&self, items: Vec<PendingConstraint>) {
+    fn register_constraints_batch(&self, items: Vec<PendingConstraint>) -> Vec<ConstraintId> {
         let mut names = self.constraint_names.borrow_mut();
         validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "constraint");
         let mut constraints = self.constraints.borrow_mut();
@@ -910,6 +921,7 @@ impl Model {
         }
         constraints.reserve(items.len());
         names.reserve(items.len());
+        let mut ids = Vec::with_capacity(items.len());
         for item in items {
             let id =
                 ConstraintId(u32::try_from(constraints.len()).expect("constraint count overflow"));
@@ -921,8 +933,10 @@ impl Model {
                 active: true,
             });
             names.insert(item.name, id);
+            ids.push(id);
         }
         self.cached_kind.set(None);
+        ids
     }
 
     /// A fresh unique auto-name `_c{n}`, skipping any a user already took.
@@ -974,12 +988,17 @@ impl Model {
     /// (any [`FromIndexKey`]: `i64`, `i32`, `usize`, `String`, raw `IndexKey`, or
     /// tuples up to arity 4). Not part of the stable public API.
     #[doc(hidden)]
-    pub fn __add_constraints_over<'a, K, F>(&'a self, name_prefix: &str, set: &Set<K>, rule: F)
+    pub fn __add_constraints_over<'a, K, F>(
+        &'a self,
+        name_prefix: &str,
+        set: &Set<K>,
+        rule: F,
+    ) -> IndexedConstraint<K>
     where
         K: FromIndexKey,
         F: Fn(K) -> ConstraintExpr<'a> + Send + Sync,
     {
-        self.add_constraints_over_with(name_prefix, set, &rule, None);
+        self.add_constraints_over_with(name_prefix, set, &rule, None)
     }
 
     fn add_constraints_over_with<'a, K, F>(
@@ -988,19 +1007,21 @@ impl Model {
         set: &Set<K>,
         rule: &F,
         forced_parallel: Option<bool>,
-    ) where
+    ) -> IndexedConstraint<K>
+    where
         K: FromIndexKey,
         F: Fn(K) -> ConstraintExpr<'a> + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_ALGEBRAIC_THRESHOLD) {
+            let mut ids = Vec::with_capacity(keys.len());
             for key in &keys {
                 let constraint = rule(K::from_index_key(key));
                 self.assert_expr_belongs(constraint.lhs);
                 let name: SmolStr = format_index_name(name_prefix, key).into();
-                self.__add_constraint(name, constraint);
+                ids.push(self.__add_constraint(name, constraint));
             }
-            return;
+            return IndexedConstraint::new(keys, set.axes(), ids);
         }
 
         let arena = &self.arena;
@@ -1042,7 +1063,8 @@ impl Model {
             pending.extend(fork.value);
         }
         drop(batch);
-        self.register_constraints_batch(pending);
+        let ids = self.register_constraints_batch(pending);
+        IndexedConstraint::new(keys, set.axes(), ids)
     }
 
     /// Macro-facing entry point for a two-sided range `lo <= mid <= hi`.
@@ -1051,33 +1073,56 @@ impl Model {
     /// bounds are pure constants and the body is linear (the condition under which
     /// one two-sided row is representable).
     #[doc(hidden)]
-    pub fn __add_range<'a, B1, B2>(&'a self, name: &str, mid: Expr<'a>, lo: B1, hi: B2)
+    pub fn __add_range<'a, B1, B2>(
+        &'a self,
+        name: &str,
+        mid: Expr<'a>,
+        lo: B1,
+        hi: B2,
+    ) -> RangeConstraintIds
     where
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
     {
         self.assert_expr_belongs(mid);
         if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
-            self.register_constraint(name.into(), mid.id, lower, upper);
+            RangeConstraintIds::Interval(self.register_constraint(
+                name.into(),
+                mid.id,
+                lower,
+                upper,
+            ))
         } else {
-            self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
-            self.__add_constraint(format!("{name}_hi"), mid.le(hi));
+            let lower = self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
+            let upper = self.__add_constraint(format!("{name}_hi"), mid.le(hi));
+            RangeConstraintIds::Split { lower, upper }
         }
     }
 
     /// Anonymous form of [`Self::__add_range`] (auto-named rows).
     #[doc(hidden)]
-    pub fn __add_range_auto<'a, B1, B2>(&'a self, mid: Expr<'a>, lo: B1, hi: B2)
+    pub fn __add_range_auto<'a, B1, B2>(
+        &'a self,
+        mid: Expr<'a>,
+        lo: B1,
+        hi: B2,
+    ) -> RangeConstraintIds
     where
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
     {
         self.assert_expr_belongs(mid);
         if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
-            self.register_constraint(self.next_auto_name(), mid.id, lower, upper);
+            RangeConstraintIds::Interval(self.register_constraint(
+                self.next_auto_name(),
+                mid.id,
+                lower,
+                upper,
+            ))
         } else {
-            self.__add_constraint_auto(mid.ge(lo));
-            self.__add_constraint_auto(mid.le(hi));
+            let lower = self.__add_constraint_auto(mid.ge(lo));
+            let upper = self.__add_constraint_auto(mid.le(hi));
+            RangeConstraintIds::Split { lower, upper }
         }
     }
 
@@ -1095,22 +1140,22 @@ impl Model {
         (classify(&self.arena.borrow(), mid) == ExprClass::Linear).then_some((lower, upper))
     }
 
-    /// Macro-facing entry point for a two-sided range family. One row per key,
-    /// each collapsing to a single interval constraint when both bounds are
-    /// constant (see [`Self::__add_range`]).
+    /// Macro-facing entry point for a two-sided range family. Each key maps to
+    /// one interval row or separate lower/upper rows (see [`Self::__add_range`]).
     #[doc(hidden)]
     pub fn __add_range_constraints_over<'a, K, B1, B2, F>(
         &'a self,
         name: &str,
         set: &Set<K>,
         rule: F,
-    ) where
+    ) -> IndexedRangeConstraint<K>
+    where
         K: FromIndexKey,
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
         F: Fn(K) -> (Expr<'a>, B1, B2) + Send + Sync,
     {
-        self.add_range_constraints_over_with(name, set, &rule, None);
+        self.add_range_constraints_over_with(name, set, &rule, None)
     }
 
     fn add_range_constraints_over_with<'a, K, B1, B2, F>(
@@ -1119,7 +1164,8 @@ impl Model {
         set: &Set<K>,
         rule: &F,
         forced_parallel: Option<bool>,
-    ) where
+    ) -> IndexedRangeConstraint<K>
+    where
         K: FromIndexKey,
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
@@ -1127,12 +1173,13 @@ impl Model {
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_RANGE_THRESHOLD) {
+            let mut ids = Vec::with_capacity(keys.len());
             for key in &keys {
                 let (mid, lo, hi) = rule(K::from_index_key(key));
                 self.assert_expr_belongs(mid);
-                self.__add_range(&format_index_name(name, key), mid, lo, hi);
+                ids.push(self.__add_range(&format_index_name(name, key), mid, lo, hi));
             }
-            return;
+            return IndexedRangeConstraint::new(keys, set.axes(), ids);
         }
 
         let arena = &self.arena;
@@ -1144,14 +1191,20 @@ impl Model {
             .par_chunks(chunk_size)
             .map(|chunk| {
                 arena.__with_fork(snapshot.clone(), || {
-                    chunk
-                        .iter()
-                        .flat_map(|key| {
-                            let (mid, lo, hi) = rule(K::from_index_key(key));
-                            assert_expr_arena(mid, expected_arena);
-                            prepare_range(format_index_name(name, key), mid, lo, hi)
-                        })
-                        .collect::<Vec<_>>()
+                    let mut prepared = PendingRangeBatch {
+                        rows: Vec::with_capacity(chunk.len()),
+                        row_counts: Vec::with_capacity(chunk.len()),
+                    };
+                    for key in chunk {
+                        let (mid, lo, hi) = rule(K::from_index_key(key));
+                        assert_expr_arena(mid, expected_arena);
+                        let (first, upper) =
+                            prepare_range(format_index_name(name, key), mid, lo, hi);
+                        prepared.row_counts.push(if upper.is_some() { 2 } else { 1 });
+                        prepared.rows.push(first);
+                        prepared.rows.extend(upper);
+                    }
+                    prepared
                 })
             })
             .collect();
@@ -1160,20 +1213,38 @@ impl Model {
             let existing = self.constraint_names.borrow();
             validate_batch_names(
                 &existing,
-                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                forks.iter().flat_map(|fork| fork.value.rows.iter().map(|item| item.name.clone())),
                 "constraint",
             );
         }
         let remaps = batch.merge(&mut forks);
-        let mut pending = Vec::with_capacity(keys.len().saturating_mul(2));
+        let row_count = forks.iter().map(|fork| fork.value.rows.len()).sum();
+        let mut pending = Vec::with_capacity(row_count);
+        let mut row_counts = Vec::with_capacity(keys.len());
         for (mut fork, remap) in forks.into_iter().zip(remaps) {
-            for item in &mut fork.value {
+            for item in &mut fork.value.rows {
                 item.remap(remap);
             }
-            pending.extend(fork.value);
+            row_counts.extend(fork.value.row_counts);
+            pending.extend(fork.value.rows);
         }
         drop(batch);
-        self.register_constraints_batch(pending);
+        let mut ids = self.register_constraints_batch(pending).into_iter();
+        let groups = row_counts
+            .into_iter()
+            .map(|count| {
+                let first = ids.next().expect("range row ID missing");
+                match count {
+                    1 => RangeConstraintIds::Interval(first),
+                    2 => RangeConstraintIds::Split {
+                        lower: first,
+                        upper: ids.next().expect("upper range row ID missing"),
+                    },
+                    _ => unreachable!("range must lower to one or two rows"),
+                }
+            })
+            .collect();
+        IndexedRangeConstraint::new(keys, set.axes(), groups)
     }
 
     /// Unified view of every algebraic, explicit SOC, and SOS constraint
@@ -2437,6 +2508,62 @@ mod tests {
     }
 
     #[test]
+    fn indexed_constraint_handles_match_in_serial_and_parallel() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Handles {
+            ordinary: Vec<(usize, ConstraintId)>,
+            ranges: Vec<(usize, RangeConstraintIds)>,
+        }
+
+        fn build(parallel: bool, keys: &Set<usize>) -> Handles {
+            let model = Model::new("family_id_parity");
+            let x = model.__var("x").build();
+            model.__add_constraint("prior", x.ge(0.0));
+            let ordinary =
+                model.add_constraints_over_with("c", keys, &|_| x.le(5.0), Some(parallel));
+            let ranges = model.add_range_constraints_over_with(
+                "r",
+                keys,
+                &|i| (if i % 2 == 0 { x + 1.0 } else { x.powi(2) }, 0.0, 10.0),
+                Some(parallel),
+            );
+            for (key, id) in ordinary.iter() {
+                assert_eq!(ordinary.get(key), Some(id));
+                assert_eq!(model.constraint_id(&format!("c[{key}]")), Some(id));
+            }
+            for (key, ids) in ranges.iter() {
+                assert_eq!(ranges.get(key), Some(ids));
+                match ids {
+                    RangeConstraintIds::Interval(id) => {
+                        assert_eq!(model.constraint_id(&format!("r[{key}]")), Some(id));
+                        let row = &model.constraints.borrow()[id.index()];
+                        assert_eq!((row.lower, row.upper), (0.0, 10.0));
+                        assert_eq!(classify(&model.arena(), row.lhs), ExprClass::Linear);
+                    }
+                    RangeConstraintIds::Split { lower, upper } => {
+                        assert_eq!(model.constraint_id(&format!("r[{key}]_lo")), Some(lower));
+                        assert_eq!(model.constraint_id(&format!("r[{key}]_hi")), Some(upper));
+                        let rows = model.constraints.borrow();
+                        assert_eq!(rows[lower.index()].lower.to_bits(), 0.0_f64.to_bits());
+                        assert_eq!(rows[upper.index()].upper.to_bits(), 10.0_f64.to_bits());
+                        assert_eq!(
+                            classify(&model.arena(), rows[lower.index()].lhs),
+                            ExprClass::Quadratic
+                        );
+                    }
+                }
+            }
+            Handles { ordinary: ordinary.iter().collect(), ranges: ranges.iter().collect() }
+        }
+
+        rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(|| {
+            for keys in [Set::range(3..1030), Set::from_ints([8, 1, 6, 3, 4])] {
+                assert_eq!(build(false, &keys), build(true, &keys));
+            }
+        });
+    }
+
+    #[test]
     fn indexed_build_forced_parallel_matches_serial_for_every_family() {
         #[derive(Debug, PartialEq)]
         struct Digest {
@@ -2560,6 +2687,39 @@ mod tests {
 
         model.__add_constraint("after", x.le(2.0));
         assert_eq!(model.constraint_id("after"), Some(ConstraintId(0)));
+    }
+
+    #[test]
+    fn parallel_range_failure_does_not_mutate_model_or_arena() {
+        for duplicate_name in [false, true] {
+            let model = Model::new("range_batch_atomicity");
+            let x = model.__var("x").build();
+            let prior = model.__add_constraint("r[17]_hi", x.le(2.0));
+            let arena_len = model.arena().len();
+            let keys = Set::range(0..128usize);
+            let rule = |i: usize| {
+                let body = if i.is_multiple_of(2) { x + 1.0 } else { x.powi(2) };
+                assert!(duplicate_name || i != 17, "deliberate range callback panic");
+                (body, 0.0, 10.0)
+            };
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                model.add_range_constraints_over_with("r", &keys, &rule, Some(true));
+            }));
+            assert!(result.is_err());
+            assert_eq!(model.num_constraints(), 1);
+            assert_eq!(model.constraint_id("r[17]_hi"), Some(prior));
+            assert_eq!(model.arena().len(), arena_len);
+
+            // The failed batch must also release the arena for subsequent builds.
+            let family = model.add_range_constraints_over_with(
+                "after",
+                &keys,
+                &|_| (x, 0.0, 1.0),
+                Some(true),
+            );
+            assert_eq!(family.get(0), Some(RangeConstraintIds::Interval(ConstraintId(1))));
+            assert_eq!(model.num_constraints(), 129);
+        }
     }
 
     #[test]

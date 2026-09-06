@@ -22,11 +22,13 @@ pub mod sos;
 pub mod sum;
 pub mod var;
 
-pub use constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
+pub use constraint::{
+    Constraint, ConstraintExpr, ConstraintId, IntoRhs, RangeConstraintIds, Relate, Sense,
+};
 pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay, SosDisplay};
 pub use domain::Domain;
 pub use error::{Error, Result};
-pub use indexed::{IndexedParam, IndexedVar};
+pub use indexed::{IndexedConstraint, IndexedParam, IndexedRangeConstraint, IndexedVar};
 pub use model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
 };

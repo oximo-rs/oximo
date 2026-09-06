@@ -51,6 +51,11 @@ pub fn variable(input: TokenStream) -> TokenStream {
 
 /// `constraint!(model, [name|name[idx]], lhs <op> rhs)`, register a constraint,
 /// an auto-named anonymous constraint, or an indexed family of constraints.
+///
+/// Single relations return `ConstraintId` for scalars and `IndexedConstraint<K>`
+/// for families. Two-sided ranges return `RangeConstraintIds` for scalars and
+/// `IndexedRangeConstraint<K>` for families. Bind a result explicitly with
+/// `let handle = constraint!(...)` to query the registered rows.
 #[proc_macro]
 pub fn constraint(input: TokenStream) -> TokenStream {
     constraint::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()

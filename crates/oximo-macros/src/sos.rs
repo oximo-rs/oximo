@@ -2,7 +2,7 @@ use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
 use syn::Expr;
 
-use crate::bind::{family_closure_param, filtered_set};
+use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
 use crate::constraint::computed_name;
 use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
 
@@ -62,6 +62,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         }),
         Some(binds) => {
             let param = family_closure_param(&binds);
+            let used = mark_bindings_used(&binds);
             let set = build_set(&binds, &root)?;
             let set = filtered_set(set, &binds, cond.as_ref(), &root);
             Ok(match &members {
@@ -70,7 +71,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                         #name_str,
                         &(#set),
                         #sos_type,
-                        |#param| [#(#members),*],
+                        |#param| { #used [#(#members),*] },
                     );
                 },
                 Members::Auto(members) => quote! {
@@ -78,7 +79,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                         #name_str,
                         &(#set),
                         #sos_type,
-                        |#param| [#(#members),*],
+                        |#param| { #used [#(#members),*] },
                     );
                 },
             })
