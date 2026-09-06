@@ -28,3 +28,7 @@ oximo-expr.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "indexed_ranges"
+harness = false
