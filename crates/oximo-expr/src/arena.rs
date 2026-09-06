@@ -661,15 +661,13 @@ impl ExprArenaBatchGuard<'_> {
             drop(std::mem::take(&mut fork.base));
         }
 
-        let mut staged = Vec::with_capacity(additional);
+        self.arena.__reserve_nodes(additional);
         for (fork, remap) in forks.iter_mut().zip(&remaps) {
             for node in &mut fork.nodes {
                 remap_node(node, *remap);
             }
-            staged.append(&mut fork.nodes);
+            self.arena.__append_nodes(std::mem::take(&mut fork.nodes));
         }
-        self.arena.__reserve_nodes(additional);
-        self.arena.__append_nodes(staged);
         remaps
     }
 }
@@ -790,6 +788,22 @@ mod tests {
         assert_eq!(Arc::as_ptr(&batch.arena.nodes), nodes);
         assert_eq!(remaps[0].local_base, 0);
         assert_eq!(remaps[0].local_len, 1);
+    }
+
+    #[test]
+    fn invalid_later_fork_does_not_append_earlier_nodes() {
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let mut batch = cell.__begin_batch();
+        let snapshot = batch.snapshot();
+        let mut forks = vec![
+            cell.__with_fork(snapshot.clone(), || Expr::constant(&cell, 1.0)),
+            cell.__with_fork(snapshot, || Expr::constant(&cell, 2.0)),
+        ];
+        forks[1].nodes.push(ExprNode::Neg(ExprId(u32::MAX)));
+        assert!(catch_unwind(AssertUnwindSafe(|| batch.merge(&mut forks))).is_err());
+        assert_eq!(batch.arena.len(), 0);
+        assert_eq!(forks[0].nodes.len(), 1);
+        assert_eq!(forks[1].nodes.len(), 2);
     }
 
     #[test]

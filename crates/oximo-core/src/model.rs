@@ -53,21 +53,21 @@ fn assert_expr_arena(expr: Expr<'_>, expected: usize) {
     assert_eq!(arena_key(expr.arena), expected, "expression belongs to a different model");
 }
 
-fn validate_batch_names<V>(
+fn validate_batch_names<'a, V>(
     existing: &FxHashMap<SmolStr, V>,
-    names: impl IntoIterator<Item = SmolStr>,
+    names: impl IntoIterator<Item = &'a SmolStr>,
     kind: &str,
+    count: usize,
 ) {
-    let mut batch = FxHashSet::default();
+    let mut batch = FxHashSet::with_capacity_and_hasher(count, FxBuildHasher);
     for name in names {
-        assert!(!existing.contains_key(&name), "{kind} name {name:?} already registered");
-        assert!(batch.insert(name.clone()), "{kind} name {name:?} occurs more than once");
+        assert!(!existing.contains_key(name), "{kind} name {name:?} already registered");
+        assert!(batch.insert(name), "{kind} name {name:?} occurs more than once");
     }
 }
 
 #[derive(Debug)]
 struct PendingVar {
-    key: IndexKey,
     name: SmolStr,
     lb: f64,
     ub: f64,
@@ -75,7 +75,6 @@ struct PendingVar {
 
 #[derive(Debug)]
 struct PendingParam {
-    key: IndexKey,
     name: SmolStr,
     value: f64,
 }
@@ -480,7 +479,7 @@ impl Model {
 
     fn register_vars_batch<'a>(&'a self, items: &[PendingVar], domain: Domain) -> Vec<Expr<'a>> {
         let mut names = self.var_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "variable");
+        validate_batch_names(&names, items.iter().map(|item| &item.name), "variable", items.len());
         let mut vars = self.variables.borrow_mut();
         let final_count = vars.len().checked_add(items.len()).expect("variable count overflow");
         if final_count > 0 {
@@ -744,20 +743,19 @@ impl Model {
             return IndexedFamily { storage, _marker: PhantomData };
         }
         let prepare = |key: &IndexKey| PendingParam {
-            key: key.clone(),
             name: format_index_name(&base, key).into(),
             value: value(K::from_index_key(key)),
         };
         let prepared: Vec<_> = keys.par_iter().map(prepare).collect();
         let handles = self.register_params_batch(&prepared);
-        let keys = prepared.into_iter().map(|item| item.key).collect();
+        drop(prepared);
         let storage = build_storage(keys, axes, handles);
         IndexedFamily { storage, _marker: PhantomData }
     }
 
     fn register_params_batch<'a>(&'a self, items: &[PendingParam]) -> Vec<Expr<'a>> {
         let mut names = self.param_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "parameter");
+        validate_batch_names(&names, items.iter().map(|item| &item.name), "parameter", items.len());
         let mut params = self.parameters.borrow_mut();
         let mut arena = self.arena.borrow_mut();
         let final_count = params.len().checked_add(items.len()).expect("parameter count overflow");
@@ -910,9 +908,12 @@ impl Model {
         id
     }
 
-    fn register_constraints_batch(&self, items: Vec<PendingConstraint>) -> Vec<ConstraintId> {
+    // Call only after name preflight, with no intervening user callbacks.
+    fn register_prevalidated_constraints_batch(
+        &self,
+        items: Vec<PendingConstraint>,
+    ) -> Vec<ConstraintId> {
         let mut names = self.constraint_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "constraint");
         let mut constraints = self.constraints.borrow_mut();
         let final_count =
             constraints.len().checked_add(items.len()).expect("constraint count overflow");
@@ -1050,8 +1051,9 @@ impl Model {
             let existing = self.constraint_names.borrow();
             validate_batch_names(
                 &existing,
-                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| &item.name)),
                 "constraint",
+                keys.len(),
             );
         }
         let remaps = batch.merge(&mut forks);
@@ -1063,7 +1065,7 @@ impl Model {
             pending.extend(fork.value);
         }
         drop(batch);
-        let ids = self.register_constraints_batch(pending);
+        let ids = self.register_prevalidated_constraints_batch(pending);
         IndexedConstraint::new(keys, set.axes(), ids)
     }
 
@@ -1209,16 +1211,17 @@ impl Model {
             })
             .collect();
         drop(snapshot);
+        let row_count = forks.iter().map(|fork| fork.value.rows.len()).sum();
         {
             let existing = self.constraint_names.borrow();
             validate_batch_names(
                 &existing,
-                forks.iter().flat_map(|fork| fork.value.rows.iter().map(|item| item.name.clone())),
+                forks.iter().flat_map(|fork| fork.value.rows.iter().map(|item| &item.name)),
                 "constraint",
+                row_count,
             );
         }
         let remaps = batch.merge(&mut forks);
-        let row_count = forks.iter().map(|fork| fork.value.rows.len()).sum();
         let mut pending = Vec::with_capacity(row_count);
         let mut row_counts = Vec::with_capacity(keys.len());
         for (mut fork, remap) in forks.into_iter().zip(remaps) {
@@ -1229,7 +1232,7 @@ impl Model {
             pending.extend(fork.value.rows);
         }
         drop(batch);
-        let mut ids = self.register_constraints_batch(pending).into_iter();
+        let mut ids = self.register_prevalidated_constraints_batch(pending).into_iter();
         let groups = row_counts
             .into_iter()
             .map(|count| {
@@ -1319,9 +1322,9 @@ impl Model {
         id
     }
 
-    fn register_soc_batch(&self, items: Vec<PendingSoc>) {
+    // Call only after name preflight, with no intervening user callbacks.
+    fn register_prevalidated_soc_batch(&self, items: Vec<PendingSoc>) {
         let mut names = self.soc_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "SOC constraint");
         let mut constraints = self.soc_constraints.borrow_mut();
         let final_count =
             constraints.len().checked_add(items.len()).expect("SOC constraint count overflow");
@@ -1445,8 +1448,9 @@ impl Model {
             let existing = self.soc_names.borrow();
             validate_batch_names(
                 &existing,
-                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| &item.name)),
                 "SOC constraint",
+                keys.len(),
             );
         }
         let remaps = batch.merge(&mut forks);
@@ -1458,7 +1462,7 @@ impl Model {
             pending.extend(fork.value);
         }
         drop(batch);
-        self.register_soc_batch(pending);
+        self.register_prevalidated_soc_batch(pending);
     }
 
     /// Typed explicit-SOC registry for specialized backend passes.
@@ -1519,9 +1523,9 @@ impl Model {
         SosConstraintHandle { model: self, id }
     }
 
-    fn register_sos_batch(&self, sos_type: SosType, items: Vec<PendingSos>) {
+    // Call only after name preflight, with no intervening user callbacks.
+    fn register_prevalidated_sos_batch(&self, sos_type: SosType, items: Vec<PendingSos>) {
         let mut names = self.sos_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| item.name.clone()), "SOS constraint");
         let mut constraints = self.sos_constraints.borrow_mut();
         let final_count =
             constraints.len().checked_add(items.len()).expect("SOS constraint count overflow");
@@ -1597,14 +1601,15 @@ impl Model {
             let existing = self.sos_names.borrow();
             validate_batch_names(
                 &existing,
-                forks.iter().flat_map(|fork| fork.value.iter().map(|item| item.name.clone())),
+                forks.iter().flat_map(|fork| fork.value.iter().map(|item| &item.name)),
                 "SOS constraint",
+                keys.len(),
             );
         }
         // Valid SOS members contain only VarIds, so no expression-root remap is needed.
         drop(batch);
         let pending = forks.into_iter().flat_map(|fork| fork.value).collect();
-        self.register_sos_batch(sos_type, pending);
+        self.register_prevalidated_sos_batch(sos_type, pending);
     }
 
     /// Register an SOS1 or SOS2 constraint with consecutive positional
@@ -2084,14 +2089,13 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
         }
 
         let prepare = |key: &IndexKey| PendingVar {
-            key: key.clone(),
             name: format_index_name(&base_name, key).into(),
             lb: lb_by.as_ref().map_or(lb, |f| f(key)),
             ub: ub_by.as_ref().map_or(ub, |f| f(key)),
         };
         let prepared: Vec<_> = keys.par_iter().map(prepare).collect();
         let handles = model.register_vars_batch(&prepared, domain);
-        let keys = prepared.into_iter().map(|item| item.key).collect();
+        drop(prepared);
         let storage = build_storage(keys, axes, handles);
         IndexedFamily { storage, _marker: PhantomData }
     }

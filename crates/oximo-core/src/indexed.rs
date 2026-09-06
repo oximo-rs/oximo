@@ -305,6 +305,9 @@ pub(crate) fn build_storage<'a>(
 ) -> Storage<'a> {
     assert_eq!(keys.len(), values.len(), "indexed storage key/value length mismatch");
     if let Some(axes) = axes {
+        if keys.iter().enumerate().all(|(i, key)| grid_offset(&axes, key) == Some(i)) {
+            return Storage::Dense { data: values, keys, axes };
+        }
         let total = keys.len();
         let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
         let mut kept: Vec<Option<IndexKey>> = vec![None; total];
@@ -364,5 +367,29 @@ fn coords_to_key(coords: &[usize]) -> IndexKey {
         IndexKey::from(*single)
     } else {
         IndexKey::Tuple(coords.iter().map(|&c| IndexKey::from(c)).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Model;
+
+    #[test]
+    fn dense_storage_keeps_key_value_pairs_when_ordered_or_shuffled() {
+        let model = Model::new("storage_order");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        for (keys, values) in [
+            (vec![IndexKey::Int(-1), IndexKey::Int(0)], vec![x, y]),
+            (vec![IndexKey::Int(0), IndexKey::Int(-1)], vec![y, x]),
+        ] {
+            let storage = build_storage(keys, Some(Box::new([Axis { start: -1, len: 2 }])), values);
+            let Storage::Dense { data, keys, .. } = storage else {
+                panic!("expected dense storage")
+            };
+            assert_eq!(data.iter().map(|expr| expr.id).collect::<Vec<_>>(), [x.id, y.id]);
+            assert_eq!(keys, [IndexKey::Int(-1), IndexKey::Int(0)]);
+        }
     }
 }

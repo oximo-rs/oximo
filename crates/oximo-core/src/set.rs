@@ -854,16 +854,11 @@ impl<K> Set<K> {
     }
 
     pub fn par_iter(&self) -> impl ParallelIterator<Item = IndexKey> + '_ {
-        match &self.repr {
-            SetRepr::Range(v) => v.par_iter().map(|i| IndexKey::Int(*i)).collect::<Vec<_>>(),
-            SetRepr::Strings(v) => {
-                v.par_iter().map(|s| IndexKey::Str(s.clone())).collect::<Vec<_>>()
-            }
-            SetRepr::Tuples(v) => {
-                v.par_iter().map(|t| IndexKey::Tuple(t.clone())).collect::<Vec<_>>()
-            }
-        }
-        .into_par_iter()
+        (0..self.len()).into_par_iter().map(|i| match &self.repr {
+            SetRepr::Range(v) => IndexKey::Int(v[i]),
+            SetRepr::Strings(v) => IndexKey::Str(v[i].clone()),
+            SetRepr::Tuples(v) => IndexKey::Tuple(v[i].clone()),
+        })
     }
 }
 
@@ -875,6 +870,12 @@ pub struct SetIter<'a> {
 
 impl<'a> Iterator for SetIter<'a> {
     type Item = IndexKey;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.repr.len() - self.pos;
+        (remaining, Some(remaining))
+    }
+
     fn next(&mut self) -> Option<Self::Item> {
         let out = match self.repr {
             SetRepr::Range(v) => v.get(self.pos).copied().map(IndexKey::Int),

@@ -3,6 +3,29 @@
 use oximo_core::prelude::*;
 
 #[test]
+fn serial_and_parallel_iterators_preserve_keys_and_remaining_length() {
+    use rayon::prelude::*;
+
+    fn check<K>(set: &Set<K>) {
+        let mut iter = set.iter();
+        for remaining in (1..=set.len()).rev() {
+            assert_eq!(iter.size_hint(), (remaining, Some(remaining)));
+            assert!(iter.next().is_some());
+        }
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.size_hint(), (0, Some(0)));
+        assert_eq!(set.par_iter().collect::<Vec<_>>(), set.iter().collect::<Vec<_>>());
+    }
+
+    check(&Set::range(0..0));
+    check(&Set::range(-3..3));
+    check(&Set::strings(["a", "long_named_index_that_spills", "a"]));
+    check(&(&Set::range(0..3) * &Set::strings(["a", "b"])));
+    check(&Set::from_ints([7, 2, 7]));
+}
+
+#[test]
 fn range_set_iteration_order() {
     let s = Set::range(0..3);
     let keys: Vec<_> = s.iter().collect();
