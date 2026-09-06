@@ -190,6 +190,34 @@ constraint!(m, flow[i in 0..n, j in 0..m], x[i, j] >= 0.0);
 constraint!(m, diag[(i, j) in rc if i == j], x[i, j] <= 1.0);
 ```
 
+Capture the macro result to query rows without reconstructing their names:
+
+```rust
+use oximo_core::prelude::*;
+
+let m = Model::new("constraint_handles");
+variable!(m, x[i in 0..4] >= 0.0);
+let capacity: ConstraintId = constraint!(m, capacity, x[0] <= 10.0);
+let cover: IndexedConstraint<usize> =
+    constraint!(m, cover[i in 0..4 if i % 2 == 0], x[i] >= 1.0);
+assert!(cover.get(1).is_none()); // filtered out
+for (i, cid) in cover.iter() {
+    assert_eq!(cover.get(i), Some(cid));
+}
+
+let bands: IndexedRangeConstraint<usize> =
+    constraint!(m, bands[i in 0..4], 1.0 <= x[i] <= 4.0);
+let RangeConstraintIds::Interval(cid) = bands.get(0).unwrap() else {
+    panic!("constant bounds and a linear body produce an interval row");
+};
+```
+
+`get(key)` returns copied IDs; `iter()` yields typed `(K, ID)` pairs in domain
+order for dense, sparse, string, tuple, and filtered domains.
+
+Two-sided ranges return `RangeConstraintIds::Interval(cid)` or
+`RangeConstraintIds::Split { lower, upper }`.
+
 ### Summation
 
 `sum!(body for k in domain)` reads as `sum_{k in domain} body`. Nest with extra
