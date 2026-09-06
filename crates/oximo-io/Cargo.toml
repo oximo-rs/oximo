@@ -24,3 +24,7 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "lp_import"
+harness = false

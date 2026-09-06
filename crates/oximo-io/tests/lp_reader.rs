@@ -4,6 +4,39 @@ use oximo_core::prelude::*;
 use oximo_io::{IoError, read_lp, read_lp_file, to_lp_string};
 
 #[test]
+fn wide_rows_lower_to_linear_size_arenas() {
+    let expression = (0..10_000).map(|i| format!("x{i}")).collect::<Vec<_>>().join(" + ");
+    let input = format!("Minimize\n obj: {expression}\nSubject To\n c: {expression} <= 10\nEnd\n");
+    let model = read_lp(input.as_bytes()).unwrap();
+    assert_eq!(model.num_variables(), 10_000);
+    let arena = model.arena();
+    assert!(arena.len() < 20_010, "wide import retained intermediate prefix nodes");
+    let terms = oximo_expr::extract_linear(&arena, model.constraints().algebraic()[0].lhs).unwrap();
+    assert_eq!(terms.coeffs.len(), 10_000);
+    for (i, (v, c)) in terms.coeffs.iter().enumerate() {
+        assert_eq!(v.index(), i);
+        assert_eq!(c.to_bits(), 1.0_f64.to_bits());
+    }
+}
+
+#[test]
+fn flat_sum_preserves_subtraction_parentheses_and_variable_order() {
+    let model = read_lp(
+        b"Minimize\n obj: z - (x - 2 y) + 3 x - z + 7\nSubject To\n c: z + y - x <= 9\nEnd\n"
+            .as_slice(),
+    )
+    .unwrap();
+    let names: Vec<_> = model.variables().iter().map(|v| v.name.to_string()).collect();
+    assert_eq!(names, ["z", "y", "x"]);
+    let arena = model.arena();
+    let objective = model.try_objective().unwrap();
+    let terms = oximo_expr::extract_quadratic(&arena, objective.expr).unwrap();
+    assert!(terms.hessian.is_empty());
+    assert_eq!(terms.constant.to_bits(), 7.0_f64.to_bits());
+    assert_eq!(terms.linear, vec![(oximo_expr::VarId(1), 2.0), (oximo_expr::VarId(2), 2.0)]);
+}
+
+#[test]
 fn reads_milp_sections_bounds_and_comments() {
     let text = r"
 \* a comment *\

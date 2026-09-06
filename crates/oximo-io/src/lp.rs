@@ -49,8 +49,7 @@ pub fn read_lp_file(path: impl AsRef<Path>) -> Result<Model, IoError> {
 enum Ast {
     Const(f64),
     Var(String),
-    Add(Box<Ast>, Box<Ast>),
-    Sub(Box<Ast>, Box<Ast>),
+    Sum(Vec<(bool, Ast)>),
     Mul(Box<Ast>, Box<Ast>),
     Div(Box<Ast>, Box<Ast>),
     Neg(Box<Ast>),
@@ -231,7 +230,10 @@ impl ExprParser {
     }
 
     fn take(&mut self) -> Option<Token> {
-        let t = self.toks.get(self.pos).cloned();
+        let t = self.toks.get_mut(self.pos).map(|token| {
+            let column = token.column;
+            std::mem::replace(token, Token { kind: Tok::Number(0.0), column })
+        });
         self.pos += usize::from(t.is_some());
         t
     }
@@ -246,21 +248,16 @@ impl ExprParser {
     }
 
     fn sum(&mut self) -> Result<Ast, IoError> {
-        let mut lhs = self.product()?;
-        loop {
-            lhs = match self.peek() {
-                Some(Tok::Plus) => {
-                    self.take();
-                    Ast::Add(Box::new(lhs), Box::new(self.product()?))
-                }
-                Some(Tok::Minus) => {
-                    self.take();
-                    Ast::Sub(Box::new(lhs), Box::new(self.product()?))
-                }
-                _ => break,
-            };
+        let first = self.product()?;
+        if !matches!(self.peek(), Some(Tok::Plus | Tok::Minus)) {
+            return Ok(first);
         }
-        Ok(lhs)
+        let mut terms = vec![(false, first)];
+        while matches!(self.peek(), Some(Tok::Plus | Tok::Minus)) {
+            let negative = matches!(self.take().map(|t| t.kind), Some(Tok::Minus));
+            terms.push((negative, self.product()?));
+        }
+        Ok(Ast::Sum(terms))
     }
 
     fn product(&mut self) -> Result<Ast, IoError> {
@@ -368,7 +365,7 @@ fn degree(a: &Ast) -> u32 {
     match a {
         Ast::Const(_) => 0,
         Ast::Var(_) => 1,
-        Ast::Add(a, b) | Ast::Sub(a, b) => degree(a).max(degree(b)),
+        Ast::Sum(terms) => terms.iter().map(|(_, a)| degree(a)).max().unwrap_or(0),
         Ast::Mul(a, b) => degree(a).saturating_add(degree(b)),
         Ast::Div(a, b) => {
             if degree(b) == 0 {
@@ -388,8 +385,15 @@ fn lower<'a>(m: &'a Model, vars: &HashMap<String, Expr<'a>>, a: Ast) -> Result<E
         Ast::Var(v) => {
             vars.get(&v).copied().ok_or_else(|| invalid_lp(1, 1, format!("unknown variable {v}")))
         }
-        Ast::Add(a, b) => Ok(lower(m, vars, *a)? + lower(m, vars, *b)?),
-        Ast::Sub(a, b) => Ok(lower(m, vars, *a)? - lower(m, vars, *b)?),
+        Ast::Sum(terms) => {
+            let terms = terms
+                .into_iter()
+                .map(|(negative, term)| {
+                    lower(m, vars, term).map(|expr| if negative { -expr } else { expr })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(terms.into_iter().sum())
+        }
         Ast::Mul(a, b) => Ok(lower(m, vars, *a)? * lower(m, vars, *b)?),
         Ast::Div(a, b) => Ok(lower(m, vars, *a)? / lower(m, vars, *b)?),
         Ast::Neg(a) => Ok(-lower(m, vars, *a)?),
@@ -813,7 +817,12 @@ fn validate_lp_row_name(name: &str) -> Result<(), IoError> {
 fn collect_vars(a: &Ast, vars: &mut Vec<String>, seen: &mut FxHashSet<String>) {
     match a {
         Ast::Var(v) if seen.insert(v.clone()) => vars.push(v.clone()),
-        Ast::Add(a, b) | Ast::Sub(a, b) | Ast::Mul(a, b) | Ast::Div(a, b) => {
+        Ast::Sum(terms) => {
+            for (_, term) in terms {
+                collect_vars(term, vars, seen);
+            }
+        }
+        Ast::Mul(a, b) | Ast::Div(a, b) => {
             collect_vars(a, vars, seen);
             collect_vars(b, vars, seen);
         }
