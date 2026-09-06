@@ -8,77 +8,80 @@
 
 // TODO: Add support for Nightly/TNLP once v0.12 releases.
 
-use std::collections::HashMap;
-
 use oximo_core::{ExprArenaSnapshot, ExprId, ExprNode, Model};
 use pounce_rs::{FbbtOp, FbbtTape};
+use rustc_hash::FxHashMap;
 
 /// Build one tape per algebraic constraint.
 /// Unsupported operators are kept as opaque slots so the builder
 /// can safely fall back to callback evaluation.
 pub(crate) fn constraint_tapes(model: &Model) -> Vec<Option<FbbtTape>> {
     let arena = model.arena();
+    let mut slots = FxHashMap::default();
     model
         .constraints()
         .algebraic()
         .iter()
-        .map(|constraint| Some(tape_for(&arena, model, constraint.lhs)))
+        .map(|constraint| Some(tape_for(&arena, constraint.lhs, &mut slots)))
         .collect()
 }
 
-fn tape_for(arena: &ExprArenaSnapshot<'_>, model: &Model, root: ExprId) -> FbbtTape {
+fn tape_for(
+    arena: &ExprArenaSnapshot<'_>,
+    root: ExprId,
+    slots: &mut FxHashMap<ExprId, usize>,
+) -> FbbtTape {
     let mut ops = Vec::new();
-    let mut slots = HashMap::new();
-    emit(arena, model, root, &mut ops, &mut slots);
+    slots.clear();
+    emit(arena, root, &mut ops, slots);
     FbbtTape { ops }
 }
 
 fn emit(
     arena: &ExprArenaSnapshot<'_>,
-    model: &Model,
     id: ExprId,
     ops: &mut Vec<FbbtOp>,
-    slots: &mut HashMap<ExprId, usize>,
+    slots: &mut FxHashMap<ExprId, usize>,
 ) -> usize {
     if let Some(&slot) = slots.get(&id) {
         return slot;
     }
-    let slot = match arena.get(id).clone() {
-        ExprNode::Const(value) => push(ops, FbbtOp::Const(value)),
-        ExprNode::Param(param) => push(ops, FbbtOp::Const(model.param_value(param))),
+    let slot = match arena.get(id) {
+        ExprNode::Const(value) => push(ops, FbbtOp::Const(*value)),
+        ExprNode::Param(param) => push(ops, FbbtOp::Const(arena.param_value(*param))),
         ExprNode::Var(var) => push(ops, FbbtOp::Var(var.index())),
         ExprNode::Neg(child) => {
-            let a = emit(arena, model, child, ops, slots);
+            let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Neg(a))
         }
         ExprNode::Sin(child) => {
-            let a = emit(arena, model, child, ops, slots);
+            let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Sin(a))
         }
         ExprNode::Cos(child) => {
-            let a = emit(arena, model, child, ops, slots);
+            let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Cos(a))
         }
         ExprNode::Exp(child) => {
-            let a = emit(arena, model, child, ops, slots);
+            let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Exp(a))
         }
         ExprNode::Log(child) => {
-            let a = emit(arena, model, child, ops, slots);
+            let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Ln(a))
         }
         ExprNode::Abs(child) => {
-            let a = emit(arena, model, child, ops, slots);
+            let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Abs(a))
         }
         ExprNode::Div(lhs, rhs) => {
-            let a = emit(arena, model, lhs, ops, slots);
-            let b = emit(arena, model, rhs, ops, slots);
+            let a = emit(arena, *lhs, ops, slots);
+            let b = emit(arena, *rhs, ops, slots);
             push(ops, FbbtOp::Div(a, b))
         }
         ExprNode::Pow(base, exponent) => {
-            let a = emit(arena, model, base, ops, slots);
-            match constant_value(arena, model, exponent) {
+            let a = emit(arena, *base, ops, slots);
+            match constant_value(arena, *exponent) {
                 Some(0.5) => push(ops, FbbtOp::Sqrt(a)),
                 Some(value)
                     if value.is_finite()
@@ -91,13 +94,14 @@ fn emit(
                 _ => push(ops, FbbtOp::Opaque),
             }
         }
-        ExprNode::Add(children) => fold(arena, model, children.as_slice(), ops, slots, 0.0, true),
-        ExprNode::Mul(children) => fold(arena, model, children.as_slice(), ops, slots, 1.0, false),
+        ExprNode::Add(children) => fold(arena, children.as_slice(), ops, slots, 0.0, true),
+        ExprNode::Mul(children) => fold(arena, children.as_slice(), ops, slots, 1.0, false),
         ExprNode::Linear { coeffs, constant } => {
-            let mut acc = push(ops, FbbtOp::Const(constant));
+            let mut acc = push(ops, FbbtOp::Const(*constant));
+            ops.reserve(coeffs.len().saturating_mul(4));
             for (var, coefficient) in coeffs {
                 let variable = push(ops, FbbtOp::Var(var.index()));
-                let factor = push(ops, FbbtOp::Const(coefficient));
+                let factor = push(ops, FbbtOp::Const(*coefficient));
                 let term = push(ops, FbbtOp::Mul(variable, factor));
                 acc = push(ops, FbbtOp::Add(acc, term));
             }
@@ -110,26 +114,25 @@ fn emit(
 
 fn fold(
     arena: &ExprArenaSnapshot<'_>,
-    model: &Model,
     children: &[ExprId],
     ops: &mut Vec<FbbtOp>,
-    slots: &mut HashMap<ExprId, usize>,
+    slots: &mut FxHashMap<ExprId, usize>,
     identity: f64,
     add: bool,
 ) -> usize {
     let mut acc = push(ops, FbbtOp::Const(identity));
     for &child in children {
-        let next = emit(arena, model, child, ops, slots);
+        let next = emit(arena, child, ops, slots);
         acc =
             if add { push(ops, FbbtOp::Add(acc, next)) } else { push(ops, FbbtOp::Mul(acc, next)) };
     }
     acc
 }
 
-fn constant_value(arena: &ExprArenaSnapshot<'_>, model: &Model, id: ExprId) -> Option<f64> {
+fn constant_value(arena: &ExprArenaSnapshot<'_>, id: ExprId) -> Option<f64> {
     match arena.get(id) {
         ExprNode::Const(value) => Some(*value),
-        ExprNode::Param(param) => Some(model.param_value(*param)),
+        ExprNode::Param(param) => Some(arena.param_value(*param)),
         _ => None,
     }
 }
@@ -156,6 +159,27 @@ mod tests {
     use oximo_core::{Model, constraint, objective, param, variable};
 
     #[test]
+    fn reused_scratch_keeps_tapes_independent_and_refreshes_parameters() {
+        let model = Model::new("fbbt_refresh");
+        param!(model, p = 2.0);
+        variable!(model, x);
+        let shared = x.pow(p);
+        constraint!(model, first, shared <= 1.0);
+        constraint!(model, second, shared <= 2.0);
+
+        for (expected, exponent) in [(2, 2.0), (3, 3.0)] {
+            model.set_param(p, exponent);
+            let tapes = constraint_tapes(&model);
+            for tape in tapes.into_iter().flatten() {
+                assert_eq!(tape.first_invalid_slot(), None);
+                assert!(
+                    matches!(tape.ops.as_slice(), [FbbtOp::Var(0), FbbtOp::PowInt(0, n)] if *n == expected)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn emits_valid_tape_for_quadratic_constraint() {
         let model = Model::new("fbbt");
         variable!(model, -2.0 <= x <= 2.0);
@@ -175,7 +199,7 @@ mod tests {
 
         let constant = model.__constant(4.0);
         let arena = model.arena();
-        let constant_tape = tape_for(&arena, &model, constant.id);
+        let constant_tape = tape_for(&arena, constant.id, &mut FxHashMap::default());
         assert!(matches!(constant_tape.ops.as_slice(), [FbbtOp::Const(4.0)]));
 
         let shared = x.sin();
