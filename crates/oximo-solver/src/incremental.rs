@@ -87,13 +87,20 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     }
 
     let arena_ref: &ExprArena = &arena;
+    let mut row_terms = Vec::new();
     for c in constraints {
         let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(&vars, v))
                 .unwrap_or_else(|| "<nonlinear>".into()),
         })?;
-        hash_row(&mut hasher, c.lower - t.constant, c.upper - t.constant, &t.coeffs);
+        hash_row(
+            &mut hasher,
+            c.lower - t.constant,
+            c.upper - t.constant,
+            &t.coeffs,
+            &mut row_terms,
+        );
     }
 
     for sos in model.sos_constraints().iter() {
@@ -128,13 +135,19 @@ fn hash_header(h: &mut FxHasher, vars: &[Variable], sense: ObjectiveSense) {
 
 /// Hash one constraint row: its (constant-folded) bounds and its `(column, coeff)`
 /// terms, sorted so the hash is independent of extraction order.
-fn hash_row(h: &mut FxHasher, lower: f64, upper: f64, coeffs: &[(VarId, f64)]) {
+fn hash_row(
+    h: &mut FxHasher,
+    lower: f64,
+    upper: f64,
+    coeffs: &[(VarId, f64)],
+    terms: &mut Vec<(usize, u64)>,
+) {
     h.write_u64(lower.to_bits());
     h.write_u64(upper.to_bits());
-    let mut terms: Vec<(usize, u64)> =
-        coeffs.iter().map(|(v, c)| (v.index(), c.to_bits())).collect();
+    terms.clear();
+    terms.extend(coeffs.iter().map(|(v, c)| (v.index(), c.to_bits())));
     terms.sort_unstable();
-    for (vi, cb) in terms {
+    for &(vi, cb) in terms.iter() {
         h.write_usize(vi);
         h.write_u64(cb);
     }
@@ -145,6 +158,35 @@ mod tests {
     use oximo_core::prelude::*;
 
     use super::snapshot;
+
+    #[test]
+    fn row_scratch_preserves_fingerprint_bits_across_different_widths() {
+        use oximo_expr::VarId;
+        use rustc_hash::FxHasher;
+        use std::hash::Hasher;
+
+        let rows = [
+            vec![(VarId(9), -0.0), (VarId(1), 2.0), (VarId(9), 0.0)],
+            vec![],
+            vec![(VarId(3), f64::from_bits(0x7ff8_0000_0000_0001))],
+            vec![(VarId(1), 1.0)],
+        ];
+        let mut expected = FxHasher::default();
+        let mut actual = FxHasher::default();
+        let mut scratch = Vec::new();
+        for row in rows {
+            expected.write_u64((-1.0_f64).to_bits());
+            expected.write_u64(2.0_f64.to_bits());
+            let mut sorted: Vec<_> = row.iter().map(|(v, c)| (v.index(), c.to_bits())).collect();
+            sorted.sort_unstable();
+            for (var, bits) in sorted {
+                expected.write_usize(var);
+                expected.write_u64(bits);
+            }
+            super::hash_row(&mut actual, -1.0, 2.0, &row, &mut scratch);
+            assert_eq!(actual.finish(), expected.finish());
+        }
+    }
 
     #[test]
     fn objective_coeff_change_keeps_fingerprint() {
