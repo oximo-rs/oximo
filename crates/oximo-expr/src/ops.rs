@@ -1,5 +1,6 @@
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
+use crate::arena::{Children, ExprId};
 use crate::handle::Expr;
 use crate::linear::{add_into, add_n, div_into, mul_into, neg_into, sub_into};
 
@@ -148,17 +149,55 @@ impl_scalar_ops!(i32, f64::from);
 // so no external zero is required. Collected into a single flat n-ary `Add`.
 // -----------------------------------------------------------------------------
 
+fn sum_children(first: ExprId, rest: impl Iterator<Item = ExprId>) -> Children {
+    let capacity = rest.size_hint().0.saturating_add(1);
+    let mut children = Children::new();
+    if capacity > children.inline_size() {
+        // We use Vec's extend loop to avoid checking SmallVec's storage mode per term.
+        let mut ids = Vec::with_capacity(capacity);
+        ids.push(first);
+        ids.extend(rest);
+        Children::from_vec(ids)
+    } else {
+        children.push(first);
+        children.extend(rest);
+        children
+    }
+}
+
 impl<'a> std::iter::Sum for Expr<'a> {
     fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
         let first = iter.next().expect("Expr::sum on empty iterator");
-        let mut ids = Vec::with_capacity(iter.size_hint().0.saturating_add(1));
-        ids.push(first.id);
-        ids.extend(iter.map(|expr| {
-            first.assert_same_arena(expr);
-            expr.id
-        }));
-        let id = first.arena.with_mut(|arena| add_n(arena, &ids));
+        let ids = sum_children(
+            first.id,
+            iter.map(|expr| {
+                first.assert_same_arena(expr);
+                expr.id
+            }),
+        );
+        let id = first.arena.with_mut(|arena| add_n(arena, ids));
         Self::new(id, first.arena)
+    }
+}
+
+impl<'a> Expr<'a> {
+    /// Macro-helper summation that evaluates every term before checking arena
+    /// ownership, matching the former collect-then-sum behavior. Returns `None`
+    /// for an empty domain so the caller can preserve its own diagnostic.
+    #[doc(hidden)]
+    pub fn __sum_terms(mut iter: impl Iterator<Item = Self>) -> Option<Self> {
+        let first = iter.next()?;
+        let mut same_arena = true;
+        let ids = sum_children(
+            first.id,
+            iter.map(|expr| {
+                same_arena &= std::ptr::eq(first.arena, expr.arena);
+                expr.id
+            }),
+        );
+        assert!(same_arena, "expressions belong to different arenas");
+        let id = first.arena.with_mut(|arena| add_n(arena, ids));
+        Some(Self::new(id, first.arena))
     }
 }
 

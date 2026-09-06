@@ -94,9 +94,7 @@ where
     D: SumDomain<K> + ?Sized,
     F: FnMut(K) -> Expr<'a>,
 {
-    let terms: Vec<Expr<'a>> = domain.keys().map(f).collect();
-    assert!(!terms.is_empty(), "sum_over on empty domain");
-    terms.into_iter().sum()
+    Expr::__sum_terms(domain.keys().map(f)).expect("sum_over on empty domain")
 }
 
 #[cfg(test)]
@@ -105,6 +103,49 @@ mod tests {
 
     use super::*;
     use crate::model::Model;
+
+    #[test]
+    fn sum_over_finishes_callbacks_before_rejecting_foreign_arena() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let model = Model::new("local");
+        let other = Model::new("foreign");
+        let x = model.__var("x").build();
+        let y = other.__var("y").build();
+        let mut visited = Vec::new();
+        let before = model.arena().len();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            __sum_over(&(0..4_usize), |i| {
+                visited.push(i);
+                if i == 1 { y } else { x }
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(visited, [0, 1, 2, 3]);
+        assert_eq!(model.arena().len(), before);
+    }
+
+    #[test]
+    fn sum_over_keeps_child_order_for_inline_and_spilled_sums() {
+        let model = Model::new("sum_order");
+        let keys = Set::range(0..8_usize);
+        let x = model.__indexed_var("x", &keys).build();
+        for count in [1_usize, 4, 8] {
+            let total = __sum_over(&(0..count), |i| x[count - i - 1]);
+            let arena = model.arena();
+            if count == 1 {
+                assert_eq!(total.id, x[0_usize].id);
+            } else {
+                let oximo_expr::ExprNode::Add(children) = arena.get(total.id) else {
+                    panic!("sum must keep its flat Add representation");
+                };
+                assert_eq!(
+                    children.as_slice(),
+                    &(0..count).rev().map(|i| x[i].id).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
 
     #[test]
     fn sum_over_scalar_set() {

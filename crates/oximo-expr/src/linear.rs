@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::smallvec;
 
-use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode, VarId};
+use crate::arena::{ArenaAccess, Children, ExprArena, ExprId, ExprNode, VarId};
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
 ///
@@ -175,11 +175,11 @@ pub(crate) fn add_into(
 ///
 /// # Panics
 /// Panics if `ids` is empty (callers supply at least one term).
-pub(crate) fn add_n(arena: &mut (impl ArenaAccess + ?Sized), ids: &[ExprId]) -> ExprId {
-    match ids {
+pub(crate) fn add_n(arena: &mut (impl ArenaAccess + ?Sized), ids: Children) -> ExprId {
+    match ids.as_slice() {
         [] => panic!("add_n on an empty term list"),
         [one] => *one,
-        _ => arena.push(ExprNode::Add(ids.iter().copied().collect())),
+        _ => arena.push(ExprNode::Add(ids)),
     }
 }
 
