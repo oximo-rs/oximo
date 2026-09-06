@@ -78,7 +78,8 @@ impl CoeffAccum {
 ///
 /// When `resolve_params` is set, an [`ExprNode::Param`] folds to its current
 /// arena value and counts as a constant.
-fn as_linear<'a, A: ArenaAccess + ?Sized>(
+#[cfg(test)]
+fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
     arena: &'a A,
     id: ExprId,
     resolve_params: bool,
@@ -94,7 +95,7 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
         ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
         ExprNode::Neg(inner) => {
             let inner = *inner;
-            as_linear(arena, inner, resolve_params).map(|t| {
+            recursive_linear(arena, inner, resolve_params).map(|t| {
                 let mut coeffs = t.coeffs.into_owned();
                 for (_, c) in &mut coeffs {
                     *c = -*c;
@@ -106,7 +107,7 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
             let mut acc = CoeffAccum::with_capacity(children.len() * 4);
             let mut constant = 0.0;
             for &child in children {
-                let t = as_linear(arena, child, resolve_params)?;
+                let t = recursive_linear(arena, child, resolve_params)?;
                 acc.extend_from_slice(&t.coeffs);
                 constant += t.constant;
             }
@@ -122,7 +123,7 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
                     ExprNode::Const(c) => scalar *= c,
                     ExprNode::Param(p) if resolve_params => scalar *= arena.param_value(*p),
                     _ if linear.is_none() => {
-                        linear = Some(as_linear(arena, child, resolve_params)?);
+                        linear = Some(recursive_linear(arena, child, resolve_params)?);
                     }
                     _ => return None,
                 }
@@ -140,6 +141,148 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
         }
         _ => None,
     }
+}
+
+struct LinearFolder<'a, A: ?Sized> {
+    arena: &'a A,
+    resolve_params: bool,
+}
+
+enum LinearState<'a> {
+    Sum { rest: &'a [ExprId], acc: CoeffAccum, constant: f64 },
+    Scale { child: Option<ExprId>, value: Option<LinearTerms<'a>>, scalar: f64, negate: bool },
+}
+
+impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
+    type Value = LinearTerms<'a>;
+    type State = LinearState<'a>;
+
+    fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Self::Value>, Self::State> {
+        use std::ops::ControlFlow::{Break, Continue};
+        Break(match self.arena.get(id) {
+            ExprNode::Const(c) => Some(LinearTerms::borrowed(&[], *c)),
+            ExprNode::Param(p) if self.resolve_params => {
+                Some(LinearTerms::borrowed(&[], self.arena.param_value(*p)))
+            }
+            ExprNode::Var(v) => Some(LinearTerms::owned(vec![(*v, 1.0)], 0.0)),
+            ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
+            ExprNode::Add(children) => {
+                return Continue(LinearState::Sum {
+                    rest: children,
+                    acc: CoeffAccum::with_capacity(children.len()),
+                    constant: 0.0,
+                });
+            }
+            ExprNode::Neg(child) => {
+                return Continue(LinearState::Scale {
+                    child: Some(*child),
+                    value: None,
+                    scalar: 1.0,
+                    negate: true,
+                });
+            }
+            ExprNode::Mul(children) => {
+                let mut scalar = 1.0;
+                let mut linear = None;
+                for &child in children {
+                    match self.arena.get(child) {
+                        ExprNode::Const(c) => scalar *= c,
+                        ExprNode::Param(p) if self.resolve_params => {
+                            scalar *= self.arena.param_value(*p);
+                        }
+                        _ if linear.is_none() => linear = Some(child),
+                        _ => return Break(None),
+                    }
+                }
+                if linear.is_some() {
+                    return Continue(LinearState::Scale {
+                        child: linear,
+                        value: None,
+                        scalar,
+                        negate: false,
+                    });
+                }
+                Some(LinearTerms::owned(Vec::new(), scalar))
+            }
+            _ => None,
+        })
+    }
+
+    fn next(&self, state: &mut Self::State) -> std::ops::ControlFlow<Option<Self::Value>, ExprId> {
+        use std::ops::ControlFlow::{Break, Continue};
+        match state {
+            LinearState::Sum { rest, acc, constant } => {
+                while let Some((&child, tail)) = rest.split_first() {
+                    *rest = tail;
+                    // Accumulate terminals directly: a wide sum needs no per-variable vectors.
+                    match self.arena.get(child) {
+                        ExprNode::Var(v) => {
+                            acc.add(*v, 1.0);
+                            *constant += 0.0;
+                        }
+                        ExprNode::Const(c) => *constant += c,
+                        ExprNode::Param(p) if self.resolve_params => {
+                            *constant += self.arena.param_value(*p);
+                        }
+                        ExprNode::Linear { coeffs, constant: c } => {
+                            acc.extend_from_slice(coeffs);
+                            *constant += c;
+                        }
+                        _ => return Continue(child),
+                    }
+                }
+                Break(Some(LinearTerms::owned(std::mem::take(&mut acc.coeffs), *constant)))
+            }
+            LinearState::Scale { child, value, scalar, negate } => {
+                if let Some(child) = child.take() {
+                    return Continue(child);
+                }
+                Break(value.take().map(|t| {
+                    let mut coeffs = t.coeffs.into_owned();
+                    for (_, c) in &mut coeffs {
+                        *c = if *negate { -*c } else { *c * *scalar };
+                    }
+                    LinearTerms::owned(
+                        coeffs,
+                        if *negate { -t.constant } else { t.constant * *scalar },
+                    )
+                }))
+            }
+        }
+    }
+
+    fn accept(&self, state: &mut Self::State, value: Self::Value) {
+        match state {
+            LinearState::Sum { acc, constant, .. } => {
+                acc.extend_from_slice(&value.coeffs);
+                *constant += value.constant;
+            }
+            LinearState::Scale { value: slot, .. } => *slot = Some(value),
+        }
+    }
+}
+
+fn as_linear<'a, A: ArenaAccess + ?Sized>(
+    arena: &'a A,
+    mut id: ExprId,
+    resolve_params: bool,
+) -> Option<LinearTerms<'a>> {
+    let mut negations = 0;
+    while let ExprNode::Neg(child) = arena.get(id) {
+        id = *child;
+        negations += 1;
+    }
+    let mut value = crate::fold::fold(arena, id, LinearFolder { arena, resolve_params })?;
+    if negations != 0 {
+        let coeffs = value.coeffs.to_mut();
+        for _ in 0..negations {
+            for (_, c) in coeffs.iter_mut() {
+                *c = -*c;
+            }
+            value.constant = -value.constant;
+        }
+    }
+    Some(value)
 }
 
 /// Materialize linear terms into a fresh `Linear` node in the arena.
@@ -356,6 +499,24 @@ pub fn describe_nonlinear_term(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iterative_linear_matches_recursive_arithmetic_and_order() {
+        let (arena, ids) = crate::fold::test_arena();
+        for id in ids {
+            for resolve in [false, true] {
+                let expected = recursive_linear(&arena, id, resolve);
+                let actual = as_linear(&arena, id, resolve);
+                let bits = |t: LinearTerms<'_>| {
+                    (
+                        t.constant.to_bits(),
+                        t.coeffs.iter().map(|(v, c)| (*v, c.to_bits())).collect::<Vec<_>>(),
+                    )
+                };
+                assert_eq!(actual.map(bits), expected.map(bits), "node {id:?}");
+            }
+        }
+    }
     use crate::arena::{ExprArena, ExprNode, VarId};
 
     #[test]

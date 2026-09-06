@@ -52,15 +52,16 @@ impl Degree {
     }
 }
 
-fn degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
+#[cfg(test)]
+fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
     match arena.get(id) {
         ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
         ExprNode::Var(_) | ExprNode::Linear { .. } => Degree::One,
-        ExprNode::Neg(inner) => degree(arena, *inner),
+        ExprNode::Neg(inner) => recursive_degree(arena, *inner),
         ExprNode::Add(children) => {
             let mut d = Degree::Zero;
             for c in children {
-                d = d.add(degree(arena, *c));
+                d = d.add(recursive_degree(arena, *c));
                 if d == Degree::Higher {
                     return d;
                 }
@@ -70,7 +71,7 @@ fn degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
         ExprNode::Mul(children) => {
             let mut d = Degree::Zero;
             for c in children {
-                d = d.mul(degree(arena, *c));
+                d = d.mul(recursive_degree(arena, *c));
                 if d == Degree::Higher {
                     return d;
                 }
@@ -90,7 +91,7 @@ fn degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
                 v if v < 2.5 => 2,
                 _ => 3,
             };
-            degree(arena, *base).pow(n)
+            recursive_degree(arena, *base).pow(n)
         }
         // Transcendentals are always > quadratic. Division is too: `div_into`
         // folds the only degree-preserving case (constant denominator) before a
@@ -103,6 +104,80 @@ fn degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
         | ExprNode::Log(_)
         | ExprNode::Abs(_) => Degree::Higher,
     }
+}
+
+struct DegreeFolder<'a, A: ?Sized>(&'a A);
+
+enum DegreeOp {
+    Add,
+    Mul,
+    Pow(u32),
+}
+struct DegreeState<'a> {
+    rest: &'a [ExprId],
+    value: Degree,
+    op: DegreeOp,
+}
+
+impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
+    type Value = Degree;
+    type State = DegreeState<'a>;
+
+    fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Degree>, Self::State> {
+        use std::ops::ControlFlow::{Break, Continue};
+        let (rest, op) = match self.0.get(id) {
+            ExprNode::Const(_) | ExprNode::Param(_) => return Break(Some(Degree::Zero)),
+            ExprNode::Var(_) | ExprNode::Linear { .. } => return Break(Some(Degree::One)),
+            ExprNode::Add(c) => (c.as_slice(), DegreeOp::Add),
+            ExprNode::Mul(c) => (c.as_slice(), DegreeOp::Mul),
+            ExprNode::Neg(c) => (std::slice::from_ref(c), DegreeOp::Add),
+            ExprNode::Pow(base, exp) => {
+                let ExprNode::Const(e) = self.0.get(*exp) else {
+                    return Break(Some(Degree::Higher));
+                };
+                if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+                    return Break(Some(Degree::Higher));
+                }
+                let n = match e.round() {
+                    v if v < 0.5 => 0,
+                    v if v < 1.5 => 1,
+                    v if v < 2.5 => 2,
+                    _ => 3,
+                };
+                (std::slice::from_ref(base), DegreeOp::Pow(n))
+            }
+            _ => return Break(Some(Degree::Higher)),
+        };
+        Continue(DegreeState { rest, value: Degree::Zero, op })
+    }
+
+    fn next(&self, state: &mut Self::State) -> std::ops::ControlFlow<Option<Degree>, ExprId> {
+        use std::ops::ControlFlow::{Break, Continue};
+        while state.value != Degree::Higher {
+            let Some((&child, tail)) = state.rest.split_first() else { break };
+            state.rest = tail;
+            match self.start(child) {
+                Break(Some(value)) => self.accept(state, value),
+                _ => return Continue(child),
+            }
+        }
+        Break(Some(state.value))
+    }
+
+    fn accept(&self, state: &mut Self::State, value: Degree) {
+        state.value = match state.op {
+            DegreeOp::Add => state.value.add(value),
+            DegreeOp::Mul => state.value.mul(value),
+            DegreeOp::Pow(n) => value.pow(n),
+        };
+    }
+}
+
+fn degree(arena: &(impl ArenaAccess + ?Sized), mut id: ExprId) -> Degree {
+    while let ExprNode::Neg(child) = arena.get(id) {
+        id = *child;
+    }
+    crate::fold::fold(arena, id, DegreeFolder(arena)).expect("degree classification is total")
 }
 
 /// Classify an expression as Linear, Quadratic (polynomial degree <= 2 with at
@@ -123,6 +198,14 @@ pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iterative_degree_matches_recursive_classification() {
+        let (arena, ids) = crate::fold::test_arena();
+        for id in ids {
+            assert_eq!(degree(&arena, id), recursive_degree(&arena, id), "node {id:?}");
+        }
+    }
     use crate::arena::{ExprArena, ExprNode, VarId};
     use smallvec::smallvec;
 

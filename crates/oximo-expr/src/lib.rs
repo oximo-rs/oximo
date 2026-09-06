@@ -4,6 +4,7 @@
 mod arena;
 mod classify;
 mod eval;
+mod fold;
 mod handle;
 mod linear;
 mod ops;

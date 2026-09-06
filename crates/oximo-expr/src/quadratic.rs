@@ -30,7 +30,7 @@ pub struct QuadraticTerms {
 /// `(min, max)` variable pairs and hold the polynomial coefficient of
 /// `x_i * x_j` (i.e. the coefficient of `x_i^2` on the diagonal), not yet the
 /// doubled Hessian value.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Poly {
     quad: FxHashMap<(VarId, VarId), f64>,
     linear: FxHashMap<VarId, f64>,
@@ -110,7 +110,8 @@ fn mul_linear(a: &Poly, b: &Poly) -> Poly {
 /// Recursively interpret `id` as a polynomial of degree `<= 2`. Returns `None`
 /// for anything of higher degree, transcendentals, or division. Parameters fold
 /// to their live arena value (a degree-0 constant).
-fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
+#[cfg(test)]
+fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
     match arena.get(id) {
         ExprNode::Const(c) => Some(Poly::constant(*c)),
         ExprNode::Var(v) => Some(Poly::var(*v)),
@@ -122,18 +123,18 @@ fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
             }
             Some(Poly { quad: FxHashMap::default(), linear, constant: *constant })
         }
-        ExprNode::Neg(inner) => as_poly(arena, *inner).map(Poly::neg),
+        ExprNode::Neg(inner) => recursive_poly(arena, *inner).map(Poly::neg),
         ExprNode::Add(children) => {
             let mut acc = Poly::default();
             for child in children {
-                acc.add_assign(as_poly(arena, *child)?);
+                acc.add_assign(recursive_poly(arena, *child)?);
             }
             Some(acc)
         }
         ExprNode::Mul(children) => {
             let mut acc = Poly::constant(1.0);
             for child in children {
-                let p = as_poly(arena, *child)?;
+                let p = recursive_poly(arena, *child)?;
                 acc = if acc.is_constant() {
                     p.scale(acc.constant)
                 } else if p.is_constant() {
@@ -153,9 +154,9 @@ fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
             }
             match e.round() {
                 n if n < 0.5 => Some(Poly::constant(1.0)),
-                n if n < 1.5 => as_poly(arena, *base),
+                n if n < 1.5 => recursive_poly(arena, *base),
                 n if n < 2.5 => {
-                    let p = as_poly(arena, *base)?;
+                    let p = recursive_poly(arena, *base)?;
                     if !p.is_linear() {
                         return None;
                     }
@@ -172,6 +173,122 @@ fn as_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
         | ExprNode::Log(_)
         | ExprNode::Abs(_) => None,
     }
+}
+
+struct PolyFolder<'a>(&'a ExprArena);
+enum PolyOp {
+    Add,
+    Mul,
+    Neg,
+    Identity,
+    Square,
+}
+struct PolyState<'a> {
+    rest: &'a [ExprId],
+    value: Option<Poly>,
+    op: PolyOp,
+}
+
+impl<'a> crate::fold::Folder for PolyFolder<'a> {
+    type Value = Poly;
+    type State = PolyState<'a>;
+
+    fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Poly>, Self::State> {
+        use std::ops::ControlFlow::{Break, Continue};
+        let (rest, op, value) = match self.0.get(id) {
+            ExprNode::Const(c) => return Break(Some(Poly::constant(*c))),
+            ExprNode::Param(p) => return Break(Some(Poly::constant(self.0.param_value(*p)))),
+            ExprNode::Var(v) => return Break(Some(Poly::var(*v))),
+            ExprNode::Linear { coeffs, constant } => {
+                let mut linear = FxHashMap::with_capacity_and_hasher(coeffs.len(), FxBuildHasher);
+                for &(v, c) in coeffs {
+                    *linear.entry(v).or_insert(0.0) += c;
+                }
+                return Break(Some(Poly { linear, constant: *constant, ..Poly::default() }));
+            }
+            ExprNode::Add(c) => (c.as_slice(), PolyOp::Add, Poly::default()),
+            ExprNode::Mul(c) => (c.as_slice(), PolyOp::Mul, Poly::constant(1.0)),
+            ExprNode::Neg(c) => (std::slice::from_ref(c), PolyOp::Neg, Poly::default()),
+            ExprNode::Pow(base, exp) => {
+                let ExprNode::Const(e) = self.0.get(*exp) else { return Break(None) };
+                if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+                    return Break(None);
+                }
+                let op = match e.round() {
+                    n if n < 0.5 => return Break(Some(Poly::constant(1.0))),
+                    n if n < 1.5 => PolyOp::Identity,
+                    n if n < 2.5 => PolyOp::Square,
+                    _ => return Break(None),
+                };
+                (std::slice::from_ref(base), op, Poly::default())
+            }
+            _ => return Break(None),
+        };
+        Continue(PolyState { rest, op, value: Some(value) })
+    }
+
+    fn next(&self, state: &mut Self::State) -> std::ops::ControlFlow<Option<Poly>, ExprId> {
+        use std::ops::ControlFlow::{Break, Continue};
+        if state.value.is_none() {
+            return Break(None);
+        }
+        while let Some((&child, tail)) = state.rest.split_first() {
+            state.rest = tail;
+            if matches!(state.op, PolyOp::Add) {
+                let acc = state.value.as_mut().expect("checked above");
+                // Avoid creating a one-entry hash table for every variable in a sum.
+                match self.0.get(child) {
+                    ExprNode::Var(v) => {
+                        acc.constant += 0.0;
+                        *acc.linear.entry(*v).or_insert(0.0) += 1.0;
+                        continue;
+                    }
+                    ExprNode::Const(c) => {
+                        acc.constant += c;
+                        continue;
+                    }
+                    ExprNode::Param(p) => {
+                        acc.constant += self.0.param_value(*p);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            return Continue(child);
+        }
+        Break(state.value.take())
+    }
+
+    fn accept(&self, state: &mut Self::State, p: Poly) {
+        let mut acc =
+            state.value.take().expect("failed products terminate before requesting children");
+        state.value = match state.op {
+            PolyOp::Add => {
+                acc.add_assign(p);
+                Some(acc)
+            }
+            PolyOp::Mul if acc.is_constant() => Some(p.scale(acc.constant)),
+            PolyOp::Mul if p.is_constant() => Some(acc.scale(p.constant)),
+            PolyOp::Mul if acc.is_linear() && p.is_linear() => Some(mul_linear(&acc, &p)),
+            PolyOp::Neg => Some(p.neg()),
+            PolyOp::Identity => Some(p),
+            PolyOp::Square if p.is_linear() => Some(mul_linear(&p, &p)),
+            PolyOp::Mul | PolyOp::Square => None,
+        };
+    }
+}
+
+fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
+    let mut negations = 0;
+    while let ExprNode::Neg(child) = arena.get(id) {
+        id = *child;
+        negations += 1;
+    }
+    let mut value = crate::fold::fold(arena, id, PolyFolder(arena))?;
+    for _ in 0..negations {
+        value = value.neg();
+    }
+    Some(value)
 }
 
 /// Snapshot the quadratic structure of `id`, if it is a polynomial of degree
@@ -212,6 +329,26 @@ pub fn extract_quadratic(arena: &ExprArena, id: ExprId) -> Option<QuadraticTerms
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iterative_poly_matches_recursive_arithmetic() {
+        let (arena, ids) = crate::fold::test_arena();
+        for id in ids {
+            let bits = |p: Poly| {
+                let mut linear: Vec<_> =
+                    p.linear.into_iter().map(|(v, c)| (v, c.to_bits())).collect();
+                let mut quad: Vec<_> = p.quad.into_iter().map(|(v, c)| (v, c.to_bits())).collect();
+                linear.sort_unstable_by_key(|(v, _)| v.0);
+                quad.sort_unstable_by_key(|((a, b), _)| (a.0, b.0));
+                (p.constant.to_bits(), linear, quad)
+            };
+            assert_eq!(
+                as_poly(&arena, id).map(bits),
+                recursive_poly(&arena, id).map(bits),
+                "node {id:?}"
+            );
+        }
+    }
     use crate::arena::{ExprArena, ExprNode, VarId};
     use smallvec::smallvec;
 
