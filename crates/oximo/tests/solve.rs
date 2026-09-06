@@ -41,6 +41,51 @@ fn highs_multi_optima_returns_single_best() {
 }
 
 #[test]
+fn indexed_constraint_handles_query_known_duals() {
+    let m = Model::new("indexed_duals");
+    variable!(m, x[i in 0..5] >= 0.0);
+    constraint!(m, prior, x[1] <= 10.0);
+    let costs = [2.0, 1.0, 3.0, 1.0, 5.0];
+    let demand = [1.0, 0.0, 2.0, 0.0, 3.0];
+    let cover: IndexedConstraint<usize> =
+        constraint!(m, cover[i in 0..5 if i % 2 == 0], x[i] >= demand[i]);
+    objective!(m, Min, sum!(costs[i] * x[i] for i in 0..5));
+    let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    assert_eq!(cover.get(1), None);
+    for (i, cid) in cover.iter() {
+        assert_eq!(cover.get(i), Some(cid));
+        let dual = result.dual_of(cid).expect("cover dual missing");
+        assert!((dual - costs[i]).abs() < 1e-6, "cover[{i}]: {dual}");
+    }
+}
+
+#[test]
+fn range_family_handles_query_interval_and_split_duals() {
+    let m = Model::new("range_family_duals");
+    variable!(m, x[i in 0..2]);
+    variable!(m, y[i in 0..2]);
+    param!(m, lo = 1.0);
+    let bands: IndexedRangeConstraint<usize> = constraint!(m, bands[i in 0..2], 1.0 <= x[i] <= 4.0);
+    let split = constraint!(m, split[i in 0..2], lo <= y[i] <= 4.0);
+    objective!(m, Min, 2.0 * x[0] - 3.0 * x[1] + 5.0 * y[0] - 7.0 * y[1]);
+    let result = Highs.solve(&m, &HighsOptions::default()).unwrap();
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    for (i, group) in bands.iter() {
+        let RangeConstraintIds::Interval(cid) = group else { panic!("expected interval") };
+        let expected = [2.0, -3.0][i];
+        assert!((result.dual_of(cid).expect("interval dual missing") - expected).abs() < 1e-6);
+    }
+    for (i, group) in split.iter() {
+        let RangeConstraintIds::Split { lower, upper } = group else { panic!("expected split") };
+        let expected_lower = [5.0, 0.0][i];
+        let expected_upper = [0.0, -7.0][i];
+        assert!((result.dual_of(lower).expect("lower dual missing") - expected_lower).abs() < 1e-6);
+        assert!((result.dual_of(upper).expect("upper dual missing") - expected_upper).abs() < 1e-6);
+    }
+}
+
+#[test]
 fn range_constraint_solves_as_single_row() {
     // max x  s.t.  1 <= x <= 4.
     let m = Model::new("range");

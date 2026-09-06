@@ -8,7 +8,7 @@ use proc_macro2::{Spacing, Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::Expr;
 
-use crate::bind::{family_closure_param, filtered_set};
+use crate::bind::{IndexBind, family_closure_param, filtered_set, mark_bindings_used};
 use crate::{
     Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas,
 };
@@ -46,10 +46,9 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             match binds {
                 None => Ok(register_named(&model, &name_str, rel)),
                 Some(binds) => {
-                    let param = family_closure_param(&binds);
                     let set = build_set(&binds, &root)?;
                     let set = filtered_set(set, &binds, cond.as_ref(), &root);
-                    Ok(register_family(&model, &name_str, &set, &param, rel))
+                    Ok(register_family(&model, &name_str, &set, &binds, rel))
                 }
             }
         }
@@ -153,15 +152,17 @@ fn register_family(
     model: &Expr,
     name_str: &str,
     set: &TokenStream2,
-    param: &TokenStream2,
+    binds: &[IndexBind],
     rel: Relations,
 ) -> TokenStream2 {
+    let param = family_closure_param(binds);
+    let used = mark_bindings_used(binds);
     match rel {
         Relations::Single(r) => quote! {
-            (#model).__add_constraints_over(#name_str, &(#set), |#param| #r);
+            (#model).__add_constraints_over(#name_str, &(#set), |#param| { #used #r })
         },
         Relations::Range { mid, lo, hi } => quote! {
-            (#model).__add_range_constraints_over(#name_str, &(#set), |#param| (#mid, #lo, #hi));
+            (#model).__add_range_constraints_over(#name_str, &(#set), |#param| { #used (#mid, #lo, #hi) })
         },
     }
 }

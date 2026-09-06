@@ -43,8 +43,9 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         let mut expr = quote!(#body);
         for b in binds.iter().rev() {
             let param = b.closure_param();
+            let used = crate::bind::mark_bindings_used(std::slice::from_ref(b));
             let domain = &b.domain;
-            expr = quote!( #root::__macro_support::sum_over(&(#domain), |#param| #expr) );
+            expr = quote!( #root::__macro_support::sum_over(&(#domain), |#param| { #used #expr }) );
         }
         return Ok(expr);
     };
@@ -58,6 +59,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     };
     for b in binds.iter().rev() {
         let pat = &b.pat;
+        let used = crate::bind::mark_bindings_used(std::slice::from_ref(b));
         let domain = &b.domain;
         let keys = if let Some(ty) = b.keys_of_type() {
             quote!( #root::__macro_support::keys_of::<#ty, _>(&(#domain)) )
@@ -66,6 +68,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         };
         inner = quote! {
             for #pat in #keys {
+                #used
                 #inner
             }
         };

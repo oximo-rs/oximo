@@ -5,7 +5,7 @@ use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 use syn::Expr;
 
-use crate::bind::{filtered_set, masked_closure_param};
+use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
 use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
@@ -37,13 +37,14 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         Some(binds) => {
             let root = oximo_root();
             let value = crate::index::rewrite_index_subscripts(value_ts);
-            let param = masked_closure_param(&binds, &value);
+            let param = family_closure_param(&binds);
+            let used = mark_bindings_used(&binds);
             let set = build_set(&binds, &root)?;
             let set = filtered_set(set, &binds, cond.as_ref(), &root);
             Ok(quote! {
                 let #name = {
                     let __set = #set;
-                    (#model).__indexed_param(#name_str, &__set, move |#param| f64::from(#value))
+                    (#model).__indexed_param(#name_str, &__set, move |#param| { #used f64::from(#value) })
                 };
             })
         }

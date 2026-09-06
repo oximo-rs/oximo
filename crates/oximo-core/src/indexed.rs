@@ -4,7 +4,109 @@ use std::ops::Index;
 use oximo_expr::Expr;
 use rustc_hash::FxHashMap;
 
+use crate::constraint::{ConstraintId, RangeConstraintIds};
 use crate::set::{Axis, FromIndexKey, IndexKey};
+
+/// Owned, ordered IDs with a domain-specific lookup index.
+#[derive(Clone, Debug)]
+struct ConstraintFamilyStorage<T> {
+    entries: Vec<(IndexKey, T)>,
+    lookup: ConstraintFamilyLookup,
+}
+
+#[derive(Clone, Debug)]
+enum ConstraintFamilyLookup {
+    Dense(Box<[Axis]>),
+    Sparse(FxHashMap<IndexKey, usize>),
+}
+
+impl<T: Copy> ConstraintFamilyStorage<T> {
+    fn new(keys: Vec<IndexKey>, axes: Option<&[Axis]>, values: Vec<T>) -> Self {
+        assert_eq!(keys.len(), values.len(), "constraint family key/value length mismatch");
+        let lookup = axes.map_or_else(
+            || {
+                ConstraintFamilyLookup::Sparse(
+                    keys.iter().cloned().enumerate().map(|(i, key)| (key, i)).collect(),
+                )
+            },
+            |axes| ConstraintFamilyLookup::Dense(axes.into()),
+        );
+        Self { entries: keys.into_iter().zip(values).collect(), lookup }
+    }
+
+    fn get(&self, key: &IndexKey) -> Option<T> {
+        let position = match &self.lookup {
+            ConstraintFamilyLookup::Dense(axes) => grid_offset(axes, key)?,
+            ConstraintFamilyLookup::Sparse(positions) => *positions.get(key)?,
+        };
+        self.entries.get(position).map(|(_, value)| *value)
+    }
+}
+
+macro_rules! constraint_family {
+    ($(#[$doc:meta])* $name:ident, $value:ty) => {
+        $(#[$doc])*
+        pub struct $name<K = IndexKey> {
+            storage: ConstraintFamilyStorage<$value>,
+            _marker: PhantomData<fn() -> K>,
+        }
+
+        impl<K> Clone for $name<K> {
+            fn clone(&self) -> Self {
+                Self { storage: self.storage.clone(), _marker: PhantomData }
+            }
+        }
+
+        impl<K> std::fmt::Debug for $name<K> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!($name)).field("entries", &self.storage.entries).finish()
+            }
+        }
+
+        impl<K> $name<K> {
+            pub(crate) fn new(keys: Vec<IndexKey>, axes: Option<&[Axis]>, values: Vec<$value>) -> Self {
+                Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
+            }
+
+            /// Number of domain entries (not the number of lowered rows).
+            pub fn len(&self) -> usize {
+                self.storage.entries.len()
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.storage.entries.is_empty()
+            }
+
+            /// Look up an entry, returning `None` for missing or filtered-out keys.
+            pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<$value> {
+                self.storage.get(&key.into())
+            }
+        }
+
+        impl<K: FromIndexKey> $name<K> {
+            /// Iterate typed keys and copied IDs in the original domain order.
+            pub fn iter(&self) -> impl Iterator<Item = (K, $value)> + '_ {
+                self.storage.entries.iter().map(|(key, value)| (K::from_index_key(key), *value))
+            }
+        }
+    };
+}
+
+constraint_family!(
+    /// Owned handle returned by an indexed single-relation `constraint!` declaration.
+    ///
+    /// IDs refer to rows of the originating model.
+    /// `get` supports integer, string, and tuple keys, including sparse domains.
+    IndexedConstraint, ConstraintId
+);
+
+constraint_family!(
+    /// Owned handle returned by an indexed two-sided range `constraint!` declaration.
+    ///
+    /// Each key maps to one interval ID or separate lower/upper IDs. Entries can
+    /// have different lowering forms within the same family.
+    IndexedRangeConstraint, RangeConstraintIds
+);
 
 /// Backing storage for an [`IndexedFamily`].
 ///

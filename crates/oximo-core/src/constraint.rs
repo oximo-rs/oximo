@@ -24,6 +24,16 @@ impl fmt::Display for Sense {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConstraintId(pub u32);
 
+/// Model row IDs produced by a two-sided range declaration.
+///
+/// Constant bounds with a linear body produce one interval row. Other ranges
+/// produce separate lower and upper rows. You can query each row's dual individually.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RangeConstraintIds {
+    Interval(ConstraintId),
+    Split { lower: ConstraintId, upper: ConstraintId },
+}
+
 impl ConstraintId {
     #[inline]
     pub fn index(self) -> usize {

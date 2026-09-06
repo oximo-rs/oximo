@@ -15,7 +15,7 @@
 use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
 
-use crate::bind::{filtered_set, masked_closure_param, references_any};
+use crate::bind::{family_closure_param, filtered_set, mark_bindings_used, references_any};
 use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
@@ -99,10 +99,11 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let bound_method = |val: &TokenStream2, kind: BoundKind| -> TokenStream2 {
         match binds_slice {
             Some(bs) if references_any(val, &idents) => {
-                let param = masked_closure_param(bs, val);
+                let param = family_closure_param(bs);
+                let used = mark_bindings_used(bs);
                 match kind {
-                    BoundKind::Lb => quote!(.lb_by(move |#param| f64::from(#val))),
-                    BoundKind::Ub => quote!(.ub_by(move |#param| f64::from(#val))),
+                    BoundKind::Lb => quote!(.lb_by(move |#param| { #used f64::from(#val) })),
+                    BoundKind::Ub => quote!(.ub_by(move |#param| { #used f64::from(#val) })),
                 }
             }
             _ => match kind {

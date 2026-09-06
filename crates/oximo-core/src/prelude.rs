@@ -1,7 +1,9 @@
-pub use crate::constraint::{Constraint, ConstraintExpr, ConstraintId, IntoRhs, Relate, Sense};
+pub use crate::constraint::{
+    Constraint, ConstraintExpr, ConstraintId, IntoRhs, RangeConstraintIds, Relate, Sense,
+};
 pub use crate::domain::Domain;
 pub use crate::error::Error;
-pub use crate::indexed::{IndexedParam, IndexedVar};
+pub use crate::indexed::{IndexedConstraint, IndexedParam, IndexedRangeConstraint, IndexedVar};
 pub use crate::model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
 };
