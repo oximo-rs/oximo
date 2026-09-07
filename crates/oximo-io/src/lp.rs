@@ -272,7 +272,10 @@ impl ExprParser {
                     self.take();
                     lhs = Ast::Div(Box::new(lhs), Box::new(self.unary()?));
                 }
-                Some(Tok::Number(_) | Tok::Word(_)) if matches!(&lhs, Ast::Const(_)) => {
+                Some(Tok::Number(_) | Tok::Word(_))
+                    if matches!(&lhs, Ast::Const(_))
+                        || matches!(&lhs, Ast::Neg(inner) if matches!(inner.as_ref(), Ast::Const(_))) =>
+                {
                     lhs = Ast::Mul(Box::new(lhs), Box::new(self.unary()?));
                 }
                 _ => break,
