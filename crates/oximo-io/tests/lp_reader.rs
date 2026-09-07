@@ -312,3 +312,17 @@ fn higher_degree_expression_is_invalid_lp_syntax() {
     let err = read_lp("Minimize\n obj: x^3\nEnd\n".as_bytes()).unwrap_err();
     assert!(matches!(err, IoError::InvalidLp { .. }));
 }
+
+#[test]
+fn missing_objective_section_is_reported_with_position() {
+    let text = "Subject To\n c: x <= 5\nEnd\n";
+    let err = read_lp(text.as_bytes()).unwrap_err();
+    match err {
+        IoError::InvalidLp { line, column, message } => {
+            assert_eq!(line, 1);
+            assert_eq!(column, 1);
+            assert_eq!(message, "missing Minimize or Maximize section");
+        }
+        other => panic!("expected InvalidLp, got {other:?}"),
+    }
+}
