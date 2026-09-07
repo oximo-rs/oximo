@@ -631,9 +631,6 @@ fn parse_lp<R: BufRead>(mut input: R, model_name: &str) -> Result<Model, IoError
             "constraint is missing a comparison and right-hand side",
         ));
     }
-    if p.sense.is_none() {
-        return Err(invalid_lp(1, 1, "missing Minimize or Maximize section"));
-    }
     build_model(p, objective_lines, model_name)
 }
 
@@ -643,6 +640,9 @@ fn build_model(
     objective_lines: Vec<String>,
     model_name: &str,
 ) -> Result<Model, IoError> {
+    let Some(objective_sense) = p.sense else {
+        return Err(invalid_lp(1, 1, "missing Minimize or Maximize section"));
+    };
     let obj_text = objective_lines.join(" ");
     let obj_text = obj_text.split_once(':').map_or(obj_text.as_str(), |(_, x)| x);
     let obj_toks = lex(obj_text, 1)?;
@@ -766,7 +766,7 @@ fn build_model(
         m.add_sos_constraint(name, sos_type, members);
     }
     let e = lower(&m, &vars, obj)?;
-    match p.sense.unwrap() {
+    match objective_sense {
         ObjectiveSense::Minimize => m.__minimize(e),
         ObjectiveSense::Maximize => m.__maximize(e),
     }
