@@ -1,7 +1,20 @@
 use std::io::{self, Cursor, Read};
 
 use oximo_core::prelude::*;
+use oximo_expr::extract_quadratic;
 use oximo_io::{IoError, read_lp, read_lp_file, to_lp_string};
+
+fn objective_terms(model: &Model) -> oximo_expr::QuadraticTerms {
+    let arena = model.arena();
+    extract_quadratic(&arena, model.try_objective().expect("objective").expr)
+        .expect("quadratic objective")
+}
+
+fn constraint_terms(model: &Model, index: usize) -> oximo_expr::QuadraticTerms {
+    let arena = model.arena();
+    extract_quadratic(&arena, model.constraints().algebraic()[index].lhs)
+        .expect("quadratic constraint")
+}
 
 #[test]
 fn wide_rows_lower_to_linear_size_arenas() {
@@ -325,4 +338,23 @@ fn missing_objective_section_is_reported_with_position() {
         }
         other => panic!("expected InvalidLp, got {other:?}"),
     }
+}
+#[test]
+fn leading_negative_coefficient_uses_implicit_multiplication() {
+    let model = read_lp("Minimize\n obj: - 2 x + y\nEnd\n".as_bytes()).expect("negative objective");
+    let vars = model.variables();
+    assert_eq!(objective_terms(&model).linear, vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
+
+    let model = read_lp("Minimize\n obj: x\nSubject To\n c1: - 2 x + y >= 3\nEnd\n".as_bytes())
+        .expect("negative row coefficient");
+    let vars = model.variables();
+    let first_cstr_term = constraint_terms(&model, 0);
+    assert_eq!(first_cstr_term.linear, vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
+
+    let model = read_lp("Minimize\n obj: [ - 2 x^2 ]/2\nEnd\n".as_bytes())
+        .expect("negative bracket coefficient");
+    assert_eq!(
+        objective_terms(&model).hessian,
+        vec![(model.variables()[0].id, model.variables()[0].id, -2.0)]
+    );
 }
