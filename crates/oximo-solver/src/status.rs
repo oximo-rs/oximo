@@ -114,8 +114,8 @@ impl PrimalStatus {
 
 #[derive(Error)]
 pub enum SolverError {
-    #[error("solver does not support model kind {0:?}")]
-    UnsupportedKind(oximo_core::ModelKind),
+    #[error("solver does not support model kind {kind:?} (supported: {})", format_kinds(supported))]
+    UnsupportedKind { kind: oximo_core::ModelKind, supported: &'static [oximo_core::ModelKind] },
     #[error("solver does not support native {0} constraints")]
     UnsupportedConstraint(&'static str),
     #[error(
@@ -133,6 +133,15 @@ pub enum SolverError {
     Core(#[from] oximo_core::Error),
 }
 
+impl SolverError {
+    pub fn unsupported_kind(
+        kind: oximo_core::ModelKind,
+        supported: &'static [oximo_core::ModelKind],
+    ) -> Self {
+        Self::UnsupportedKind { kind, supported }
+    }
+}
+
 // Mirror `Display` in `Debug`. When a `main` returning `Result` propagates an
 // error, Rust's `Termination` impl prints it with `{:?}`. The derived `Debug`
 // would escape newlines in `Backend` messages (e.g. multi-line GAMS reports)
@@ -141,6 +150,10 @@ impl std::fmt::Debug for SolverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
+}
+
+fn format_kinds(kinds: &[oximo_core::ModelKind]) -> String {
+    kinds.iter().map(|k| format!("{:?}", k)).collect::<Vec<_>>().join(", ")
 }
 
 #[cfg(test)]

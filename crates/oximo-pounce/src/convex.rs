@@ -52,17 +52,19 @@ pub(crate) fn route(model: &Model, opts: &PounceOptions) -> Result<Route, Solver
     }
 
     match selection {
-        PounceSolverSelection::Auto => match class {
-            Class::Lp | Class::ConvexQp => Ok(Route::QpIpm),
-            Class::Socp => Ok(Route::Socp),
-            Class::General => {
-                if has_explicit_soc {
-                    Err(SolverError::UnsupportedKind(ModelKind::SOCP))
-                } else {
-                    Ok(Route::Nlp)
+        PounceSolverSelection::Auto => {
+            match class {
+                Class::Lp | Class::ConvexQp => Ok(Route::QpIpm),
+                Class::Socp => Ok(Route::Socp),
+                Class::General => {
+                    if has_explicit_soc {
+                        Err(SolverError::UnsupportedConstraint("explicit SOC constraints are not supported by the automatic POUNCE route".into()))
+                    } else {
+                        Ok(Route::Nlp)
+                    }
                 }
             }
-        },
+        }
         PounceSolverSelection::Nlp => {
             if has_explicit_soc {
                 Err(incompatible("nlp", "explicit SOC constraints"))

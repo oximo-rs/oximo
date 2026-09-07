@@ -101,7 +101,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
-        return Err(SolverError::UnsupportedKind(kind));
+        return Err(SolverError::unsupported_kind(kind, crate::SUPPORTED_KINDS));
     }
 
     let arena = model.arena();
@@ -612,7 +612,13 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::MIQP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MIQP)));
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedKind {
+                kind: ModelKind::MIQP,
+                supported: crate::SUPPORTED_KINDS
+            }
+        ));
     }
 
     #[test]
@@ -624,7 +630,13 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::QCP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::QCP)));
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedKind {
+                kind: ModelKind::QCP,
+                supported: crate::SUPPORTED_KINDS
+            }
+        ));
     }
 
     #[test]
@@ -683,6 +695,12 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::SOCP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::SOCP)));
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedKind {
+                kind: ModelKind::SOCP,
+                supported: crate::SUPPORTED_KINDS
+            }
+        ));
     }
 }

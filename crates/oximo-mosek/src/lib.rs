@@ -21,19 +21,19 @@ use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
 pub struct Mosek;
 
 pub(crate) const NAME: &str = "MOSEK";
+pub(crate) const SUPPORTED_KINDS: &[ModelKind] = &[
+    ModelKind::LP,
+    ModelKind::MILP,
+    ModelKind::QP,
+    ModelKind::MIQP,
+    ModelKind::QCP,
+    ModelKind::MIQCP,
+    ModelKind::SOCP,
+    ModelKind::MISOCP,
+];
 
-pub(crate) const fn supported(kind: ModelKind) -> bool {
-    matches!(
-        kind,
-        ModelKind::LP
-            | ModelKind::MILP
-            | ModelKind::QP
-            | ModelKind::MIQP
-            | ModelKind::QCP
-            | ModelKind::MIQCP
-            | ModelKind::SOCP
-            | ModelKind::MISOCP
-    )
+pub(crate) fn supported(kind: ModelKind) -> bool {
+    SUPPORTED_KINDS.contains(&kind)
 }
 
 impl Solver for Mosek {

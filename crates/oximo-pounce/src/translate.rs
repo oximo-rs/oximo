@@ -255,11 +255,10 @@ fn effective_string(opts: &PounceOptions, name: &str) -> Option<String> {
 /// Kind gate, objective declaration check, sign, and bound snapshot.
 pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, SolverError> {
     let kind = model.kind();
-    if !matches!(
-        kind,
-        ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
-    ) {
-        return Err(SolverError::UnsupportedKind(kind));
+    if !crate::supported(kind) {
+        return Err(SolverError::UnsupportedConstraint(
+            "explicit SOC constraints are not supported by the automatic POUNCE route".into(),
+        ));
     }
     validate_algorithm(kind, opts)?;
     model.ensure_objective_declared().map_err(SolverError::Core)?;
@@ -281,7 +280,7 @@ pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, Sol
 
     let model_constraints = model.constraints();
     if !model_constraints.second_order_cones().is_empty() {
-        return Err(SolverError::UnsupportedKind(ModelKind::SOCP));
+        return Err(SolverError::unsupported_kind(ModelKind::SOCP, crate::SUPPORTED_KINDS));
     }
     let constraints = model_constraints.algebraic();
     let mut g_l = Vec::with_capacity(constraints.len());
@@ -346,7 +345,11 @@ pub(crate) fn validate_algorithm(
     opts: &PounceOptions,
 ) -> Result<PounceAlgorithm, SolverError> {
     let algorithm = selected_algorithm(opts)?;
-    if algorithm.supports(kind) { Ok(algorithm) } else { Err(SolverError::UnsupportedKind(kind)) }
+    if algorithm.supports(kind) {
+        Ok(algorithm)
+    } else {
+        Err(SolverError::UnsupportedKind { kind, supported: crate::SUPPORTED_KINDS })
+    }
 }
 
 /// Midpoint of finite bounds, otherwise zero clipped into the bounds.

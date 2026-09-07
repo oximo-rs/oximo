@@ -47,24 +47,26 @@ impl Gams {
 /// and the `solver_name` stamped on every [`SolverResult`].
 pub(crate) const NAME: &str = "GAMS";
 
+/// Supported Models.
+pub(crate) const SUPPORTED_KINDS: &[ModelKind] = &[
+    ModelKind::LP,
+    ModelKind::MILP,
+    ModelKind::QP,
+    ModelKind::MIQP,
+    ModelKind::QCP,
+    ModelKind::MIQCP,
+    ModelKind::SOCP,
+    ModelKind::MISOCP,
+    ModelKind::NLP,
+    ModelKind::MINLP,
+];
+
 /// GAMS handles every kind oximo classifies: quadratic constraints route
 /// through the QCP/MIQCP solve types and explicit SOC constraints are emitted
 /// as quadratic `sqr(..)` rows. Whether the selected sub-solver copes is
 /// checked separately (see `validate_solver`).
-pub(crate) const fn supported(kind: ModelKind) -> bool {
-    matches!(
-        kind,
-        ModelKind::LP
-            | ModelKind::MILP
-            | ModelKind::QP
-            | ModelKind::MIQP
-            | ModelKind::QCP
-            | ModelKind::MIQCP
-            | ModelKind::SOCP
-            | ModelKind::MISOCP
-            | ModelKind::NLP
-            | ModelKind::MINLP
-    )
+pub(crate) fn supported(kind: ModelKind) -> bool {
+    SUPPORTED_KINDS.contains(&kind)
 }
 
 impl Solver for Gams {

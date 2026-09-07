@@ -23,7 +23,15 @@ pub use hybrid::benchmark_support;
 pub use options::{
     MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection,
 };
+use oximo_core::ModelKind;
 pub use persistent::PouncePersistent;
+
+pub(crate) const SUPPORTED_KINDS: &[ModelKind] =
+    &[ModelKind::LP, ModelKind::QP, ModelKind::QCP, ModelKind::SOCP, ModelKind::NLP];
+
+pub(crate) fn supported(kind: ModelKind) -> bool {
+    SUPPORTED_KINDS.contains(&kind)
+}
 
 /// The POUNCE backend:
 /// specialized convex LP/QP/SOCP engines with a general IPOPT-lineage
@@ -44,12 +52,8 @@ impl oximo_solver::Solver for Pounce {
         "pounce"
     }
 
-    fn supports(&self, kind: oximo_core::ModelKind) -> bool {
-        use oximo_core::ModelKind;
-        matches!(
-            kind,
-            ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
-        )
+    fn supports(&self, kind: ModelKind) -> bool {
+        supported(kind)
     }
 
     fn solve(

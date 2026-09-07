@@ -97,7 +97,8 @@ constraint_family!(
     ///
     /// IDs refer to rows of the originating model.
     /// `get` supports integer, string, and tuple keys, including sparse domains.
-    IndexedConstraint, ConstraintId
+    IndexedConstraint,
+    ConstraintId
 );
 
 constraint_family!(
@@ -105,7 +106,8 @@ constraint_family!(
     ///
     /// Each key maps to one interval ID or separate lower/upper IDs. Entries can
     /// have different lowering forms within the same family.
-    IndexedRangeConstraint, RangeConstraintIds
+    IndexedRangeConstraint,
+    RangeConstraintIds
 );
 
 /// Backing storage for an [`IndexedFamily`].
