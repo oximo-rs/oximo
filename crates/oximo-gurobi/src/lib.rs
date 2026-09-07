@@ -33,23 +33,25 @@ pub struct Gurobi;
 /// and the `solver_name` stamped on every [`SolverResult`].
 pub(crate) const NAME: &str = "Gurobi";
 
+/// Supported Models.
+pub(crate) const SUPPORTED_KINDS: &[ModelKind] = &[
+    ModelKind::LP,
+    ModelKind::MILP,
+    ModelKind::QP,
+    ModelKind::MIQP,
+    ModelKind::QCP,
+    ModelKind::MIQCP,
+    ModelKind::SOCP,
+    ModelKind::MISOCP,
+    ModelKind::NLP,
+    ModelKind::MINLP,
+];
+
 /// Gurobi handles every kind oximo classifies: linear, quadratic objectives
 /// and constraints, second-order cones (lowered to quadratic rows), and
 /// general nonlinear expressions.
-pub(crate) const fn supported(kind: ModelKind) -> bool {
-    matches!(
-        kind,
-        ModelKind::LP
-            | ModelKind::MILP
-            | ModelKind::QP
-            | ModelKind::MIQP
-            | ModelKind::QCP
-            | ModelKind::MIQCP
-            | ModelKind::SOCP
-            | ModelKind::MISOCP
-            | ModelKind::NLP
-            | ModelKind::MINLP
-    )
+pub(crate) fn supported(kind: ModelKind) -> bool {
+    SUPPORTED_KINDS.contains(&kind)
 }
 
 impl Solver for Gurobi {

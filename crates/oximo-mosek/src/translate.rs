@@ -60,7 +60,7 @@ pub(crate) fn build_task(
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
-        return Err(SolverError::UnsupportedKind(kind));
+        return Err(SolverError::unsupported_kind(kind, crate::SUPPORTED_KINDS));
     }
     reject_semi_domains(model)?;
 

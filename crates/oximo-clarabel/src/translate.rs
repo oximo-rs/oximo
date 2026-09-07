@@ -188,7 +188,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if !crate::supported(kind) {
-        return Err(SolverError::UnsupportedKind(kind));
+        return Err(SolverError::UnsupportedKind { kind, supported: crate::SUPPORTED_KINDS });
     }
     let vars = model.variables();
     reject_semi_domains(&vars)?;
@@ -1009,7 +1009,13 @@ mod tests {
         variable!(m, 0.0 <= x <= 5.0, Int);
         objective!(m, Min, x);
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedKind {
+                kind: ModelKind::MISOCP,
+                supported: crate::SUPPORTED_KINDS
+            }
+        ));
     }
 
     #[test]
@@ -1022,7 +1028,13 @@ mod tests {
         constraint!(m, c, x * y <= 4.0);
         objective!(m, Min, x + y);
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::QCP)));
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedKind {
+                kind: ModelKind::QCP,
+                supported: crate::SUPPORTED_KINDS
+            }
+        ));
     }
 
     #[test]
@@ -1031,7 +1043,13 @@ mod tests {
         variable!(m, x >= 0.1);
         objective!(m, Min, x.sin());
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::NLP)));
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedKind {
+                kind: ModelKind::NLP,
+                supported: crate::SUPPORTED_KINDS
+            }
+        ));
     }
 
     #[test]

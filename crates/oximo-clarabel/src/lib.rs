@@ -27,12 +27,13 @@ pub struct Clarabel;
 /// Display name for this backend; the single source for both [`Solver::name`]
 /// and the `solver_name` stamped on every [`SolverResult`].
 pub(crate) const NAME: &str = "Clarabel";
+pub(crate) const SUPPORTED_KINDS: &[ModelKind] = &[ModelKind::LP, ModelKind::QP, ModelKind::SOCP];
 
 /// The model kinds Clarabel can solve: continuous LP, quadratic-objective QP,
 /// and SOCP.
 /// QCP is out until convex quadratic constraints are reformulated to SOC.
-pub(crate) const fn supported(kind: ModelKind) -> bool {
-    matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::SOCP)
+pub(crate) fn supported(kind: ModelKind) -> bool {
+    SUPPORTED_KINDS.contains(&kind)
 }
 
 impl Solver for Clarabel {

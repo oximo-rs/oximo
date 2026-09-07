@@ -29,9 +29,11 @@ pub struct Highs;
 /// and the `solver_name` stamped on every [`SolverResult`].
 pub(crate) const NAME: &str = "HiGHS";
 
+pub(crate) const SUPPORTED_KINDS: &[ModelKind] = &[ModelKind::LP, ModelKind::MILP, ModelKind::QP];
+
 /// The model kinds HiGHS can solve: linear models and quadratic-objective QP.
-pub(crate) const fn supported(kind: ModelKind) -> bool {
-    matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+pub(crate) fn supported(kind: ModelKind) -> bool {
+    SUPPORTED_KINDS.contains(&kind)
 }
 
 impl Solver for Highs {

@@ -33,6 +33,8 @@ pub struct Snapshot {
     pub fingerprint: u64,
 }
 
+const LINEAR_MODELS: &[ModelKind] = &[ModelKind::LP, ModelKind::MILP];
+
 /// Compute the incremental [`Snapshot`] of a linear model (`LP`/`MILP`).
 ///
 /// The objective and every constraint must be linear, the snapshot is the basis
@@ -49,7 +51,7 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     model.ensure_objective_declared().map_err(SolverError::Core)?;
     let kind = model.kind();
     if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
-        return Err(SolverError::UnsupportedKind(kind));
+        return Err(SolverError::UnsupportedKind { kind, supported: LINEAR_MODELS });
     }
     let arena = model.arena();
     let vars = model.variables();
@@ -155,9 +157,8 @@ fn hash_row(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use oximo_core::prelude::*;
-
-    use super::snapshot;
 
     #[test]
     fn row_scratch_preserves_fingerprint_bits_across_different_widths() {
@@ -279,7 +280,10 @@ mod tests {
         objective!(m, Min, t);
         assert!(matches!(
             snapshot(&m),
-            Err(crate::status::SolverError::UnsupportedKind(ModelKind::SOCP))
+            Err(crate::status::SolverError::UnsupportedKind {
+                kind: ModelKind::SOCP,
+                supported: LINEAR_MODELS
+            })
         ));
     }
 
