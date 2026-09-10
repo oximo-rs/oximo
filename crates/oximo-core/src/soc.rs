@@ -1,6 +1,4 @@
-use oximo_expr::{
-    ExprArena, ExprId, LinearTerms, QuadraticTerms, VarId, extract_linear, extract_quadratic,
-};
+use oximo_expr::{ExprArena, ExprId, LinearTerms, QuadraticTerms, VarId, extract_quadratic};
 use smol_str::SmolStr;
 
 use crate::constraint::{Constraint, Sense};
@@ -33,9 +31,7 @@ pub struct SocConstraint {
 
 /// Normalized second-order cone data: `|| A x + a ||_2 <= b'x + beta`, one
 /// [`LinearTerms`] per row of `A x + a` plus one for the bound side. Produced
-/// by [`detect_soc`] (algebraic quadratic constraints) and
-/// [`explicit_soc_form`] ([`SocConstraint`]s), so backends translate both
-/// through a single shape.
+/// by shared solver preparation for algebraic and explicit cones.
 #[derive(Clone, Debug)]
 pub struct SocForm {
     pub terms: Vec<LinearTerms<'static>>,
@@ -78,7 +74,7 @@ fn soc_quadratic(vars: &[Variable], c: &Constraint, q: &QuadraticTerms) -> Optio
 
 /// Whether an algebraic constraint has the supported detected-SOC shape.
 ///
-/// Unlike [`detect_soc`], this does not materialize a [`SocForm`]. Model-kind
+/// This does not materialize a [`SocForm`]. Model-kind
 /// inference only needs this predicate and can avoid allocating one
 /// `LinearTerms` coefficient vector per cone member.
 pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> bool {
@@ -103,14 +99,7 @@ pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constrai
 /// That is `sum_i p_i x_i^2 <= n t^2` with `t >= 0`, equivalent to
 /// `|| sqrt(p_i/n) x_i ||_2 <= t`. Cross-term (Cholesky-factorized) quadratic
 /// forms are not detected, they classify as QCP instead.
-pub fn detect_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> Option<SocForm> {
-    if !matches!(c.as_single(), Some((Sense::Le, _))) {
-        return None;
-    }
-    let q = extract_quadratic(arena, c.lhs)?;
-    __detect_soc_from_quadratic(vars, c, &q)
-}
-
+///
 /// Backend hook for recognizing a row that has already been decomposed.
 /// `q` must describe `c.lhs` at the current parameter values.
 #[doc(hidden)]
@@ -132,18 +121,5 @@ pub fn __detect_soc_from_quadratic(
         })
         .collect();
     let bound = LinearTerms { coeffs: vec![(t, 1.0)].into(), constant: 0.0 };
-    Some(SocForm { terms, bound })
-}
-
-/// The normalized [`SocForm`] view of an explicit [`SocConstraint`]. Members
-/// are validated affine at registration, so this only returns `None` on a
-/// corrupted model (e.g. an `ExprId` from a different arena).
-pub fn explicit_soc_form(arena: &ExprArena, s: &SocConstraint) -> Option<SocForm> {
-    let terms = s
-        .terms
-        .iter()
-        .map(|&e| extract_linear(arena, e).map(LinearTerms::into_owned))
-        .collect::<Option<Vec<_>>>()?;
-    let bound = extract_linear(arena, s.bound).map(LinearTerms::into_owned)?;
     Some(SocForm { terms, bound })
 }
