@@ -400,9 +400,7 @@ fn extract_result(
             soc_dual,
             reduced_costs,
             best_bound,
-            gap: mixed_integer
-                .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok())
-                .flatten(),
+            gap: mixed_integer.then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok()).flatten(),
             solve_time: elapsed,
             iterations,
             node_count,
