@@ -536,11 +536,48 @@ mod tests {
     }
 
     #[test]
-    fn nonoptimal_milp_gap_uses_shifted_objective_and_bound() {
-        let objective_constant = 5.0;
-        let objective = 10.0 + objective_constant;
-        let bound = 8.0 + objective_constant;
-        let _ = (objective, bound);
+    fn milp_native_gap_is_preserved_when_restoring_objective_offset() {
+        let model = Model::new("native_gap");
+        let items: Vec<_> =
+            (0..100).map(|i| model.__var(format!("x{i}")).binary().build()).collect();
+        let weight = items
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| f64::from(u32::try_from((i * 7) % 17 + 3).unwrap()) * x)
+            .sum::<oximo_core::Expr<'_>>();
+        let value = items
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| f64::from(u32::try_from((i * 11) % 23 + 5).unwrap()) * x)
+            .sum::<oximo_core::Expr<'_>>();
+        let volume = items
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| f64::from(u32::try_from((i * 13) % 31 + 2).unwrap()) * x)
+            .sum::<oximo_core::Expr<'_>>();
+        constraint!(model, capacity, weight <= 350.0);
+        constraint!(model, volume_capacity, volume <= 550.0);
+        objective!(model, Max, value + 100.0);
+        let (prob, meta) = build_problem(&model).unwrap();
+        let opts = HighsOptions::default().presolve(crate::HighsPresolve::Off).mip_gap(0.5);
+        let solved = make_live(prob, &opts).unwrap().try_solve().unwrap();
+        let native_gap = solved.double_info_value(c"mip_gap").unwrap();
+        assert!(native_gap.is_finite() && native_gap > 0.0, "native gap: {native_gap}");
+        let result = extract_result(
+            &solved,
+            true,
+            meta.obj_constant,
+            meta.num_constraints,
+            meta.cols.len(),
+            Duration::ZERO,
+        );
+        assert_eq!(result.gap, Some(native_gap));
+        assert_eq!(result.objective(), Some(solved.objective_value() + 100.0));
+        let native_bound = solved.double_info_value(c"mip_dual_bound").unwrap();
+        assert_eq!(result.best_bound, Some(native_bound + 100.0));
+        let shifted_gap = (result.objective().unwrap() - result.best_bound.unwrap()).abs()
+            / result.objective().unwrap().abs();
+        assert!((native_gap - shifted_gap).abs() > 1e-6);
     }
 
     #[test]
