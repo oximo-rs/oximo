@@ -33,11 +33,30 @@ fn limits_require_points_and_invalid_incumbents_do_not_keep_their_duals() {
     assert_eq!(normalize_result(result.clone(), 1).primal_status, PrimalStatus::FeasiblePoint);
     result.solutions.insert(0, point(&[], 2.0));
     result.dual_status = DualStatus::FeasiblePoint;
+    result.gap = Some(0.25);
     result.dual.insert(ConstraintId(0), 99.0);
     let result = normalize_result(result, 1);
     assert_eq!(result.result_count(), 1);
     assert!(result.dual.is_empty());
     assert_eq!(result.dual_status, DualStatus::Unknown);
+    assert_eq!(result.gap, None);
+}
+
+#[test]
+fn discarded_only_incumbent_clears_gap_but_preserves_independent_bound() {
+    let result = normalize_result(
+        SolverResult {
+            termination: TerminationStatus::TimeLimit,
+            solutions: vec![point(&[(0, f64::NAN)], 7.0)],
+            best_bound: Some(2.0),
+            gap: Some(0.5),
+            ..Default::default()
+        },
+        1,
+    );
+    assert_eq!(result.primal_status, PrimalStatus::NoSolution);
+    assert_eq!(result.best_bound, Some(2.0));
+    assert_eq!(result.gap, None);
 }
 
 #[test]
@@ -94,6 +113,7 @@ fn discarded_optimal_incumbent_does_not_certify_another_pool_point() {
             primal_status: PrimalStatus::OptimalPoint,
             solutions: vec![point(&[], 2.0), point(&[(0, 3.0)], 7.0)],
             best_bound: bound,
+            gap: Some(0.0),
             dual_status: DualStatus::FeasiblePoint,
             ..Default::default()
         };

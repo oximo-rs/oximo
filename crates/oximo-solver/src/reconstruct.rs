@@ -138,6 +138,7 @@ pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> Solve
     };
     if lost_incumbent {
         result.dual_status = DualStatus::Unknown;
+        result.gap = None;
     }
     if result.dual_status != DualStatus::FeasiblePoint {
         result.dual.clear();
