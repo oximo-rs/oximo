@@ -78,8 +78,73 @@ macro_rules! adapter {
             fn parameters_between_cold_solves() {
                 parameter_refresh($solver, &$opts);
             }
+            #[test]
+            fn quadratic_cross_terms_and_objective_signs() {
+                quadratic_cross_terms($solver, &$opts);
+            }
+            #[test]
+            fn explicit_and_detected_cones() {
+                cone_forms($solver, &$opts);
+            }
         }
     };
+}
+
+fn quadratic_cross_terms<S: Solver>(mut solver: S, opts: &S::Options) {
+    for maximize in [false, true] {
+        let model = Model::new("quadratic_cross_terms");
+        variable!(model, x >= 0.0);
+        variable!(model, y >= 0.0);
+        constraint!(model, balance, x + y == 1.0);
+        let polynomial = 2.0 * x.powi(2) + x * y + y.powi(2) + x + y;
+        if maximize {
+            objective!(model, Max, 7.0 - polynomial);
+        } else {
+            objective!(model, Min, polynomial + 7.0);
+        }
+        let result = solver.solve(&model, opts).unwrap();
+        assert!(result.has_solution());
+        close(result.value_of(x), 0.25);
+        close(result.value_of(y), 0.75);
+        close(result.objective(), if maximize { 5.125 } else { 8.875 });
+        assert!(matches!(
+            result.termination,
+            TerminationStatus::Optimal | TerminationStatus::LocallyOptimal
+        ));
+        if result.termination == TerminationStatus::Optimal {
+            close(result.best_bound, result.objective().unwrap());
+        }
+    }
+}
+
+fn cone_forms<S: Solver>(mut solver: S, opts: &S::Options) {
+    for explicit in [false, true] {
+        let model = Model::new("cone_forms");
+        variable!(model, x >= 0.0);
+        variable!(model, y >= 0.0);
+        variable!(model, t >= 0.0);
+        constraint!(model, fix_x, x == 3.0);
+        constraint!(model, fix_y, y == 4.0);
+        if explicit {
+            soc_constraint!(model, cone, [2.0 * x + 1.0, y + 20.0] <= 2.0 * t + 5.0);
+        } else {
+            constraint!(model, cone, x.powi(2) + y.powi(2) <= t.powi(2));
+        }
+        objective!(model, Min, t + 7.0);
+        assert_eq!(model.kind(), ModelKind::SOCP);
+        let result = solver.solve(&model, opts);
+        if !solver.supports(ModelKind::SOCP) {
+            assert!(matches!(result, Err(SolverError::UnsupportedKind(ModelKind::SOCP))));
+            continue;
+        }
+        let result = result.unwrap();
+        assert!(result.has_solution());
+        close(result.value_of(x), 3.0);
+        close(result.value_of(y), 4.0);
+        // sqrt(7^2 + 24^2) = 25 for the explicit cone.
+        close(result.value_of(t), if explicit { 10.0 } else { 5.0 });
+        close(result.objective(), if explicit { 17.0 } else { 12.0 });
+    }
 }
 
 adapter!("highs", highs, oximo::solvers::Highs, oximo::HighsOptions::default(), true);
