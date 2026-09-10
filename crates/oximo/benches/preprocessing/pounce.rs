@@ -7,10 +7,25 @@ use super::common::{pair, sizes, threads};
 
 /// Run stable POUNCE classification, value, and rejected Jacobian candidates.
 pub fn bench(criterion: &mut Criterion) {
+    nlp_setup(criterion);
     classification(criterion);
     initialization(criterion);
     values(criterion);
     jacobians(criterion);
+}
+
+/// Measure the production route and NLP bounds snapshot, excluding oracle
+/// construction and optimization.
+fn nlp_setup(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("preprocessing/pounce_nlp_setup");
+    for rows in [16, 64, 1_024, 8_192] {
+        let model = benchmark_support::model(rows, true);
+        group.throughput(Throughput::Elements(rows as u64));
+        group.bench_function(BenchmarkId::from_parameter(rows), |bencher| {
+            bencher.iter(|| black_box(benchmark_support::prepare_nlp(&model)));
+        });
+    }
+    group.finish();
 }
 
 /// Measure initial constraint-slot classification for QCP and NLP models.

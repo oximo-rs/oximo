@@ -112,6 +112,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
     let t = tnlp.borrow();
     Ok(match &t.captured {
         Some(c) => Outcome {
+            has_point: crate::translate::nlp_has_point(status, &stats, opts),
             termination,
             dual_status: if matches!(status, ApplicationReturnStatus::SolveSucceeded) {
                 DualStatus::FeasiblePoint
@@ -129,6 +130,7 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
             raw_log,
         },
         None => Outcome {
+            has_point: false,
             termination,
             dual_status: DualStatus::Unknown,
             raw_status: format!("{status:?}"),

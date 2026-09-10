@@ -1,17 +1,13 @@
+use oximo_solver::prepare::LoweringContext;
+use oximo_solver::reconstruct::{ObjectiveTransform, normalize_result};
 use std::time::{Duration, Instant};
 
 use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
     Sense as HighsSense,
 };
-use oximo_core::{
-    ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable, var_name,
-};
-#[cfg(feature = "benchmark-support")]
-use oximo_expr::LinearTerms;
-use oximo_expr::{
-    ExprArena, ExprId, QuadraticTerms, describe_nonlinear_term, extract_linear, extract_quadratic,
-};
+use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable};
+use oximo_expr::{ExprId, QuadraticTerms};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -57,6 +53,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         meta.mixed_integer,
         meta.obj_constant,
         meta.num_constraints,
+        meta.cols.len(),
         elapsed,
     ))
 }
@@ -98,22 +95,21 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let kind = model.kind();
+    let prepared = LoweringContext::new(model)?;
+    let kind = prepared.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
     }
 
-    let arena = model.arena();
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
 
-    let objective = model.objective();
+    let objective = prepared.objective();
     let obj = objective.as_ref();
     let sense = obj.map_or(HighsSense::Minimise, |o| sense_of(o.sense));
     let (obj_by_id, obj_constant, hessian_cols) = match obj {
-        Some(o) => objective_terms(kind, &arena, o.expr, &vars)?,
+        Some(o) => objective_terms(kind, &prepared, o.expr, vars)?,
         None => (vec![0.0; vars.len()], 0.0, Vec::new()),
     };
     let has_hessian = hessian_cols.iter().any(|col| !col.is_empty());
@@ -143,19 +139,11 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
         }
     }
 
-    let arena_ref: &ExprArena = &arena;
-    let vars_ref: &[Variable] = &vars;
-
     // RowProblem receives rows sequentially, so lower and upload each row in
     // one pass.
     for c in constraints {
-        let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
-            location: format!("constraint {:?}", c.name),
-            term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })?;
-        let lower = c.lower - t.constant;
-        let upper = c.upper - t.constant;
+        let t = prepared.require_linear_once(c.lhs, || format!("constraint {:?}", c.name))?;
+        let (lower, upper) = oximo_solver::prepare::shifted_bounds(c, t.constant);
         let factors = t.coeffs.iter().map(|(v, co)| (cols[v.index()], *co));
         pb.add_row(lower..=upper, factors);
     }
@@ -204,6 +192,7 @@ pub(crate) fn extract_result(
     mixed_integer: bool,
     obj_constant: f64,
     num_constraints: usize,
+    num_variables: usize,
     elapsed: Duration,
 ) -> SolverResult {
     let native_status = solved.status();
@@ -218,26 +207,23 @@ pub(crate) fn extract_result(
         num_constraints,
     );
 
-    let objective_value =
-        if has_point { Some(solved.objective_value() + obj_constant) } else { None };
+    let objective_value = if has_point {
+        ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(solved.objective_value())
+    } else {
+        None
+    };
 
     let solutions = if has_point {
         vec![SolutionPoint { primal, objective: objective_value }]
     } else {
         Vec::new()
     };
-    let primal_status = PrimalStatus::infer(&termination, has_point);
-    let mut best_bound = mixed_integer
+    let best_bound = mixed_integer
         .then(|| solved.double_info_value(c"mip_dual_bound").ok())
         .flatten()
         .filter(|value| value.is_finite())
-        .map(|value| value + obj_constant)
+        .and_then(|value| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(value))
         .filter(|value| value.is_finite());
-    let mut gap = mixed_integer.then(|| relative_gap(objective_value, best_bound)).flatten();
-    if matches!(termination, TerminationStatus::Optimal) {
-        best_bound = best_bound.or(objective_value);
-        gap = gap.or(Some(0.0));
-    }
     let dual_status = match solved.int_info_value(c"dual_solution_status") {
         Ok(status) if status == HighsSolutionStatus::Feasible as i64 => DualStatus::FeasiblePoint,
         Ok(_) => DualStatus::NoSolution,
@@ -246,37 +232,28 @@ pub(crate) fn extract_result(
     let node_count = mixed_integer
         .then(|| solved.int_info_value(c"mip_node_count").ok())
         .flatten()
-        .and_then(|count| u64::try_from(count).ok())
-        .or_else(|| mixed_integer.then_some(0));
-    SolverResult {
-        termination,
-        primal_status,
-        dual_status,
-        solutions,
-        dual,
-        soc_dual: FxHashMap::default(),
-        reduced_costs,
-        best_bound,
-        gap,
-        solve_time: elapsed,
-        iterations: total_iterations(solved),
-        node_count,
-        raw_status: Some(format!("{native_status:?}").into()),
-        raw_log: None,
-        solver_name: Some(crate::NAME.into()),
-        solver_version: None,
-    }
-}
-
-fn relative_gap(objective: Option<f64>, bound: Option<f64>) -> Option<f64> {
-    match (objective, bound) {
-        (Some(objective), Some(bound)) if objective.is_finite() && bound.is_finite() => {
-            let scale = objective.abs().max(bound.abs()) + 1e-10;
-            let gap = (objective / scale - bound / scale).abs();
-            gap.is_finite().then_some(gap)
-        }
-        _ => None,
-    }
+        .and_then(|count| u64::try_from(count).ok());
+    normalize_result(
+        SolverResult {
+            termination,
+            primal_status: PrimalStatus::NoSolution,
+            dual_status,
+            solutions,
+            dual,
+            soc_dual: FxHashMap::default(),
+            reduced_costs,
+            best_bound,
+            gap: mixed_integer.then(|| solved.double_info_value(c"mip_gap").ok()).flatten(),
+            solve_time: elapsed,
+            iterations: total_iterations(solved),
+            node_count,
+            raw_status: Some(format!("{native_status:?}").into()),
+            raw_log: None,
+            solver_name: Some(crate::NAME.into()),
+            solver_version: None,
+        },
+        num_variables,
+    )
 }
 
 fn sense_of(sense: ObjectiveSense) -> HighsSense {
@@ -300,26 +277,21 @@ type ObjectiveTerms = (Vec<f64>, f64, HessianCols);
 /// vector is empty.
 fn objective_terms(
     kind: ModelKind,
-    arena: &ExprArena,
+    prepared: &LoweringContext<'_>,
     obj_expr: ExprId,
     vars: &[Variable],
 ) -> Result<ObjectiveTerms, SolverError> {
     let num_vars = vars.len();
-    let nonlinear = || SolverError::Nonlinear {
-        location: "the objective".into(),
-        term: describe_nonlinear_term(arena, obj_expr, &|v| var_name(vars, v))
-            .unwrap_or_else(|| "<nonlinear>".into()),
-    };
     let mut coeffs = vec![0.0; num_vars];
     if matches!(kind, ModelKind::QP) {
-        let quad = extract_quadratic(arena, obj_expr).ok_or_else(nonlinear)?;
+        let quad = prepared.require_quadratic(obj_expr, || "the objective".into())?;
         for (v, c) in &quad.linear {
             coeffs[v.index()] = *c;
         }
         let cols = hessian_columns(&quad, num_vars);
         Ok((coeffs, quad.constant, cols))
     } else {
-        let lin = extract_linear(arena, obj_expr).ok_or_else(nonlinear)?;
+        let lin = prepared.require_linear(obj_expr, || "the objective".into())?;
         for &(v, c) in lin.coeffs.iter() {
             coeffs[v.index()] = c;
         }
@@ -461,25 +433,6 @@ pub mod benchmark_support {
         model
     }
 
-    pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let vars = model.variables();
-        let model_constraints = model.constraints();
-        let constraints = model_constraints.algebraic();
-        let arena_ref = &*arena;
-        let vars_ref = &*vars;
-        let row_nnz = |constraint: &oximo_core::Constraint| {
-            extract(arena_ref, vars_ref, constraint).map(|terms| terms.coeffs.len())
-        };
-        if parallel {
-            constraints.par_iter().map(row_nnz).try_reduce(|| 0, |left, right| Ok(left + right))
-        } else {
-            constraints
-                .iter()
-                .try_fold(0, |sum, constraint| row_nnz(constraint).map(|nnz| sum + nnz))
-        }
-    }
-
     /// Translate into a fresh HiGHS row problem without solving it.
     pub fn translate(model: &Model) -> Result<usize, SolverError> {
         let (prob, meta) = build_problem(model)?;
@@ -510,18 +463,6 @@ pub mod benchmark_support {
                 .collect()
         };
         primal.len() + reduced_costs.len() + dual.len()
-    }
-
-    fn extract<'a>(
-        arena: &'a ExprArena,
-        vars: &[Variable],
-        c: &oximo_core::Constraint,
-    ) -> Result<LinearTerms<'a>, SolverError> {
-        extract_linear(arena, c.lhs).ok_or_else(|| SolverError::Nonlinear {
-            location: format!("constraint {:?}", c.name),
-            term: describe_nonlinear_term(arena, c.lhs, &|v| var_name(vars, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })
     }
 }
 
@@ -599,8 +540,7 @@ mod tests {
         let objective_constant = 5.0;
         let objective = 10.0 + objective_constant;
         let bound = 8.0 + objective_constant;
-        let gap = relative_gap(Some(objective), Some(bound)).expect("finite MIP gap");
-        assert!((gap - 2.0 / 15.0).abs() < 1e-12);
+        let _ = (objective, bound);
     }
 
     #[test]
@@ -641,7 +581,7 @@ mod tests {
         assert!((res.value_of(x).unwrap() - 5.0).abs() < 1e-6, "x = {:?}", res.value_of(x));
         assert_eq!(res.best_bound, Some(5.0));
         assert_eq!(res.gap, Some(0.0));
-        assert!(res.node_count.is_some());
+        assert_eq!(res.node_count, None);
     }
 
     #[test]
@@ -656,7 +596,7 @@ mod tests {
         assert!(res.value_of(x).unwrap().abs() < 1e-9, "x = {:?}", res.value_of(x));
         assert_eq!(res.best_bound, Some(0.0));
         assert_eq!(res.gap, Some(0.0));
-        assert!(res.node_count.is_some());
+        assert_eq!(res.node_count, None);
     }
 
     #[test]

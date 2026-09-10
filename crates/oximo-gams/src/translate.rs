@@ -1,3 +1,5 @@
+use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::reconstruct::normalize_result;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
@@ -12,7 +14,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense,
     SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType, VarId, Variable,
 };
-use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -41,16 +43,15 @@ pub fn solve(
     opts: &GamsOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let kind = model.kind();
+    let prepared = LoweringContext::new(model)?;
+    let kind = prepared.kind();
     validate_solver(opts, kind)?;
-    let arena = model.arena();
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let socs = model.soc_constraints();
-    let sos_constraints = model.sos_constraints();
-    let objective = model.objective();
+    let socs = prepared.constraints().second_order_cones();
+    let sos_constraints = prepared.constraints().special_ordered_sets();
+    let objective = prepared.objective();
     let sense = objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
 
     let sense_kw = match sense {
@@ -62,12 +63,12 @@ pub fn solve(
     let solver_opt = build_model_section(
         &mut gms,
         kind,
-        &arena,
-        &vars,
+        &prepared,
+        vars,
         constraints,
-        &socs,
-        &sos_constraints,
-        objective.as_ref(),
+        socs,
+        sos_constraints,
+        objective,
         sense_kw,
         opts,
     );
@@ -120,15 +121,8 @@ pub fn solve(
     // solve (see `parseoximo_solution`).
     let soc_bounds: Vec<LinearTerms<'static>> = socs
         .iter()
-        .map(|s| {
-            extract_linear(&arena, s.bound).expect("SOC bound is validated affine").into_owned()
-        })
+        .map(|s| prepared.linear(s.bound).expect("SOC bound is validated affine").into_owned())
         .collect();
-
-    drop(arena);
-    drop(vars);
-    drop(socs);
-    drop(sos_constraints);
 
     // - Write .gms file
     let gms_path = tmp_dir.join("model.gms");
@@ -205,7 +199,7 @@ pub fn solve(
                 | ModelKind::MINLP
         );
         let mut result =
-            parseoximo_solution(&content, &soc_bounds, mixed_integer, elapsed, raw_log);
+            parseoximo_solution(&content, &soc_bounds, mixed_integer, vars.len(), elapsed, raw_log);
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
@@ -232,7 +226,7 @@ pub fn solve(
 
     let _ = fs::remove_dir_all(&tmp_dir);
     result.solver_name = Some(gams_solver_label(opts));
-    Ok(result)
+    Ok(normalize_result(result, vars.len()))
 }
 
 /// Backend label for the result: `GAMS/<sub-solver>` when a sub-solver is
@@ -304,6 +298,7 @@ fn parseoximo_solution(
     content: &str,
     soc_bounds: &[LinearTerms<'_>],
     mixed_integer: bool,
+    num_variables: usize,
     elapsed: std::time::Duration,
     raw_log: Option<String>,
 ) -> SolverResult {
@@ -329,7 +324,12 @@ fn parseoximo_solution(
         } else if let Some(rest) = line.strip_prefix("OBJVAL=") {
             obj_val = parse_gams_float(rest);
         } else if let Some(rest) = line.strip_prefix("OBJEST=") {
-            best_bound = parse_gams_float(rest);
+            // GAMS defines `objEst` as a best-possible-objective estimate for
+            // mixed-integer models. It is not a generic certified bound for
+            // continuous LP/QP/NLP solves.
+            if mixed_integer {
+                best_bound = parse_gams_float(rest);
+            }
         } else if let Some(rest) = line.strip_prefix("NODUSD=") {
             node_count = parse_gams_u64(rest);
         } else if let Some(rest) = line.strip_prefix("MARGINALS=") {
@@ -386,12 +386,11 @@ fn parseoximo_solution(
         for (i, bound) in soc_bounds.iter().enumerate() {
             let idx = u32::try_from(i).expect("SOC count overflow");
             if let Some(m) = soc_marginals.get(&idx) {
-                let b_val = bound.constant
-                    + bound
-                        .coeffs
-                        .iter()
-                        .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
-                        .sum::<f64>();
+                let Some(b_val) = bound.coeffs.iter().try_fold(bound.constant, |sum, &(v, c)| {
+                    primal.get(&v).map(|value| sum + c * value)
+                }) else {
+                    continue;
+                };
                 soc_dual.insert(SocConstraintId(idx), 2.0 * b_val * m.abs());
             }
         }
@@ -401,48 +400,38 @@ fn parseoximo_solution(
     // a sub-solver solution pool (if one was written) read from the run dir's GDX.
     let solutions =
         if has_sol { vec![SolutionPoint { primal, objective: obj_val }] } else { Vec::new() };
-    let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
-    let mut gap = match (obj_val, best_bound) {
-        (Some(objective), Some(bound)) if objective.is_finite() && bound.is_finite() => {
-            let scale = objective.abs().max(bound.abs()) + 1e-10;
-            let gap = (objective / scale - bound / scale).abs();
-            gap.is_finite().then_some(gap)
-        }
-        _ => None,
-    };
-    if modelstat == 1 && solvestat == 1 {
-        best_bound = best_bound.or(obj_val);
-        gap = Some(0.0);
-    }
-    SolverResult {
-        solutions,
-        dual: if has_sol { dual } else { FxHashMap::default() },
-        soc_dual,
-        reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
-        termination,
-        primal_status,
-        dual_status: match marginals {
-            Some(true) if has_sol => DualStatus::FeasiblePoint,
-            Some(_) => DualStatus::NoSolution,
-            None => DualStatus::Unknown,
+    normalize_result(
+        SolverResult {
+            solutions,
+            dual: if has_sol { dual } else { FxHashMap::default() },
+            soc_dual,
+            reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
+            termination,
+            primal_status: PrimalStatus::NoSolution,
+            dual_status: match marginals {
+                Some(true) if has_sol => DualStatus::FeasiblePoint,
+                Some(_) => DualStatus::NoSolution,
+                None => DualStatus::Unknown,
+            },
+            best_bound,
+            gap: None,
+            solve_time: elapsed,
+            iterations,
+            node_count: mixed_integer.then_some(node_count).flatten(),
+            raw_status: Some(
+                format!(
+                    "modelstat={modelstat} ({}), solvestat={solvestat} ({})",
+                    model_status_label(modelstat),
+                    solve_status_label(solvestat)
+                )
+                .into(),
+            ),
+            raw_log,
+            solver_name: Some(crate::NAME.into()),
+            solver_version,
         },
-        best_bound,
-        gap,
-        solve_time: elapsed,
-        iterations,
-        node_count: mixed_integer.then_some(node_count).flatten(),
-        raw_status: Some(
-            format!(
-                "modelstat={modelstat} ({}), solvestat={solvestat} ({})",
-                model_status_label(modelstat),
-                solve_status_label(solvestat)
-            )
-            .into(),
-        ),
-        raw_log,
-        solver_name: Some(crate::NAME.into()),
-        solver_version,
-    }
+        num_variables,
+    )
 }
 
 /// Read a sub-solver solution pool from the GAMS run directory.
@@ -596,11 +585,11 @@ fn map_status(modelstat: i32, solvestat: i32) -> TerminationStatus {
 /// <https://www.gams.com/latest/docs/apis/python/classgams_1_1control_1_1workspace_1_1ModelStat.html>
 fn modelstat_termination(modelstat: i32) -> TerminationStatus {
     match modelstat {
-        1 | 8 | 15 | 16 | 17 => TerminationStatus::Optimal,
+        1 => TerminationStatus::Optimal,
         2 => TerminationStatus::LocallyOptimal,
-        7 => TerminationStatus::Feasible,
+        7 | 8 | 15 | 16 | 17 => TerminationStatus::Feasible,
         3 | 18 => TerminationStatus::Unbounded,
-        4 | 6 | 10 | 19 => TerminationStatus::Infeasible,
+        4 | 10 | 19 => TerminationStatus::Infeasible,
         5 => TerminationStatus::LocallyInfeasible,
         11 => TerminationStatus::LicenseError,
         n => TerminationStatus::Other(format!("gams_modelstat_{n}")),
@@ -667,7 +656,7 @@ fn solve_status_label(status: i32) -> &'static str {
 fn build_model_section(
     gms: &mut String,
     kind: ModelKind,
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     vars: &[Variable],
     constraints: &[Constraint],
     socs: &[SocConstraint],
@@ -683,7 +672,7 @@ fn build_model_section(
     write_var_declarations(gms, vars);
     write_sos_declarations(gms, sos_constraints);
     write_bounds_and_initials(gms, vars, sos_constraints);
-    write_equations(gms, arena, constraints, socs, sos_constraints, objective);
+    write_equations(gms, prepared, constraints, socs, sos_constraints, objective);
     write_options(gms, opts, solve_type);
     write_model_and_solve(gms, solve_type, sense_kw, solver_opt.is_some());
 
@@ -878,12 +867,13 @@ fn write_var_bounds(gms: &mut String, v: &Variable) {
 
 fn write_equations(
     gms: &mut String,
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     constraints: &[Constraint],
     socs: &[SocConstraint],
     sos_constraints: &[SosConstraint],
     objective: Option<&Objective>,
 ) {
+    let arena = prepared.arena();
     write!(gms, "Equations\n    eq_obj").unwrap();
     for (i, c) in constraints.iter().enumerate() {
         if c.as_single().is_some() {
@@ -906,7 +896,7 @@ fn write_equations(
     match objective {
         None => writeln!(gms, "eq_obj..  v_obj =e= 0;").unwrap(),
         Some(obj) => {
-            let obj_form = ExprForm::from(arena, obj.expr);
+            let obj_form = ExprForm::prepared(prepared, obj.expr);
             write!(gms, "eq_obj..  v_obj =e=").unwrap();
             write_form(gms, arena, &obj_form, true);
             writeln!(gms, ";").unwrap();
@@ -921,7 +911,7 @@ fn write_equations(
                 Sense::Eq => "=e=",
             };
             write!(gms, "eq_c{ci}..").unwrap();
-            match ExprForm::from(arena, c.lhs) {
+            match ExprForm::prepared(prepared, c.lhs) {
                 ExprForm::Linear(t) => {
                     let adjusted_rhs = rhs - t.constant;
                     write_linear(gms, &t, false);
@@ -933,7 +923,7 @@ fn write_equations(
                 }
             }
         } else {
-            match ExprForm::from(arena, c.lhs) {
+            match ExprForm::prepared(prepared, c.lhs) {
                 ExprForm::Linear(t) => {
                     let lo = c.lower - t.constant;
                     let hi = c.upper - t.constant;
@@ -955,7 +945,7 @@ fn write_equations(
             }
         }
     }
-    write_soc_equations(gms, arena, socs);
+    write_soc_equations(gms, prepared, socs);
     write_sos_link_equations(gms, sos_constraints);
     writeln!(gms).unwrap();
 }
@@ -990,19 +980,19 @@ fn ordered_sos_members(constraint: &SosConstraint) -> Vec<&SosMember> {
 /// Emit each explicit SOC constraint `||terms||_2 <= bound` as the quadratic
 /// row `sqr(term_1) + ... =l= sqr(bound)` plus the sign row `bound =g= 0`
 /// (squaring loses the sign of the bound side).
-fn write_soc_equations(gms: &mut String, arena: &ExprArena, socs: &[SocConstraint]) {
+fn write_soc_equations(gms: &mut String, prepared: &PreparedExpressions, socs: &[SocConstraint]) {
     for (i, s) in socs.iter().enumerate() {
         write!(gms, "eq_soc{i}.. ").unwrap();
         for (k, &term) in s.terms.iter().enumerate() {
             if k > 0 {
                 write!(gms, " +").unwrap();
             }
-            let t = extract_linear(arena, term).expect("SOC members are validated affine");
+            let t = prepared.linear(term).expect("SOC members are validated affine");
             write!(gms, " sqr(").unwrap();
             write_linear(gms, &t, true);
             write!(gms, " )").unwrap();
         }
-        let b = extract_linear(arena, s.bound).expect("SOC bound is validated affine");
+        let b = prepared.linear(s.bound).expect("SOC bound is validated affine");
         write!(gms, " =l= sqr(").unwrap();
         write_linear(gms, &b, true);
         writeln!(gms, " );").unwrap();
@@ -1024,16 +1014,13 @@ fn write_model_and_solve(gms: &mut String, solve_type: &str, sense_kw: &str, has
 
 /// Captured form of an expression for GAMS emission.
 enum ExprForm<'a> {
-    Linear(LinearTerms<'a>),
+    Linear(oximo_solver::prepare::AffineTerms<'a>),
     Nonlinear(ExprId),
 }
 
 impl<'a> ExprForm<'a> {
-    fn from(arena: &'a ExprArena, id: ExprId) -> Self {
-        match extract_linear(arena, id) {
-            Some(t) => ExprForm::Linear(t),
-            None => ExprForm::Nonlinear(id),
-        }
+    fn prepared(prepared: &'a PreparedExpressions, id: ExprId) -> Self {
+        prepared.linear(id).map_or(Self::Nonlinear(id), Self::Linear)
     }
 }
 
@@ -1218,7 +1205,8 @@ fn parse_gams_float(s: &str) -> Option<f64> {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
     use rayon::prelude::*;
@@ -1246,7 +1234,7 @@ pub mod benchmark_support {
     }
 
     pub fn render_equations(model: &Model, parallel: bool) -> String {
-        let arena = model.arena().clone();
+        let arena = PreparedExpressions::new((*model.arena()).clone());
         let constraints = model.constraints().algebraic().to_vec();
         let socs = model.soc_constraints().clone();
         let mut out = String::new();
@@ -1260,7 +1248,7 @@ pub mod benchmark_support {
 
     fn write_parallel(
         out: &mut String,
-        arena: &ExprArena,
+        arena: &PreparedExpressions,
         constraints: &[Constraint],
         socs: &[SocConstraint],
     ) {
@@ -1289,7 +1277,7 @@ pub mod benchmark_support {
         writeln!(out).unwrap();
     }
 
-    fn constraint_fragment(arena: &ExprArena, index: usize, c: &Constraint) -> String {
+    fn constraint_fragment(arena: &PreparedExpressions, index: usize, c: &Constraint) -> String {
         let mut out = String::new();
         if let Some((sense, rhs)) = c.as_single() {
             let sense = match sense {
@@ -1298,7 +1286,7 @@ pub mod benchmark_support {
                 Sense::Eq => "=e=",
             };
             write!(out, "eq_c{index}..").unwrap();
-            match ExprForm::from(arena, c.lhs) {
+            match ExprForm::prepared(arena, c.lhs) {
                 ExprForm::Linear(terms) => {
                     write_linear(&mut out, &terms, false);
                     writeln!(out, " {sense} {};", fmt(rhs - terms.constant)).unwrap();
@@ -1309,7 +1297,7 @@ pub mod benchmark_support {
                 }
             }
         } else {
-            match ExprForm::from(arena, c.lhs) {
+            match ExprForm::prepared(arena, c.lhs) {
                 ExprForm::Linear(terms) => {
                     write!(out, "eq_c{index}_lo..").unwrap();
                     write_linear(&mut out, &terms, false);
@@ -1338,7 +1326,7 @@ mod tests {
     use oximo_core::prelude::*;
 
     fn render(model: &Model, opts: &GamsOptions) -> String {
-        let arena = model.arena();
+        let _arena = model.arena();
         let vars = model.variables();
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
@@ -1353,7 +1341,7 @@ mod tests {
         build_model_section(
             &mut gms,
             model.kind(),
-            &arena,
+            &LoweringContext::new(model).unwrap(),
             &vars,
             constraints,
             &socs,
@@ -1369,21 +1357,21 @@ mod tests {
     fn parses_iterations_from_put_file() {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], false, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &[], false, 1, std::time::Duration::ZERO, None);
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.iterations, 42);
         assert_eq!(r.best_bound, Some(10.0));
-        assert_eq!(r.gap, Some(0.0));
+        assert_eq!(r.gap, None);
         assert!(r.raw_status.as_deref().unwrap().contains("modelstat=1 (optimal)"));
     }
 
     #[test]
     fn parses_bound_nodes_marginals_and_solver_version() {
         let content = "STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\nNODUSD=17\nMARGINALS=1\nSOLVER_VERSION=13.0.1\n0=2.5\nD0=1.0\n";
-        let r = parseoximo_solution(content, &[], true, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &[], true, 1, std::time::Duration::ZERO, None);
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
         assert_eq!(r.best_bound, Some(8.0));
-        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(r.gap, None);
         assert_eq!(r.node_count, Some(17));
         assert_eq!(r.dual_status, DualStatus::FeasiblePoint);
         assert_eq!(r.solver_version.as_deref(), Some("13.0.1"));
@@ -1393,30 +1381,65 @@ mod tests {
     #[test]
     fn integer_solution_status_keeps_reported_gap() {
         let content = "STATUS=8\nSOLVESTAT=1\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], true, std::time::Duration::ZERO, None);
-        assert_eq!(r.termination, TerminationStatus::Optimal);
+        let r = parseoximo_solution(content, &[], true, 1, std::time::Duration::ZERO, None);
+        assert_eq!(r.termination, TerminationStatus::Feasible);
         assert_eq!(r.best_bound, Some(8.0));
-        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(r.gap, None);
+    }
+
+    #[test]
+    fn feasible_model_statuses_do_not_synthesize_global_bounds() {
+        for status in [7, 8, 15, 16, 17] {
+            let content = format!("STATUS={status}\nSOLVESTAT=1\nOBJVAL=10\n0=2.5\n");
+            let result =
+                parseoximo_solution(&content, &[], false, 1, std::time::Duration::ZERO, None);
+            assert_eq!(result.termination, TerminationStatus::Feasible);
+            assert_eq!(result.primal_status, PrimalStatus::FeasiblePoint);
+            assert_eq!(result.best_bound, None);
+            assert_eq!(result.gap, None);
+        }
+        let result = parseoximo_solution(
+            "STATUS=6\nSOLVESTAT=1\nOBJVAL=10\n0=2.5\n",
+            &[],
+            false,
+            1,
+            std::time::Duration::ZERO,
+            None,
+        );
+        assert_eq!(result.termination, TerminationStatus::Other("gams_modelstat_6".into()));
+        assert!(!result.has_solution());
+    }
+
+    #[test]
+    fn time_limit_uses_model_status_as_point_evidence() {
+        for (status, has_point) in [(8, true), (14, false)] {
+            let content = format!("STATUS={status}\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n");
+            let result =
+                parseoximo_solution(&content, &[], true, 1, std::time::Duration::ZERO, None);
+            assert_eq!(result.termination, TerminationStatus::TimeLimit);
+            assert_eq!(result.has_solution(), has_point);
+            assert!(result.gap.is_none());
+            assert_eq!(result.best_bound, Some(8.0));
+            assert!(result.dual.is_empty());
+        }
     }
 
     #[test]
     fn extreme_objective_bound_gap_does_not_overflow() {
         let content =
             format!("STATUS=8\nSOLVESTAT=3\nOBJVAL={}\nOBJEST={}\n0=2.5\n", f64::MAX, -f64::MAX);
-        let r = parseoximo_solution(&content, &[], true, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(&content, &[], true, 1, std::time::Duration::ZERO, None);
         assert_eq!(r.best_bound, Some(-f64::MAX));
-        let gap = r.gap.expect("finite extreme gap");
-        assert!(gap.is_finite());
-        assert!((gap - 2.0).abs() < 1e-12);
+        assert_eq!(r.gap, None);
     }
 
     #[test]
-    fn continuous_objest_bound_is_preserved() {
+    fn continuous_objest_is_not_treated_as_a_global_bound() {
         let content = "STATUS=7\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], false, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &[], false, 1, std::time::Duration::ZERO, None);
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
-        assert_eq!(r.best_bound, Some(8.0));
-        assert!((r.gap.unwrap() - 0.2).abs() < 1e-9);
+        assert_eq!(r.best_bound, None);
+        assert_eq!(r.gap, None);
         assert_eq!(r.node_count, None);
     }
 
@@ -1424,7 +1447,7 @@ mod tests {
     fn missing_objest_tokens_remain_unset() {
         for token in ["NA", "UNDF"] {
             let content = format!("STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST={token}\n0=2.5\n");
-            let r = parseoximo_solution(&content, &[], false, std::time::Duration::ZERO, None);
+            let r = parseoximo_solution(&content, &[], false, 1, std::time::Duration::ZERO, None);
             assert_eq!(r.best_bound, None, "OBJEST={token}");
             assert_eq!(r.gap, None, "OBJEST={token}");
         }
@@ -1432,9 +1455,9 @@ mod tests {
 
     #[test]
     fn soc_marginal_is_rescaled_to_norm_form() {
-        let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\n0=-1.0\n1=1.5\nZ0=-0.75\n";
+        let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\n";
         let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 }];
-        let r = parseoximo_solution(content, &bounds, false, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(content, &bounds, false, 2, std::time::Duration::ZERO, None);
         let z0 = r.soc_dual_of(SocConstraintId(0)).expect("SOC dual missing");
         assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");
     }
@@ -1455,7 +1478,7 @@ mod tests {
         assert_eq!(map_status(2, 1), TerminationStatus::LocallyOptimal);
         assert_eq!(map_status(7, 1), TerminationStatus::Feasible);
         assert_eq!(map_status(9, 1), TerminationStatus::Other("gams_modelstat_9".into()));
-        assert_eq!(map_status(8, 1), TerminationStatus::Optimal);
+        assert_eq!(map_status(8, 1), TerminationStatus::Feasible);
         assert_eq!(map_status(4, 1), TerminationStatus::Infeasible);
         assert_eq!(map_status(3, 1), TerminationStatus::Unbounded);
         assert_eq!(map_status(8, 2), TerminationStatus::IterationLimit);

@@ -1,3 +1,5 @@
+use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::reconstruct::normalize_result;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::process::Stdio;
@@ -9,7 +11,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, Objective, ObjectiveSense, Sense, SocConstraint,
     SocConstraintId, VarId, Variable,
 };
-use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, extract_linear};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms};
 use oximo_solver::{
     DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
     VarBoundKind,
@@ -221,26 +223,23 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let arena = model.arena();
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    let prepared = LoweringContext::new(model)?;
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let socs = model.soc_constraints();
-    let objective = model.objective();
+    let socs = prepared.constraints().second_order_cones();
+    let objective = prepared.objective();
 
     let mut bar = String::with_capacity(4096);
     write_options(&mut bar, opts, RES_NAME, TIM_NAME);
-    let var_order = write_var_declarations(&mut bar, &vars)?;
-    write_bounds(&mut bar, &vars);
-    let con_order = write_equations(&mut bar, &arena, constraints, &socs)?;
-    write_objective(&mut bar, &arena, objective.as_ref())?;
-    write_starting_point(&mut bar, &vars);
+    let var_order = write_var_declarations(&mut bar, vars)?;
+    write_bounds(&mut bar, vars);
+    let con_order = write_equations(&mut bar, &prepared, constraints, socs)?;
+    write_objective(&mut bar, &prepared, objective)?;
+    write_starting_point(&mut bar, vars);
     let soc_bounds = socs
         .iter()
-        .map(|s| {
-            extract_linear(&arena, s.bound).expect("SOC bound is validated affine").into_owned()
-        })
+        .map(|s| prepared.linear(s.bound).expect("SOC bound is validated affine").into_owned())
         .collect();
     Ok((bar, var_order, con_order, soc_bounds))
 }
@@ -350,13 +349,18 @@ fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
 type EquationRow = (&'static str, &'static str, f64);
 
 fn equation_rows(c: &Constraint) -> [Option<EquationRow>; 2] {
-    match c.as_single() {
-        Some((Sense::Le, rhs)) => [Some(("", "<=", rhs)), None],
-        Some((Sense::Ge, rhs)) => [Some(("", ">=", rhs)), None],
-        Some((Sense::Eq, rhs)) => [Some(("", "==", rhs)), None],
-        None if c.is_range() => [Some(("_lo", ">=", c.lower)), Some(("_hi", "<=", c.upper))],
-        None => [None, None],
-    }
+    oximo_solver::prepare::row_sides(c).map(|side| {
+        side.map(|(sense, rhs)| {
+            let suffix =
+                if c.is_range() { if sense == Sense::Ge { "_lo" } else { "_hi" } } else { "" };
+            let op = match sense {
+                Sense::Le => "<=",
+                Sense::Ge => ">=",
+                Sense::Eq => "==",
+            };
+            (suffix, op, rhs)
+        })
+    })
 }
 
 /// Write the `EQUATIONS` block, returning the emit-order map.
@@ -367,10 +371,11 @@ fn equation_rows(c: &Constraint) -> [Option<EquationRow>; 2] {
 /// positional indices stay correct.
 fn write_equations(
     bar: &mut String,
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     constraints: &[Constraint],
     socs: &[SocConstraint],
 ) -> Result<Vec<ConstraintId>, SolverError> {
+    let arena = prepared.arena();
     let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
     let mut names: Vec<String> = Vec::with_capacity(constraints.len() + 2 * socs.len());
     let mut bodies = String::new();
@@ -395,7 +400,7 @@ fn write_equations(
             names.push(format!("c{i}{suffix}"));
             emit_map.push(id);
             write!(bodies, "c{i}{suffix}: ").unwrap();
-            write_constraint_body(&mut bodies, arena, c.lhs, op, rhs)?;
+            write_constraint_body(&mut bodies, prepared, c.lhs, op, rhs)?;
         }
     }
     for i in 0..socs.len() {
@@ -408,7 +413,7 @@ fn write_equations(
 
     writeln!(bar, "EQUATIONS {};", names.join(", ")).unwrap();
     bar.push_str(&bodies);
-    write_soc_rows(bar, arena, socs);
+    write_soc_rows(bar, prepared, socs);
     writeln!(bar).unwrap();
     Ok(emit_map)
 }
@@ -416,19 +421,19 @@ fn write_equations(
 /// Emit each explicit SOC constraint `||terms||_2 <= bound` as the polynomial
 /// row `(term_1)^2 + ... - (bound)^2 <= 0` plus the sign row `bound >= 0`
 /// (squaring loses the sign of the bound side).
-fn write_soc_rows(bar: &mut String, arena: &ExprArena, socs: &[SocConstraint]) {
+fn write_soc_rows(bar: &mut String, prepared: &PreparedExpressions, socs: &[SocConstraint]) {
     for (i, s) in socs.iter().enumerate() {
         write!(bar, "soc{i}: ").unwrap();
         for (k, &term) in s.terms.iter().enumerate() {
             if k > 0 {
                 write!(bar, " + ").unwrap();
             }
-            let t = extract_linear(arena, term).expect("SOC members are validated affine");
+            let t = prepared.linear(term).expect("SOC members are validated affine");
             write!(bar, "(").unwrap();
             write_linear(bar, &t, true);
             write!(bar, ")^2").unwrap();
         }
-        let b = extract_linear(arena, s.bound).expect("SOC bound is validated affine");
+        let b = prepared.linear(s.bound).expect("SOC bound is validated affine");
         write!(bar, " - (").unwrap();
         write_linear(bar, &b, true);
         writeln!(bar, ")^2 <= 0;").unwrap();
@@ -444,12 +449,13 @@ fn write_soc_rows(bar: &mut String, arena: &ExprArena, socs: &[SocConstraint]) {
 /// full LHS and keep the original RHS.
 fn write_constraint_body(
     bar: &mut String,
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     lhs: ExprId,
     op: &str,
     rhs: f64,
 ) -> Result<(), SolverError> {
-    if let Some(t) = extract_linear(arena, lhs) {
+    let arena = prepared.arena();
+    if let Some(t) = prepared.linear(lhs) {
         let adjusted_rhs = rhs - t.constant;
         write_linear(bar, &t, false);
         writeln!(bar, " {op} {};", fmt(adjusted_rhs)).unwrap();
@@ -462,9 +468,10 @@ fn write_constraint_body(
 
 fn write_objective(
     bar: &mut String,
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     objective: Option<&Objective>,
 ) -> Result<(), SolverError> {
+    let arena = prepared.arena();
     write!(bar, "OBJ: ").unwrap();
     match objective {
         // BARON requires an objective. A feasibility problem minimizes a constant.
@@ -475,7 +482,7 @@ fn write_objective(
                 ObjectiveSense::Maximize => "maximize",
             };
             write!(bar, "{kw} ").unwrap();
-            if let Some(t) = extract_linear(arena, o.expr) {
+            if let Some(t) = prepared.linear(o.expr) {
                 write_linear(bar, &t, true);
             } else {
                 write_bar_expr(bar, arena, o.expr)?;
@@ -755,60 +762,42 @@ fn parse_solution(
         }
     }
 
-    // A point is only usable if it carries primal values.
-    let has_usable_primal = solutions.iter().any(|s| !s.primal.is_empty());
-    let primal_status = PrimalStatus::infer(&termination, has_usable_primal);
-    let mut best_bound = match sense {
+    let best_bound = match sense {
         ObjectiveSense::Minimize => lower,
         ObjectiveSense::Maximize => upper,
     };
-    let mut gap = relative_gap(lower, upper);
-    if matches!(termination, TerminationStatus::Optimal) {
-        best_bound = best_bound.or(objective);
-        gap = gap.or(Some(0.0));
-    }
     let raw_status = termination_banner(res)
         .map_or_else(|| format!("model_status={model_status}"), str::to_owned);
     let dual_available =
         has_sol && res.to_ascii_lowercase().contains("corresponding dual solution");
 
-    SolverResult {
-        solutions,
-        dual,
-        soc_dual,
-        reduced_costs,
-        termination,
-        primal_status,
-        dual_status: if dual_available {
-            DualStatus::FeasiblePoint
-        } else if has_sol {
-            DualStatus::Unknown
-        } else {
-            DualStatus::NoSolution
+    normalize_result(
+        SolverResult {
+            solutions,
+            dual,
+            soc_dual,
+            reduced_costs,
+            termination,
+            primal_status: PrimalStatus::NoSolution,
+            dual_status: if dual_available {
+                DualStatus::FeasiblePoint
+            } else if has_sol {
+                DualStatus::Unknown
+            } else {
+                DualStatus::NoSolution
+            },
+            best_bound,
+            gap: None,
+            solve_time: elapsed,
+            iterations,
+            node_count,
+            raw_status: Some(raw_status.into()),
+            raw_log,
+            solver_name: Some(crate::NAME.into()),
+            solver_version: baron_version(res),
         },
-        best_bound,
-        gap,
-        solve_time: elapsed,
-        iterations,
-        node_count,
-        raw_status: Some(raw_status.into()),
-        raw_log,
-        solver_name: Some(crate::NAME.into()),
-        solver_version: baron_version(res),
-    }
-}
-
-/// Relative optimality gap from BARON's lower/upper bounds, `None` unless both
-/// are finite. Normalized by the larger-magnitude bound (+ epsilon) so it is
-/// comparable across models.
-fn relative_gap(lower: Option<f64>, upper: Option<f64>) -> Option<f64> {
-    match (lower, upper) {
-        (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() => {
-            let g = (hi - lo).abs() / (lo.abs().max(hi.abs()) + 1e-10);
-            g.is_finite().then_some(g)
-        }
-        _ => None,
-    }
+        var_order.len(),
+    )
 }
 
 enum BaronBanner {
@@ -1235,7 +1224,8 @@ fn parse_baron_float(s: &str) -> Option<f64> {
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
+#[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
     use rayon::prelude::*;
@@ -1263,7 +1253,7 @@ pub mod benchmark_support {
     }
 
     pub fn render_equations(model: &Model, parallel: bool) -> Result<String, SolverError> {
-        let arena = model.arena().clone();
+        let arena = PreparedExpressions::new((*model.arena()).clone());
         let constraints = model.constraints().algebraic().to_vec();
         let socs = model.soc_constraints().clone();
         let mut out = String::new();
@@ -1278,7 +1268,7 @@ pub mod benchmark_support {
 
     fn render_parallel(
         out: &mut String,
-        arena: &ExprArena,
+        arena: &PreparedExpressions,
         constraints: &[Constraint],
         socs: &[SocConstraint],
     ) -> Result<Vec<ConstraintId>, SolverError> {
@@ -1312,7 +1302,7 @@ pub mod benchmark_support {
     }
 
     fn constraint_fragment(
-        arena: &ExprArena,
+        arena: &PreparedExpressions,
         index: usize,
         c: &Constraint,
     ) -> Result<String, SolverError> {
@@ -1996,7 +1986,7 @@ The above solution has an objective value of:  0.0
     #[test]
     fn no_solution_node_minus_three_leaves_primal_empty() {
         // model=1 (optimal) but nodeopt = -3 => no solution vector. We surface a
-        // single objective-only point, but it carries no primal data,
+        // result without a point, because it carries no primal data,
         // so it must NOT count as a usable solution.
         let tim = "m 1 1 0 0 0 0 1 1 0 0 -3 0 0 0.01";
         let res = "The best solution found is:\n\n\n  x0  0  9.9\n";
@@ -2010,16 +2000,9 @@ The above solution has an objective value of:  0.0
             &[],
             &[],
         );
-        assert_eq!(r.result_count(), 1);
-        assert!(
-            r.solution(0).unwrap().primal.is_empty(),
-            "nodeopt -3 must skip primal: {:?}",
-            r.solution(0)
-        );
+        assert_eq!(r.result_count(), 0);
         assert_eq!(r.primal_status, PrimalStatus::NoSolution);
-        assert!(!r.has_solution(), "nodeopt -3 must not report a usable solution");
-        let primal = r.primal().expect("objective-only point is present");
-        assert!(primal.is_empty(), "nodeopt -3 must expose no primal values: {primal:?}");
+        assert!(r.primal().is_none());
         assert!(r.value(VarId(0)).is_none(), "nodeopt -3 must not yield a variable value");
     }
 }

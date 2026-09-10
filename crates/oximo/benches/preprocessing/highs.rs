@@ -4,18 +4,8 @@ use oximo_highs::benchmark_support;
 use super::common::{pair, sizes};
 
 #[expect(clippy::cast_precision_loss)]
-/// Measure HiGHS row extraction and its rejected result-map candidate.
+/// Measure HiGHS production translation and its rejected result-map candidate.
 pub fn bench(criterion: &mut Criterion) {
-    // Measures ordered linear row extraction before building the native model.
-    let mut row_group = criterion.benchmark_group("preprocessing/highs_rows");
-    for (size, rows) in sizes(benchmark_support::ROW_THRESHOLD) {
-        let model = benchmark_support::row_model(rows);
-        pair(&mut row_group, &format!("{size}/{rows}"), rows, &model, |model, parallel| {
-            benchmark_support::rows(model, parallel).unwrap()
-        });
-    }
-    row_group.finish();
-
     // Measures complete RowProblem construction, without solver setup or solve.
     let mut translation_group = criterion.benchmark_group("preprocessing/highs_translation");
     for (size, rows) in sizes(benchmark_support::ROW_THRESHOLD) {

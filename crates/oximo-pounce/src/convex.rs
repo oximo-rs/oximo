@@ -3,8 +3,9 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use oximo_core::{Model, ModelKind, ObjectiveSense, Sense, SocForm, detect_soc, explicit_soc_form};
-use oximo_expr::{LinearTerms, extract_linear, extract_quadratic};
+use oximo_core::{Model, ModelKind, ObjectiveSense, Sense, SocForm};
+use oximo_expr::LinearTerms;
+use oximo_solver::prepare::LoweringContext;
 use oximo_solver::{DualStatus, SolverError, SolverResult, TerminationStatus};
 use pounce_rs::IpoptApplication;
 use pounce_rs::convex::{
@@ -15,7 +16,7 @@ use pounce_rs::linsol::backend;
 
 use crate::options::{PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection};
 use crate::translate::{
-    Outcome, apply_options, assemble, selected_algorithm, selected_solver, solve_nlp_since,
+    Outcome, apply_options, assemble, selected_algorithm, selected_solver, solve_nlp_since_prepared,
 };
 
 const PSD_TOL: f64 = 1e-9;
@@ -37,7 +38,10 @@ enum Class {
 }
 
 /// Resolve automatic/forced routing, including the safe time-limit policy.
-pub(crate) fn route(model: &Model, opts: &PounceOptions) -> Result<Route, SolverError> {
+pub(crate) fn route(
+    model: &LoweringContext<'_>,
+    opts: &PounceOptions,
+) -> Result<Route, SolverError> {
     let selection = selected_solver(opts)?;
     let algorithm = selected_algorithm(opts)?;
     let class = classify(model);
@@ -107,25 +111,22 @@ fn incompatible(selection: &str, detail: &str) -> SolverError {
     ))
 }
 
-fn classify(model: &Model) -> Class {
+fn classify(model: &LoweringContext<'_>) -> Class {
     match model.kind() {
         ModelKind::LP => Class::Lp,
         ModelKind::QP => {
-            let arena = model.arena();
             let sign = objective_sign(model);
             let psd = model
                 .objective()
                 .as_ref()
-                .and_then(|obj| extract_quadratic(&arena, obj.expr))
+                .and_then(|obj| model.quadratic(obj.expr))
                 .is_some_and(|q| hessian_is_psd(&q.hessian, sign));
             if psd { Class::ConvexQp } else { Class::General }
         }
         ModelKind::SOCP => {
-            let arena = model.arena();
             let sign = objective_sign(model);
             let convex = model.objective().as_ref().is_none_or(|obj| {
-                extract_quadratic(&arena, obj.expr)
-                    .is_some_and(|q| hessian_is_psd(&q.hessian, sign))
+                model.quadratic(obj.expr).is_some_and(|q| hessian_is_psd(&q.hessian, sign))
             });
             if convex { Class::Socp } else { Class::General }
         }
@@ -133,7 +134,7 @@ fn classify(model: &Model) -> Class {
     }
 }
 
-fn objective_sign(model: &Model) -> f64 {
+fn objective_sign(model: &LoweringContext<'_>) -> f64 {
     if model.objective().as_ref().is_some_and(|o| o.sense == ObjectiveSense::Maximize) {
         -1.0
     } else {
@@ -207,35 +208,35 @@ fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms<'_>, scale: 
     clippy::many_single_char_names,
     reason = "A, b, G, h, c, and n are the conventional standard-form QP symbols"
 )]
-#[expect(clippy::too_many_lines)]
-pub(crate) fn build_problem(model: &Model, opts: &PounceOptions) -> Result<Problem, SolverError> {
-    if model.has_active_sos_constraints() {
+pub(crate) fn build_problem(
+    prepared: &LoweringContext<'_>,
+    opts: &PounceOptions,
+) -> Result<Problem, SolverError> {
+    if prepared.constraints().special_ordered_sets().iter().any(|s| s.active) {
         return Err(SolverError::UnsupportedSos);
     }
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let arena = model.arena();
-    let vars = model.variables();
+    let vars = prepared.variables();
     let n = vars.len();
-    let sign = objective_sign(model);
+    let sign = objective_sign(prepared);
     let mut p_lower = Vec::new();
     let mut c = vec![0.0; n];
     let mut objective_constant = 0.0;
-    if let Some(obj) = model.objective().as_ref() {
-        let q = extract_quadratic(&arena, obj.expr).ok_or_else(|| {
+    if let Some(obj) = prepared.objective() {
+        let q = prepared.quadratic(obj.expr).ok_or_else(|| {
             SolverError::Backend("pounce convex route requires a quadratic objective".into())
         })?;
         p_lower.extend(
             q.hessian
-                .into_iter()
-                .map(|(row, col, value)| Triplet::new(row.index(), col.index(), sign * value)),
+                .iter()
+                .map(|&(row, col, value)| Triplet::new(row.index(), col.index(), sign * value)),
         );
-        for (var, value) in q.linear {
+        for &(var, value) in &q.linear {
             c[var.index()] += sign * value;
         }
         objective_constant = sign * q.constant;
     }
 
-    let model_constraints = model.constraints();
+    let model_constraints = prepared.constraints();
     let algebraic = model_constraints.algebraic();
     let mut maps = vec![ConstraintMap::None; algebraic.len()];
     let mut a = Vec::new();
@@ -245,7 +246,7 @@ pub(crate) fn build_problem(model: &Model, opts: &PounceOptions) -> Result<Probl
     let mut detected: Vec<(usize, SocForm)> = Vec::new();
 
     for (index, constraint) in algebraic.iter().enumerate() {
-        if let Some(terms) = extract_linear(&arena, constraint.lhs) {
+        if let Some(terms) = prepared.linear(constraint.lhs) {
             if let Some((Sense::Eq, rhs)) = constraint.as_single() {
                 let row = b.len();
                 push_row(&mut a, row, &terms, 1.0);
@@ -268,7 +269,7 @@ pub(crate) fn build_problem(model: &Model, opts: &PounceOptions) -> Result<Probl
                 lower = Some(row);
             }
             maps[index] = ConstraintMap::Ineq { upper, lower };
-        } else if let Some(form) = detect_soc(&arena, &vars, constraint) {
+        } else if let Some(form) = prepared.detected_soc(constraint) {
             detected.push((index, form));
         } else {
             return Err(SolverError::Backend(format!(
@@ -285,15 +286,13 @@ pub(crate) fn build_problem(model: &Model, opts: &PounceOptions) -> Result<Probl
     }
     let mut explicit_soc_starts = Vec::new();
     for soc in model_constraints.second_order_cones() {
-        let form = explicit_soc_form(&arena, soc).ok_or_else(|| {
-            SolverError::Backend(format!("invalid explicit SOC constraint {:?}", soc.name))
-        })?;
+        let form = prepared.explicit_soc(soc)?;
         explicit_soc_starts.push(h.len());
         append_soc(&mut g, &mut h, &form);
         cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
     }
     for (index, form) in detected {
-        maps[index] = ConstraintMap::Ineq { upper: Some(h.len()), lower: None };
+        maps[index] = ConstraintMap::None;
         append_soc(&mut g, &mut h, &form);
         cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
     }
@@ -373,18 +372,19 @@ fn append_soc(g: &mut Vec<Triplet>, h: &mut Vec<f64>, form: &SocForm) {
 
 pub(crate) fn solve(
     model: &Model,
+    prepared: &LoweringContext<'_>,
     opts: &PounceOptions,
     route: Route,
 ) -> Result<SolverResult, SolverError> {
     validate_options(opts)?;
-    let problem = build_problem(model, opts)?;
+    let problem = build_problem(prepared, opts)?;
     let started = Instant::now();
     let sol = run(&problem, opts, route, None);
     if should_fallback_to_nlp(model, opts, &sol)? {
-        return solve_nlp_since(model, opts, started);
+        return solve_nlp_since_prepared(model, prepared, opts, started);
     }
     let outcome = outcome(&problem, opts, route, &sol);
-    Ok(assemble(problem.sign, outcome, started.elapsed()))
+    Ok(assemble(problem.sign, outcome, started.elapsed(), model.num_variables()))
 }
 
 /// Match POUNCE's automatic fallback policy.
@@ -546,7 +546,7 @@ pub(crate) fn outcome(
     sol: &QpSolution,
 ) -> Outcome {
     let termination = match sol.status {
-        QpStatus::Optimal => TerminationStatus::LocallyOptimal,
+        QpStatus::Optimal => TerminationStatus::Optimal,
         QpStatus::OptimalInaccurate => TerminationStatus::Feasible,
         QpStatus::PrimalInfeasible => TerminationStatus::Infeasible,
         QpStatus::DualInfeasible => TerminationStatus::Unbounded,
@@ -557,21 +557,22 @@ pub(crate) fn outcome(
     let mut lambda = vec![0.0; problem.maps.len()];
     for (value, map) in lambda.iter_mut().zip(&problem.maps) {
         *value = match map {
-            ConstraintMap::None => 0.0,
-            ConstraintMap::Eq(row) => sol.y.get(*row).copied().unwrap_or(0.0),
+            ConstraintMap::None => f64::NAN,
+            ConstraintMap::Eq(row) => sol.y.get(*row).copied().unwrap_or(f64::NAN),
             ConstraintMap::Ineq { upper, lower } => {
-                upper.and_then(|r| sol.z.get(r)).copied().unwrap_or(0.0)
-                    - lower.and_then(|r| sol.z.get(r)).copied().unwrap_or(0.0)
+                upper.map_or(0.0, |r| sol.z.get(r).copied().unwrap_or(f64::NAN))
+                    - lower.map_or(0.0, |r| sol.z.get(r).copied().unwrap_or(f64::NAN))
             }
         };
     }
     let soc_dual = problem
         .explicit_soc_starts
         .iter()
-        .map(|&row| sol.z.get(row).copied().unwrap_or(0.0))
+        .map(|&row| sol.z.get(row).copied().unwrap_or(f64::NAN))
         .collect();
     let reduced = Some(sol.z_lb.iter().zip(&sol.z_ub).map(|(l, u)| l - u).collect());
     Outcome {
+        has_point: matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
         termination,
         dual_status: if matches!(sol.status, QpStatus::Optimal) {
             DualStatus::FeasiblePoint
@@ -859,7 +860,7 @@ mod tests {
         objective!(model, Min, x.powi(2));
 
         let opts = PounceOptions::default().bound_relax_factor(0.1).constr_viol_tol(0.2);
-        let problem = build_problem(&model, &opts).unwrap();
+        let problem = build_problem(&LoweringContext::new(&model).unwrap(), &opts).unwrap();
 
         assert_eq!(problem.qp.lb, [-2.2]);
         assert_eq!(problem.qp.ub, [3.2]);
@@ -905,7 +906,9 @@ mod tests {
         let model = Model::new("time_limit_outcome");
         variable!(model, x >= 0.0);
         objective!(model, Min, x);
-        let problem = build_problem(&model, &PounceOptions::default()).unwrap();
+        let problem =
+            build_problem(&LoweringContext::new(&model).unwrap(), &PounceOptions::default())
+                .unwrap();
         let solution = QpSolution {
             status: QpStatus::TimeLimit,
             x: vec![1.0],

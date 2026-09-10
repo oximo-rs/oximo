@@ -1,7 +1,7 @@
 use std::hash::Hasher;
 
-use oximo_core::{Model, ModelKind, ObjectiveSense, Variable, var_name};
-use oximo_expr::{ExprArena, VarId, describe_nonlinear_term, extract_linear};
+use oximo_core::{Model, ModelKind, ObjectiveSense, Variable};
+use oximo_expr::VarId;
 use rustc_hash::FxHasher;
 
 use crate::status::SolverError;
@@ -46,26 +46,21 @@ pub struct Snapshot {
 /// cone program (explicit [`oximo_core::SocConstraint`]s or SOC-shaped
 /// quadratic constraints detected by [`Model::kind`]).
 pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let kind = model.kind();
+    let prepared = crate::prepare::LoweringContext::new(model)?;
+    let kind = prepared.kind();
     if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
         return Err(SolverError::UnsupportedKind(kind));
     }
-    let arena = model.arena();
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
 
-    let objective = model.objective();
+    let objective = prepared.objective();
     let obj = objective.as_ref();
     let sense = obj.map_or(ObjectiveSense::Minimize, |o| o.sense);
     let (obj_by_id, obj_constant) = match obj {
         Some(o) => {
-            let lin = extract_linear(&arena, o.expr).ok_or_else(|| SolverError::Nonlinear {
-                location: "the objective".into(),
-                term: describe_nonlinear_term(&arena, o.expr, &|v| var_name(&vars, v))
-                    .unwrap_or_else(|| "<nonlinear>".into()),
-            })?;
+            let lin = prepared.require_linear(o.expr, || "the objective".into())?;
             let mut by_id = vec![0.0; vars.len()];
             for &(v, c) in lin.coeffs.iter() {
                 by_id[v.index()] = c;
@@ -79,21 +74,16 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     let mut lb = Vec::with_capacity(vars.len());
     let mut ub = Vec::with_capacity(vars.len());
     let mut hasher = FxHasher::default();
-    hash_header(&mut hasher, &vars, sense);
-    for v in vars.iter() {
+    hash_header(&mut hasher, vars, sense);
+    for v in vars {
         obj_costs.push(obj_by_id[v.id.index()]);
         lb.push(v.lb);
         ub.push(v.ub);
     }
 
-    let arena_ref: &ExprArena = &arena;
     let mut row_terms = Vec::new();
     for c in constraints {
-        let t = extract_linear(arena_ref, c.lhs).ok_or_else(|| SolverError::Nonlinear {
-            location: format!("constraint {:?}", c.name),
-            term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(&vars, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })?;
+        let t = prepared.require_linear(c.lhs, || format!("constraint {:?}", c.name))?;
         hash_row(
             &mut hasher,
             c.lower - t.constant,
@@ -103,7 +93,7 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
         );
     }
 
-    for sos in model.sos_constraints().iter() {
+    for sos in prepared.constraints().special_ordered_sets() {
         if !sos.active {
             continue;
         }

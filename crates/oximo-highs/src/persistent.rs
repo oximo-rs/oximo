@@ -127,6 +127,7 @@ impl HighsPersistent {
             st.meta.mixed_integer,
             st.meta.obj_constant,
             st.meta.num_constraints,
+            st.meta.cols.len(),
             elapsed,
         );
         st.live = Some(HighsModel::from(solved));
