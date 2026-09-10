@@ -1761,6 +1761,7 @@ dependencies = [
 name = "oximo-solver"
 version = "0.6.0"
 dependencies = [
+ "criterion",
  "oximo-core",
  "oximo-expr",
  "rustc-hash",

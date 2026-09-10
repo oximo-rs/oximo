@@ -88,9 +88,13 @@ pub struct LoweringContext<'a> {
 
 /// A shareable arena snapshot and bounded, reuse-admitted extraction caches.
 /// Each cache has 16 independent shards, each retaining at most 16 expressions
-/// and 1,024 coefficient entries, evicting in insertion order. A first encounter
-/// returns owned terms without locking or allocating cache storage and only a
-/// repeated root is admitted. Larger decompositions are returned uncached.
+/// and 1,024 coefficient entries, evicting in insertion order. Before cache
+/// initialization, first encounters return owned terms without locking or
+/// allocating cache storage. Only repeated roots are admitted. A small
+/// direct-mapped history recognizes reuse across interleaved roots, and
+/// collisions may delay admission. Once initialized, cached entries are
+/// always checked independently of admission history.
+/// Larger decompositions are returned uncached.
 #[derive(Debug)]
 pub struct PreparedExpressions {
     arena: ExprArena,
@@ -111,27 +115,25 @@ struct CacheEntries<T> {
 
 #[derive(Debug)]
 struct ExtractionCache<T> {
-    recent: AtomicU64,
+    recent: [AtomicU64; CACHE_SHARDS],
     shards: OnceLock<Box<[CacheShard<T>; CACHE_SHARDS]>>,
 }
 
-// Keep unrelated workers' admission writes on independent cache lines.
+// Keep unrelated workers' cache locks on independent cache lines.
 #[derive(Debug)]
 #[repr(align(64))]
 struct CacheShard<T> {
-    recent: AtomicU64,
     entries: Mutex<CacheEntries<T>>,
 }
 
 impl<T> Default for ExtractionCache<T> {
     fn default() -> Self {
-        Self { recent: AtomicU64::new(u64::MAX), shards: OnceLock::new() }
+        Self { recent: std::array::from_fn(|_| AtomicU64::new(u64::MAX)), shards: OnceLock::new() }
     }
 }
 
 fn cache_shards<T>() -> Box<[CacheShard<T>; CACHE_SHARDS]> {
     Box::new(std::array::from_fn(|_| CacheShard {
-        recent: AtomicU64::new(u64::MAX),
         entries: Mutex::new(CacheEntries {
             values: FxHashMap::default(),
             order: VecDeque::new(),
@@ -148,17 +150,19 @@ impl<T> ExtractionCache<T> {
         size: impl FnOnce(&T) -> usize,
     ) -> Option<Extracted<T>> {
         let key = u64::from(expr.0);
+        // Low bits distribute admission slots independently of cache shards.
+        let admit =
+            || self.recent[expr.0 as usize % CACHE_SHARDS].swap(key, Ordering::Relaxed) == key;
         let Some(shards) = self.shards.get() else {
-            if self.recent.swap(key, Ordering::Relaxed) != key {
+            if !admit() {
                 return extract().map(Extracted::Owned);
             }
             let shards = self.shards.get_or_init(cache_shards);
             let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
-            shard.recent.store(key, Ordering::Relaxed);
-            return shard.extract(expr, key, extract, size);
+            return shard.extract(expr, extract, size, || true);
         };
         let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
-        shard.extract(expr, key, extract, size)
+        shard.extract(expr, extract, size, admit)
     }
 }
 
@@ -166,20 +170,18 @@ impl<T> CacheShard<T> {
     fn extract(
         &self,
         expr: ExprId,
-        key: u64,
         extract: impl FnOnce() -> Option<T>,
         size: impl FnOnce(&T) -> usize,
+        admit: impl FnOnce() -> bool,
     ) -> Option<Extracted<T>> {
-        // This is an admission hint, not synchronization of cached values.
-        // So races/collisions can only cause redundant extraction.
-        if self.recent.load(Ordering::Relaxed) != key {
-            self.recent.store(key, Ordering::Relaxed);
-            return extract().map(Extracted::Owned);
-        }
         if let Some(value) =
             self.entries.lock().expect("preparation cache poisoned").values.get(&expr)
         {
             return value.clone().map(Extracted::Shared);
+        }
+        // Admission hints should not hide an already cached value.
+        if !admit() {
+            return extract().map(Extracted::Owned);
         }
         // Independent misses can be evaluated concurrently. Concurrent misses
         // for the same expression may repeat work, but publish one shared value.
@@ -431,6 +433,31 @@ impl PreparedExpressions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interleaved_roots_are_admitted_and_cached_hits_ignore_history() {
+        let cache = ExtractionCache::default();
+        let shard = |id: u32| id.wrapping_mul(0x9e37_79b9) >> 28;
+        let a = 0;
+        let b = (1..1000).find(|&id| shard(id) == shard(a) && id % 16 != a % 16).unwrap();
+        for id in [a, b] {
+            assert!(matches!(
+                cache.extract(ExprId(id), || Some(vec![id]), Vec::len),
+                Some(Extracted::Owned(_))
+            ));
+        }
+        for id in [a, b, a, b] {
+            assert!(matches!(
+                cache.extract(ExprId(id), || Some(vec![id]), Vec::len),
+                Some(Extracted::Shared(_))
+            ));
+        }
+        // Change the admission history for a without evicting its cached value.
+        cache.extract(ExprId(a + 16), || Some(vec![16]), Vec::len);
+        let hit =
+            cache.extract(ExprId(a), || panic!("cached root was re-extracted"), Vec::len).unwrap();
+        assert_eq!(hit.as_slice(), &[a]);
+    }
 
     #[test]
     fn unique_roots_do_not_allocate_cache_entries() {
