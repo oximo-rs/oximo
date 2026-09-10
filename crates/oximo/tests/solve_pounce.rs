@@ -5,7 +5,7 @@
 
 #![cfg(feature = "pounce")]
 
-use oximo::pounce::{MuStrategy, PounceOptions};
+use oximo::pounce::{MuStrategy, PounceOptions, PounceSolverSelection};
 use oximo::prelude::*;
 use oximo::solvers::Pounce;
 
@@ -62,10 +62,20 @@ fn maximize_flips_sign_back() {
     variable!(m, -10.0 <= x <= 10.0);
     objective!(m, Max, 4.0 * x - x.powi(2));
 
-    let res = Pounce.solve(&m, &PounceOptions::default()).unwrap();
-    assert_eq!(res.termination, TerminationStatus::LocallyOptimal);
-    assert_close(res.value_of(x).unwrap(), 2.0, 1e-4, "x");
-    assert_close(res.objective().unwrap(), 4.0, 1e-5, "objective");
+    // Automatic routing recognizes the concave maximization as a convex QP.
+    // The explicitly selected NLP route reports local optimality instead.
+    for (opts, expected) in [
+        (PounceOptions::default(), TerminationStatus::Optimal),
+        (
+            PounceOptions::default().solver_selection(PounceSolverSelection::Nlp),
+            TerminationStatus::LocallyOptimal,
+        ),
+    ] {
+        let res = Pounce.solve(&m, &opts).unwrap();
+        assert_eq!(res.termination, expected);
+        assert_close(res.value_of(x).unwrap(), 2.0, 1e-4, "x");
+        assert_close(res.objective().unwrap(), 4.0, 1e-5, "objective");
+    }
 }
 
 #[test]
