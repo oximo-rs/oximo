@@ -4,11 +4,14 @@
 use std::time::Instant;
 
 use oximo_core::{Model, ModelKind};
+use oximo_solver::prepare::LoweringContext;
 use oximo_solver::{Solver, SolverError, SolverResult};
 
 use crate::convex::{self, Route};
 use crate::options::PounceOptions;
-use crate::translate::{WarmStart, assemble, reject_semi_domains, run_nlp_with_retries, setup};
+use crate::translate::{
+    WarmStart, assemble, reject_semi_domains, run_nlp_with_retries, setup_prepared,
+};
 
 #[cfg(feature = "enzyme")]
 use crate::exact as backend;
@@ -84,28 +87,31 @@ impl PouncePersistent {
         }
         reject_semi_domains(model)?;
 
-        let route = convex::route(model, opts)?;
+        let prepared = LoweringContext::new(model)?;
+        let route = convex::route(&prepared, opts)?;
         if route == Route::Nlp {
-            return self.solve_nlp(model, opts);
+            return self.solve_nlp(model, &prepared, opts);
         }
-        self.solve_convex(model, opts, route)
+        self.solve_convex(model, &prepared, opts, route)
     }
 
     fn solve_nlp(
         &mut self,
         model: &Model,
+        prepared: &LoweringContext<'_>,
         opts: &PounceOptions,
     ) -> Result<SolverResult, SolverError> {
-        self.solve_nlp_since(model, opts, Instant::now())
+        self.solve_nlp_since(model, prepared, opts, Instant::now())
     }
 
     fn solve_nlp_since(
         &mut self,
         model: &Model,
+        prepared: &LoweringContext<'_>,
         opts: &PounceOptions,
         started: Instant,
     ) -> Result<SolverResult, SolverError> {
-        let prep = setup(model, opts)?;
+        let prep = setup_prepared(prepared, opts)?;
         let state = match &mut self.state {
             Some(State::Nlp(state)) if backend::try_reuse(&state.oracle, model) => state,
             slot => {
@@ -118,17 +124,18 @@ impl PouncePersistent {
             run_nlp_with_retries(model, &state.oracle, &prep, opts, state.warm.as_ref())?;
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
-        Ok(assemble(prep.sign, outcome, elapsed))
+        Ok(assemble(prep.sign, outcome, elapsed, model.num_variables()))
     }
 
     fn solve_convex(
         &mut self,
         model: &Model,
+        prepared: &LoweringContext<'_>,
         opts: &PounceOptions,
         route: Route,
     ) -> Result<SolverResult, SolverError> {
         self.validate_convex_options(opts)?;
-        let problem = convex::build_problem(model, opts)?;
+        let problem = convex::build_problem(prepared, opts)?;
         let started = Instant::now();
         let state = match &mut self.state {
             Some(State::Convex(state))
@@ -159,7 +166,7 @@ impl PouncePersistent {
             convex::run(&state.problem, opts, route, state.warm.as_ref())
         };
         if convex::should_fallback_to_nlp(model, opts, &solution)? {
-            return self.solve_nlp_since(model, opts, started);
+            return self.solve_nlp_since(model, prepared, opts, started);
         }
         let elapsed = started.elapsed();
         let mut outcome = convex::outcome(&state.problem, opts, route, &solution);
@@ -167,7 +174,7 @@ impl PouncePersistent {
             .then(|| convex::warm_from_solution(route, &state.problem, &solution));
         let sign = state.problem.sign();
         outcome.warm = None;
-        Ok(assemble(sign, outcome, elapsed))
+        Ok(assemble(sign, outcome, elapsed, model.num_variables()))
     }
 
     fn validate_convex_options(&mut self, opts: &PounceOptions) -> Result<(), SolverError> {

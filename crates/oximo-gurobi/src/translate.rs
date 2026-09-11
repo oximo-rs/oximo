@@ -1,3 +1,5 @@
+use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::reconstruct::{ObjectiveTransform, normalize_result};
 use std::time::Instant;
 
 use gurobi_rs::constr::RangeExpr;
@@ -7,7 +9,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraint,
     SocConstraintId, SosConstraint, SosConstraintId, SosType, VarId, Variable, var_name,
 };
-use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term, extract_linear};
+use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
     DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
     VarBoundKind,
@@ -66,8 +68,8 @@ pub(crate) struct Built {
 /// Returns a [`SolverError`] if the model contains nonlinear expressions Gurobi
 /// cannot represent or Gurobi reports an error during setup.
 pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let kind = model.kind();
+    let prepared = LoweringContext::new(model)?;
+    let kind = prepared.kind();
     let nonlinear_kind = matches!(
         kind,
         ModelKind::QP
@@ -78,30 +80,29 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
             | ModelKind::MINLP
     );
 
-    let arena = model.arena();
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let socs = model.soc_constraints();
-    let sos = model.sos_constraints();
-    let objective = model.objective();
+    let socs = prepared.constraints().second_order_cones();
+    let sos = prepared.constraints().special_ordered_sets();
+    let objective = prepared.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
     let mut gurobi_model = gurobi_rs::Model::with_env("oximo", env).map_err(map_gurobi_err)?;
 
-    let gurobi_vars = add_variables(&mut gurobi_model, &vars)?;
+    let gurobi_vars = add_variables(&mut gurobi_model, vars)?;
 
     // Aux-variable counter shared by the constraint and objective lowering so the
     // synthetic variable names stay unique across both.
     let mut aux_counter = 0_u32;
     let gurobi_constrs =
-        add_constraints(&arena, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
-    let soc_rows = add_soc_rows(&arena, &vars, &socs, &mut gurobi_model, &gurobi_vars)?;
-    let special_ordered_sets = add_sos_constraints(&sos, &mut gurobi_model, &gurobi_vars)?;
+        add_constraints(&prepared, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
+    let soc_rows = add_soc_rows(&prepared, vars, socs, &mut gurobi_model, &gurobi_vars)?;
+    let special_ordered_sets = add_sos_constraints(sos, &mut gurobi_model, &gurobi_vars)?;
 
     let (obj_constant, objective_generated) = match objective.as_ref() {
         Some(o) => set_objective(
-            &arena,
+            &prepared,
             o.expr,
             o.sense,
             &mut gurobi_model,
@@ -114,7 +115,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     // Warm starts are assigned only after the full structural model has been
     // built. This keeps the batch variable construction and the start vector
     // compatible with Gurobi's pending-update rules.
-    apply_initial_values(&gurobi_model, &vars, &gurobi_vars)?;
+    apply_initial_values(&gurobi_model, vars, &gurobi_vars)?;
 
     apply_options(&mut gurobi_model, opts).map_err(map_gurobi_err)?;
     if nonlinear_kind && !opts.has_non_convex() {
@@ -188,13 +189,7 @@ fn collect_after_optimize(
         built.obj_constant,
     );
 
-    let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
-    let mut best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
-    let mut gap = built.model.get_attr(attr::MIPGap).ok().filter(|g| g.is_finite());
-    if matches!(termination, TerminationStatus::Optimal) {
-        best_bound = best_bound.or_else(|| solutions.first().and_then(|point| point.objective));
-        gap = gap.or(Some(0.0));
-    }
+    let best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let node_count = matches!(
         kind,
@@ -206,24 +201,27 @@ fn collect_after_optimize(
     .map(|count| count as u64);
     let (major, minor, technical) = gurobi_rs::version();
 
-    Ok(SolverResult {
-        termination,
-        primal_status,
-        dual_status: collected_dual_status(kind, dual_available, !solutions.is_empty()),
-        solutions,
-        dual,
-        soc_dual,
-        reduced_costs,
-        best_bound,
-        gap,
-        solve_time: elapsed,
-        iterations,
-        node_count,
-        raw_status: Some(format!("{native_status:?}").into()),
-        raw_log: None,
-        solver_name: Some(crate::NAME.into()),
-        solver_version: Some(format!("{major}.{minor}.{technical}").into()),
-    })
+    Ok(normalize_result(
+        SolverResult {
+            termination,
+            primal_status: PrimalStatus::NoSolution,
+            dual_status: collected_dual_status(kind, dual_available, !solutions.is_empty()),
+            solutions,
+            dual,
+            soc_dual,
+            reduced_costs,
+            best_bound,
+            gap: built.model.get_attr(attr::MIPGap).ok(),
+            solve_time: elapsed,
+            iterations,
+            node_count,
+            raw_status: Some(format!("{native_status:?}").into()),
+            raw_log: None,
+            solver_name: Some(crate::NAME.into()),
+            solver_version: Some(format!("{major}.{minor}.{technical}").into()),
+        },
+        built.vars.len(),
+    ))
 }
 
 /// Build, optimize with a callback, and collect the ordinary solver result.
@@ -483,12 +481,13 @@ pub(crate) struct SocHandle {
 /// and falls back to the general lowering otherwise.
 #[expect(clippy::too_many_lines)]
 fn add_constraints(
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     constraints: &[Constraint],
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
 ) -> Result<Vec<ConstraintHandle>, SolverError> {
+    let arena = prepared.arena();
     struct PendingSingle {
         index: usize,
         name: String,
@@ -511,7 +510,7 @@ fn add_constraints(
 
     for (index, c) in constraints.iter().enumerate() {
         if let Some((sense, rhs)) = c.as_single() {
-            if let Some(t) = extract_linear(arena, c.lhs) {
+            if let Some(t) = prepared.linear(c.lhs) {
                 let mut expr = LinExpr::new();
                 for &(v, coeff) in t.coeffs.iter() {
                     expr.add_term(coeff, gurobi_vars[v.index()]);
@@ -527,7 +526,7 @@ fn add_constraints(
                 nonlinear.push(index);
             }
         } else if c.is_range() {
-            if let Some(t) = extract_linear(arena, c.lhs) {
+            if let Some(t) = prepared.linear(c.lhs) {
                 let mut expr = LinExpr::new();
                 for &(v, coeff) in t.coeffs.iter() {
                     expr.add_term(coeff, gurobi_vars[v.index()]);
@@ -624,24 +623,25 @@ fn add_constraints(
 /// `SocConstraintId` order, so `collect_solution` can rescale the squared-form
 /// `QCPi` multiplier back to the norm form.
 fn add_soc_rows(
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     vars: &[Variable],
     socs: &[SocConstraint],
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
 ) -> Result<Vec<SocHandle>, SolverError> {
+    let arena = prepared.arena();
     let mut rows = Vec::with_capacity(socs.len());
     for (i, s) in socs.iter().enumerate() {
         let mut q = QuadExpr::new();
         for &term in &s.terms {
-            let t = extract_linear(arena, term).ok_or_else(|| SolverError::Nonlinear {
+            let t = prepared.linear(term).ok_or_else(|| SolverError::Nonlinear {
                 location: format!("second-order cone {:?} term {i}", s.name),
                 term: describe_nonlinear_term(arena, term, &|v| var_name(vars, v))
                     .unwrap_or_else(|| "<nonlinear>".into()),
             })?;
             add_squared_affine(&mut q, &t, 1.0, gurobi_vars);
         }
-        let b = extract_linear(arena, s.bound).ok_or_else(|| SolverError::Nonlinear {
+        let b = prepared.linear(s.bound).ok_or_else(|| SolverError::Nonlinear {
             location: format!("second-order cone {:?} bound", s.name),
             term: describe_nonlinear_term(arena, s.bound, &|v| var_name(vars, v))
                 .unwrap_or_else(|| "<nonlinear>".into()),
@@ -756,18 +756,19 @@ fn add_comparison_rows(
 }
 
 fn set_objective(
-    arena: &ExprArena,
+    prepared: &PreparedExpressions,
     obj_expr: ExprId,
     sense: ObjectiveSense,
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
 ) -> Result<(f64, Vec<GeneratedConstraint>), SolverError> {
+    let arena = prepared.arena();
     let gurobi_sense = match sense {
         ObjectiveSense::Minimize => ModelSense::Minimize,
         ObjectiveSense::Maximize => ModelSense::Maximize,
     };
-    if let Some(t) = extract_linear(arena, obj_expr) {
+    if let Some(t) = prepared.linear(obj_expr) {
         let mut e = LinExpr::new();
         for &(v, c) in t.coeffs.iter() {
             e.add_term(c, gurobi_vars[v.index()]);
@@ -932,7 +933,10 @@ fn collect_pool(
         let Ok(vals) = model.get_obj_attr_batch(attr::Xn, vars.iter().copied()) else {
             break;
         };
-        let objective = model.get_attr(attr::PoolObjVal).ok().map(|v| v + obj_constant);
+        let objective = model
+            .get_attr(attr::PoolObjVal)
+            .ok()
+            .and_then(|v| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(v));
         out.push(SolutionPoint { primal: index_map(&vals), objective });
     }
     if out.is_empty() {
@@ -950,18 +954,16 @@ fn collect_incumbent(
         .get_obj_attr_batch(attr::X, vars.iter().copied())
         .map(|v| index_map(&v))
         .unwrap_or_default();
-    let objective = model.get_attr(attr::ObjVal).ok().map(|v| v + obj_constant);
+    let objective = model
+        .get_attr(attr::ObjVal)
+        .ok()
+        .and_then(|v| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(v));
     SolutionPoint { primal, objective }
 }
 
 /// Map a dense per-variable value array (in `VarId` order) to a sparse map.
 fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
-    let mut map = FxHashMap::default();
-    map.reserve(vals.len());
-    for (index, &value) in vals.iter().enumerate() {
-        map.insert(VarId(u32::try_from(index).unwrap()), value);
-    }
-    map
+    oximo_solver::reconstruct::project_dense_primal(vals, vals.len()).unwrap_or_default()
 }
 
 fn map_status(status: Status) -> TerminationStatus {
@@ -1046,7 +1048,6 @@ mod status_tests {
 #[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
-    use rayon::prelude::*;
 
     use super::*;
 
@@ -1068,21 +1069,6 @@ pub mod benchmark_support {
         }
         model.__minimize(x + y + z);
         model
-    }
-
-    pub fn extract(model: &Model, parallel: bool) -> usize {
-        let arena = model.arena();
-        let model_constraints = model.constraints();
-        let constraints = model_constraints.algebraic();
-        let arena_ref = &*arena;
-        let count = |constraint: &Constraint| {
-            extract_linear(arena_ref, constraint.lhs).map_or(0, |terms| terms.coeffs.len() + 1)
-        };
-        if parallel {
-            constraints.par_iter().map(count).sum()
-        } else {
-            constraints.iter().map(count).sum()
-        }
     }
 
     /// Create a Gurobi environment once for repeated translation benchmarks.

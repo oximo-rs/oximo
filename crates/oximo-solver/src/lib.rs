@@ -5,6 +5,8 @@ pub mod incremental;
 pub mod infeasibility;
 pub mod options;
 pub mod persistent;
+pub mod prepare;
+pub mod reconstruct;
 pub mod result;
 pub mod solver;
 pub mod status;

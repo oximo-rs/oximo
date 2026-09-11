@@ -189,7 +189,7 @@ struct PendingSos {
 ///   cone
 /// - `SOCP`: second-order cone constraints are present (explicit
 ///   [`crate::SocConstraint`]s or SOC-shaped quadratic constraints recognized
-///   by [`crate::detect_soc`]); the objective may be linear or quadratic
+///   by the model's structural cone predicate). The objective may be linear or quadratic:
 /// - `QP`: quadratic objective, linear constraints
 /// - `LP`: everything linear
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1860,8 +1860,8 @@ impl Model {
     /// column):
     ///
     /// 1. any nonlinear expression (objective or constraint) -> `NLP`
-    /// 2. any quadratic constraint not recognized as SOC (see
-    ///    [`crate::detect_soc`]) -> `QCP`
+    /// 2. any quadratic constraint not recognized by the structural SOC
+    ///    predicate -> `QCP`
     /// 3. cones present (explicit or detected) -> `SOCP`
     /// 4. quadratic objective -> `QP`
     /// 5. otherwise -> `LP`

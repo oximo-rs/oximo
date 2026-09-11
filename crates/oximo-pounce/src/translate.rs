@@ -3,6 +3,9 @@
 //! both the exact-derivative path ([`crate::exact`], enzyme) and the
 //! stable hybrid path ([`crate::stable`]).
 
+use oximo_solver::prepare::LoweringContext;
+use oximo_solver::reconstruct::{ObjectiveTransform, normalize_result};
+
 use std::time::{Duration, Instant};
 
 use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, SocConstraintId, VarId};
@@ -51,6 +54,7 @@ pub(crate) struct WarmStart {
 /// Objective and multipliers are in POUNCE's minimization sense
 /// (a `Maximize` model is posed as `min -f`) and [`assemble`] undoes the sign.
 pub(crate) struct Outcome {
+    pub has_point: bool,
     pub termination: TerminationStatus,
     pub dual_status: DualStatus,
     /// Native POUNCE/convex-route status label.
@@ -92,28 +96,34 @@ pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, Solver
         return Err(SolverError::UnsupportedSos);
     }
     reject_semi_domains(model)?;
-    let route = crate::convex::route(model, opts)?;
+    let prepared = LoweringContext::new(model)?;
+    let route = crate::convex::route(&prepared, opts)?;
     if route != crate::convex::Route::Nlp {
-        return crate::convex::solve(model, opts, route);
+        return crate::convex::solve(model, &prepared, opts, route);
     }
-    solve_nlp(model, opts)
+    solve_nlp_prepared(model, &prepared, opts)
 }
 
-pub(crate) fn solve_nlp(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
-    solve_nlp_since(model, opts, Instant::now())
+fn solve_nlp_prepared(
+    model: &Model,
+    prepared: &LoweringContext<'_>,
+    opts: &PounceOptions,
+) -> Result<SolverResult, SolverError> {
+    solve_nlp_since_prepared(model, prepared, opts, Instant::now())
 }
 
 /// Solve through the NLP route while charging time already spent by an
 /// automatic convex attempt to the reported solve duration.
-pub(crate) fn solve_nlp_since(
+pub(crate) fn solve_nlp_since_prepared(
     model: &Model,
+    prepared: &LoweringContext<'_>,
     opts: &PounceOptions,
     started: Instant,
 ) -> Result<SolverResult, SolverError> {
-    let prep = setup(model, opts)?;
+    let prep = setup_prepared(prepared, opts)?;
     let oracle = backend::build(model)?;
     let outcome = run_nlp_with_retries(model, &oracle, &prep, opts, None)?;
-    Ok(assemble(prep.sign, outcome, started.elapsed()))
+    Ok(assemble(prep.sign, outcome, started.elapsed(), model.num_variables()))
 }
 
 /// Mirror POUNCE's two-rung second opinion for a local-infeasibility verdict.
@@ -127,7 +137,7 @@ pub(crate) fn run_nlp_with_retries(
 ) -> Result<Outcome, SolverError> {
     let started = Instant::now();
     let mut original = backend::run(model, oracle, prep, opts, warm)?;
-    if original.termination != TerminationStatus::Infeasible {
+    if original.termination != TerminationStatus::LocallyInfeasible {
         return Ok(original);
     }
 
@@ -253,8 +263,11 @@ fn effective_string(opts: &PounceOptions, name: &str) -> Option<String> {
 }
 
 /// Kind gate, objective declaration check, sign, and bound snapshot.
-pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, SolverError> {
-    let kind = model.kind();
+pub(crate) fn setup_prepared(
+    prepared: &LoweringContext<'_>,
+    opts: &PounceOptions,
+) -> Result<Prepared, SolverError> {
+    let kind = prepared.kind();
     if !matches!(
         kind,
         ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
@@ -262,24 +275,22 @@ pub(crate) fn setup(model: &Model, opts: &PounceOptions) -> Result<Prepared, Sol
         return Err(SolverError::UnsupportedKind(kind));
     }
     validate_algorithm(kind, opts)?;
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let sign = match model.objective().as_ref().map(|o| o.sense) {
+    let sign = match prepared.objective().map(|o| o.sense) {
         Some(ObjectiveSense::Maximize) => -1.0,
         _ => 1.0,
     };
 
-    let vars = model.variables();
+    let vars = prepared.variables();
     let mut x_l = Vec::with_capacity(vars.len());
     let mut x_u = Vec::with_capacity(vars.len());
     let mut x0 = Vec::with_capacity(vars.len());
-    for v in vars.iter() {
+    for v in vars {
         x_l.push(v.lb.max(-POUNCE_INFINITY));
         x_u.push(v.ub.min(POUNCE_INFINITY));
         x0.push(v.initial.unwrap_or_else(|| initial_guess(v.lb, v.ub)));
     }
-    drop(vars);
 
-    let model_constraints = model.constraints();
+    let model_constraints = prepared.constraints();
     if !model_constraints.second_order_cones().is_empty() {
         return Err(SolverError::UnsupportedKind(ModelKind::SOCP));
     }
@@ -355,12 +366,35 @@ fn initial_guess(lb: f64, ub: f64) -> f64 {
 }
 
 /// Map a POUNCE application status onto oximo's termination taxonomy.
+/// Native NLP feasibility evidence, including an unscaled residual check for
+/// interrupted/limited solves. Missing statistics never establish feasibility.
+pub(crate) fn nlp_has_point(
+    status: ApplicationReturnStatus,
+    stats: &pounce_rs::pounce_nlp::solve_statistics::SolveStatistics,
+    opts: &PounceOptions,
+) -> bool {
+    use ApplicationReturnStatus as A;
+    if matches!(status, A::SolveSucceeded | A::SolvedToAcceptableLevel | A::FeasiblePointFound) {
+        return true;
+    }
+    let tol = opts.effective_num("constr_viol_tol").unwrap_or(1e-4);
+    matches!(
+        status,
+        A::MaximumIterationsExceeded
+            | A::MaximumCpuTimeExceeded
+            | A::MaximumWallTimeExceeded
+            | A::UserRequestedStop
+    ) && [stats.final_unscaled_constr_viol, stats.final_declared_box_viol]
+        .iter()
+        .all(|v| v.is_finite() && *v <= tol)
+}
+
 pub(crate) fn map_status(s: ApplicationReturnStatus) -> TerminationStatus {
     use ApplicationReturnStatus as A;
     match s {
         A::SolveSucceeded | A::SolvedToAcceptableLevel => TerminationStatus::LocallyOptimal,
         A::FeasiblePointFound => TerminationStatus::Feasible,
-        A::InfeasibleProblemDetected => TerminationStatus::Infeasible,
+        A::InfeasibleProblemDetected => TerminationStatus::LocallyInfeasible,
         A::MaximumIterationsExceeded => TerminationStatus::IterationLimit,
         A::MaximumCpuTimeExceeded | A::MaximumWallTimeExceeded => TerminationStatus::TimeLimit,
         A::UserRequestedStop => TerminationStatus::Interrupted,
@@ -375,8 +409,13 @@ pub(crate) fn map_status(s: ApplicationReturnStatus) -> TerminationStatus {
 /// Assemble a [`SolverResult`], undoing the maximize sign flip: the reported
 /// objective is `sign * pounce_obj`, the LP-convention dual is `−sign * lambda`,
 /// and the reduced cost is `sign * (z_l − z_u)`.
-pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult {
-    let has_point = o.termination.admits_primal() && !o.x.is_empty();
+pub(crate) fn assemble(
+    sign: f64,
+    o: Outcome,
+    elapsed: Duration,
+    num_variables: usize,
+) -> SolverResult {
+    let has_point = o.has_point;
 
     let mut solutions = Vec::new();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
@@ -384,10 +423,8 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
     let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
 
     if has_point {
-        let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
-        for (i, &v) in o.x.iter().enumerate() {
-            primal.insert(VarId(u32::try_from(i).expect("variable count overflow")), v);
-        }
+        let primal = oximo_solver::reconstruct::project_dense_primal(&o.x, num_variables)
+            .unwrap_or_default();
         for (i, &l) in o.lambda.iter().enumerate() {
             dual.insert(
                 ConstraintId(u32::try_from(i).expect("constraint count overflow")),
@@ -406,28 +443,36 @@ pub(crate) fn assemble(sign: f64, o: Outcome, elapsed: Duration) -> SolverResult
                 value,
             );
         }
-        solutions.push(SolutionPoint { primal, objective: o.objective.map(|f| sign * f) });
+        solutions.push(SolutionPoint {
+            primal,
+            objective: o
+                .objective
+                .and_then(|f| ObjectiveTransform { sign, offset: 0.0 }.restore(f)),
+        });
     }
 
     let primal_status = PrimalStatus::infer(&o.termination, has_point);
-    SolverResult {
-        termination: o.termination,
-        primal_status,
-        dual_status: o.dual_status,
-        solutions,
-        dual,
-        soc_dual,
-        reduced_costs,
-        best_bound: None,
-        gap: None,
-        solve_time: elapsed,
-        iterations: o.iterations,
-        node_count: None,
-        raw_status: Some(o.raw_status.into()),
-        raw_log: o.raw_log,
-        solver_name: Some("pounce".into()),
-        solver_version: None,
-    }
+    normalize_result(
+        SolverResult {
+            termination: o.termination,
+            primal_status,
+            dual_status: o.dual_status,
+            solutions,
+            dual,
+            soc_dual,
+            reduced_costs,
+            best_bound: None,
+            gap: None,
+            solve_time: elapsed,
+            iterations: o.iterations,
+            node_count: None,
+            raw_status: Some(o.raw_status.into()),
+            raw_log: o.raw_log,
+            solver_name: Some("pounce".into()),
+            solver_version: None,
+        },
+        num_variables,
+    )
 }
 
 /// The effective `print_level`:
@@ -548,6 +593,25 @@ pub(crate) fn apply_options(
 mod retry_tests {
     use super::*;
     use crate::options::MuStrategy;
+
+    #[test]
+    fn local_infeasibility_and_missing_limit_statistics_remain_uncertified() {
+        use pounce_rs::pounce_nlp::solve_statistics::SolveStatistics;
+        assert_eq!(
+            map_status(ApplicationReturnStatus::InfeasibleProblemDetected),
+            TerminationStatus::LocallyInfeasible
+        );
+        let mut stats = SolveStatistics::default();
+        let status = ApplicationReturnStatus::MaximumIterationsExceeded;
+        let opts = PounceOptions::default().constr_viol_tol(1e-6);
+        assert!(!nlp_has_point(status, &stats, &opts));
+        stats.final_unscaled_constr_viol = 1e-7;
+        assert!(!nlp_has_point(status, &stats, &opts));
+        stats.final_declared_box_viol = 1e-5;
+        assert!(!nlp_has_point(status, &stats, &opts));
+        stats.final_declared_box_viol = 1e-7;
+        assert!(nlp_has_point(status, &stats, &opts));
+    }
 
     #[test]
     fn raw_mu_strategy_has_final_precedence() {
@@ -702,6 +766,7 @@ mod retry_tests {
             let result = assemble(
                 1.0,
                 Outcome {
+                    has_point: true,
                     termination,
                     dual_status: DualStatus::Unknown,
                     raw_status: raw_status.into(),
@@ -715,6 +780,7 @@ mod retry_tests {
                     raw_log: None,
                 },
                 Duration::ZERO,
+                1,
             );
             assert_eq!(result.dual_status, DualStatus::Unknown, "{raw_status}");
         }
@@ -722,6 +788,7 @@ mod retry_tests {
         let result = assemble(
             1.0,
             Outcome {
+                has_point: true,
                 termination: TerminationStatus::LocallyOptimal,
                 dual_status: DualStatus::FeasiblePoint,
                 raw_status: "SolveSucceeded".into(),
@@ -735,12 +802,14 @@ mod retry_tests {
                 raw_log: None,
             },
             Duration::ZERO,
+            1,
         );
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
     }
 
     fn logged_outcome(log: &str) -> Outcome {
         Outcome {
+            has_point: false,
             termination: TerminationStatus::Infeasible,
             dual_status: DualStatus::Unknown,
             raw_status: "InfeasibleProblemDetected".into(),

@@ -429,6 +429,16 @@ pub mod benchmark_support {
     // Keep each task large enough to amortize its register buffer.
     const VALUE_MIN_LEN: usize = 64;
 
+    /// Exercise the production NLP routing and bound-snapshot path without
+    /// constructing the derivative oracle or entering the optimizer.
+    pub fn prepare_nlp(model: &Model) -> usize {
+        let opts = crate::PounceOptions::default();
+        let prepared = oximo_solver::prepare::LoweringContext::new(model).unwrap();
+        assert_eq!(crate::convex::route(&prepared, &opts).unwrap(), crate::convex::Route::Nlp);
+        let setup = crate::translate::setup_prepared(&prepared, &opts).unwrap();
+        setup.x_l.len() + setup.x_u.len() + setup.x0.len() + setup.g_l.len() + setup.g_u.len()
+    }
+
     pub fn model(rows: usize, nonlinear: bool) -> Model {
         let model = Model::new("pounce_bench");
         let x = model.__var("x").lb(-5.0).ub(5.0).build();

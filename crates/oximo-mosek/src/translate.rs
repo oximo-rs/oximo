@@ -1,14 +1,13 @@
+use oximo_solver::prepare::{LoweringContext, PolynomialTerms};
+use oximo_solver::reconstruct::normalize_result;
 use std::time::{Duration, Instant};
 
 use mosek::{
     Boundkey, Dinfitem, Iinfitem, Liinfitem, Objsense, Prosta, Rescode, Solsta, Soltype,
     Streamtype, Task, TaskCB, Variabletype,
 };
-use oximo_core::{
-    ConstraintId, Domain, Model, ModelKind, ObjectiveSense, SocConstraintId, detect_soc,
-    explicit_soc_form,
-};
-use oximo_expr::{LinearTerms, QuadraticTerms, VarId, extract_quadratic};
+use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, SocConstraintId};
+use oximo_expr::{LinearTerms, QuadraticTerms, VarId};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -57,8 +56,8 @@ pub(crate) fn build_task(
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let kind = model.kind();
+    let prepared = LoweringContext::new(model)?;
+    let kind = prepared.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
     }
@@ -67,14 +66,14 @@ pub(crate) fn build_task(
     let task =
         Task::new().ok_or_else(|| SolverError::Backend("MOSEK: failed to create task".into()))?;
     let mut task = task.with_callbacks();
-    build_base(model, &mut task)?;
+    build_base(&model.name, &prepared, &mut task)?;
     opts.apply_cb(&mut task)?;
 
     if opts.universal.verbose.unwrap_or(false) {
         task.put_stream_callback(Streamtype::LOG, |message| print!("{message}"))
             .map_err(backend)?;
     }
-    let meta = build_rows_and_cones(model, kind, &mut task)?;
+    let meta = build_rows_and_cones(&prepared, kind, &mut task)?;
 
     Ok((task, meta))
 }
@@ -104,23 +103,21 @@ fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
     Ok(())
 }
 
-fn build_base(model: &Model, task: &mut TaskCB) -> Result<(), SolverError> {
-    let arena = model.arena();
-    let variables = model.variables();
-    let objective = model.objective();
+fn build_base(
+    name: &str,
+    prepared: &LoweringContext<'_>,
+    task: &mut TaskCB,
+) -> Result<(), SolverError> {
+    let variables = prepared.variables();
+    let objective = prepared.objective();
     let quad = objective.as_ref().map_or_else(
-        || Ok(QuadraticTerms::default()),
-        |obj| {
-            extract_quadratic(&arena, obj.expr).ok_or_else(|| SolverError::Nonlinear {
-                location: "the objective".into(),
-                term: "<nonlinear>".into(),
-            })
-        },
+        || Ok(oximo_solver::prepare::Extracted::Owned(QuadraticTerms::default())),
+        |obj| prepared.require_quadratic(obj.expr, || "the objective".into()),
     )?;
 
-    task.put_task_name(&model.name).map_err(backend)?;
+    task.put_task_name(name).map_err(backend)?;
     task.append_vars(count_i32(variables.len(), "variables")?).map_err(backend)?;
-    for variable in variables.iter() {
+    for variable in variables {
         let j = index_i32(variable.id.index(), "variable")?;
         task.put_var_name(j, &variable.name).map_err(backend)?;
         let (key, lower, upper) = bounds(variable.lb, variable.ub);
@@ -145,7 +142,7 @@ fn build_base(model: &Model, task: &mut TaskCB) -> Result<(), SolverError> {
     let initial_type =
         if variables.iter().any(|v| v.domain.is_integer()) { Soltype::ITG } else { Soltype::ITR };
     let mut has_initial = false;
-    for variable in variables.iter() {
+    for variable in variables {
         if let Some(value) = variable.initial {
             let j = index_i32(variable.id.index(), "variable")?;
             task.put_xx_slice(initial_type, j, j + 1, &[value]).map_err(backend)?;
@@ -160,50 +157,53 @@ fn build_base(model: &Model, task: &mut TaskCB) -> Result<(), SolverError> {
 }
 
 fn build_rows_and_cones(
-    model: &Model,
+    prepared: &LoweringContext<'_>,
     kind: ModelKind,
     task: &mut TaskCB,
 ) -> Result<Meta, SolverError> {
-    let arena = model.arena();
-    let variables = model.variables();
-    let model_constraints = model.constraints();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
     let mut row_by_constraint = vec![None; constraints.len()];
     let mut detected = Vec::new();
     let mut scratch = TaskScratch::default();
 
     for (id, constraint) in constraints.iter().enumerate() {
-        if let Some(form) = detect_soc(&arena, &variables, constraint) {
+        // Direct affine rows remain borrowed. Every other row is traversed once
+        // as a quadratic and retained through detection/native emission.
+        let terms = prepared
+            .require_polynomial(constraint.lhs, || format!("constraint {:?}", constraint.name))?;
+        if let PolynomialTerms::Quadratic(terms) = &terms
+            && let Some(form) =
+                oximo_core::__detect_soc_from_quadratic(prepared.variables(), constraint, terms)
+        {
             detected.push((id, form));
             continue;
         }
-        let terms =
-            extract_quadratic(&arena, constraint.lhs).ok_or_else(|| SolverError::Nonlinear {
-                location: format!("constraint {:?}", constraint.name),
-                term: "<nonlinear>".into(),
-            })?;
+        let (linear, constant) = match &terms {
+            PolynomialTerms::Affine(terms) => (terms.coeffs.as_ref(), terms.constant),
+            PolynomialTerms::Quadratic(terms) => (terms.linear.as_slice(), terms.constant),
+        };
         let row = task.get_num_con().map_err(backend)?;
         task.append_cons(1).map_err(backend)?;
         task.put_con_name(row, &constraint.name).map_err(backend)?;
-        put_linear_row(task, row, &terms.linear, &mut scratch)?;
-        let (key, lower, upper) =
-            bounds(constraint.lower - terms.constant, constraint.upper - terms.constant);
+        put_linear_row(task, row, linear, &mut scratch)?;
+        let (key, lower, upper) = {
+            let (lower, upper) = oximo_solver::prepare::shifted_bounds(constraint, constant);
+            bounds(lower, upper)
+        };
         task.put_con_bound(row, key, lower, upper).map_err(backend)?;
-        put_q_constraint(task, row, &terms, &mut scratch)?;
+        if let PolynomialTerms::Quadratic(terms) = terms {
+            put_q_constraint(task, row, &terms, &mut scratch)?;
+        }
         row_by_constraint[id] = Some(row);
     }
 
-    let socs = model.soc_constraints();
+    let socs = prepared.constraints().second_order_cones();
     let mut explicit_accs = Vec::with_capacity(socs.len());
     let mut next_afe = 0_i64;
     let mut next_acc = 0_i64;
     for (id, soc) in socs.iter().enumerate() {
-        let form = explicit_soc_form(&arena, soc).ok_or_else(|| {
-            SolverError::Backend(format!(
-                "MOSEK: SOC constraint '{}' contains an expression from another model",
-                soc.name
-            ))
-        })?;
+        let form = prepared.explicit_soc(soc)?;
         let dim = append_soc(task, &form, &mut next_afe, &mut scratch)?;
         task.put_acc_name(next_acc, &soc.name).map_err(backend)?;
         explicit_accs.push((
@@ -355,13 +355,8 @@ fn extract_result(
     if has_point {
         let mut values = vec![0.0; variables.len()];
         task.get_xx(solution_type, &mut values).map_err(backend)?;
-        let primal = values
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                Ok((VarId(u32::try_from(index).map_err(|_| overflow("variable"))?), value))
-            })
-            .collect::<Result<FxHashMap<_, _>, SolverError>>()?;
+        let primal = oximo_solver::reconstruct::project_dense_primal(&values, variables.len())
+            .unwrap_or_default();
         let objective = task.get_primal_obj(solution_type).ok().filter(|value| value.is_finite());
         solutions.push(SolutionPoint { primal, objective });
     }
@@ -379,18 +374,10 @@ fn extract_result(
 
     let bound_defined = mixed_integer
         && task.get_int_inf(Iinfitem::MIO_OBJ_BOUND_DEFINED).is_ok_and(|defined| defined != 0);
-    let mut best_bound = bound_defined
+    let best_bound = bound_defined
         .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_BOUND).ok())
         .flatten()
         .filter(|value| value.is_finite());
-    let mut gap = mixed_integer
-        .then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok())
-        .flatten()
-        .filter(|value| value.is_finite() && *value >= 0.0);
-    if matches!(termination, TerminationStatus::Optimal) {
-        best_bound = best_bound.or_else(|| solutions.first().and_then(|point| point.objective));
-        gap = gap.or(Some(0.0));
-    }
     let iterations = iteration_count(task, mixed_integer);
     let node_count = mixed_integer
         .then(|| task.get_int_inf(Iinfitem::MIO_NUM_SOLVED_NODES).ok())
@@ -403,28 +390,30 @@ fn extract_result(
     let solver_version = mosek::get_version(&mut major, &mut minor, &mut revision)
         .ok()
         .map(|()| format!("{major}.{minor}.{revision}").into());
-    let primal_status = PrimalStatus::infer(&termination, has_point);
-    Ok(SolverResult {
-        termination,
-        primal_status,
-        dual_status,
-        solutions,
-        dual,
-        soc_dual,
-        reduced_costs,
-        best_bound,
-        gap,
-        solve_time: elapsed,
-        iterations,
-        node_count,
-        raw_status: Some(
-            format!("solution={solution_status}, problem={problem_status}, termination={trm}")
-                .into(),
-        ),
-        raw_log: None,
-        solver_name: Some(crate::NAME.into()),
-        solver_version,
-    })
+    Ok(normalize_result(
+        SolverResult {
+            termination,
+            primal_status: PrimalStatus::NoSolution,
+            dual_status,
+            solutions,
+            dual,
+            soc_dual,
+            reduced_costs,
+            best_bound,
+            gap: mixed_integer.then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok()).flatten(),
+            solve_time: elapsed,
+            iterations,
+            node_count,
+            raw_status: Some(
+                format!("solution={solution_status}, problem={problem_status}, termination={trm}")
+                    .into(),
+            ),
+            raw_log: None,
+            solver_name: Some(crate::NAME.into()),
+            solver_version,
+        },
+        variables.len(),
+    ))
 }
 
 fn collect_continuous_duals(
@@ -586,7 +575,6 @@ fn backend(message: String) -> SolverError {
 #[allow(clippy::wildcard_imports)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
-    use rayon::prelude::*;
 
     use super::*;
 
@@ -624,54 +612,11 @@ pub mod benchmark_support {
         model
     }
 
-    pub fn rows(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let variables = model.variables();
-        let model_constraints = model.constraints();
-        let constraints = model_constraints.algebraic();
-        let arena_ref = &*arena;
-        let variables_ref = &*variables;
-        let row = |c: &oximo_core::Constraint| {
-            extract_quadratic(arena_ref, c.lhs)
-                .ok_or_else(|| SolverError::Nonlinear {
-                    location: format!("constraint {:?}", c.name),
-                    term: "<nonlinear>".into(),
-                })
-                .map(|q| {
-                    usize::from(detect_soc(arena_ref, variables_ref, c).is_some())
-                        + q.linear.len()
-                        + q.hessian.len()
-                })
-        };
-        if parallel {
-            constraints.par_iter().map(row).try_reduce(|| 0, |left, right| Ok(left + right))
-        } else {
-            constraints
-                .iter()
-                .try_fold(0, |sum, constraint| row(constraint).map(|count| sum + count))
-        }
-    }
-
-    pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let socs = model.soc_constraints();
-        let arena_ref = &*arena;
-        let form = |s: &oximo_core::SocConstraint| {
-            explicit_soc_form(arena_ref, s).ok_or_else(|| {
-                SolverError::Backend(format!(
-                    "SOC constraint '{}' has a member outside this model's arena",
-                    s.name
-                ))
-            })
-        };
-        if parallel {
-            socs.par_iter()
-                .map(form)
-                .try_fold(|| 0, |count, _| Ok(count + 1))
-                .try_reduce(|| 0, |left, right| Ok(left + right))
-        } else {
-            socs.iter().try_fold(0, |count, soc| form(soc).map(|_| count + 1))
-        }
+    /// Build and destroy a complete native task, without optimization.
+    pub fn translate(model: &Model) -> Result<usize, SolverError> {
+        let built = build_task(model, &MosekOptions::default())?;
+        std::hint::black_box(&built);
+        Ok(model.num_variables())
     }
 }
 

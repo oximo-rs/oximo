@@ -15,5 +15,12 @@ oximo-core.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "extraction_cache"
+harness = false
+
 [lints]
 workspace = true

@@ -150,8 +150,8 @@ fn evaluate_soc_at(
 /// `solutions` (index `0` is the best/incumbent, empty when no solution was
 /// found). `dual` and `reduced_costs` apply to the best continuous point and are
 /// sparse maps, so a solver that does not return duals (e.g. MILP) can simply
-/// leave them empty. `best_bound` and `gap` are populated by branch-and-bound
-/// backends when available.
+/// leave them empty. `best_bound` is populated when a global bound is available.
+/// `gap` is the solver-reported gap, whose convention is backend-specific.
 #[derive(Clone, Debug)]
 pub struct SolverResult {
     pub termination: TerminationStatus,

@@ -43,7 +43,7 @@ pub use set::{
 };
 #[doc(hidden)]
 pub use soc::__detect_soc_from_quadratic;
-pub use soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
+pub use soc::{SocConstraint, SocConstraintId, SocForm};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
 pub use var::{VarBuilder, Variable, var_name};

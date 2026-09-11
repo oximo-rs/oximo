@@ -13,7 +13,7 @@ pub use crate::reformulation::{
     ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
 pub use crate::set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
-pub use crate::soc::{SocConstraint, SocConstraintId, SocForm, detect_soc, explicit_soc_form};
+pub use crate::soc::{SocConstraint, SocConstraintId, SocForm};
 pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use crate::sum::SumDomain;
 pub use crate::var::{VarBuilder, Variable};

@@ -1,4 +1,4 @@
-//! Tests for SOC pattern detection (`detect_soc`) and the normalized
+//! Tests for SOC pattern detection (polynomial recognition) and the normalized
 //! `SocForm` views backends translate from.
 
 #![expect(clippy::float_cmp)]
@@ -10,11 +10,8 @@ fn detect_first(m: &Model) -> Option<SocForm> {
     let vars = m.variables();
     let model_constraints = m.constraints();
     let constraints = model_constraints.algebraic();
-    let form = detect_soc(&arena, &vars, &constraints[0]);
-    let reused = oximo_expr::extract_quadratic(&arena, constraints[0].lhs)
-        .and_then(|q| oximo_core::__detect_soc_from_quadratic(&vars, &constraints[0], &q));
-    assert_eq!(format!("{form:?}"), format!("{reused:?}"));
-    form
+    oximo_expr::extract_quadratic(&arena, constraints[0].lhs)
+        .and_then(|q| oximo_core::__detect_soc_from_quadratic(&vars, &constraints[0], &q))
 }
 
 #[test]
@@ -100,22 +97,4 @@ fn rejects_unsigned_bound_variable() {
     variable!(m, t);
     constraint!(m, c, x * x <= t * t);
     assert!(detect_first(&m).is_none());
-}
-
-#[test]
-fn explicit_form_recovers_affine_rows() {
-    let m = Model::new("soc");
-    variable!(m, x);
-    variable!(m, y);
-    variable!(m, t >= 0.0);
-    m.add_soc_constraint("cone", [x - y, 2.0 * y + 1.0], t);
-
-    let arena = m.arena();
-    let model_constraints = m.constraints();
-    let socs = model_constraints.second_order_cones();
-    let form = explicit_soc_form(&arena, &socs[0]).expect("affine members");
-    assert_eq!(form.terms.len(), 2);
-    assert_eq!(form.terms[0].coeffs.len(), 2);
-    assert_eq!(form.terms[1].constant, 1.0);
-    assert_eq!(form.bound.coeffs, vec![(m.variable_id("t").unwrap(), 1.0)]);
 }

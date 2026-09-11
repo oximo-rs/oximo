@@ -7,7 +7,7 @@
 //!    two-sided ranges as both, then finite variable bounds.
 //! 3. One `SecondOrderCone` block per cone constraint, explicit
 //!    [`SocConstraint`]s first, then SOC-shaped quadratic constraints detected
-//!    by [`detect_soc`] in constraint order. Each block is
+//!    by shared prepared lowering in constraint order. Each block is
 //!    `s0 = bound(x), s_i = term_i(x)` via `A` rows holding the negated
 //!    affine coefficients.
 //!
@@ -19,15 +19,17 @@
 
 // TODO: Add convex-QCP-to-SOC reformulation?
 
+use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::reconstruct::{DualProjection, ObjectiveTransform, normalize_result};
+
 use std::time::{Duration, Instant};
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use oximo_core::{
-    ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, detect_soc,
-    explicit_soc_form, var_name,
+    ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, var_name,
 };
-use oximo_expr::{LinearTerms, VarId, describe_nonlinear_term, extract_linear, extract_quadratic};
+use oximo_expr::{LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -54,7 +56,7 @@ type Triplets = Vec<(usize, usize, f64)>;
 struct Rows {
     a_trip: Triplets,
     b: Vec<f64>,
-    row_duals: Vec<Option<(ConstraintId, f64)>>,
+    row_duals: Vec<Option<DualProjection<ConstraintId>>>,
 }
 
 impl Rows {
@@ -89,20 +91,21 @@ impl Rows {
 
     /// Attach a dual mapping to the row just pushed.
     fn set_last_dual(&mut self, id: ConstraintId, scale: f64) {
-        *self.row_duals.last_mut().unwrap() = Some((id, scale));
+        *self.row_duals.last_mut().unwrap() = Some(DualProjection { source: id, scale });
     }
 }
 
 /// Readback metadata, turn a solved [`DefaultSolver`] back into a
 /// generic [`SolverResult`].
 pub(crate) struct Meta {
+    num_variables: usize,
     /// `-1.0` for a maximize objective (Clarabel always minimizes), else `1.0`.
     sign: f64,
     /// Folded objective constant, added back after solving.
     obj_constant: f64,
     /// Per `A`-row dual mapping: `Some((constraint, scale))`, or `None` for
     /// bound/cone rows that carry no [`ConstraintId`].
-    row_duals: Vec<Option<(ConstraintId, f64)>>,
+    row_duals: Vec<Option<DualProjection<ConstraintId>>>,
     /// Row index of each SOC block's `s0` entry.
     soc_block_starts: Vec<usize>,
     /// Count of leading SOC blocks that are explicit cones (duals reported).
@@ -185,20 +188,19 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
 }
 
 fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, SolverError> {
-    model.ensure_objective_declared().map_err(SolverError::Core)?;
-    let kind = model.kind();
+    let prepared = LoweringContext::new(model)?;
+    let kind = prepared.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
     }
-    let vars = model.variables();
-    reject_semi_domains(&vars)?;
+    let vars = prepared.variables();
+    reject_semi_domains(vars)?;
     let n = vars.len();
 
-    let (sign, p_trip, q, obj_constant) = objective_data(model, n)?;
-    let rows = classify_rows_with(model, parallel)?;
-    let arena = model.arena();
-    let socs = model.soc_constraints();
-    let explicit_forms = explicit_soc_forms(&arena, &socs, parallel)?;
+    let (sign, p_trip, q, obj_constant) = objective_data(&prepared, n)?;
+    let rows = classify_rows(&prepared, parallel)?;
+    let socs = prepared.constraints().second_order_cones();
+    let explicit_forms = explicit_soc_forms(&prepared, socs, parallel)?;
     let (row_capacity, nonzero_capacity, soc_capacity) =
         translation_capacities(model, &rows, &explicit_forms);
     let acc = Rows::with_capacity(row_capacity, nonzero_capacity);
@@ -218,7 +220,14 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
         a_mat,
         b,
         cones,
-        meta: Meta { sign, obj_constant, row_duals, soc_block_starts, n_explicit },
+        meta: Meta {
+            num_variables: n,
+            sign,
+            obj_constant,
+            row_duals,
+            soc_block_starts,
+            n_explicit,
+        },
     })
 }
 
@@ -230,9 +239,11 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
 /// lower-triangular with doubled diagonal (the `0.5 x'Qx` convention), matching
 /// Clarabel's `P` up to the triangle side, so entries transpose to
 /// upper-triangular with no scaling.
-fn objective_data(model: &Model, n: usize) -> Result<(f64, Triplets, Vec<f64>, f64), SolverError> {
-    let arena = model.arena();
-    let objective = model.objective();
+fn objective_data(
+    prepared: &LoweringContext<'_>,
+    n: usize,
+) -> Result<(f64, Triplets, Vec<f64>, f64), SolverError> {
+    let objective = prepared.objective();
     let sign = match objective.as_ref().map(|o| o.sense) {
         Some(ObjectiveSense::Maximize) => -1.0,
         _ => 1.0,
@@ -240,12 +251,7 @@ fn objective_data(model: &Model, n: usize) -> Result<(f64, Triplets, Vec<f64>, f
     let Some(obj) = objective.as_ref() else {
         return Ok((sign, Triplets::new(), vec![0.0; n], 0.0));
     };
-    let vars = model.variables();
-    let quad = extract_quadratic(&arena, obj.expr).ok_or_else(|| SolverError::Nonlinear {
-        location: "the objective".into(),
-        term: describe_nonlinear_term(&arena, obj.expr, &|v| var_name(&vars, v))
-            .unwrap_or_else(|| "<nonlinear>".into()),
-    })?;
+    let quad = prepared.require_quadratic(obj.expr, || "the objective".into())?;
     let mut q = vec![0.0; n];
     for &(var, coef) in &quad.linear {
         q[var.index()] += sign * coef;
@@ -258,15 +264,24 @@ fn objective_data(model: &Model, n: usize) -> Result<(f64, Triplets, Vec<f64>, f
 /// Classify every algebraic constraint as linear or SOC. The kind gate
 /// guarantees a quadratic constraint detects as SOC, so a miss here is a
 /// genuine nonlinear.
+#[cfg(any(test, feature = "benchmark-support"))]
 fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>, SolverError> {
-    let arena = model.arena();
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    classify_rows(&LoweringContext::new(model)?, parallel)
+}
+
+fn classify_rows(
+    prepared: &LoweringContext<'_>,
+    parallel: Option<bool>,
+) -> Result<Vec<Row>, SolverError> {
+    let arena = prepared.arena();
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let arena_ref = &*arena;
-    let vars_ref = &*vars;
+    let arena_ref = arena;
+    let vars_ref = vars;
+    let expressions: &PreparedExpressions = prepared;
     let classify_non_linear = |c: &oximo_core::Constraint| {
-        detect_soc(arena_ref, vars_ref, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
+        expressions.detected_soc(vars_ref, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
                 .unwrap_or_else(|| "<nonlinear>".into()),
@@ -279,7 +294,7 @@ fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>,
     let mut rows: Vec<Option<Row>> = (0..constraints.len()).map(|_| None).collect();
     let mut pending = Vec::new();
     for (index, constraint) in constraints.iter().enumerate() {
-        match extract_linear(arena_ref, constraint.lhs).map(LinearTerms::into_owned) {
+        match prepared.linear(constraint.lhs).map(oximo_solver::prepare::AffineTerms::into_owned) {
             Some(terms) => rows[index] = Some(Row::Lin(terms)),
             None => pending.push((index, constraint)),
         }
@@ -436,18 +451,11 @@ fn soc_blocks(
 }
 
 fn explicit_soc_forms(
-    arena_ref: &oximo_expr::ExprArena,
+    prepared: &PreparedExpressions,
     socs: &[oximo_core::SocConstraint],
     parallel: Option<bool>,
 ) -> Result<Vec<SocForm>, SolverError> {
-    let extract = |s: &oximo_core::SocConstraint| {
-        explicit_soc_form(arena_ref, s).ok_or_else(|| {
-            SolverError::Backend(format!(
-                "SOC constraint '{}' has a member outside this model's arena",
-                s.name
-            ))
-        })
-    };
+    let extract = |s: &oximo_core::SocConstraint| prepared.explicit_soc(s);
     let use_parallel = parallel.unwrap_or(false);
     let explicit_results: Vec<Result<SocForm, SolverError>> = if use_parallel {
         socs.par_iter().map(extract).collect()
@@ -486,19 +494,16 @@ pub(crate) fn read_result(
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
     let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
     if has_point {
-        let primal: FxHashMap<VarId, f64> = solver
-            .solution
-            .x
-            .iter()
-            .enumerate()
-            .map(|(i, &val)| (VarId(u32::try_from(i).expect("variable count overflow")), val))
-            .collect();
-        let objective = Some(meta.sign * solver.solution.obj_val + meta.obj_constant);
+        let primal =
+            oximo_solver::reconstruct::project_dense_primal(&solver.solution.x, meta.num_variables)
+                .unwrap_or_default();
+        let objective = ObjectiveTransform { sign: meta.sign, offset: meta.obj_constant }
+            .restore(solver.solution.obj_val);
         solutions.push(SolutionPoint { primal, objective });
 
         for (r, &z) in solver.solution.z.iter().enumerate() {
-            if let Some(Some((id, s))) = meta.row_duals.get(r) {
-                *dual.entry(*id).or_insert(0.0) += meta.sign * s * z;
+            if let Some(Some(projection)) = meta.row_duals.get(r) {
+                projection.accumulate(&mut dual, z, meta.sign);
             }
         }
         for (k, &start) in meta.soc_block_starts.iter().take(meta.n_explicit).enumerate() {
@@ -508,42 +513,46 @@ pub(crate) fn read_result(
         }
     }
     let primal_status = PrimalStatus::infer(&termination, !solutions.is_empty());
-    let (best_bound, gap) =
-        mapped_objective_bound(meta, solver.solution.obj_val, solver.solution.obj_val_dual);
+    let best_bound = if native_status == SolverStatus::Solved {
+        mapped_objective_bound(meta, solver.solution.obj_val, solver.solution.obj_val_dual)
+    } else {
+        None
+    };
 
-    SolverResult {
-        termination,
-        primal_status,
-        dual_status: if has_point { DualStatus::FeasiblePoint } else { DualStatus::NoSolution },
-        solutions,
-        dual,
-        soc_dual,
-        reduced_costs: FxHashMap::default(),
-        best_bound,
-        gap,
-        solve_time: elapsed,
-        iterations: u64::from(solver.info.iterations),
-        node_count: None,
-        raw_status: Some(format!("{native_status:?}").into()),
-        raw_log: None,
-        solver_name: Some(crate::NAME.into()),
-        solver_version: None,
-    }
+    normalize_result(
+        SolverResult {
+            termination,
+            primal_status,
+            dual_status: if native_status == SolverStatus::Solved {
+                DualStatus::FeasiblePoint
+            } else if has_point {
+                DualStatus::Unknown
+            } else {
+                DualStatus::NoSolution
+            },
+            solutions,
+            dual,
+            soc_dual,
+            reduced_costs: FxHashMap::default(),
+            best_bound,
+            gap: None,
+            solve_time: elapsed,
+            iterations: u64::from(solver.info.iterations),
+            node_count: None,
+            raw_status: Some(format!("{native_status:?}").into()),
+            raw_log: None,
+            solver_name: Some(crate::NAME.into()),
+            solver_version: None,
+        },
+        meta.num_variables,
+    )
 }
 
 /// Map Clarabel's primal and dual objectives back to the model's objective
-/// convention and compute their relative difference when both are finite.
-fn mapped_objective_bound(meta: &Meta, primal: f64, dual: f64) -> (Option<f64>, Option<f64>) {
-    let mapped_primal = meta.sign * primal + meta.obj_constant;
-    let mapped_dual = meta.sign * dual + meta.obj_constant;
-    if !mapped_primal.is_finite() || !mapped_dual.is_finite() {
-        return (None, None);
-    }
-
-    let relative_gap =
-        (mapped_primal - mapped_dual).abs() / (mapped_primal.abs().max(mapped_dual.abs()) + 1e-10);
-    let gap = relative_gap.is_finite().then_some(relative_gap);
-    (Some(mapped_dual), gap)
+/// convention.
+fn mapped_objective_bound(meta: &Meta, _primal: f64, dual: f64) -> Option<f64> {
+    let transform = ObjectiveTransform { sign: meta.sign, offset: meta.obj_constant };
+    transform.restore(dual)
 }
 
 /// Assemble an `m x n` [`CscMatrix`] from `(row, col, value)` triplets,
@@ -660,11 +669,10 @@ fn map_status(s: SolverStatus) -> TerminationStatus {
     match s {
         SolverStatus::Solved => TerminationStatus::Optimal,
         SolverStatus::AlmostSolved => TerminationStatus::Feasible,
-        SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
-            TerminationStatus::Infeasible
-        }
-        SolverStatus::DualInfeasible | SolverStatus::AlmostDualInfeasible => {
-            TerminationStatus::Unbounded
+        SolverStatus::PrimalInfeasible => TerminationStatus::Infeasible,
+        SolverStatus::DualInfeasible => TerminationStatus::Unbounded,
+        other @ (SolverStatus::AlmostPrimalInfeasible | SolverStatus::AlmostDualInfeasible) => {
+            TerminationStatus::Other(format!("{other:?}"))
         }
         SolverStatus::MaxIterations => TerminationStatus::IterationLimit,
         SolverStatus::MaxTime => TerminationStatus::TimeLimit,
@@ -735,9 +743,9 @@ pub mod benchmark_support {
     }
 
     pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        let arena = model.arena();
-        let socs = model.soc_constraints();
-        explicit_soc_forms(&arena, &socs, Some(parallel)).map(|forms| forms.len())
+        let prepared = LoweringContext::new(model)?;
+        explicit_soc_forms(&prepared, prepared.constraints().second_order_cones(), Some(parallel))
+            .map(|forms| forms.len())
     }
 
     pub fn translate(model: &Model) -> Result<(usize, usize, usize), SolverError> {
@@ -767,8 +775,21 @@ mod tests {
     }
 
     #[test]
+    fn approximate_certificates_do_not_claim_proven_infeasibility() {
+        assert_eq!(map_status(SolverStatus::Solved), TerminationStatus::Optimal);
+        assert_eq!(map_status(SolverStatus::AlmostSolved), TerminationStatus::Feasible);
+        for status in [SolverStatus::AlmostPrimalInfeasible, SolverStatus::AlmostDualInfeasible] {
+            assert_eq!(map_status(status), TerminationStatus::Other(format!("{status:?}")));
+            assert!(!status_has_point(status));
+        }
+        assert_eq!(map_status(SolverStatus::PrimalInfeasible), TerminationStatus::Infeasible);
+        assert_eq!(map_status(SolverStatus::DualInfeasible), TerminationStatus::Unbounded);
+    }
+
+    #[test]
     fn finite_dual_objective_maps_bound_and_gap() {
         let meta = Meta {
+            num_variables: 0,
             sign: -1.0,
             obj_constant: 5.0,
             row_duals: Vec::new(),
@@ -776,14 +797,14 @@ mod tests {
             n_explicit: 0,
         };
 
-        let (bound, gap) = mapped_objective_bound(&meta, -10.0, -8.0);
+        let bound = mapped_objective_bound(&meta, -10.0, -8.0);
         assert_eq!(bound, Some(13.0));
-        assert!(close(gap.unwrap(), 2.0 / 15.0, 1e-12));
     }
 
     #[test]
-    fn nonfinite_objective_leaves_bound_and_gap_unset() {
+    fn nonfinite_primal_does_not_discard_an_independent_finite_bound() {
         let meta = Meta {
+            num_variables: 0,
             sign: 1.0,
             obj_constant: 0.0,
             row_duals: Vec::new(),
@@ -794,7 +815,10 @@ mod tests {
         for (primal, dual) in
             [(f64::NAN, 1.0), (1.0, f64::NAN), (f64::INFINITY, 1.0), (1.0, f64::NEG_INFINITY)]
         {
-            assert_eq!(mapped_objective_bound(&meta, primal, dual), (None, None));
+            assert_eq!(
+                mapped_objective_bound(&meta, primal, dual),
+                dual.is_finite().then_some(dual)
+            );
         }
     }
 

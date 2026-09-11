@@ -198,6 +198,7 @@ fn run_builder(
         sqp_working: None,
     });
     Ok(Outcome {
+        has_point: crate::translate::nlp_has_point(sol.status, &sol.stats, opts),
         termination,
         dual_status: if matches!(sol.status, pounce_rs::ApplicationReturnStatus::SolveSucceeded) {
             DualStatus::FeasiblePoint

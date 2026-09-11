@@ -46,7 +46,30 @@ point came back.
 
 Each `SolutionPoint` holds the `primal` variable values (`FxHashMap<VarId, f64>`) and that point's `objective` (`Option<f64>`). Index `0` is the best/incumbent. Backends with solution pools return the extra points after it.
 
-### Accessors
+## Shared preparation and reconstruction
+
+Create a fresh `prepare::LoweringContext` per model build, and pass it through
+classification and emission. It freezes parameter values and exposes the original
+model entities. `PreparedExpressions` can be shared with parallel writers.
+Direct affine nodes borrow their coefficients. One-use streaming consumers can
+explicitly bypass reuse admission. Before cache initialization, first-use compound
+expressions return owned terms without locking or allocating shared storage.
+Once initialized, cached entries are checked independently of reuse admission;
+a small bounded history recognizes interleaved roots.
+
+`require_linear`, `require_linear_once`, and `require_quadratic` take a lazy location closure, e.g.
+`|| format!("constraint {:?}", row.name)`, which runs only on failure.
+Quadratic extraction returns `Extracted<QuadraticTerms>` (owned or shared),
+which dereferences to the original coefficient representation.
+
+Adapters own capability checks, native row/column layouts, reformulation choices,
+native status decoding, and evidence that points, duals and global bounds exist.
+`reconstruct` shares coordinate restoration and result cleanup. `normalize_result`
+removes incomplete/nonfinite points and clears uncertified multipliers. Discarding
+the incumbent also clears its native gap, which does not describe a surviving
+pool point.
+
+## Result accessors
 
 ```rust,ignore
 result.objective()    // Option<f64>, best solution's objective
