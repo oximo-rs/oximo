@@ -50,7 +50,7 @@ syn              = { version = "3", features = ["full"] }
 quote            = "1"
 proc-macro2      = "1"
 proc-macro-crate = "3"
-smallvec         = "1.15"
+smallvec         = "1.16"
 smol_str         = "0.3.6"
 rustc-hash       = "2.1"
 ndarray          = "0.17"
