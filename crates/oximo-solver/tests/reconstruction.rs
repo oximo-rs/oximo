@@ -60,6 +60,20 @@ fn discarded_only_incumbent_clears_gap_but_preserves_independent_bound() {
 }
 
 #[test]
+fn empty_solutions_clear_gap() {
+    let result = normalize_result(
+        SolverResult {
+            termination: TerminationStatus::TimeLimit,
+            gap: Some(0.5),
+            ..Default::default()
+        },
+        1,
+    );
+    assert_eq!(result.primal_status, PrimalStatus::NoSolution);
+    assert_eq!(result.gap, None);
+}
+
+#[test]
 fn gaps_use_restored_units_and_retain_native_conventions_separately() {
     let transform = ObjectiveTransform { sign: -1.0, offset: 5.0 };
     let p = transform.restore(-10.0).unwrap();

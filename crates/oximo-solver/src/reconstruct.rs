@@ -153,5 +153,8 @@ pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> Solve
         result.best_bound = result.objective();
     }
     result.gap = result.gap.filter(|v| v.is_finite() && *v >= 0.0);
+    if result.primal_status == PrimalStatus::NoSolution {
+        result.gap = None;
+    }
     result
 }
