@@ -2,7 +2,7 @@
 
 Core modeling types for [oximo](https://github.com/oximo-rs/oximo): `Model`, `Variable`, `Set`, `Constraint`, `Objective`, `Parameter`, `IndexedVar`, `Domain`, and `ModelKind`.
 
-Re-exports `oximo-expr` types (`Expr`, `ExprArena`, `ExprId`, `ExprNode`, `ParamId`, `VarId`) so downstream code does not need a separate `oximo-expr` import. End users typically depend on the umbrella `oximo` crate rather than this one directly.
+Re-exports `oximo-expr` types (`Expr`, `ExprArena`, `ExprId`, `ExprNode`, `UnaryOp`, `Children`, `ParamId`, `VarId`) so downstream code does not need a separate `oximo-expr` import. End users typically depend on the umbrella `oximo` crate rather than this one directly.
 
 ## Usage
 
@@ -43,7 +43,7 @@ println!("kind = {:?}", m.kind()); // LP
 ## Modeling API
 
 The modeling surface is a set of macros: `variable!`, `constraint!`, `objective!`,
-`sum!`, `set!`, and `param!`. Each expands to the underlying typed model operations,
+`sum!`, `min!`, `max!`, `set!`, and `param!`. Each expands to the underlying typed model operations,
 so there is no runtime cost and full compile-time type/borrow checking is preserved.
 
 `Model` uses interior mutability, so a macro can take `&m`, register
@@ -310,6 +310,10 @@ The method form `m.add_soc_constraint("cone", [x, y], t)` is equivalent.
 objective!(m, Min, cost_expr);
 objective!(m, Max, revenue_expr);
 ```
+
+Nonlinear expressions use `Expr` methods such as `sqrt`, `exp2`, `log1p`,
+`atan2`, `min`, and `max`. `min!`/`max!` provide the same indexed-domain
+syntax as `sum!` and preserve deterministic child order.
 
 ## Parameters
 
