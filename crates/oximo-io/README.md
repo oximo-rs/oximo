@@ -125,15 +125,15 @@ let imported = oximo_io::read_lp(s.as_bytes())?;
 
 The standard format for sharing nonlinear and mixed-integer models. Unlike MPS/LP, it carries full nonlinear expressions, emitted as prefix (Polish) opcode trees.
 
-| Feature              | Behavior                                                                |
-| -------------------- | ----------------------------------------------------------------------- |
-| Nonlinear bodies     | Linear part goes to `J`/`G`; nonlinear residual to `C`/`O` opcode trees |
-| Supported operators  | `+ - * /`, negation, `pow`, `abs`, `sin`, `cos`, `exp`, `log` (natural) |
-| Output encoding      | ASCII (default) or binary, via `WriteOptions::format`                   |
-| Precision / comments | `precision` and `comments` knobs tune the ASCII output                  |
-| Variable ordering    | Standard ASL order: nonlinear-first (by appearance), then linear        |
-| Name sidecars        | `write_nl_files` also writes `.row` / `.col` name files                 |
-| Optional segments    | `F`/`S`/`V`/`d`/`r` segments supplied via `WriteOptions`                |
+| Feature              | Behavior                                                                    |
+| -------------------- | --------------------------------------------------------------------------- |
+| Nonlinear bodies     | Linear part goes to `J`/`G`; nonlinear residual to `C`/`O` opcode trees     |
+| Supported operators  | `+ - * /`, all documented AMPL unary/trig/hyperbolic opcodes, min/max, etc. |
+| Output encoding      | ASCII (default) or binary, via `WriteOptions::format`                       |
+| Precision / comments | `precision` and `comments` knobs tune the ASCII output                      |
+| Variable ordering    | Standard ASL order: nonlinear-first (by appearance), then linear            |
+| Name sidecars        | `write_nl_files` also writes `.row` / `.col` name files                     |
+| Optional segments    | `F`/`S`/`V`/`d`/`r` segments supplied via `WriteOptions`                    |
 
 ```rust,ignore
 use oximo::prelude::*;
