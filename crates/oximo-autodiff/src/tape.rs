@@ -183,7 +183,7 @@ pub(crate) fn eval_tape(
         let bi = b[i] as usize;
         let op = ops[i];
         // Keep the common opcodes in a compact dispatch table.
-		// The extended nonlinear vocabulary is cold for existing tapes.
+        // The extended nonlinear vocabulary is cold for existing tapes.
         if op <= OP_LINEAR {
             match op {
                 OP_CONST => regs[i] = consts[ai],
