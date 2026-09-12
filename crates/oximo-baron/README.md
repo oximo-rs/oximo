@@ -74,6 +74,35 @@ cargo run -p oximo --example baron_robot --features baron
 | `.threads(u32)`         | `threads: <n>`       | none    |
 | `.verbose(bool)`        | `PrLevel: 1/0`       | none    |
 
+### Nonlinear expressions
+
+The [BARON User Manual and Installation Guide, version 2026.9.10, Sections
+6--7](https://minlp-downloads.nyc3.cdn.digitaloceanspaces.com/docs/baron%20manual.pdf#page=18)
+explicitly documents the variable-power rewrite `x^y = exp(y * log(x))`, the
+absolute-value rewrite `abs(x) = (x^2)^0.5`, and the base-10 logarithm rewrite
+`log10(x) = 0.4342944819032518 * log(x)`. Because BARON accepts `x^alpha` and
+`beta^x` for real constants `alpha` and `beta`, the adapter emits `sqrt(x)` as
+`x^0.5` and `exp2(x)` as `2^x`.
+
+### Convex equation hints
+
+BARON can generate supporting hyperplanes for an entire convex feasible set
+instead of relaxing its expression term by term. Pass the corresponding
+algebraic constraint IDs to [`BaronOptions::convex_equations`]:
+
+```rust,no_run
+use oximo_baron::BaronOptions;
+use oximo_core::prelude::*;
+
+let m = Model::new("convex_hint");
+variable!(m, -1.0 <= x <= 1.0);
+variable!(m, -1.0 <= y <= 1.0);
+let disk = constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
+objective!(m, Min, x + y);
+
+let options = BaronOptions::default().convex_equations([disk]);
+```
+
 ### BARON-specific options
 
 Each builder method is the snake_case form of a BARON keyword. Highlights:
