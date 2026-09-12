@@ -1,8 +1,8 @@
 #![expect(clippy::float_cmp)]
 
 use oximo_expr::{
-    Expr, ExprArena, ExprArenaCell, ExprClass, ExprNode, UnaryOp, VarId, classify, evaluate,
-    render_expr, simplify,
+    Children, Expr, ExprArena, ExprArenaCell, ExprClass, ExprNode, UnaryOp, VarId, classify,
+    evaluate, render_expr, simplify,
 };
 
 fn value(expr: Expr<'_>) -> f64 {
@@ -145,8 +145,8 @@ fn extrema_term_helpers_return_the_only_flattened_child() {
     let (empty_min, empty_max, child) = {
         let mut nodes = arena.borrow_mut();
         (
-            nodes.push(ExprNode::Min(Default::default())),
-            nodes.push(ExprNode::Max(Default::default())),
+            nodes.push(ExprNode::Min(Children::new())),
+            nodes.push(ExprNode::Max(Children::new())),
             nodes.push(ExprNode::Const(7.0)),
         )
     };
