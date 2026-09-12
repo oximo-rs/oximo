@@ -5,7 +5,7 @@
 use oximo_autodiff::sparsity::{
     HessianColoring, hessian_pattern, star_hessian_coloring, variable_support,
 };
-use oximo_expr::{ExprArena, ExprNode, VarId, extract_quadratic};
+use oximo_expr::{ExprArena, ExprNode, UnaryOp, VarId, extract_quadratic};
 use rustc_hash::FxHashSet;
 
 fn var(arena: &mut ExprArena, i: u32) -> oximo_expr::ExprId {
@@ -18,7 +18,7 @@ fn separable_sum_of_sins_is_diagonal() {
     let sins: Vec<_> = (0..5)
         .map(|i| {
             let x = var(&mut arena, i);
-            arena.push(ExprNode::Sin(x))
+            arena.push(ExprNode::Unary(UnaryOp::Sin, x))
         })
         .collect();
     let root = arena.push(ExprNode::Add(sins.into_iter().collect()));
@@ -33,7 +33,7 @@ fn product_and_unary_patterns() {
     let x2 = var(&mut arena, 2);
 
     let mul = arena.push(ExprNode::Mul([x0, x1].into_iter().collect()));
-    let sin = arena.push(ExprNode::Sin(x2));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x2));
     let root = arena.push(ExprNode::Add([mul, sin].into_iter().collect()));
     assert_eq!(hessian_pattern(&arena, root), vec![(1, 0), (2, 2)]);
 
@@ -53,13 +53,13 @@ fn product_and_unary_patterns() {
 fn abs_passes_through_its_argument_pattern() {
     let mut arena = ExprArena::new();
     let lin = arena.linear(vec![(VarId(0), 2.0), (VarId(1), -1.0)], 0.0);
-    let abs_lin = arena.push(ExprNode::Abs(lin));
+    let abs_lin = arena.push(ExprNode::Unary(UnaryOp::Abs, lin));
     assert_eq!(hessian_pattern(&arena, abs_lin), vec![]);
 
     let x0 = var(&mut arena, 0);
     let three = arena.constant(3.0);
     let cube = arena.push(ExprNode::Pow(x0, three));
-    let abs_cube = arena.push(ExprNode::Abs(cube));
+    let abs_cube = arena.push(ExprNode::Unary(UnaryOp::Abs, cube));
     assert_eq!(hessian_pattern(&arena, abs_cube), vec![(0, 0)]);
 }
 
@@ -67,7 +67,7 @@ fn abs_passes_through_its_argument_pattern() {
 fn dag_shared_subexpression() {
     let mut arena = ExprArena::new();
     let x0 = var(&mut arena, 0);
-    let s = arena.push(ExprNode::Sin(x0));
+    let s = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
     let mul = arena.push(ExprNode::Mul([s, s].into_iter().collect()));
     let root = arena.push(ExprNode::Add([mul, s].into_iter().collect()));
     assert_eq!(hessian_pattern(&arena, root), vec![(0, 0)]);
@@ -120,7 +120,7 @@ fn sin_of_sum_is_a_full_clique() {
     let x = var(&mut arena, 0);
     let y = var(&mut arena, 1);
     let sum = arena.push(ExprNode::Add([x, y].into_iter().collect()));
-    let s = arena.push(ExprNode::Sin(sum));
+    let s = arena.push(ExprNode::Unary(UnaryOp::Sin, sum));
     assert_eq!(hessian_pattern(&arena, s), vec![(0, 0), (1, 0), (1, 1)]);
 }
 
@@ -148,7 +148,7 @@ fn packed_support_spans_multiple_words() {
     let mut arena = ExprArena::new();
     let vars: Vec<_> = (0..70).map(|i| var(&mut arena, i)).collect();
     let sum = arena.push(ExprNode::Add(vars.into_iter().collect()));
-    let root = arena.push(ExprNode::Sin(sum));
+    let root = arena.push(ExprNode::Unary(UnaryOp::Sin, sum));
     let pattern = hessian_pattern(&arena, root);
     assert_eq!(pattern.len(), 70 * 71 / 2);
     assert_eq!(pattern.first(), Some(&(0, 0)));
@@ -162,7 +162,7 @@ fn wide_sparse_support_avoids_dense_pair_storage() {
     let mut arena = ExprArena::new();
     let vars: Vec<_> = (0..1_025).map(|i| var(&mut arena, i)).collect();
     let endpoints = arena.push(ExprNode::Add([vars[0], vars[1_024]].into_iter().collect()));
-    let nonlinear = arena.push(ExprNode::Sin(endpoints));
+    let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, endpoints));
     let root =
         arena.push(ExprNode::Add(vars.into_iter().chain(std::iter::once(nonlinear)).collect()));
 
@@ -176,7 +176,7 @@ fn sparse_variable_ids_are_coordinate_compressed() {
     let low = var(&mut arena, 7);
     let high = var(&mut arena, u32::MAX);
     let sum = arena.push(ExprNode::Add([high, low].into_iter().collect()));
-    let root = arena.push(ExprNode::Sin(sum));
+    let root = arena.push(ExprNode::Unary(UnaryOp::Sin, sum));
     assert_eq!(variable_support(&arena, root), vec![7, u32::MAX]);
     assert_eq!(hessian_pattern(&arena, root), vec![(7, 7), (u32::MAX, 7), (u32::MAX, u32::MAX)]);
 }
@@ -185,7 +185,7 @@ fn sparse_variable_ids_are_coordinate_compressed() {
 fn zero_power_keeps_syntactic_support_but_has_no_hessian() {
     let mut arena = ExprArena::new();
     let x = var(&mut arena, 11);
-    let nonlinear_base = arena.push(ExprNode::Sin(x));
+    let nonlinear_base = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
     let zero = arena.constant(0.0);
     let root = arena.push(ExprNode::Pow(nonlinear_base, zero));
     assert_eq!(variable_support(&arena, root), vec![11]);
@@ -201,7 +201,7 @@ fn deep_sparsity_walks_are_iterative() {
     let mut arena = ExprArena::with_capacity(50_001);
     let mut root = var(&mut arena, 3);
     for _ in 0..50_000 {
-        root = arena.push(ExprNode::Neg(root));
+        root = arena.push(ExprNode::Unary(UnaryOp::Neg, root));
     }
     assert_eq!(variable_support(&arena, root), vec![3]);
     assert_eq!(hessian_pattern(&arena, root), vec![]);
@@ -365,4 +365,20 @@ fn sparse_ids_and_duplicate_entries_are_deterministic() {
     assert_eq!(first.groups, second.groups);
     assert_eq!(first.recover, second.recover);
     assert_eq!(first.groups.len(), 2);
+}
+
+#[test]
+fn nonsmooth_branch_unions_do_not_add_cross_terms() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 0);
+    let y = var(&mut arena, 1);
+    let two = arena.constant(2.0);
+    let x2 = arena.push(ExprNode::Pow(x, two));
+    let sin_y = arena.push(ExprNode::Unary(UnaryOp::Sin, y));
+    let minimum = arena.push(ExprNode::Min([x2, sin_y].into_iter().collect()));
+    assert_eq!(hessian_pattern(&arena, minimum), vec![(0, 0), (1, 1)]);
+
+    let affine_min = arena.push(ExprNode::Min([x, y].into_iter().collect()));
+    assert!(hessian_pattern(&arena, affine_min).is_empty());
+    assert_eq!(variable_support(&arena, affine_min), vec![0, 1]);
 }

@@ -8,7 +8,7 @@
 
 // TODO: Add support for Nightly/TNLP once v0.12 releases.
 
-use oximo_core::{ExprArenaSnapshot, ExprId, ExprNode, Model};
+use oximo_core::{ExprArenaSnapshot, ExprId, ExprNode, Model, UnaryOp};
 use pounce_rs::{FbbtOp, FbbtTape};
 use rustc_hash::FxHashMap;
 
@@ -50,29 +50,36 @@ fn emit(
         ExprNode::Const(value) => push(ops, FbbtOp::Const(*value)),
         ExprNode::Param(param) => push(ops, FbbtOp::Const(arena.param_value(*param))),
         ExprNode::Var(var) => push(ops, FbbtOp::Var(var.index())),
-        ExprNode::Neg(child) => {
+        ExprNode::Unary(UnaryOp::Neg, child) => {
             let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Neg(a))
         }
-        ExprNode::Sin(child) => {
+        ExprNode::Unary(UnaryOp::Sin, child) => {
             let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Sin(a))
         }
-        ExprNode::Cos(child) => {
+        ExprNode::Unary(UnaryOp::Cos, child) => {
             let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Cos(a))
         }
-        ExprNode::Exp(child) => {
+        ExprNode::Unary(UnaryOp::Exp, child) => {
             let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Exp(a))
         }
-        ExprNode::Log(child) => {
+        ExprNode::Unary(UnaryOp::Log, child) => {
             let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Ln(a))
         }
-        ExprNode::Abs(child) => {
+        ExprNode::Unary(UnaryOp::Abs, child) => {
             let a = emit(arena, *child, ops, slots);
             push(ops, FbbtOp::Abs(a))
+        }
+        ExprNode::Unary(UnaryOp::Sqrt, child) => {
+            let a = emit(arena, *child, ops, slots);
+            push(ops, FbbtOp::Sqrt(a))
+        }
+        ExprNode::Unary(_, _) | ExprNode::Atan2(_, _) | ExprNode::Min(_) | ExprNode::Max(_) => {
+            push(ops, FbbtOp::Opaque)
         }
         ExprNode::Div(lhs, rhs) => {
             let a = emit(arena, *lhs, ops, slots);
@@ -205,15 +212,16 @@ mod tests {
         let shared = x.sin();
         constraint!(model, unary, -shared + x.cos() + x.exp() + x.log() + x.abs() <= 100.0);
         constraint!(model, division, x.sin() / (y + 1.0) <= 100.0);
-        constraint!(model, square_root, x.powf(0.5) <= 100.0);
+        constraint!(model, square_root, x.sqrt() <= 100.0);
         constraint!(model, integer_power, x.powi(3) <= 100.0);
         constraint!(model, parameter_power, x.pow(exponent) <= 100.0);
         constraint!(model, variable_power, x.pow(y) <= 100.0);
+        constraint!(model, opaque_addition, x.cbrt() + x.atan2(y) <= 100.0);
         constraint!(model, linear, 2.0 * x + 3.0 * y + 1.0 <= 100.0);
         constraint!(model, constant, model.__constant(1.0) <= 2.0);
 
         let tapes = constraint_tapes(&model);
-        assert_eq!(tapes.len(), 8);
+        assert_eq!(tapes.len(), 9);
         let ops = tapes.into_iter().flatten().flat_map(|tape| tape.ops).collect::<Vec<_>>();
 
         assert!(ops.iter().any(|op| matches!(op, FbbtOp::Neg(..))));

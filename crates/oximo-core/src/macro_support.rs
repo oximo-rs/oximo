@@ -19,6 +19,34 @@ pub fn sum_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
     terms.into_iter().sum()
 }
 
+#[must_use]
+pub fn min_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
+    oximo_expr::Expr::__min_terms(terms.into_iter())
+        .expect("min! with an `if` filter produced no terms")
+}
+
+#[must_use]
+pub fn max_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
+    oximo_expr::Expr::__max_terms(terms.into_iter())
+        .expect("max! with an `if` filter produced no terms")
+}
+
+pub fn min_over<'a, K, D, F>(domain: &D, f: F) -> oximo_expr::Expr<'a>
+where
+    D: SumDomain<K> + ?Sized,
+    F: FnMut(K) -> oximo_expr::Expr<'a>,
+{
+    oximo_expr::Expr::__min_terms(domain.keys().map(f)).expect("min! on empty domain")
+}
+
+pub fn max_over<'a, K, D, F>(domain: &D, f: F) -> oximo_expr::Expr<'a>
+where
+    D: SumDomain<K> + ?Sized,
+    F: FnMut(K) -> oximo_expr::Expr<'a>,
+{
+    oximo_expr::Expr::__max_terms(domain.keys().map(f)).expect("max! on empty domain")
+}
+
 /// Filter a [`Set`] by a typed predicate over its decoded keys. Backs the
 /// filtered family form `name[i in dom if cond]` of `variable!`/`constraint!`.
 pub fn filter_keys<K, F>(set: &Set<K>, pred: F) -> Set<K>

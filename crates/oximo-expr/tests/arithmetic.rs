@@ -186,7 +186,7 @@ fn abs_is_nonlinear() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let x = make_var(&arena, 0);
     let e = x.abs();
-    assert!(matches!(arena.borrow().get(e.id), ExprNode::Abs(_)));
+    assert!(matches!(arena.borrow().get(e.id), ExprNode::Unary(oximo_expr::UnaryOp::Abs, _)));
     assert_eq!(classify(&arena.borrow(), e.id), ExprClass::Nonlinear);
     assert!(extract_linear(&arena.borrow(), e.id).is_none());
 }

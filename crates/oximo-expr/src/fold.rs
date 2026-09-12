@@ -23,14 +23,19 @@ fn shared_nodes(arena: &(impl ArenaAccess + ?Sized), root: ExprId) -> FxHashSet<
     stack.push(root);
     while let Some(id) = stack.pop() {
         let children: &[ExprId] = match arena.get(id) {
-            ExprNode::Add(c) | ExprNode::Mul(c) => c,
-            ExprNode::Neg(c) | ExprNode::Pow(c, _) => std::slice::from_ref(c),
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::Min(c) | ExprNode::Max(c) => c,
+            ExprNode::Unary(_, c) | ExprNode::Pow(c, _) => std::slice::from_ref(c),
             _ => continue,
         };
         for &child in children {
             if !matches!(
                 arena.get(child),
-                ExprNode::Add(_) | ExprNode::Mul(_) | ExprNode::Neg(_) | ExprNode::Pow(_, _)
+                ExprNode::Add(_)
+                    | ExprNode::Mul(_)
+                    | ExprNode::Min(_)
+                    | ExprNode::Max(_)
+                    | ExprNode::Unary(_, _)
+                    | ExprNode::Pow(_, _)
             ) {
                 continue;
             }
@@ -92,7 +97,7 @@ pub(crate) fn fold<F: Folder>(
 
 #[cfg(test)]
 pub(crate) fn test_arena() -> (crate::ExprArena, Vec<ExprId>) {
-    use crate::VarId;
+    use crate::{UnaryOp, VarId};
     use smallvec::smallvec;
     let mut arena = crate::ExprArena::new();
     let mut ids = vec![];
@@ -118,10 +123,10 @@ pub(crate) fn test_arena() -> (crate::ExprArena, Vec<ExprId>) {
             let node = match i % 8 {
                 0 | 1 => ExprNode::Add(smallvec![a, b, a]),
                 2 => ExprNode::Mul(smallvec![a, b]),
-                3 => ExprNode::Neg(a),
+                3 => ExprNode::Unary(UnaryOp::Neg, a),
                 4 => ExprNode::Pow(a, ids[(i / 8) % 5]),
                 5 => ExprNode::Mul(smallvec![ids[6], a, ids[8]]),
-                6 => ExprNode::Sin(a),
+                6 => ExprNode::Unary(UnaryOp::Sin, a),
                 _ => ExprNode::Add(smallvec![a, ids[6], ids[7], b]),
             };
             ids.push(arena.push(node));
@@ -134,7 +139,7 @@ pub(crate) fn test_arena() -> (crate::ExprArena, Vec<ExprId>) {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ExprArena, ExprClass, ExprNode, VarId, classify, extract_linear, extract_quadratic,
+        ExprArena, ExprClass, ExprNode, UnaryOp, VarId, classify, extract_linear, extract_quadratic,
     };
     use smallvec::smallvec;
 
@@ -143,7 +148,7 @@ mod tests {
         let mut arena = ExprArena::new();
         let mut root = arena.push(ExprNode::Var(VarId(0)));
         for _ in 0..30_000 {
-            root = arena.push(ExprNode::Neg(root));
+            root = arena.push(ExprNode::Unary(UnaryOp::Neg, root));
         }
         assert_eq!(extract_linear(&arena, root).unwrap().coeffs.as_ref(), &[(VarId(0), 1.0)]);
         assert_eq!(extract_quadratic(&arena, root).unwrap().linear, vec![(VarId(0), 1.0)]);

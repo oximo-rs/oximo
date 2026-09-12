@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use oximo_expr::{ExprArena, ExprId, ExprNode};
+use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp};
 use rustc_hash::FxHashSet;
 
 use crate::slot::{FunctionSlot, SlotKind};
@@ -30,16 +30,14 @@ pub fn variable_support(arena: &ExprArena, root: ExprId) -> Vec<u32> {
             ExprNode::Linear { coeffs, .. } => {
                 support.extend(coeffs.iter().map(|(v, _)| v.0));
             }
-            ExprNode::Add(children) | ExprNode::Mul(children) => {
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            | ExprNode::Max(children) => {
                 stack.extend(children.iter().copied());
             }
-            ExprNode::Neg(inner)
-            | ExprNode::Sin(inner)
-            | ExprNode::Cos(inner)
-            | ExprNode::Exp(inner)
-            | ExprNode::Log(inner)
-            | ExprNode::Abs(inner) => stack.push(*inner),
-            ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) => {
+            ExprNode::Unary(_, inner) => stack.push(*inner),
+            ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) | ExprNode::Atan2(base, exp) => {
                 stack.push(*base);
                 stack.push(*exp);
             }
@@ -297,7 +295,8 @@ fn finish_sparse_union(scratch: &mut Vec<usize>) {
 /// "Exact structural" means a superset of the numerically nonzero second
 /// partials that ignores value cancellation. Parameters stay symbolic, so the
 /// pattern is independent of current parameter values.
-/// `Abs` contributes only its argument's pattern.
+/// `Abs` and `Min`/`Max` conservatively union branch patterns without adding
+/// synthetic cross terms between branches.
 pub fn hessian_pattern(arena: &ExprArena, root: ExprId) -> Vec<(u32, u32)> {
     structural_sparsity(arena, root).hess_pairs
 }
@@ -314,16 +313,14 @@ fn collect_node_vars(node: &ExprNode, vars: &mut Vec<u32>) {
 
 fn push_syntax_children(node: &ExprNode, walk: &mut Vec<WalkAction>) {
     match node {
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             walk.extend(children.iter().copied().map(WalkAction::Syntax));
         }
-        ExprNode::Neg(inner)
-        | ExprNode::Sin(inner)
-        | ExprNode::Cos(inner)
-        | ExprNode::Exp(inner)
-        | ExprNode::Log(inner)
-        | ExprNode::Abs(inner) => walk.push(WalkAction::Syntax(*inner)),
-        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) => {
+        ExprNode::Unary(_, inner) => walk.push(WalkAction::Syntax(*inner)),
+        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) | ExprNode::Atan2(base, exp) => {
             walk.push(WalkAction::Syntax(*base));
             walk.push(WalkAction::Syntax(*exp));
         }
@@ -333,15 +330,13 @@ fn push_syntax_children(node: &ExprNode, walk: &mut Vec<WalkAction>) {
 
 fn push_active_children(arena: &ExprArena, id: ExprId, walk: &mut Vec<WalkAction>) {
     match arena.get(id) {
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             walk.extend(children.iter().rev().copied().map(WalkAction::ActiveEnter));
         }
-        ExprNode::Neg(inner)
-        | ExprNode::Sin(inner)
-        | ExprNode::Cos(inner)
-        | ExprNode::Exp(inner)
-        | ExprNode::Log(inner)
-        | ExprNode::Abs(inner) => walk.push(WalkAction::ActiveEnter(*inner)),
+        ExprNode::Unary(_, inner) => walk.push(WalkAction::ActiveEnter(*inner)),
         ExprNode::Div(num, den) => {
             walk.push(WalkAction::ActiveEnter(*den));
             walk.push(WalkAction::ActiveEnter(*num));
@@ -357,6 +352,10 @@ fn push_active_children(arena: &ExprArena, id: ExprId, walk: &mut Vec<WalkAction
                 walk.push(WalkAction::ActiveEnter(*base));
             }
         },
+        ExprNode::Atan2(y, x) => {
+            walk.push(WalkAction::ActiveEnter(*x));
+            walk.push(WalkAction::ActiveEnter(*y));
+        }
         ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
     }
 }
@@ -422,6 +421,7 @@ fn prepare_storage(workspace: &mut SparsityWorkspace) -> StorageMode {
     StorageMode::Dense { words }
 }
 
+#[expect(clippy::too_many_lines)]
 fn build_dense_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace, words: usize) {
     for order_index in 0..workspace.order.len() {
         let id = workspace.order[order_index];
@@ -443,11 +443,13 @@ fn build_dense_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace
                 }
                 row
             }
-            ExprNode::Neg(inner) | ExprNode::Abs(inner) => workspace.meta[inner.index()].row,
+            ExprNode::Unary(UnaryOp::Neg | UnaryOp::Abs, inner) => {
+                workspace.meta[inner.index()].row
+            }
             ExprNode::Add(children) if children.len() == 1 => {
                 workspace.meta[children[0].index()].row
             }
-            ExprNode::Add(children) => {
+            ExprNode::Add(children) | ExprNode::Min(children) | ExprNode::Max(children) => {
                 let row = workspace.alloc_row(words);
                 for child in children {
                     union_rows(
@@ -478,11 +480,15 @@ fn build_dense_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace
                 union_rows(&mut workspace.supports, row, den, words);
                 row
             }
-            ExprNode::Sin(inner)
-            | ExprNode::Cos(inner)
-            | ExprNode::Exp(inner)
-            | ExprNode::Log(inner) => {
+            ExprNode::Unary(_, inner) => {
                 let row = workspace.meta[inner.index()].row;
+                workspace.add_clique_once(row, words);
+                row
+            }
+            ExprNode::Atan2(y, x) => {
+                let row = workspace.alloc_row(words);
+                union_rows(&mut workspace.supports, row, workspace.meta[y.index()].row, words);
+                union_rows(&mut workspace.supports, row, workspace.meta[x.index()].row, words);
                 workspace.add_clique_once(row, words);
                 row
             }
@@ -618,18 +624,25 @@ fn build_sparse_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspac
                 finish_sparse_union(&mut workspace.sparse_scratch);
                 store_sparse_scratch(workspace)
             }
-            ExprNode::Neg(inner) | ExprNode::Abs(inner) => workspace.meta[inner.index()].row,
+            ExprNode::Unary(UnaryOp::Neg | UnaryOp::Abs, inner) => {
+                workspace.meta[inner.index()].row
+            }
             ExprNode::Add(children) if children.len() == 1 => {
                 workspace.meta[children[0].index()].row
             }
             ExprNode::Add(children) => sparse_union_row(workspace, children.iter().copied()),
+            ExprNode::Min(children) | ExprNode::Max(children) => {
+                sparse_union_row(workspace, children.iter().copied())
+            }
             ExprNode::Mul(children) => sparse_product_row(workspace, children.iter().copied()),
             ExprNode::Div(num, den) => sparse_division_row(workspace, *num, *den),
-            ExprNode::Sin(inner)
-            | ExprNode::Cos(inner)
-            | ExprNode::Exp(inner)
-            | ExprNode::Log(inner) => {
+            ExprNode::Unary(_, inner) => {
                 let row = workspace.meta[inner.index()].row;
+                workspace.add_sparse_clique_once(row);
+                row
+            }
+            ExprNode::Atan2(y, x) => {
+                let row = sparse_union_row(workspace, [*y, *x]);
                 workspace.add_sparse_clique_once(row);
                 row
             }

@@ -1,6 +1,6 @@
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
-use crate::arena::{Children, ExprId};
+use crate::arena::{Children, ExprId, ExprNode};
 use crate::handle::Expr;
 use crate::linear::{add_into, add_n, div_into, mul_into, neg_into, sub_into};
 
@@ -198,6 +198,44 @@ impl<'a> Expr<'a> {
         assert!(same_arena, "expressions belong to different arenas");
         let id = first.arena.with_mut(|arena| add_n(arena, ids));
         Some(Self::new(id, first.arena))
+    }
+
+    fn extrema_terms(mut iter: impl Iterator<Item = Self>, is_min: bool) -> Option<Self> {
+        let first = iter.next()?;
+        let mut same_arena = true;
+        let mut ids = Children::new();
+        let mut append = |expr: Self| {
+            same_arena &= std::ptr::eq(first.arena, expr.arena);
+            expr.arena.with_ref(|arena| match arena.get(expr.id) {
+                ExprNode::Min(children) if is_min => ids.extend_from_slice(children),
+                ExprNode::Max(children) if !is_min => ids.extend_from_slice(children),
+                _ => ids.push(expr.id),
+            });
+        };
+        append(first);
+        for expr in iter {
+            append(expr);
+        }
+        assert!(same_arena, "expressions belong to different arenas");
+        if ids.len() == 1 {
+            return Some(first);
+        }
+        let id = first.arena.with_mut(|arena| {
+            arena.push(if is_min { ExprNode::Min(ids) } else { ExprNode::Max(ids) })
+        });
+        Some(Self::new(id, first.arena))
+    }
+
+    /// Macro support for constructing a flat n-ary minimum.
+    #[doc(hidden)]
+    pub fn __min_terms(iter: impl Iterator<Item = Self>) -> Option<Self> {
+        Self::extrema_terms(iter, true)
+    }
+
+    /// Macro support for constructing a flat n-ary maximum.
+    #[doc(hidden)]
+    pub fn __max_terms(iter: impl Iterator<Item = Self>) -> Option<Self> {
+        Self::extrema_terms(iter, false)
     }
 }
 

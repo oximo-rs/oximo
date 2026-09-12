@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use gurobi_rs::Opcode;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
-use oximo_expr::{ExprArena, ExprId, ExprNode, VarId};
+use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 use oximo_solver::SolverError;
 
 /// A value that can stay on Gurobi's direct linear/quadratic fast path, or a
@@ -235,7 +235,7 @@ fn try_quadratic(
             }
             LoweredExpr::Linear(e)
         }
-        ExprNode::Neg(inner) => {
+        ExprNode::Unary(UnaryOp::Neg, inner) => {
             let Some(inner) = try_quadratic(arena, *inner, ctx)? else {
                 return Ok(cache_quadratic_none(ctx, id));
             };
@@ -298,11 +298,9 @@ fn try_quadratic(
             };
             try_scale(num, 1.0 / den)
         }
-        ExprNode::Sin(_)
-        | ExprNode::Cos(_)
-        | ExprNode::Exp(_)
-        | ExprNode::Log(_)
-        | ExprNode::Abs(_) => return Ok(cache_quadratic_none(ctx, id)),
+        ExprNode::Unary(_, _) | ExprNode::Atan2(_, _) | ExprNode::Min(_) | ExprNode::Max(_) => {
+            return Ok(cache_quadratic_none(ctx, id));
+        }
     };
     ctx.quadratic_cache.insert(id, Some(value.clone()));
     Ok(Some(value))
@@ -315,18 +313,16 @@ fn cache_quadratic_none(ctx: &mut LoweringCtx<'_>, id: ExprId) -> Option<Lowered
 
 fn for_each_child(node: &ExprNode, f: &mut impl FnMut(ExprId)) {
     match node {
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             for child in children {
                 f(*child);
             }
         }
-        ExprNode::Neg(inner)
-        | ExprNode::Sin(inner)
-        | ExprNode::Cos(inner)
-        | ExprNode::Exp(inner)
-        | ExprNode::Log(inner)
-        | ExprNode::Abs(inner) => f(*inner),
-        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) => {
+        ExprNode::Unary(_, inner) => f(*inner),
+        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) | ExprNode::Atan2(base, exp) => {
             f(*base);
             f(*exp);
         }
@@ -554,6 +550,91 @@ fn materialize_abs(
     Ok(result)
 }
 
+pub(crate) fn validate_supported(
+    arena: &ExprArena,
+    roots: impl IntoIterator<Item = ExprId>,
+) -> Result<(), SolverError> {
+    let mut seen = vec![false; arena.len()];
+    let mut stack: Vec<_> = roots.into_iter().collect();
+    while let Some(id) = stack.pop() {
+        if std::mem::replace(&mut seen[id.index()], true) {
+            continue;
+        }
+        match arena.get(id) {
+            ExprNode::Unary(op, child) => {
+                if !matches!(
+                    op,
+                    UnaryOp::Neg
+                        | UnaryOp::Abs
+                        | UnaryOp::Sqrt
+                        | UnaryOp::Exp
+                        | UnaryOp::Exp2
+                        | UnaryOp::Log
+                        | UnaryOp::Log2
+                        | UnaryOp::Log10
+                        | UnaryOp::Sin
+                        | UnaryOp::Cos
+                        | UnaryOp::Tan
+                        | UnaryOp::Tanh
+                ) {
+                    return Err(SolverError::UnsupportedNonlinearOperator {
+                        backend: "Gurobi",
+                        operator: op.name(),
+                    });
+                }
+                stack.push(*child);
+            }
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            | ExprNode::Max(children) => stack.extend(children.iter().copied()),
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            ExprNode::Atan2(_, _) => {
+                return Err(SolverError::UnsupportedNonlinearOperator {
+                    backend: "Gurobi",
+                    operator: "atan2",
+                });
+            }
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn materialize_extrema(
+    ctx: &mut LoweringCtx<'_>,
+    arena: &ExprArena,
+    children: &[ExprId],
+    is_min: bool,
+) -> Result<Var, SolverError> {
+    let mut arguments = Vec::with_capacity(children.len());
+    for child in children {
+        let argument = if let Some(value) = try_quadratic(arena, *child, ctx)? {
+            materialize_lowered(ctx, value)?
+        } else {
+            native_expr(ctx, arena, *child)?
+        };
+        arguments.push(argument);
+    }
+    let tag = if is_min { "min" } else { "max" };
+    let result = ctx.new_aux(tag, f64::NEG_INFINITY, f64::INFINITY).map_err(map_gurobi)?;
+    let name = ctx.next_name(&format!("{tag}_def"));
+    let generated = if is_min {
+        ctx.model.add_genconstr_min(&name, result, arguments, Some(gurobi_rs::INFINITY))
+    } else {
+        ctx.model.add_genconstr_max(&name, result, arguments, Some(-gurobi_rs::INFINITY))
+    }
+    .map_err(map_gurobi)?;
+    ctx.generated.push(GeneratedConstraint::General(generated));
+    Ok(result)
+}
+
 fn materialize_shared(
     ctx: &mut LoweringCtx<'_>,
     arena: &ExprArena,
@@ -566,7 +647,9 @@ fn materialize_shared(
         materialize_lowered(ctx, value)?
     } else {
         match arena.get(id) {
-            ExprNode::Abs(inner) => materialize_abs(ctx, arena, *inner)?,
+            ExprNode::Unary(UnaryOp::Abs, inner) => materialize_abs(ctx, arena, *inner)?,
+            ExprNode::Min(children) => materialize_extrema(ctx, arena, children, true)?,
+            ExprNode::Max(children) => materialize_extrema(ctx, arena, children, false)?,
             _ => native_expr(ctx, arena, id)?,
         }
     };
@@ -574,6 +657,7 @@ fn materialize_shared(
     Ok(result)
 }
 
+#[expect(clippy::too_many_lines)]
 fn append_tree(
     ctx: &mut LoweringCtx<'_>,
     arena: &ExprArena,
@@ -614,7 +698,7 @@ fn append_tree(
             }
             append_linear_parts(ctx, &terms, parent, tree)
         }
-        ExprNode::Neg(inner) => {
+        ExprNode::Unary(UnaryOp::Neg, inner) => {
             let op = tree.push(Opcode::Uminus, 0.0, parent)?;
             append_tree(ctx, arena, *inner, Some(op), tree)
         }
@@ -635,24 +719,61 @@ fn append_tree(
             append_tree(ctx, arena, *num, Some(op), tree)?;
             append_tree(ctx, arena, *den, Some(op), tree)
         }
-        ExprNode::Sin(inner)
-        | ExprNode::Cos(inner)
-        | ExprNode::Exp(inner)
-        | ExprNode::Log(inner) => {
-            let opcode = match arena.get(id) {
-                ExprNode::Sin(_) => Opcode::Sin,
-                ExprNode::Cos(_) => Opcode::Cos,
-                ExprNode::Exp(_) => Opcode::Exp,
-                ExprNode::Log(_) => Opcode::Log,
+        ExprNode::Unary(op, inner)
+            if matches!(
+                op,
+                UnaryOp::Sqrt
+                    | UnaryOp::Sin
+                    | UnaryOp::Cos
+                    | UnaryOp::Tan
+                    | UnaryOp::Exp
+                    | UnaryOp::Log
+                    | UnaryOp::Log2
+                    | UnaryOp::Log10
+                    | UnaryOp::Tanh
+            ) =>
+        {
+            let opcode = match op {
+                UnaryOp::Sqrt => Opcode::Sqrt,
+                UnaryOp::Sin => Opcode::Sin,
+                UnaryOp::Cos => Opcode::Cos,
+                UnaryOp::Tan => Opcode::Tan,
+                UnaryOp::Exp => Opcode::Exp,
+                UnaryOp::Log => Opcode::Log,
+                UnaryOp::Log2 => Opcode::Log2,
+                UnaryOp::Log10 => Opcode::Log10,
+                UnaryOp::Tanh => Opcode::Tanh,
                 _ => unreachable!(),
             };
             let op = tree.push(opcode, 0.0, parent)?;
             append_tree(ctx, arena, *inner, Some(op), tree)
         }
-        ExprNode::Abs(inner) => {
+        ExprNode::Unary(UnaryOp::Exp2, inner) => {
+            let op = tree.push(Opcode::Pow, 0.0, parent)?;
+            tree.push(Opcode::Constant, 2.0, Some(op))?;
+            append_tree(ctx, arena, *inner, Some(op), tree)
+        }
+        ExprNode::Unary(UnaryOp::Abs, inner) => {
             let result = materialize_abs(ctx, arena, *inner)?;
             let index = ctx.model.var_index(&result).map_err(map_gurobi)?;
             tree.push(Opcode::Variable, f64::from(index), parent)
+        }
+        ExprNode::Min(children) | ExprNode::Max(children) => {
+            let result = materialize_extrema(
+                ctx,
+                arena,
+                children,
+                matches!(arena.get(id), ExprNode::Min(_)),
+            )?;
+            let index = ctx.model.var_index(&result).map_err(map_gurobi)?;
+            tree.push(Opcode::Variable, f64::from(index), parent)
+        }
+        ExprNode::Unary(op, _) => Err(SolverError::UnsupportedNonlinearOperator {
+            backend: "Gurobi",
+            operator: op.name(),
+        }),
+        ExprNode::Atan2(_, _) => {
+            Err(SolverError::UnsupportedNonlinearOperator { backend: "Gurobi", operator: "atan2" })
         }
     }
 }

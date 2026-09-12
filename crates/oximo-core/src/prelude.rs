@@ -17,8 +17,8 @@ pub use crate::soc::{SocConstraint, SocConstraintId, SocForm};
 pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use crate::sum::SumDomain;
 pub use crate::var::{VarBuilder, Variable};
-pub use oximo_expr::{Expr, ExprId, ParamId, VarId, dot};
+pub use oximo_expr::{Children, Expr, ExprId, ParamId, UnaryOp, VarId, dot};
 
 pub use oximo_macros::{
-    constraint, objective, param, set, soc_constraint, sos_constraint, sum, variable,
+    constraint, max, min, objective, param, set, soc_constraint, sos_constraint, sum, variable,
 };

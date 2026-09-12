@@ -2,7 +2,7 @@
 //! Used by the public display adapters in `oximo-core` and by
 //! the nonlinear-term error messages ([`describe_nonlinear_term`](crate::describe_nonlinear_term)).
 
-use crate::arena::{ExprArena, ExprId, ExprNode, VarId};
+use crate::arena::{ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 use crate::linear::{LinearTerms, split_linear};
 
 // Precedence levels for parenthesizing `render_node` output.
@@ -99,14 +99,14 @@ pub(crate) fn render_node(
         ExprNode::Const(c) => (fmt_num(*c), PREC_UNARY),
         ExprNode::Var(v) => (resolve(*v), PREC_UNARY),
         ExprNode::Param(p) => (fmt_num(arena.param_value(*p)), PREC_UNARY),
-        ExprNode::Neg(x) => {
+        ExprNode::Unary(UnaryOp::Neg, x) => {
             (format!("-{}", render_node(arena, *x, resolve, PREC_UNARY)), PREC_UNARY)
         }
         ExprNode::Add(children) => {
             let mut parts: Vec<Part> = Vec::with_capacity(children.len());
             for c in children.iter().copied() {
                 match arena.get(c) {
-                    ExprNode::Neg(inner) => {
+                    ExprNode::Unary(UnaryOp::Neg, inner) => {
                         parts.push((true, render_node(arena, *inner, resolve, PREC_UNARY)));
                     }
                     ExprNode::Const(v) if *v < 0.0 => parts.push((true, fmt_num(-v))),
@@ -136,11 +136,21 @@ pub(crate) fn render_node(
             let d = render_node(arena, *den, resolve, PREC_MUL);
             (format!("{n} / {d}"), PREC_MUL)
         }
-        ExprNode::Sin(x) => (fmt_call("sin", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Cos(x) => (fmt_call("cos", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Exp(x) => (fmt_call("exp", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Log(x) => (fmt_call("log", arena, *x, resolve), PREC_UNARY),
-        ExprNode::Abs(x) => (fmt_call("abs", arena, *x, resolve), PREC_UNARY),
+        ExprNode::Unary(op, x) => (fmt_call(op.name(), arena, *x, resolve), PREC_UNARY),
+        ExprNode::Atan2(y, x) => {
+            let y = render_node(arena, *y, resolve, PREC_ADD);
+            let x = render_node(arena, *x, resolve, PREC_ADD);
+            (format!("atan2({y}, {x})"), PREC_UNARY)
+        }
+        ExprNode::Min(children) | ExprNode::Max(children) => {
+            let name = if matches!(arena.get(id), ExprNode::Min(_)) { "min" } else { "max" };
+            let args = children
+                .iter()
+                .map(|child| render_node(arena, *child, resolve, PREC_ADD))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("{name}({args})"), PREC_UNARY)
+        }
         ExprNode::Linear { coeffs, constant } => {
             let parts = linear_parts_from_slice(coeffs, *constant, resolve);
             // A multi-term or negative-leading sum needs parens inside a product.
@@ -238,8 +248,8 @@ mod tests {
     fn expr_negated_residual() {
         let mut arena = ExprArena::new();
         let x = arena.push(ExprNode::Var(VarId(0)));
-        let s = arena.push(ExprNode::Sin(x));
-        let neg = arena.push(ExprNode::Neg(s));
+        let s = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
+        let neg = arena.push(ExprNode::Unary(UnaryOp::Neg, s));
         assert_eq!(render_expr(&arena, neg, &names), "-sin(x)");
 
         let y = arena.push(ExprNode::Var(VarId(1)));
@@ -276,7 +286,7 @@ mod tests {
         let prod = arena.push(ExprNode::Mul(smallvec::smallvec![x, y]));
         let neg_z = arena.push(ExprNode::Linear { coeffs: vec![(VarId(2), -1.0)], constant: 0.0 });
         let sum = arena.push(ExprNode::Add(smallvec::smallvec![prod, neg_z]));
-        let s = arena.push(ExprNode::Sin(sum));
+        let s = arena.push(ExprNode::Unary(UnaryOp::Sin, sum));
         assert_eq!(render_expr(&arena, s, &names), "sin(x * y - z)");
     }
 
@@ -287,7 +297,7 @@ mod tests {
         let pid = arena.new_param(-3.0);
         let p = arena.param(pid);
         let sum = arena.push(ExprNode::Add(smallvec::smallvec![x, p]));
-        let s = arena.push(ExprNode::Sin(sum));
+        let s = arena.push(ExprNode::Unary(UnaryOp::Sin, sum));
         assert_eq!(render_expr(&arena, s, &names), "sin(x - 3)");
 
         arena.set_param_value(pid, 3.0);

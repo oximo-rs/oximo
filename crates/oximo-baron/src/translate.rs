@@ -11,7 +11,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, Objective, ObjectiveSense, Sense, SocConstraint,
     SocConstraintId, VarId, Variable,
 };
-use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
     DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
     VarBoundKind,
@@ -541,6 +541,7 @@ fn write_linear(bar: &mut String, t: &LinearTerms<'_>, include_constant: bool) {
 }
 
 /// Recursive infix printer for a BARON-compatible expression.
+#[expect(clippy::too_many_lines)]
 fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(), SolverError> {
     match arena.get(id) {
         ExprNode::Const(c) => write!(bar, "{}", fmt(*c)).unwrap(),
@@ -552,7 +553,7 @@ fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(),
             write_linear(bar, &t, true);
             write!(bar, ")").unwrap();
         }
-        ExprNode::Neg(inner) => {
+        ExprNode::Unary(UnaryOp::Neg, inner) => {
             write!(bar, "(-").unwrap();
             write_bar_expr(bar, arena, *inner)?;
             write!(bar, ")").unwrap();
@@ -604,35 +605,62 @@ fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(),
             write_bar_expr(bar, arena, *den)?;
             write!(bar, ")").unwrap();
         }
-        ExprNode::Exp(a) => {
+        ExprNode::Unary(UnaryOp::Exp, a) => {
             write!(bar, "exp(").unwrap();
             write_bar_expr(bar, arena, *a)?;
             write!(bar, ")").unwrap();
         }
-        ExprNode::Log(a) => {
+        ExprNode::Unary(UnaryOp::Log, a) => {
             write!(bar, "log(").unwrap();
             write_bar_expr(bar, arena, *a)?;
             write!(bar, ")").unwrap();
         }
-        ExprNode::Sin(_) => {
-            return Err(SolverError::Backend(
-                "BARON does not support sin(); the .bar format has no trigonometric intrinsics"
-                    .into(),
-            ));
+        ExprNode::Unary(UnaryOp::Sqrt, a) => {
+            write!(bar, "((").unwrap();
+            write_bar_expr(bar, arena, *a)?;
+            write!(bar, ") ^ 0.5)").unwrap();
         }
-        ExprNode::Cos(_) => {
-            return Err(SolverError::Backend(
-                "BARON does not support cos(); the .bar format has no trigonometric intrinsics"
-                    .into(),
-            ));
+        ExprNode::Unary(UnaryOp::Exp2, a) => {
+            write!(bar, "(2 ^ (").unwrap();
+            write_bar_expr(bar, arena, *a)?;
+            write!(bar, "))").unwrap();
         }
-        ExprNode::Abs(a) => {
+        ExprNode::Unary(UnaryOp::Log10, a) => {
+            write!(bar, "(0.4342944819032518 * log(").unwrap();
+            write_bar_expr(bar, arena, *a)?;
+            write!(bar, "))").unwrap();
+        }
+        ExprNode::Unary(UnaryOp::Abs, a) => {
             // BARON has no abs() intrinsic.
             // We reformulate: |x| = (x^2)^(1/2),
             // As suggested by the BARON user manual.
             write!(bar, "(((").unwrap();
             write_bar_expr(bar, arena, *a)?;
             write!(bar, ") ^ 2) ^ 0.5)").unwrap();
+        }
+        ExprNode::Unary(op, _) => {
+            return Err(SolverError::UnsupportedNonlinearOperator {
+                backend: "BARON",
+                operator: op.name(),
+            });
+        }
+        ExprNode::Atan2(_, _) => {
+            return Err(SolverError::UnsupportedNonlinearOperator {
+                backend: "BARON",
+                operator: "atan2",
+            });
+        }
+        ExprNode::Min(_) => {
+            return Err(SolverError::UnsupportedNonlinearOperator {
+                backend: "BARON",
+                operator: "min",
+            });
+        }
+        ExprNode::Max(_) => {
+            return Err(SolverError::UnsupportedNonlinearOperator {
+                backend: "BARON",
+                operator: "max",
+            });
         }
     }
     Ok(())
@@ -646,18 +674,14 @@ fn expr_has_var(arena: &ExprArena, id: ExprId) -> bool {
         ExprNode::Var(_) => true,
         ExprNode::Const(_) | ExprNode::Param(_) => false,
         ExprNode::Linear { coeffs, .. } => coeffs.iter().any(|(_, c)| *c != 0.0),
-        ExprNode::Neg(a)
-        | ExprNode::Sin(a)
-        | ExprNode::Cos(a)
-        | ExprNode::Exp(a)
-        | ExprNode::Log(a)
-        | ExprNode::Abs(a) => expr_has_var(arena, *a),
-        ExprNode::Pow(a, b) | ExprNode::Div(a, b) => {
+        ExprNode::Unary(_, a) => expr_has_var(arena, *a),
+        ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => {
             expr_has_var(arena, *a) || expr_has_var(arena, *b)
         }
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
-            children.iter().any(|c| expr_has_var(arena, *c))
-        }
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => children.iter().any(|c| expr_has_var(arena, *c)),
     }
 }
 
@@ -1474,10 +1498,21 @@ mod tests {
         variable!(m, -1.0 <= x <= 1.0);
         objective!(m, Min, x.sin());
         let err = build_bar(&m, &BaronOptions::default()).unwrap_err();
-        match err {
-            SolverError::Backend(msg) => assert!(msg.contains("sin"), "{msg}"),
-            other => panic!("expected Backend error, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            SolverError::UnsupportedNonlinearOperator { backend: "BARON", operator: "sin" }
+        ));
+    }
+
+    #[test]
+    fn structural_extrema_are_rejected_without_automatic_reformulation() {
+        let m = Model::new("extrema");
+        variable!(m, -1.0 <= x <= 1.0);
+        objective!(m, Min, x.min(-x));
+        assert!(matches!(
+            build_bar(&m, &BaronOptions::default()),
+            Err(SolverError::UnsupportedNonlinearOperator { backend: "BARON", operator: "min" })
+        ));
     }
 
     #[test]

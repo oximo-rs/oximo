@@ -14,8 +14,9 @@ mod simplify;
 mod visit;
 
 pub use arena::{
-    ExprArena, ExprArenaBatchGuard, ExprArenaCell, ExprArenaSnapshot, ExprArenaWriteGuard, ExprId,
-    ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ParamId, VarId,
+    Children, ExprArena, ExprArenaBatchGuard, ExprArenaCell, ExprArenaSnapshot,
+    ExprArenaWriteGuard, ExprId, ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ParamId,
+    UnaryOp, VarId,
 };
 pub use classify::{ExprClass, classify};
 pub use eval::{EvalContext, EvalError, evaluate};

@@ -11,6 +11,7 @@
 use oximo_autodiff::{AutodiffError, NlpEvaluator, gradient_at};
 use oximo_core::Model;
 use oximo_core::prelude::*;
+use oximo_expr::UnaryOp;
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     let denom = want.abs().max(1.0);
@@ -368,6 +369,173 @@ fn gradient_at_rejects_wrong_dimension() {
         matches!(err, AutodiffError::DimensionMismatch { expected: 2, got: 1 }),
         "unexpected error: {err:?}"
     );
+}
+
+/// Check the entire smooth unary vocabulary through Enzyme's gradient and
+/// forward-over-reverse Hessian entry points.
+#[test]
+fn smooth_unary_gradients_and_hessians_match_analytic() {
+    let m = Model::new("smooth_unary");
+    variable!(m, -5.0 <= x <= 5.0);
+    let point: f64 = 0.5;
+
+    let cases = [
+        (UnaryOp::Neg, -x.sin(), -point.cos(), point.sin()),
+        (UnaryOp::Sqrt, x, 1.0 / (2.0 * point.sqrt()), -1.0 / (4.0 * point.powf(1.5))),
+        (
+            UnaryOp::Cbrt,
+            x,
+            1.0 / (3.0 * point.powf(2.0 / 3.0)),
+            -2.0 / (9.0 * point.powf(5.0 / 3.0)),
+        ),
+        (UnaryOp::Exp, x, point.exp(), point.exp()),
+        (
+            UnaryOp::Exp2,
+            x,
+            point.exp2() * std::f64::consts::LN_2,
+            point.exp2() * std::f64::consts::LN_2.powi(2),
+        ),
+        (UnaryOp::Expm1, x, point.exp(), point.exp()),
+        (UnaryOp::Log, x, 1.0 / point, -1.0 / point.powi(2)),
+        (
+            UnaryOp::Log2,
+            x,
+            1.0 / (point * std::f64::consts::LN_2),
+            -1.0 / (point.powi(2) * std::f64::consts::LN_2),
+        ),
+        (
+            UnaryOp::Log10,
+            x,
+            1.0 / (point * std::f64::consts::LN_10),
+            -1.0 / (point.powi(2) * std::f64::consts::LN_10),
+        ),
+        (UnaryOp::Log1p, x, 1.0 / (1.0 + point), -1.0 / (1.0 + point).powi(2)),
+        (UnaryOp::Sin, x, point.cos(), -point.sin()),
+        (UnaryOp::Cos, x, -point.sin(), -point.cos()),
+        (UnaryOp::Tan, x, 1.0 / point.cos().powi(2), 2.0 * point.tan() / point.cos().powi(2)),
+        (
+            UnaryOp::Asin,
+            x / 2.0,
+            0.5 / (1.0 - 0.25 * point.powi(2)).sqrt(),
+            0.25 * (0.5 * point) / (1.0 - 0.25 * point.powi(2)).powf(1.5),
+        ),
+        (
+            UnaryOp::Acos,
+            x / 2.0,
+            -0.5 / (1.0 - 0.25 * point.powi(2)).sqrt(),
+            -0.25 * (0.5 * point) / (1.0 - 0.25 * point.powi(2)).powf(1.5),
+        ),
+        (
+            UnaryOp::Atan,
+            x,
+            1.0 / (1.0 + point.powi(2)),
+            -2.0 * point / (1.0 + point.powi(2)).powi(2),
+        ),
+        (UnaryOp::Sinh, x, point.cosh(), point.sinh()),
+        (UnaryOp::Cosh, x, point.sinh(), point.cosh()),
+        (
+            UnaryOp::Tanh,
+            x,
+            1.0 - point.tanh().powi(2),
+            -2.0 * point.tanh() * (1.0 - point.tanh().powi(2)),
+        ),
+        (
+            UnaryOp::Asinh,
+            x,
+            1.0 / (1.0 + point.powi(2)).sqrt(),
+            -point / (1.0 + point.powi(2)).powf(1.5),
+        ),
+        (
+            UnaryOp::Acosh,
+            x + 1.0,
+            1.0 / ((point + 1.0).powi(2) - 1.0).sqrt(),
+            -(point + 1.0) / ((point + 1.0).powi(2) - 1.0).powf(1.5),
+        ),
+        (
+            UnaryOp::Atanh,
+            x / 2.0,
+            0.5 / (1.0 - (point / 2.0).powi(2)),
+            0.25 * point / (1.0 - (point / 2.0).powi(2)).powi(2),
+        ),
+    ];
+
+    for (op, expr, expected_grad, expected_hess) in cases {
+        let expr = match op {
+            UnaryOp::Neg => expr,
+            UnaryOp::Sqrt => expr.sqrt(),
+            UnaryOp::Cbrt => expr.cbrt(),
+            UnaryOp::Exp => expr.exp(),
+            UnaryOp::Exp2 => expr.exp2(),
+            UnaryOp::Expm1 => expr.expm1(),
+            UnaryOp::Log => expr.log(),
+            UnaryOp::Log2 => expr.log2(),
+            UnaryOp::Log10 => expr.log10(),
+            UnaryOp::Log1p => expr.log1p(),
+            UnaryOp::Sin => expr.sin(),
+            UnaryOp::Cos => expr.cos(),
+            UnaryOp::Tan => expr.tan(),
+            UnaryOp::Asin => expr.asin(),
+            UnaryOp::Acos => expr.acos(),
+            UnaryOp::Atan => expr.atan(),
+            UnaryOp::Sinh => expr.sinh(),
+            UnaryOp::Cosh => expr.cosh(),
+            UnaryOp::Tanh => expr.tanh(),
+            UnaryOp::Asinh => expr.asinh(),
+            UnaryOp::Acosh => expr.acosh(),
+            UnaryOp::Atanh => expr.atanh(),
+            _ => unreachable!("nonsmooth/binary operation in smooth test"),
+        };
+        let grad = gradient_at(&m, expr, &[point]).unwrap();
+        assert_close(grad[0], expected_grad, 1e-10, &format!("{op} gradient"));
+
+        objective!(m, Min, expr);
+        let ev = NlpEvaluator::new(&m).unwrap();
+        let mut hess = vec![0.0; ev.hessian_lagrangian_structure().len()];
+        ev.eval_hessian_lagrangian(&[point], 1.0, &[], &mut hess);
+        assert_eq!(hess.len(), 1, "{op} should have one Hessian entry");
+        assert_close(hess[0], expected_hess, 1e-9, &format!("{op} Hessian"));
+    }
+}
+
+#[test]
+fn atan2_and_branch_derivatives_match_away_from_kinks() {
+    let m = Model::new("branches");
+    variable!(m, -5.0 <= x <= 5.0);
+    variable!(m, -5.0 <= y <= 5.0);
+
+    let (xv, yv) = (2.0, 1.0);
+    let r2 = xv * xv + yv * yv;
+    let atan2 = y.atan2(x);
+    let grad = gradient_at(&m, atan2, &[xv, yv]).unwrap();
+    assert_close(grad[0], -yv / r2, 1e-10, "atan2 dx");
+    assert_close(grad[1], xv / r2, 1e-10, "atan2 dy");
+    objective!(m, Min, atan2);
+    let ev = NlpEvaluator::new(&m).unwrap();
+    let mut hess = vec![0.0; ev.hessian_lagrangian_structure().len()];
+    ev.eval_hessian_lagrangian(&[xv, yv], 1.0, &[], &mut hess);
+    let r4 = r2 * r2;
+    let expected = [2.0 * xv * yv / r4, (yv * yv - xv * xv) / r4, -2.0 * xv * yv / r4];
+    for (got, want) in hess.iter().zip(expected) {
+        assert_close(*got, want, 1e-9, "atan2 Hessian");
+    }
+
+    for (name, expr, point, expected) in [
+        ("abs", x.abs(), [1.5, 0.0], [1.0, 0.0]),
+        ("min", x.min(y), [1.0, 2.0], [1.0, 0.0]),
+        ("max", x.max(y), [2.0, 1.0], [1.0, 0.0]),
+    ] {
+        let grad = gradient_at(&m, expr, &point).unwrap();
+        for (got, want) in grad.iter().zip(expected) {
+            assert_close(*got, want, 1e-10, &format!("{name} gradient"));
+        }
+        objective!(m, Min, expr);
+        let ev = NlpEvaluator::new(&m).unwrap();
+        let mut hess = vec![0.0; ev.hessian_lagrangian_structure().len()];
+        ev.eval_hessian_lagrangian(&point, 1.0, &[], &mut hess);
+        for value in hess {
+            assert_close(value, 0.0, 1e-9, &format!("{name} Hessian"));
+        }
+    }
 }
 
 /// A dense Hessian yields one seed per column, crossing the parallel-HVP

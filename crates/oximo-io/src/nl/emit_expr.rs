@@ -2,24 +2,25 @@
 //!
 //! Mapping (D. M. Gay, operator Tables 4 unary, 6 binary, 8 n-ary, 11 n-ary operators).
 //!
-//! | `ExprNode`        | NL opcode                             |
-//! |-------------------|---------------------------------------|
-//! | `Const(c)`        | `n<c>` (binary picks `s`/`l`/`n`)     |
-//! | `Var(v)`          | `v<permuted_idx>`                     |
-//! | `Neg(x)`          | `o16`                                 |
-//! | `Add(2)`          | `o0` (binary plus)                    |
-//! | `Add(>=3)`        | `o54 <N>` (n-ary sumlist)             |
-//! | `Mul(2)`          | `o2` (binary times)                   |
-//! | `Mul(>=3)`        | left-folded `o2` chain                |
-//! | `Pow(b, e)`       | `o5`                                  |
-//! | `Div(n, d)`       | `o3`                                  |
-//! | `Sin/Cos/Exp/Log` | `o41`, `o46`, `o44`, `o43`            |
-//! | `Abs`             | `o15`                                 |
-//! | `Linear`          | expanded to `o54 <N+1>` of `o2 n_c v` |
+//! | `ExprNode`        | NL opcode                                   |
+//! |-------------------|---------------------------------------------|
+//! | `Const(c)`        | `n<c>` (binary picks `s`/`l`/`n`)           |
+//! | `Var(v)`          | `v<permuted_idx>`                           |
+//! | `Unary(Neg, x)`   | `o16`                                       |
+//! | `Add(2)`          | `o0` (binary plus)                          |
+//! | `Add(>=3)`        | `o54 <N>` (n-ary sumlist)                   |
+//! | `Mul(2)`          | `o2` (binary times)                         |
+//! | `Mul(>=3)`        | left-folded `o2` chain                      |
+//! | `Pow(b, e)`       | `o5`                                        |
+//! | `Div(n, d)`       | `o3`                                        |
+//! | `Unary`           | documented unary opcodes (see `emit_unary`) |
+//! | `Atan2(y, x)`     | `o48`                                       |
+//! | `Min/Max`         | `o11`/`o12` with arity and children        |
+//! | `Linear`          | expanded to `o54 <N+1>` of `o2 n_c v`       |
 
 use std::io::Write;
 
-use oximo_expr::{ExprArena, ExprId, ExprNode, SignedExpr, VarId};
+use oximo_expr::{ExprArena, ExprId, ExprNode, SignedExpr, UnaryOp, VarId};
 use rustc_hash::FxHashMap;
 
 use super::writer::Writer;
@@ -82,10 +83,7 @@ pub(crate) fn emit_expr<W: Write>(
             w.var(idx)?;
         }
         ExprNode::Param(p) => w.num(arena.param_value(*p))?,
-        ExprNode::Neg(x) => {
-            w.op(16)?;
-            emit_expr(w, arena, var_index, *x)?;
-        }
+        ExprNode::Unary(op, x) => emit_unary(w, arena, var_index, *op, *x)?,
         ExprNode::Add(children) => emit_add(w, arena, var_index, children)?,
         ExprNode::Mul(children) => emit_mul(w, arena, var_index, children)?,
         ExprNode::Pow(b, e) => {
@@ -98,29 +96,72 @@ pub(crate) fn emit_expr<W: Write>(
             emit_expr(w, arena, var_index, *num)?;
             emit_expr(w, arena, var_index, *den)?;
         }
-        ExprNode::Sin(x) => {
-            w.op(41)?;
+        ExprNode::Atan2(y, x) => {
+            w.op(48)?;
+            emit_expr(w, arena, var_index, *y)?;
             emit_expr(w, arena, var_index, *x)?;
         }
-        ExprNode::Cos(x) => {
-            w.op(46)?;
-            emit_expr(w, arena, var_index, *x)?;
-        }
-        ExprNode::Exp(x) => {
-            w.op(44)?;
-            emit_expr(w, arena, var_index, *x)?;
-        }
-        ExprNode::Log(x) => {
-            w.op(43)?;
-            emit_expr(w, arena, var_index, *x)?;
-        }
-        ExprNode::Abs(x) => {
-            w.op(15)?;
-            emit_expr(w, arena, var_index, *x)?;
-        }
+        ExprNode::Min(children) => emit_extrema(w, arena, var_index, 11, children)?,
+        ExprNode::Max(children) => emit_extrema(w, arena, var_index, 12, children)?,
         ExprNode::Linear { coeffs, constant } => {
             emit_linear_inline(w, var_index, coeffs, *constant)?;
         }
+    }
+    Ok(())
+}
+
+fn emit_unary<W: Write>(
+    w: &mut Writer<'_, W>,
+    arena: &ExprArena,
+    var_index: &FxHashMap<VarId, u32>,
+    op: UnaryOp,
+    child: ExprId,
+) -> Result<(), IoError> {
+    if op == UnaryOp::Exp2 {
+        w.op(5)?;
+        w.num(2.0)?;
+        return emit_expr(w, arena, var_index, child);
+    }
+    let opcode = match op {
+        UnaryOp::Neg => 16,
+        UnaryOp::Abs => 15,
+        UnaryOp::Sqrt => 39,
+        UnaryOp::Exp => 44,
+        UnaryOp::Log => 43,
+        UnaryOp::Log10 => 42,
+        UnaryOp::Sin => 41,
+        UnaryOp::Cos => 46,
+        UnaryOp::Tan => 38,
+        UnaryOp::Asin => 51,
+        UnaryOp::Acos => 53,
+        UnaryOp::Atan => 49,
+        UnaryOp::Sinh => 40,
+        UnaryOp::Cosh => 45,
+        UnaryOp::Tanh => 37,
+        UnaryOp::Asinh => 50,
+        UnaryOp::Acosh => 52,
+        UnaryOp::Atanh => 47,
+        UnaryOp::Cbrt | UnaryOp::Expm1 | UnaryOp::Log2 | UnaryOp::Log1p => {
+            return Err(IoError::UnsupportedNonlinearOperator { operator: op.name() });
+        }
+        UnaryOp::Exp2 => unreachable!(),
+    };
+    w.op(opcode)?;
+    emit_expr(w, arena, var_index, child)
+}
+
+fn emit_extrema<W: Write>(
+    w: &mut Writer<'_, W>,
+    arena: &ExprArena,
+    var_index: &FxHashMap<VarId, u32>,
+    opcode: u32,
+    children: &[ExprId],
+) -> Result<(), IoError> {
+    w.op(opcode)?;
+    w.int(i64::try_from(children.len()).expect("arity"))?;
+    w.eor()?;
+    for child in children {
+        emit_expr(w, arena, var_index, *child)?;
     }
     Ok(())
 }

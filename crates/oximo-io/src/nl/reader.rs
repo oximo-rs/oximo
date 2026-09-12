@@ -54,7 +54,7 @@ enum Node {
     Var(usize),
     Unary(u32, Box<Node>),
     Binary(u32, Box<Node>, Box<Node>),
-    Sum(Vec<Node>),
+    Nary(u32, Vec<Node>),
 }
 
 /// Read an ASCII NL stream.
@@ -629,9 +629,9 @@ fn parse_binary_expr(b: &mut Bin<'_>, depth: usize) -> Result<Node, IoError> {
             let c = u32::try_from(nonneg(b.i32()?, "opcode")?)
                 .map_err(|_| invalid("binary", "opcode out of range"))?;
             let ar = match c {
-                15 | 16 | 41 | 43 | 44 | 46 => 1,
-                0 | 1 | 2 | 3 | 5 => 2,
-                54 => nonneg(b.i32()?, "sum arity")?,
+                15 | 16 | 37..=47 | 49..=53 => 1,
+                0 | 1 | 2 | 3 | 5 | 48 => 2,
+                11 | 12 | 54 => nonneg(b.i32()?, "n-ary operator arity")?,
                 _ => {
                     return Err(IoError::UnsupportedNl {
                         section: "expression".into(),
@@ -639,14 +639,14 @@ fn parse_binary_expr(b: &mut Bin<'_>, depth: usize) -> Result<Node, IoError> {
                     });
                 }
             };
-            if c == 54 {
+            if matches!(c, 11 | 12 | 54) {
                 let mut xs =
                     Vec::with_capacity(bounded_capacity(ar, b.bytes.len().saturating_sub(b.pos)));
                 let child_depth = next_expression_depth(depth)?;
                 for _ in 0..ar {
                     xs.push(parse_binary_expr(b, child_depth)?);
                 }
-                Ok(Node::Sum(xs))
+                Ok(Node::Nary(c, xs))
             } else {
                 let child_depth = next_expression_depth(depth)?;
                 let a = parse_binary_expr(b, child_depth)?;
@@ -679,9 +679,9 @@ fn parse_expr(lines: &[String], i: &mut usize, depth: usize) -> Result<Node, IoE
         .parse()
         .map_err(|_| invalid("expression", "bad opcode"))?;
     let arity = match code {
-        15 | 16 | 41 | 43 | 44 | 46 => 1,
-        0 | 1 | 2 | 3 | 5 => 2,
-        54 => {
+        15 | 16 | 37..=47 | 49..=53 => 1,
+        0 | 1 | 2 | 3 | 5 | 48 => 2,
+        11 | 12 | 54 => {
             if *i >= lines.len() {
                 return Err(invalid("expression", "missing sum arity"));
             }
@@ -699,13 +699,13 @@ fn parse_expr(lines: &[String], i: &mut usize, depth: usize) -> Result<Node, IoE
             });
         }
     };
-    if code == 54 {
+    if matches!(code, 11 | 12 | 54) {
         let mut xs = Vec::with_capacity(bounded_capacity(arity, lines.len().saturating_sub(*i)));
         let child_depth = next_expression_depth(depth)?;
         for _ in 0..arity {
             xs.push(parse_expr(lines, i, child_depth)?);
         }
-        return Ok(Node::Sum(xs));
+        return Ok(Node::Nary(code, xs));
     }
     let child_depth = next_expression_depth(depth)?;
     let a = parse_expr(lines, i, child_depth)?;
@@ -833,10 +833,22 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<E
             Ok(match c {
                 15 => x.abs(),
                 16 => -x,
+                37 => x.tanh(),
+                38 => x.tan(),
+                39 => x.sqrt(),
+                40 => x.sinh(),
                 41 => x.sin(),
+                42 => x.log10(),
                 43 => x.log(),
                 44 => x.exp(),
+                45 => x.cosh(),
                 46 => x.cos(),
+                47 => x.atanh(),
+                49 => x.atan(),
+                50 => x.asinh(),
+                51 => x.asin(),
+                52 => x.acosh(),
+                53 => x.acos(),
                 _ => return Err(invalid("expression", "unsupported unary opcode")),
             })
         }
@@ -850,16 +862,30 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<E
                 2 => x * y,
                 3 => x / y,
                 5 => x.pow(y),
+                48 => x.atan2(y),
                 _ => return Err(invalid("expression", "unsupported binary opcode")),
             })
         }
-        Node::Sum(xs) => {
+        Node::Nary(code, xs) => {
             let mut it = xs.into_iter();
-            let Some(first) = it.next() else { return Ok(m.__constant(0.0)) };
+            let Some(first) = it.next() else {
+                return Ok(m.__constant(match code {
+                    54 => 0.0,
+                    11 => f64::INFINITY,
+                    12 => f64::NEG_INFINITY,
+                    _ => return Err(invalid("expression", "unsupported n-ary opcode")),
+                }));
+            };
             let child_depth = next_expression_depth(depth)?;
             let mut e = lower(m, vars, first, child_depth)?;
             for x in it {
-                e = e + lower(m, vars, x, child_depth)?;
+                let next = lower(m, vars, x, child_depth)?;
+                e = match code {
+                    54 => e + next,
+                    11 => e.min(next),
+                    12 => e.max(next),
+                    _ => return Err(invalid("expression", "unsupported n-ary opcode")),
+                };
             }
             Ok(e)
         }

@@ -168,3 +168,64 @@ fn nonlinear_iis_maps_generated_abs_definition() {
     let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute nonlinear IIS");
     assert!(iis.constraints.contains(&conflict));
 }
+
+#[test]
+fn unsupported_operator_errors_before_environment_or_optimize() {
+    let m = Model::new("unsupported_asin");
+    variable!(m, -0.5 <= x <= 0.5);
+    objective!(m, Min, x.asin());
+    assert!(matches!(
+        Gurobi.solve(&m, &GurobiOptions::default()),
+        Err(oximo_solver::SolverError::UnsupportedNonlinearOperator {
+            backend: "Gurobi",
+            operator: "asin"
+        })
+    ));
+}
+
+#[test]
+fn newly_supported_native_unary_operators_solve_at_fixed_point() {
+    let point: f64 = 0.5;
+
+    macro_rules! check_unary {
+        ($method:ident, $expected:expr) => {{
+            let m = Model::new(concat!("native_", stringify!($method)));
+            variable!(m, -5.0 <= x <= 5.0);
+            m.fix(x, point);
+            objective!(m, Min, x.$method());
+
+            let result = Gurobi
+                .solve(&m, &GurobiOptions::default())
+                .unwrap_or_else(|error| panic!("{} solve failed: {error}", stringify!($method)));
+            assert_solved(&result);
+            let actual = result.objective().expect("objective");
+            assert!(
+                close(actual, $expected, 1e-6),
+                "{}({point}) = {actual}, expected {}",
+                stringify!($method),
+                $expected
+            );
+        }};
+    }
+
+    check_unary!(sqrt, point.sqrt());
+    check_unary!(exp2, point.exp2());
+    check_unary!(log2, point.log2());
+    check_unary!(log10, point.log10());
+    check_unary!(tan, point.tan());
+    check_unary!(tanh, point.tanh());
+}
+
+#[test]
+fn nested_min_max_use_native_general_constraints() {
+    let m = Model::new("nested_extrema");
+    variable!(m, -5.0 <= x <= 5.0);
+    variable!(m, -5.0 <= y <= 5.0);
+    m.fix(x, -2.0);
+    m.fix(y, 3.0);
+    objective!(m, Min, x.min(y).max(x + 1.0));
+
+    let result = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve nested extrema");
+    assert_solved(&result);
+    assert!(close(result.objective().unwrap(), -1.0, 1e-8));
+}

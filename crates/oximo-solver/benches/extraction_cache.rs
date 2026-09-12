@@ -8,7 +8,8 @@ use oximo_solver::prepare::PreparedExpressions;
 fn bench(c: &mut Criterion) {
     let mut arena = ExprArena::new();
     let linear = arena.linear((0..64).map(|i| (VarId(i), 1.0)).collect(), 3.0);
-    let roots: Vec<_> = (0..256).map(|_| arena.push(ExprNode::Neg(linear))).collect();
+    let roots: Vec<_> =
+        (0..256).map(|_| arena.push(ExprNode::Unary(oximo_expr::UnaryOp::Neg, linear))).collect();
     let a = roots[0];
     let shard = |id: oximo_expr::ExprId| id.0.wrapping_mul(0x9e37_79b9) >> 28;
     let b = *roots.iter().find(|&&id| id != a && shard(id) == shard(a)).unwrap();

@@ -11,21 +11,19 @@ pub fn walk<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
     let node = arena.get(id);
     visitor.visit(arena, id, node);
     match node {
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             for &child in children {
                 walk(arena, child, visitor);
             }
         }
-        ExprNode::Neg(inner)
-        | ExprNode::Sin(inner)
-        | ExprNode::Cos(inner)
-        | ExprNode::Exp(inner)
-        | ExprNode::Log(inner)
-        | ExprNode::Abs(inner) => {
+        ExprNode::Unary(_, inner) => {
             let inner = *inner;
             walk(arena, inner, visitor);
         }
-        ExprNode::Pow(base, exp) => {
+        ExprNode::Pow(base, exp) | ExprNode::Atan2(base, exp) => {
             let base = *base;
             let exp = *exp;
             walk(arena, base, visitor);

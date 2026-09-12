@@ -127,6 +127,8 @@ pub enum SolverError {
     NoObjective,
     #[error("{location} contains a nonlinear term unsupported by this backend: {term}")]
     Nonlinear { location: String, term: String },
+    #[error("{backend} does not support nonlinear operator {operator}")]
+    UnsupportedNonlinearOperator { backend: &'static str, operator: &'static str },
     #[error("backend error: {0}")]
     Backend(String),
     #[error(transparent)]
