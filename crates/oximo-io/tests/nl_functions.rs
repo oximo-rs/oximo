@@ -39,8 +39,25 @@ fn objective_value(model: &Model, x: f64) -> f64 {
     evaluate(&model.arena(), objective.expr, &values).unwrap()
 }
 
+fn read_literal_objective(body: &str) -> Model {
+    let header = "\
+g3 1 1 0
+ 0 0 1 0 0
+ 0 1
+ 0 0
+ 0 0 0
+ 0 0 0 1
+ 0 0 0 0 0
+ 0 0
+ 0 0
+ 0 0 0 0 0
+O0 0
+";
+    read_nl(format!("{header}{body}").as_bytes()).unwrap()
+}
+
 #[test]
-fn documented_unary_opcodes_are_exact() {
+fn documented_root_opcodes_are_exact() {
     macro_rules! assert_root_opcode {
         ($name:literal, $opcode:literal, |$arg:ident| $body:expr) => {{
             let m = Model::new($name);
@@ -80,6 +97,28 @@ fn documented_unary_opcodes_are_exact() {
     assert_root_opcode!("asin", 51, |x| x.asin());
     assert_root_opcode!("acosh", 52, |x| x.acosh());
     assert_root_opcode!("acos", 53, |x| x.acos());
+    assert_root_opcode!("min", 11, |x| x.min(x + 1.0));
+    assert_root_opcode!("max", 12, |x| x.max(x + 1.0));
+}
+
+#[test]
+fn literal_extrema_opcodes_decode_independently() {
+    let minimum = read_literal_objective("o11\n3\nn3\nn-2\nn5\n");
+    let maximum = read_literal_objective("o12\n3\nn3\nn-2\nn5\n");
+
+    assert_eq!(objective_value(&minimum, 0.0).to_bits(), (-2.0_f64).to_bits());
+    assert_eq!(objective_value(&maximum, 0.0).to_bits(), 5.0_f64.to_bits());
+}
+
+#[test]
+fn literal_atan2_opcode_preserves_y_x_operand_order() {
+    let model = read_literal_objective("o48\nn1\nn-1\n");
+    let actual = objective_value(&model, 0.0);
+    let expected = 1.0_f64.atan2(-1.0);
+    let reversed = (-1.0_f64).atan2(1.0);
+
+    assert_eq!(actual.to_bits(), expected.to_bits());
+    assert_ne!(actual.to_bits(), reversed.to_bits());
 }
 
 #[test]
