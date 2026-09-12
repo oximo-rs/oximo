@@ -10,7 +10,7 @@ use oximo_autodiff::sparsity::{
     hessian_lagrangian_structure, jacobian_structure, variable_support,
 };
 use oximo_autodiff::tape::Tape;
-use oximo_expr::{ExprArena, ExprId, ExprNode, VarId, evaluate};
+use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp, VarId, evaluate};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     let denom = want.abs().max(1.0);
@@ -60,15 +60,15 @@ fn every_node_kind_matches_evaluate() {
 
     let add = arena.push(ExprNode::Add([x0, x1, c2].into_iter().collect()));
     let mul = arena.push(ExprNode::Mul([x0, x1, p0].into_iter().collect()));
-    let neg = arena.push(ExprNode::Neg(mul));
+    let neg = arena.push(ExprNode::Unary(UnaryOp::Neg, mul));
     let powc = arena.push(ExprNode::Pow(x0, c3));
     let pow = arena.push(ExprNode::Pow(add, x1)); // expression exponent
     let div = arena.push(ExprNode::Div(powc, x1));
-    let sin = arena.push(ExprNode::Sin(x0));
-    let cos = arena.push(ExprNode::Cos(x1));
-    let exp = arena.push(ExprNode::Exp(sin));
-    let log = arena.push(ExprNode::Log(exp));
-    let abs = arena.push(ExprNode::Abs(neg));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
+    let cos = arena.push(ExprNode::Unary(UnaryOp::Cos, x1));
+    let exp = arena.push(ExprNode::Unary(UnaryOp::Exp, sin));
+    let log = arena.push(ExprNode::Unary(UnaryOp::Log, exp));
+    let abs = arena.push(ExprNode::Unary(UnaryOp::Abs, neg));
     let lin = arena.linear(vec![(VarId(0), 2.0), (VarId(1), -0.5)], 4.0);
     let root =
         arena.push(ExprNode::Add([add, neg, pow, div, cos, log, abs, lin].into_iter().collect()));
@@ -85,7 +85,7 @@ fn every_node_kind_matches_evaluate() {
 fn shared_subexpressions_lower_once() {
     let mut arena = ExprArena::new();
     let x0 = arena.var(VarId(0));
-    let sin = arena.push(ExprNode::Sin(x0));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
     // sin(x0) used three times: as a DAG the tape must reuse the register.
     let mul = arena.push(ExprNode::Mul([sin, sin].into_iter().collect()));
     let root = arena.push(ExprNode::Add([mul, sin].into_iter().collect()));
@@ -101,9 +101,9 @@ fn weighted_tape_matches_manual_sum() {
     let mut arena = ExprArena::new();
     let x0 = arena.var(VarId(0));
     let x1 = arena.var(VarId(1));
-    let sin = arena.push(ExprNode::Sin(x0));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
     let f0 = arena.push(ExprNode::Mul([sin, x1].into_iter().collect()));
-    let f1 = arena.push(ExprNode::Exp(x1));
+    let f1 = arena.push(ExprNode::Unary(UnaryOp::Exp, x1));
     let f2 = arena.push(ExprNode::Mul([sin, sin].into_iter().collect())); // shares sin
 
     let tape = Tape::compile_weighted(&arena, &[f0, f1, f2]);
@@ -147,7 +147,7 @@ fn classification_fast_paths() {
     assert!(matches!(slot.kind, SlotKind::Quadratic(_)), "quadratic slot");
     assert_eq!(slot.support, vec![0, 1]);
 
-    let sin = arena.push(ExprNode::Sin(x0));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x0));
     let slot = FunctionSlot::classify(&arena, sin);
     assert!(slot.is_nonlinear(), "nonlinear slot");
     assert_eq!(slot.support, vec![0]);
@@ -196,7 +196,7 @@ fn sparsity_patterns() {
     let mut arena = ExprArena::new();
     let x0 = arena.var(VarId(0));
     let x2 = arena.var(VarId(2));
-    let sin = arena.push(ExprNode::Sin(x2));
+    let sin = arena.push(ExprNode::Unary(UnaryOp::Sin, x2));
     let mul = arena.push(ExprNode::Mul([x0, sin].into_iter().collect()));
     let lin = arena.linear(vec![(VarId(1), 1.0), (VarId(3), 2.0)], 0.0);
     let root = arena.push(ExprNode::Add([mul, lin].into_iter().collect()));
@@ -220,8 +220,47 @@ fn sparsity_patterns() {
 fn lagrangian_structure_handles_wide_sparse_variable_ids() {
     let mut arena = ExprArena::new();
     let high = arena.var(VarId(1_024));
-    let nonlinear = arena.push(ExprNode::Sin(high));
+    let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, high));
     let slots = [FunctionSlot::classify(&arena, nonlinear)];
 
     assert_eq!(hessian_lagrangian_structure(&slots), vec![(1_024, 1_024)]);
+}
+
+#[test]
+fn tape_matches_direct_evaluation_for_full_nonlinear_vocabulary() {
+    let cell = oximo_expr::ExprArenaCell::new(ExprArena::new());
+    let x = oximo_expr::Expr::from_var(&cell, VarId(0));
+    let y = oximo_expr::Expr::from_var(&cell, VarId(1));
+    let roots = [
+        x.abs(),
+        (x + 2.0).sqrt(),
+        y.cbrt(),
+        x.exp(),
+        x.exp2(),
+        x.expm1(),
+        (x + 2.0).log(),
+        (x + 2.0).log2(),
+        (x + 2.0).log10(),
+        x.log1p(),
+        x.sin(),
+        x.cos(),
+        x.tan(),
+        (x / 2.0).asin(),
+        (x / 2.0).acos(),
+        x.atan(),
+        y.sinh(),
+        y.cosh(),
+        y.tanh(),
+        y.asinh(),
+        (x + 1.0).acosh(),
+        (y / 2.0).atanh(),
+        y.atan2(x),
+        x.min(y),
+        x.max(y),
+    ];
+    let arena = cell.borrow();
+    let points = [vec![0.75, -0.5], vec![1.25, 0.25]];
+    for root in roots {
+        check_matches_evaluate(&arena, root.id, &points);
+    }
 }

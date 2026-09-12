@@ -9,6 +9,7 @@ use syn::Ident;
 
 mod bind;
 mod constraint;
+mod extrema;
 mod index;
 mod objective;
 mod param;
@@ -91,6 +92,22 @@ pub fn objective(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn sum(input: TokenStream) -> TokenStream {
     sum::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `min!(body for pat in domain[, pat in domain ...][ if cond])`, an indexed minimum.
+#[proc_macro]
+pub fn min(input: TokenStream) -> TokenStream {
+    extrema::expand(input.into(), extrema::Extremum::Min)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// `max!(body for pat in domain[, pat in domain ...][ if cond])`, an indexed maximum.
+#[proc_macro]
+pub fn max(input: TokenStream) -> TokenStream {
+    extrema::expand(input.into(), extrema::Extremum::Max)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// `param!(model, name = value)`, declare a re-bindable scalar parameter and

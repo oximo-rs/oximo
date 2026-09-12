@@ -168,17 +168,15 @@ fn validate(arena: &ExprArena, id: ExprId, nonfinite_strings: bool) -> Result<()
             }
             Ok(())
         }
-        ExprNode::Neg(x)
-        | ExprNode::Sin(x)
-        | ExprNode::Cos(x)
-        | ExprNode::Exp(x)
-        | ExprNode::Log(x)
-        | ExprNode::Abs(x) => validate(arena, *x, nonfinite_strings),
-        ExprNode::Pow(b, e) => {
+        ExprNode::Unary(_, x) => validate(arena, *x, nonfinite_strings),
+        ExprNode::Pow(b, e) | ExprNode::Atan2(b, e) => {
             validate(arena, *b, nonfinite_strings)?;
             validate(arena, *e, nonfinite_strings)
         }
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             for c in children {
                 validate(arena, *c, nonfinite_strings)?;
             }
@@ -207,17 +205,15 @@ fn collect_vars(arena: &ExprArena, id: ExprId, out: &mut FxHashSet<VarId>) -> Re
             out.insert(*v);
             Ok(())
         }
-        ExprNode::Neg(x)
-        | ExprNode::Sin(x)
-        | ExprNode::Cos(x)
-        | ExprNode::Exp(x)
-        | ExprNode::Log(x)
-        | ExprNode::Abs(x) => collect_vars(arena, *x, out),
-        ExprNode::Pow(b, e) => {
+        ExprNode::Unary(_, x) => collect_vars(arena, *x, out),
+        ExprNode::Pow(b, e) | ExprNode::Atan2(b, e) => {
             collect_vars(arena, *b, out)?;
             collect_vars(arena, *e, out)
         }
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             for c in children {
                 collect_vars(arena, *c, out)?;
             }

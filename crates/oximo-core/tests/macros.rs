@@ -733,3 +733,72 @@ fn soc_macro_rejects_quadratic_term() {
     variable!(m, t >= 0.0);
     soc_constraint!(m, cone, [x * x] <= t);
 }
+
+#[test]
+fn extrema_macros_flatten_indices_filters_and_keep_order() {
+    let m = Model::new("extrema");
+    variable!(m, x[i in 0..6]);
+
+    let lo = min!(x[2 * i + j] for i in 0..2, j in 0..2);
+    let hi = max!(x[i] for i in 0..6 if i % 2 == 1);
+    let arena = m.arena();
+    assert!(matches!(
+        arena.get(lo.id),
+        oximo_core::ExprNode::Min(children)
+            if children.as_slice() == [x[0].id, x[1].id, x[2].id, x[3].id]
+    ));
+    assert!(matches!(
+        arena.get(hi.id),
+        oximo_core::ExprNode::Max(children)
+            if children.as_slice() == [x[1].id, x[3].id, x[5].id]
+    ));
+}
+
+#[test]
+fn extrema_macros_accept_typed_sets() {
+    let m = Model::new("typed_extrema");
+    let plants = Set::strings(["a", "b", "c"]);
+    variable!(m, x[p in plants]);
+    let lo = min!(x[&p] for p: String in plants);
+    let hi = max!(x[&p] for p: String in plants if p != "b");
+    let arena = m.arena();
+    assert!(matches!(arena.get(lo.id), oximo_core::ExprNode::Min(children) if children.len() == 3));
+    assert!(matches!(arena.get(hi.id), oximo_core::ExprNode::Max(children) if children.len() == 2));
+}
+
+#[test]
+fn filtered_extrema_macro_does_not_capture_caller_terms_binding() {
+    let m = Model::new("extrema_hygiene");
+    variable!(m, x);
+    let __terms = x;
+
+    let lo = min!(__terms for i in 0..2 if i == 1);
+
+    assert_eq!(lo.id, x.id);
+}
+
+#[test]
+#[should_panic(expected = "expressions belong to different arenas")]
+fn extrema_macro_rejects_foreign_arenas() {
+    let m = Model::new("local_extrema");
+    let other = Model::new("foreign_extrema");
+    variable!(m, x);
+    variable!(other, y);
+    let _ = min!(if i == 0 { x } else { y } for i in 0..2);
+}
+
+#[test]
+#[should_panic(expected = "min! on empty domain")]
+fn min_macro_empty_domain_has_specific_diagnostic() {
+    let m = Model::new("empty_min");
+    variable!(m, x);
+    let _ = min!(x for _i in 0..0);
+}
+
+#[test]
+#[should_panic(expected = "max! with an `if` filter produced no terms")]
+fn max_macro_empty_filter_has_specific_diagnostic() {
+    let m = Model::new("empty_max_filter");
+    variable!(m, x);
+    let _ = max!(x for i in 0..3 if i > 10);
+}

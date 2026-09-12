@@ -7,7 +7,7 @@
 //! once at compile time.
 //!
 //! The tape is in SSA form.
-use oximo_expr::{ExprArena, ExprId, ExprNode};
+use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp};
 use rustc_hash::FxHashMap;
 
 // Opcodes. `a`/`b` are operand register indices unless noted.
@@ -27,6 +27,26 @@ pub(crate) const OP_EXP: u32 = 12;
 pub(crate) const OP_LOG: u32 = 13;
 pub(crate) const OP_ABS: u32 = 14;
 pub(crate) const OP_LINEAR: u32 = 15; // sum of lin_coeffs[a..b] * x[lin_vars[a..b]]
+pub(crate) const OP_SQRT: u32 = 16;
+pub(crate) const OP_CBRT: u32 = 17;
+pub(crate) const OP_EXP2: u32 = 18;
+pub(crate) const OP_EXPM1: u32 = 19;
+pub(crate) const OP_LOG2: u32 = 20;
+pub(crate) const OP_LOG10: u32 = 21;
+pub(crate) const OP_LOG1P: u32 = 22;
+pub(crate) const OP_TAN: u32 = 23;
+pub(crate) const OP_ASIN: u32 = 24;
+pub(crate) const OP_ACOS: u32 = 25;
+pub(crate) const OP_ATAN: u32 = 26;
+pub(crate) const OP_SINH: u32 = 27;
+pub(crate) const OP_COSH: u32 = 28;
+pub(crate) const OP_TANH: u32 = 29;
+pub(crate) const OP_ASINH: u32 = 30;
+pub(crate) const OP_ACOSH: u32 = 31;
+pub(crate) const OP_ATANH: u32 = 32;
+pub(crate) const OP_ATAN2: u32 = 33;
+pub(crate) const OP_MIN: u32 = 34;
+pub(crate) const OP_MAX: u32 = 35;
 
 /// An expression (or weighted sum of expressions) compiled to a flat
 /// instruction tape, evaluable at any point without touching the arena.
@@ -161,31 +181,60 @@ pub(crate) fn eval_tape(
     for i in 0..n {
         let ai = a[i] as usize;
         let bi = b[i] as usize;
-        match ops[i] {
-            OP_CONST => regs[i] = consts[ai],
-            OP_VAR => regs[i] = x[ai],
-            OP_PARAM => regs[i] = params[ai],
-            OP_MULT => regs[i] = mults[ai],
-            OP_ADD => regs[i] = regs[ai] + regs[bi],
-            OP_MUL => regs[i] = regs[ai] * regs[bi],
-            OP_DIV => regs[i] = regs[ai] / regs[bi],
-            OP_NEG => regs[i] = -regs[ai],
-            OP_POWC => regs[i] = regs[ai].powf(consts[bi]),
-            OP_POW => regs[i] = regs[ai].powf(regs[bi]),
-            OP_SIN => regs[i] = regs[ai].sin(),
-            OP_COS => regs[i] = regs[ai].cos(),
-            OP_EXP => regs[i] = regs[ai].exp(),
-            OP_LOG => regs[i] = regs[ai].ln(),
-            OP_ABS => regs[i] = regs[ai].abs(),
-            OP_LINEAR => {
-                regs[i] = lin_coeffs[ai] * x[lin_vars[ai] as usize];
-                for k in (ai + 1)..bi {
-                    regs[i] += lin_coeffs[k] * x[lin_vars[k] as usize];
+        let op = ops[i];
+        // Keep the common opcodes in a compact dispatch table.
+        // The extended nonlinear vocabulary is cold for existing tapes.
+        if op <= OP_LINEAR {
+            match op {
+                OP_CONST => regs[i] = consts[ai],
+                OP_VAR => regs[i] = x[ai],
+                OP_PARAM => regs[i] = params[ai],
+                OP_MULT => regs[i] = mults[ai],
+                OP_ADD => regs[i] = regs[ai] + regs[bi],
+                OP_MUL => regs[i] = regs[ai] * regs[bi],
+                OP_DIV => regs[i] = regs[ai] / regs[bi],
+                OP_NEG => regs[i] = -regs[ai],
+                OP_POWC => regs[i] = regs[ai].powf(consts[bi]),
+                OP_POW => regs[i] = regs[ai].powf(regs[bi]),
+                OP_SIN => regs[i] = regs[ai].sin(),
+                OP_COS => regs[i] = regs[ai].cos(),
+                OP_EXP => regs[i] = regs[ai].exp(),
+                OP_LOG => regs[i] = regs[ai].ln(),
+                OP_ABS => regs[i] = regs[ai].abs(),
+                OP_LINEAR => {
+                    regs[i] = lin_coeffs[ai] * x[lin_vars[ai] as usize];
+                    for k in (ai + 1)..bi {
+                        regs[i] += lin_coeffs[k] * x[lin_vars[k] as usize];
+                    }
                 }
+                _ => regs[i] = f64::NAN,
             }
-            // Unreachable for a well-formed tape (the builder emits only the
-            // opcodes above).
-            _ => regs[i] = f64::NAN,
+        } else {
+            match op {
+                OP_SQRT => regs[i] = regs[ai].sqrt(),
+                OP_CBRT => regs[i] = regs[ai].cbrt(),
+                OP_EXP2 => regs[i] = regs[ai].exp2(),
+                OP_EXPM1 => regs[i] = regs[ai].exp_m1(),
+                OP_LOG2 => regs[i] = regs[ai].log2(),
+                OP_LOG10 => regs[i] = regs[ai].log10(),
+                OP_LOG1P => regs[i] = regs[ai].ln_1p(),
+                OP_TAN => regs[i] = regs[ai].tan(),
+                OP_ASIN => regs[i] = regs[ai].asin(),
+                OP_ACOS => regs[i] = regs[ai].acos(),
+                OP_ATAN => regs[i] = regs[ai].atan(),
+                OP_SINH => regs[i] = regs[ai].sinh(),
+                OP_COSH => regs[i] = regs[ai].cosh(),
+                OP_TANH => regs[i] = regs[ai].tanh(),
+                OP_ASINH => regs[i] = regs[ai].asinh(),
+                OP_ACOSH => regs[i] = regs[ai].acosh(),
+                OP_ATANH => regs[i] = regs[ai].atanh(),
+                OP_ATAN2 => regs[i] = regs[ai].atan2(regs[bi]),
+                OP_MIN => regs[i] = regs[ai].min(regs[bi]),
+                OP_MAX => regs[i] = regs[ai].max(regs[bi]),
+                // Unreachable for a well-formed tape (the builder emits only
+                // the opcodes above).
+                _ => regs[i] = f64::NAN,
+            }
         }
     }
     out[0] = regs[n - 1];
@@ -254,9 +303,9 @@ impl Builder {
             ExprNode::Param(p) => self.push(OP_PARAM, p.0, 0),
             ExprNode::Add(children) => self.lower_nary(arena, children, OP_ADD, 0.0),
             ExprNode::Mul(children) => self.lower_nary(arena, children, OP_MUL, 1.0),
-            ExprNode::Neg(inner) => {
+            ExprNode::Unary(op, inner) => {
                 let r = self.lower(arena, *inner);
-                self.push(OP_NEG, r, 0)
+                self.push(unary_opcode(*op), r, 0)
             }
             ExprNode::Pow(base, exp) => {
                 let base_reg = self.lower(arena, *base);
@@ -273,26 +322,13 @@ impl Builder {
                 let d = self.lower(arena, *den);
                 self.push(OP_DIV, n, d)
             }
-            ExprNode::Sin(inner) => {
-                let r = self.lower(arena, *inner);
-                self.push(OP_SIN, r, 0)
+            ExprNode::Atan2(y, x) => {
+                let y = self.lower(arena, *y);
+                let x = self.lower(arena, *x);
+                self.push(OP_ATAN2, y, x)
             }
-            ExprNode::Cos(inner) => {
-                let r = self.lower(arena, *inner);
-                self.push(OP_COS, r, 0)
-            }
-            ExprNode::Exp(inner) => {
-                let r = self.lower(arena, *inner);
-                self.push(OP_EXP, r, 0)
-            }
-            ExprNode::Log(inner) => {
-                let r = self.lower(arena, *inner);
-                self.push(OP_LOG, r, 0)
-            }
-            ExprNode::Abs(inner) => {
-                let r = self.lower(arena, *inner);
-                self.push(OP_ABS, r, 0)
-            }
+            ExprNode::Min(children) => self.lower_nary(arena, children, OP_MIN, f64::INFINITY),
+            ExprNode::Max(children) => self.lower_nary(arena, children, OP_MAX, f64::NEG_INFINITY),
             // OP_LINEAR requires a non-empty range (see `eval_tape`), so a
             // coefficient-free Linear node lowers to its constant.
             ExprNode::Linear { coeffs, constant } if coeffs.is_empty() => {
@@ -334,5 +370,33 @@ impl Builder {
             acc = self.push(op, acc, r);
         }
         acc
+    }
+}
+
+fn unary_opcode(op: UnaryOp) -> u32 {
+    match op {
+        UnaryOp::Neg => OP_NEG,
+        UnaryOp::Abs => OP_ABS,
+        UnaryOp::Sqrt => OP_SQRT,
+        UnaryOp::Cbrt => OP_CBRT,
+        UnaryOp::Exp => OP_EXP,
+        UnaryOp::Exp2 => OP_EXP2,
+        UnaryOp::Expm1 => OP_EXPM1,
+        UnaryOp::Log => OP_LOG,
+        UnaryOp::Log2 => OP_LOG2,
+        UnaryOp::Log10 => OP_LOG10,
+        UnaryOp::Log1p => OP_LOG1P,
+        UnaryOp::Sin => OP_SIN,
+        UnaryOp::Cos => OP_COS,
+        UnaryOp::Tan => OP_TAN,
+        UnaryOp::Asin => OP_ASIN,
+        UnaryOp::Acos => OP_ACOS,
+        UnaryOp::Atan => OP_ATAN,
+        UnaryOp::Sinh => OP_SINH,
+        UnaryOp::Cosh => OP_COSH,
+        UnaryOp::Tanh => OP_TANH,
+        UnaryOp::Asinh => OP_ASINH,
+        UnaryOp::Acosh => OP_ACOSH,
+        UnaryOp::Atanh => OP_ATANH,
     }
 }

@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::smallvec;
 
-use crate::arena::{ArenaAccess, Children, ExprArena, ExprId, ExprNode, VarId};
+use crate::arena::{ArenaAccess, Children, ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
 ///
@@ -93,7 +93,7 @@ fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
             Some(LinearTerms { coeffs: Cow::Owned(vec![(*v, 1.0)]), constant: 0.0 })
         }
         ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
-        ExprNode::Neg(inner) => {
+        ExprNode::Unary(UnaryOp::Neg, inner) => {
             let inner = *inner;
             recursive_linear(arena, inner, resolve_params).map(|t| {
                 let mut coeffs = t.coeffs.into_owned();
@@ -173,7 +173,7 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                     constant: 0.0,
                 });
             }
-            ExprNode::Neg(child) => {
+            ExprNode::Unary(UnaryOp::Neg, child) => {
                 return Continue(LinearState::Scale {
                     child: Some(*child),
                     value: None,
@@ -268,7 +268,7 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
     resolve_params: bool,
 ) -> Option<LinearTerms<'a>> {
     let mut negations = 0;
-    while let ExprNode::Neg(child) = arena.get(id) {
+    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.get(id) {
         id = *child;
         negations += 1;
     }
@@ -402,7 +402,7 @@ pub(crate) fn neg_into(arena: &mut (impl ArenaAccess + ?Sized), rhs: ExprId) -> 
         }
         return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
-    arena.push(ExprNode::Neg(rhs))
+    arena.push(ExprNode::Unary(UnaryOp::Neg, rhs))
 }
 
 /// Extract the linear terms of `id`, if any. Used by solver backends to extract
@@ -459,7 +459,7 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
                     sign_stack.push((c, sign));
                 }
             }
-            ExprNode::Neg(inner) => sign_stack.push((*inner, -sign)),
+            ExprNode::Unary(UnaryOp::Neg, inner) => sign_stack.push((*inner, -sign)),
             _ => {
                 if let Some(t) = as_linear(arena, cur, true) {
                     for &(v, c) in t.coeffs.iter() {
@@ -575,7 +575,7 @@ mod tests {
         assert!(residual.is_empty());
 
         let y = arena.push(ExprNode::Var(VarId(1)));
-        let nonlinear = arena.push(ExprNode::Sin(y));
+        let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, y));
         let mixed = arena.push(ExprNode::Add(smallvec::smallvec![linear, nonlinear]));
         let (split, residual) = split_linear(&arena, mixed);
         assert!(matches!(split.coeffs, Cow::Owned(_)));
@@ -678,7 +678,7 @@ mod tests {
         let pow = arena.push(ExprNode::Pow(x, two));
         assert_eq!(describe_nonlinear_term(&arena, pow, &names).as_deref(), Some("x^2"));
 
-        let s = arena.push(ExprNode::Sin(x));
+        let s = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
         assert_eq!(describe_nonlinear_term(&arena, s, &names).as_deref(), Some("sin(x)"));
 
         let div = arena.push(ExprNode::Div(x, y));

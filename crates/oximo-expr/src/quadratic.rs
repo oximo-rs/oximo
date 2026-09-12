@@ -1,6 +1,6 @@
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
-use crate::arena::{ExprArena, ExprId, ExprNode, VarId};
+use crate::arena::{ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 
 /// Quadratic decomposition of an expression: its Hessian, gradient-linear
 /// part, and constant.
@@ -123,7 +123,7 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
             }
             Some(Poly { quad: FxHashMap::default(), linear, constant: *constant })
         }
-        ExprNode::Neg(inner) => recursive_poly(arena, *inner).map(Poly::neg),
+        ExprNode::Unary(UnaryOp::Neg, inner) => recursive_poly(arena, *inner).map(Poly::neg),
         ExprNode::Add(children) => {
             let mut acc = Poly::default();
             for child in children {
@@ -167,11 +167,10 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
         }
         ExprNode::Param(p) => Some(Poly::constant(arena.param_value(*p))),
         ExprNode::Div(_, _)
-        | ExprNode::Sin(_)
-        | ExprNode::Cos(_)
-        | ExprNode::Exp(_)
-        | ExprNode::Log(_)
-        | ExprNode::Abs(_) => None,
+        | ExprNode::Atan2(_, _)
+        | ExprNode::Min(_)
+        | ExprNode::Max(_)
+        | ExprNode::Unary(_, _) => None,
     }
 }
 
@@ -208,7 +207,9 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
             }
             ExprNode::Add(c) => (c.as_slice(), PolyOp::Add, Poly::default()),
             ExprNode::Mul(c) => (c.as_slice(), PolyOp::Mul, Poly::constant(1.0)),
-            ExprNode::Neg(c) => (std::slice::from_ref(c), PolyOp::Neg, Poly::default()),
+            ExprNode::Unary(UnaryOp::Neg, c) => {
+                (std::slice::from_ref(c), PolyOp::Neg, Poly::default())
+            }
             ExprNode::Pow(base, exp) => {
                 let ExprNode::Const(e) = self.0.get(*exp) else { return Break(None) };
                 if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
@@ -280,7 +281,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
 
 fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
     let mut negations = 0;
-    while let ExprNode::Neg(child) = arena.get(id) {
+    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.get(id) {
         id = *child;
         negations += 1;
     }
@@ -448,7 +449,7 @@ mod tests {
         let two = a.push(ExprNode::Const(2.0));
         let sq = a.push(ExprNode::Pow(x, two));
         let inner = a.push(ExprNode::Add(smallvec![sq, x]));
-        let neg = a.push(ExprNode::Neg(inner));
+        let neg = a.push(ExprNode::Unary(UnaryOp::Neg, inner));
         let q = extract_quadratic(&a, neg).unwrap();
         assert_eq!(q.hessian, vec![(v(0), v(0), -2.0)]);
         assert_eq!(q.linear, vec![(v(0), -1.0)]);
@@ -477,7 +478,7 @@ mod tests {
     fn transcendental_is_none() {
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
-        let s = a.push(ExprNode::Sin(x));
+        let s = a.push(ExprNode::Unary(UnaryOp::Sin, x));
         assert!(extract_quadratic(&a, s).is_none());
     }
 

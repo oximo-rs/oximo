@@ -22,7 +22,7 @@ fn main() {
     }
     let mut root = arena.push(ExprNode::Mul(smallvec![param, vars[0]]));
     for _ in 0..256 {
-        root = arena.push(ExprNode::Neg(root));
+        root = arena.push(ExprNode::Unary(oximo_expr::UnaryOp::Neg, root));
     }
     support::measure("linear_deep/256", || extract_linear(&arena, root).unwrap());
     support::measure("quadratic_deep/256", || extract_quadratic(&arena, root).unwrap());

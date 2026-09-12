@@ -95,6 +95,78 @@ fn gams_nlp_duals_at_local_point() {
 }
 
 #[test]
+fn gams_continuous_abs_routes_to_dnlp() {
+    let m = Model::new("dnlp_abs");
+    variable!(m, -10.0 <= x <= 10.0);
+    objective!(m, Min, (x - 2.0).abs());
+
+    let result = Gams::new().solve(&m, &GamsOptions::default()).unwrap();
+    assert!(result.has_solution(), "termination={:?}", result.termination);
+    assert!((result.value_of(x).unwrap() - 2.0).abs() < 1e-5);
+    assert!(result.objective().unwrap().abs() < 1e-5);
+}
+
+#[test]
+fn gams_generated_supported_nonlinear_vocabulary_solves() {
+    let x_value: f64 = 0.5;
+    let y_value: f64 = 1.5;
+    let m = Model::new("dnlp_supported_functions");
+    variable!(m, 0.1 <= x <= 2.0);
+    variable!(m, 0.1 <= y <= 2.0);
+    m.fix(x, x_value);
+    m.fix(y, y_value);
+
+    let expression = (x - y).abs()
+        + x.sqrt()
+        + y.exp2()
+        + x.exp()
+        + x.log()
+        + x.log2()
+        + y.log10()
+        + x.sin()
+        + x.cos()
+        + x.tan()
+        + (x / 2.0).asin()
+        + (x / 2.0).acos()
+        + x.atan()
+        + x.sinh()
+        + y.cosh()
+        + x.tanh()
+        + x.atan2(y)
+        + x.min(y)
+        + x.max(y);
+    objective!(m, Min, expression);
+
+    let opts = GamsOptions::default()
+        .solver(GamsSolverConfig::Conopt(GamsConoptOptions::default()))
+        .time_limit(Duration::from_secs(30));
+    let result = Gams::new().solve(&m, &opts).expect("solve generated nonlinear vocabulary");
+    assert!(result.has_solution(), "termination={:?}", result.termination);
+
+    let expected = (x_value - y_value).abs()
+        + x_value.sqrt()
+        + y_value.exp2()
+        + x_value.exp()
+        + x_value.ln()
+        + x_value.log2()
+        + y_value.log10()
+        + x_value.sin()
+        + x_value.cos()
+        + x_value.tan()
+        + (x_value / 2.0).asin()
+        + (x_value / 2.0).acos()
+        + x_value.atan()
+        + x_value.sinh()
+        + y_value.cosh()
+        + x_value.tanh()
+        + x_value.atan2(y_value)
+        + x_value.min(y_value)
+        + x_value.max(y_value);
+    let actual = result.objective().expect("objective");
+    assert!((actual - expected).abs() < 1e-5, "objective={actual}, expected={expected}");
+}
+
+#[test]
 fn gams_mip_duals_at_fixed_point() {
     // max 2a + 3b  s.t.  a + b <= 1,  a, b binary.
     // Ask CPLEX to re-solve with integers fixed, so `.m` carries the duals

@@ -149,28 +149,30 @@ impl GamsSolverConfig {
     }
 }
 
-/// GAMS solve types a named solver supports, restricted to the six oximo can
-/// emit: `LP` / `MIP` / `NLP` / `MINLP` / `QCP` / `MIQCP`. `None` means the
+/// GAMS solve types a named solver supports, restricted to the seven oximo can
+/// emit: `LP` / `MIP` / `NLP` / `DNLP` / `MINLP` / `QCP` / `MIQCP`. `None` means the
 /// name is unrecognized and cannot be validated.
 ///
 /// Transcribed from the GAMS solver/model-type matrix (other model types
-/// (`MCP`, `MPEC`, `CNS`, `DNLP`, `EMP`, stochastic) are omitted because oximo
+/// (`MCP`, `MPEC`, `CNS`, `EMP`, stochastic) are omitted because oximo
 /// never emits them):
 /// - "GAMS Solver Manuals," GAMS Development Corporation.
 ///   <https://www.gams.com/latest/docs/S_MAIN.html#SOLVERS_MODEL_TYPES> (accessed May 14, 2026).
 fn supported_solve_types(gams_name: &str) -> Option<&'static [&'static str]> {
     Some(match gams_name {
         "ALPHAECP" | "DICOPT" | "SBB" | "SHOT" => &["MINLP", "MIQCP"],
-        "CONOPT" | "CONOPT3" | "CONOPT4" | "IPOPT" | "MINOS" | "SNOPT" => &["LP", "NLP", "QCP"],
+        "CONOPT" | "CONOPT3" | "CONOPT4" | "IPOPT" | "MINOS" | "SNOPT" => {
+            &["LP", "NLP", "DNLP", "QCP"]
+        }
         "DECIS" | "SOPLEX" | "QUADMINOS" => &["LP"],
         "CBC" | "GLPK" | "HIGHS" => &["LP", "MIP"],
         "ODHCPLEX" => &["MIP", "MIQCP"],
         "COPT" | "CPLEX" => &["LP", "MIP", "QCP", "MIQCP"],
-        "ANTIGONE" => &["NLP", "MINLP", "QCP", "MIQCP"],
-        "KNITRO" => &["LP", "NLP", "MINLP", "QCP", "MIQCP"],
-        "SCIP" => &["MIP", "NLP", "MINLP", "QCP", "MIQCP"],
+        "ANTIGONE" => &["NLP", "DNLP", "MINLP", "QCP", "MIQCP"],
+        "KNITRO" => &["LP", "NLP", "DNLP", "MINLP", "QCP", "MIQCP"],
+        "SCIP" => &["MIP", "NLP", "DNLP", "MINLP", "QCP", "MIQCP"],
         "BARON" | "GUROBI" | "GUSS" | "KESTREL" | "LINDO" | "LINDOGLOBAL" | "MOSEK" | "XPRESS" => {
-            &["LP", "MIP", "NLP", "MINLP", "QCP", "MIQCP"]
+            &["LP", "MIP", "NLP", "DNLP", "MINLP", "QCP", "MIQCP"]
         }
         // JAMS (EMP), MILES (MCP), NLPEC (MCP/MPEC), PATH (MCP/MPEC/CNS),
         // RESHOP (EMP) support none of the model types oximo emits.

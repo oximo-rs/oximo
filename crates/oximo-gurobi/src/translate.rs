@@ -17,7 +17,7 @@ use oximo_solver::{
 use rustc_hash::FxHashMap;
 
 use crate::GurobiOptions;
-use crate::nonlinear::{GeneratedConstraint, LoweredExpr, LoweringCtx, lower};
+use crate::nonlinear::{GeneratedConstraint, LoweredExpr, LoweringCtx, lower, validate_supported};
 use crate::options::apply as apply_options;
 
 pub(crate) fn map_gurobi_err(e: gurobi_rs::Error) -> SolverError {
@@ -38,6 +38,7 @@ pub(crate) fn map_gurobi_err(e: gurobi_rs::Error) -> SolverError {
 /// Panics if model variable or constraint indices overflow `u32`.
 pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
+    validate_model_operators(model)?;
     let env = default_env()?;
     let mut built = build(model, opts, &env)?;
     run_and_collect(&mut built, kind)
@@ -68,6 +69,7 @@ pub(crate) struct Built {
 /// Returns a [`SolverError`] if the model contains nonlinear expressions Gurobi
 /// cannot represent or Gurobi reports an error during setup.
 pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
+    validate_model_operators(model)?;
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();
     let nonlinear_kind = matches!(
@@ -134,6 +136,23 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         obj_constant,
         has_semi,
     })
+}
+
+fn validate_model_operators(model: &Model) -> Result<(), SolverError> {
+    let arena = model.arena();
+    let mut roots = Vec::new();
+    if let Some(objective) = model.objective().as_ref() {
+        roots.push(objective.expr);
+    }
+    roots.extend(
+        model
+            .constraints()
+            .algebraic()
+            .iter()
+            .filter(|constraint| constraint.active)
+            .map(|constraint| constraint.lhs),
+    );
+    validate_supported(&arena, roots)
 }
 
 /// Optimize a built model and assemble the generic [`SolverResult`]. Shared by the

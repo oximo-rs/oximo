@@ -66,6 +66,22 @@ fn baron_lp_duals_and_reduced_costs() {
 }
 
 #[test]
+fn baron_accepts_per_constraint_convexity_hint() {
+    let m = Model::new("convex_hint");
+    variable!(m, -1.0 <= x <= 1.0);
+    variable!(m, -1.0 <= y <= 1.0);
+    let disk = constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
+    objective!(m, Min, x + y);
+
+    let options =
+        BaronOptions::default().convex_equations([disk]).time_limit(Duration::from_secs(30));
+    let result = Baron::new().solve(&m, &options).expect("solve with convex-equation hint");
+
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    assert!((result.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
+}
+
+#[test]
 fn baron_milp_duals_at_best_point() {
     // max 2a + 3b  s.t.  a + b <= 1,  a, b binary.
     // Optimal: (0, 1), obj 3.

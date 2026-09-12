@@ -39,6 +39,113 @@ impl ParamId {
 
 pub type Children = SmallVec<[ExprId; 4]>;
 
+/// Unary scalar functions represented by [`ExprNode::Unary`].
+///
+/// This enum is public so expression consumers can exhaustively describe the
+/// nonlinear vocabulary they support. Adding a variant is therefore a
+/// deliberate source-breaking extension for exhaustive matches.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+    Neg,
+    Abs,
+    Sqrt,
+    Cbrt,
+    Exp,
+    Exp2,
+    Expm1,
+    Log,
+    Log2,
+    Log10,
+    Log1p,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+}
+
+impl UnaryOp {
+    /// Canonical modeling-language spelling used in rendering and diagnostics.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Neg => "neg",
+            Self::Abs => "abs",
+            Self::Sqrt => "sqrt",
+            Self::Cbrt => "cbrt",
+            Self::Exp => "exp",
+            Self::Exp2 => "exp2",
+            Self::Expm1 => "expm1",
+            Self::Log => "log",
+            Self::Log2 => "log2",
+            Self::Log10 => "log10",
+            Self::Log1p => "log1p",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Asin => "asin",
+            Self::Acos => "acos",
+            Self::Atan => "atan",
+            Self::Sinh => "sinh",
+            Self::Cosh => "cosh",
+            Self::Tanh => "tanh",
+            Self::Asinh => "asinh",
+            Self::Acosh => "acosh",
+            Self::Atanh => "atanh",
+        }
+    }
+
+    /// Apply this operation with Rust's IEEE-754 `f64` semantics.
+    #[must_use]
+    #[inline]
+    pub fn apply(self, value: f64) -> f64 {
+        match self {
+            Self::Neg => -value,
+            Self::Abs => value.abs(),
+            Self::Sqrt => value.sqrt(),
+            Self::Cbrt => value.cbrt(),
+            Self::Exp => value.exp(),
+            Self::Exp2 => value.exp2(),
+            Self::Expm1 => value.exp_m1(),
+            Self::Log => value.ln(),
+            Self::Log2 => value.log2(),
+            Self::Log10 => value.log10(),
+            Self::Log1p => value.ln_1p(),
+            Self::Sin => value.sin(),
+            Self::Cos => value.cos(),
+            Self::Tan => value.tan(),
+            Self::Asin => value.asin(),
+            Self::Acos => value.acos(),
+            Self::Atan => value.atan(),
+            Self::Sinh => value.sinh(),
+            Self::Cosh => value.cosh(),
+            Self::Tanh => value.tanh(),
+            Self::Asinh => value.asinh(),
+            Self::Acosh => value.acosh(),
+            Self::Atanh => value.atanh(),
+        }
+    }
+
+    /// Whether this operation is nonsmooth on its ordinary real domain.
+    #[must_use]
+    pub const fn is_nonsmooth(self) -> bool {
+        matches!(self, Self::Abs)
+    }
+}
+
+impl std::fmt::Display for UnaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Here we use a linear fast-path: `sum(coeff * var) + constant`.
 /// Built by the operator overloads when all children are linear,
 /// so LP/MILP construction never walks an `Add(Mul(Const, Var), ...)` tree.
@@ -50,15 +157,20 @@ pub enum ExprNode {
     Param(ParamId),
     Add(Children),
     Mul(Children),
-    Neg(ExprId),
+    /// Unary scalar operation.
+    Unary(UnaryOp, ExprId),
     Pow(ExprId, ExprId),
     Div(ExprId, ExprId),
-    Sin(ExprId),
-    Cos(ExprId),
-    Exp(ExprId),
-    Log(ExprId),
-    Abs(ExprId),
-    Linear { coeffs: Vec<(VarId, f64)>, constant: f64 },
+    /// Two-argument arctangent in `y.atan2(x)` order.
+    Atan2(ExprId, ExprId),
+    /// N-ary minimum.
+    Min(Children),
+    /// N-ary maximum.
+    Max(Children),
+    Linear {
+        coeffs: Vec<(VarId, f64)>,
+        constant: f64,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -674,18 +786,16 @@ impl ExprArenaBatchGuard<'_> {
 
 fn validate_node(node: &ExprNode, remap: ExprIdRemap) {
     match node {
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             for child in children {
                 remap.validate(*child);
             }
         }
-        ExprNode::Neg(child)
-        | ExprNode::Sin(child)
-        | ExprNode::Cos(child)
-        | ExprNode::Exp(child)
-        | ExprNode::Log(child)
-        | ExprNode::Abs(child) => remap.validate(*child),
-        ExprNode::Pow(left, right) | ExprNode::Div(left, right) => {
+        ExprNode::Unary(_, child) => remap.validate(*child),
+        ExprNode::Pow(left, right) | ExprNode::Div(left, right) | ExprNode::Atan2(left, right) => {
             remap.validate(*left);
             remap.validate(*right);
         }
@@ -701,18 +811,16 @@ impl Drop for ExprArenaBatchGuard<'_> {
 
 fn remap_node(node: &mut ExprNode, remap: ExprIdRemap) {
     match node {
-        ExprNode::Add(children) | ExprNode::Mul(children) => {
+        ExprNode::Add(children)
+        | ExprNode::Mul(children)
+        | ExprNode::Min(children)
+        | ExprNode::Max(children) => {
             for child in children {
                 *child = remap.apply(*child);
             }
         }
-        ExprNode::Neg(child)
-        | ExprNode::Sin(child)
-        | ExprNode::Cos(child)
-        | ExprNode::Exp(child)
-        | ExprNode::Log(child)
-        | ExprNode::Abs(child) => *child = remap.apply(*child),
-        ExprNode::Pow(left, right) | ExprNode::Div(left, right) => {
+        ExprNode::Unary(_, child) => *child = remap.apply(*child),
+        ExprNode::Pow(left, right) | ExprNode::Div(left, right) | ExprNode::Atan2(left, right) => {
             *left = remap.apply(*left);
             *right = remap.apply(*right);
         }
@@ -799,7 +907,7 @@ mod tests {
             cell.__with_fork(snapshot.clone(), || Expr::constant(&cell, 1.0)),
             cell.__with_fork(snapshot, || Expr::constant(&cell, 2.0)),
         ];
-        forks[1].nodes.push(ExprNode::Neg(ExprId(u32::MAX)));
+        forks[1].nodes.push(ExprNode::Unary(UnaryOp::Neg, ExprId(u32::MAX)));
         assert!(catch_unwind(AssertUnwindSafe(|| batch.merge(&mut forks))).is_err());
         assert_eq!(batch.arena.len(), 0);
         assert_eq!(forks[0].nodes.len(), 1);

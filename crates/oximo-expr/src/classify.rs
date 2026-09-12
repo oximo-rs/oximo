@@ -1,4 +1,4 @@
-use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode};
+use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode, UnaryOp};
 
 /// Highest-degree polynomial class an expression belongs to, ignoring constant
 /// folding. Used by backends to pick between linear, quadratic, and general
@@ -57,7 +57,7 @@ fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
     match arena.get(id) {
         ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
         ExprNode::Var(_) | ExprNode::Linear { .. } => Degree::One,
-        ExprNode::Neg(inner) => recursive_degree(arena, *inner),
+        ExprNode::Unary(UnaryOp::Neg, inner) => recursive_degree(arena, *inner),
         ExprNode::Add(children) => {
             let mut d = Degree::Zero;
             for c in children {
@@ -98,11 +98,10 @@ fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
         // `Div` node is created, so any other `Div` has a non-constant
         // denominator.
         ExprNode::Div(_, _)
-        | ExprNode::Sin(_)
-        | ExprNode::Cos(_)
-        | ExprNode::Exp(_)
-        | ExprNode::Log(_)
-        | ExprNode::Abs(_) => Degree::Higher,
+        | ExprNode::Atan2(_, _)
+        | ExprNode::Min(_)
+        | ExprNode::Max(_)
+        | ExprNode::Unary(_, _) => Degree::Higher,
     }
 }
 
@@ -130,7 +129,7 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
             ExprNode::Var(_) | ExprNode::Linear { .. } => return Break(Some(Degree::One)),
             ExprNode::Add(c) => (c.as_slice(), DegreeOp::Add),
             ExprNode::Mul(c) => (c.as_slice(), DegreeOp::Mul),
-            ExprNode::Neg(c) => (std::slice::from_ref(c), DegreeOp::Add),
+            ExprNode::Unary(UnaryOp::Neg, c) => (std::slice::from_ref(c), DegreeOp::Add),
             ExprNode::Pow(base, exp) => {
                 let ExprNode::Const(e) = self.0.get(*exp) else {
                     return Break(Some(Degree::Higher));
@@ -174,7 +173,7 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
 }
 
 fn degree(arena: &(impl ArenaAccess + ?Sized), mut id: ExprId) -> Degree {
-    while let ExprNode::Neg(child) = arena.get(id) {
+    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.get(id) {
         id = *child;
     }
     crate::fold::fold(arena, id, DegreeFolder(arena)).expect("degree classification is total")
@@ -262,7 +261,7 @@ mod tests {
     fn nonlinear_sin() {
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
-        let s = a.push(ExprNode::Sin(x));
+        let s = a.push(ExprNode::Unary(UnaryOp::Sin, x));
         assert_eq!(classify(&a, s), ExprClass::Nonlinear);
     }
 
@@ -270,7 +269,7 @@ mod tests {
     fn nonlinear_abs() {
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
-        let s = a.push(ExprNode::Abs(x));
+        let s = a.push(ExprNode::Unary(UnaryOp::Abs, x));
         assert_eq!(classify(&a, s), ExprClass::Nonlinear);
     }
 

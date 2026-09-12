@@ -61,7 +61,10 @@ fn all_model_families_retain_original_entities() {
     let objective = prepared.objective().unwrap().expr;
     assert!(prepared.linear(objective).is_none());
     assert!(prepared.quadratic(objective).is_none());
-    assert!(matches!(prepared.arena().get(objective), oximo_core::ExprNode::Exp(_)));
+    assert!(matches!(
+        prepared.arena().get(objective),
+        oximo_core::ExprNode::Unary(oximo_core::UnaryOp::Exp, _)
+    ));
 }
 
 #[test]

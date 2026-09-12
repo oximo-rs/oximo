@@ -14,7 +14,7 @@ use oximo_core::{
     Constraint, ConstraintId, Domain, Model, ModelKind, Objective, ObjectiveSense, Sense,
     SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType, VarId, Variable,
 };
-use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -45,7 +45,9 @@ pub fn solve(
 ) -> Result<SolverResult, SolverError> {
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();
-    validate_solver(opts, kind)?;
+    let nonsmooth = analyze_gams_expressions(&prepared)?;
+    let solve_type = gams_solve_type_for(kind, nonsmooth);
+    validate_solver_type(opts, kind, solve_type)?;
     let vars = prepared.variables();
     let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
@@ -62,7 +64,7 @@ pub fn solve(
     let mut gms = String::with_capacity(4096);
     let solver_opt = build_model_section(
         &mut gms,
-        kind,
+        solve_type,
         &prepared,
         vars,
         constraints,
@@ -655,7 +657,7 @@ fn solve_status_label(status: i32) -> &'static str {
 #[expect(clippy::too_many_arguments)]
 fn build_model_section(
     gms: &mut String,
-    kind: ModelKind,
+    solve_type: &str,
     prepared: &PreparedExpressions,
     vars: &[Variable],
     constraints: &[Constraint],
@@ -665,7 +667,6 @@ fn build_model_section(
     sense_kw: &str,
     opts: &GamsOptions,
 ) -> Option<(String, String)> {
-    let solve_type = gams_solve_type(kind);
     let solver_opt = build_solver_opt(opts);
 
     write_preamble(gms);
@@ -690,14 +691,21 @@ pub(crate) fn gams_solve_type(kind: ModelKind) -> &'static str {
     }
 }
 
+fn gams_solve_type_for(kind: ModelKind, nonsmooth: bool) -> &'static str {
+    if nonsmooth && kind == ModelKind::NLP { "DNLP" } else { gams_solve_type(kind) }
+}
+
 /// Reject an explicitly selected sub-solver that cannot handle `kind` before
 /// invoking GAMS, so the caller gets a clear error naming the solver and model
 /// type instead of a downstream GAMS compilation failure.
-fn validate_solver(opts: &GamsOptions, kind: ModelKind) -> Result<(), SolverError> {
+fn validate_solver_type(
+    opts: &GamsOptions,
+    kind: ModelKind,
+    solve_type: &str,
+) -> Result<(), SolverError> {
     if let Some(cfg) = &opts.solver
-        && !cfg.supports(kind)
+        && !crate::solver_options::solver_supports_type(cfg.gams_name(), solve_type)
     {
-        let solve_type = gams_solve_type(kind);
         return Err(SolverError::Backend(format!(
             "GAMS solver {} does not support {solve_type} models (model kind {kind:?}); \
             select a solver that supports {solve_type}",
@@ -705,6 +713,88 @@ fn validate_solver(opts: &GamsOptions, kind: ModelKind) -> Result<(), SolverErro
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn validate_solver(opts: &GamsOptions, kind: ModelKind) -> Result<(), SolverError> {
+    validate_solver_type(opts, kind, gams_solve_type(kind))
+}
+
+/// Validate GAMS's expression-local vocabulary and detect active,
+/// variable-dependent nonsmooth primitives that require DNLP routing.
+fn analyze_gams_expressions(prepared: &LoweringContext<'_>) -> Result<bool, SolverError> {
+    let arena = prepared.arena();
+    let mut depends_on_var = vec![false; arena.len()];
+    for (index, node) in arena.nodes().iter().enumerate() {
+        let dep = |id: ExprId| depends_on_var[id.index()];
+        depends_on_var[index] = match node {
+            ExprNode::Const(_) | ExprNode::Param(_) => false,
+            ExprNode::Var(_) => true,
+            ExprNode::Linear { coeffs, .. } => !coeffs.is_empty(),
+            ExprNode::Unary(_, child) => dep(*child),
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => dep(*a) || dep(*b),
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            | ExprNode::Max(children) => children.iter().any(|child| dep(*child)),
+        };
+    }
+
+    let mut roots = Vec::new();
+    if let Some(objective) = prepared.objective() {
+        roots.push(objective.expr);
+    }
+    roots.extend(
+        prepared
+            .constraints()
+            .algebraic()
+            .iter()
+            .filter(|constraint| constraint.active)
+            .map(|constraint| constraint.lhs),
+    );
+    let mut seen = vec![false; arena.len()];
+    let mut nonsmooth = false;
+    while let Some(id) = roots.pop() {
+        if std::mem::replace(&mut seen[id.index()], true) {
+            continue;
+        }
+        match arena.get(id) {
+            ExprNode::Unary(op, child) => {
+                if matches!(
+                    op,
+                    UnaryOp::Cbrt
+                        | UnaryOp::Expm1
+                        | UnaryOp::Log1p
+                        | UnaryOp::Asinh
+                        | UnaryOp::Acosh
+                        | UnaryOp::Atanh
+                ) {
+                    return Err(SolverError::UnsupportedNonlinearOperator {
+                        backend: "GAMS",
+                        operator: op.name(),
+                    });
+                }
+                nonsmooth |= *op == UnaryOp::Abs && depends_on_var[id.index()];
+                roots.push(*child);
+            }
+            ExprNode::Min(children) | ExprNode::Max(children) => {
+                nonsmooth |= depends_on_var[id.index()];
+                roots.extend(children.iter().copied());
+            }
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                roots.extend(children.iter().copied());
+            }
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => {
+                roots.push(*a);
+                roots.push(*b);
+            }
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. } => {}
+        }
+    }
+    Ok(nonsmooth)
 }
 
 fn build_solver_opt(opts: &GamsOptions) -> Option<(String, String)> {
@@ -1082,7 +1172,7 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
             write_linear(gms, &t, true);
             write!(gms, " )").unwrap();
         }
-        ExprNode::Neg(inner) => {
+        ExprNode::Unary(UnaryOp::Neg, inner) => {
             write!(gms, "(-").unwrap();
             write_gams_expr(gms, arena, *inner, true);
             write!(gms, ")").unwrap();
@@ -1136,32 +1226,63 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
             write_gams_expr(gms, arena, *den, true);
             write!(gms, ")").unwrap();
         }
-        ExprNode::Sin(a) => {
-            write!(gms, "sin(").unwrap();
-            write_gams_expr(gms, arena, *a, false);
+        ExprNode::Unary(op, a) => write_gams_unary(gms, arena, *op, *a),
+        ExprNode::Atan2(y, x) => {
+            write!(gms, "arctan2(").unwrap();
+            write_gams_expr(gms, arena, *y, false);
+            write!(gms, ", ").unwrap();
+            write_gams_expr(gms, arena, *x, false);
             write!(gms, ")").unwrap();
         }
-        ExprNode::Cos(a) => {
-            write!(gms, "cos(").unwrap();
-            write_gams_expr(gms, arena, *a, false);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Exp(a) => {
-            write!(gms, "exp(").unwrap();
-            write_gams_expr(gms, arena, *a, false);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Log(a) => {
-            write!(gms, "log(").unwrap();
-            write_gams_expr(gms, arena, *a, false);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Abs(a) => {
-            write!(gms, "abs(").unwrap();
-            write_gams_expr(gms, arena, *a, false);
+        ExprNode::Min(children) | ExprNode::Max(children) => {
+            let name = if matches!(arena.get(id), ExprNode::Min(_)) { "min" } else { "max" };
+            write!(gms, "{name}(").unwrap();
+            for (index, child) in children.iter().enumerate() {
+                if index > 0 {
+                    write!(gms, ", ").unwrap();
+                }
+                write_gams_expr(gms, arena, *child, false);
+            }
             write!(gms, ")").unwrap();
         }
     }
+}
+
+#[inline]
+fn write_gams_unary(gms: &mut String, arena: &ExprArena, op: UnaryOp, child: ExprId) {
+    if op == UnaryOp::Exp2 {
+        write!(gms, "(2 ** ").unwrap();
+        write_gams_expr(gms, arena, child, false);
+        write!(gms, ")").unwrap();
+        return;
+    }
+    let name = match op {
+        UnaryOp::Abs => "abs",
+        UnaryOp::Sqrt => "sqrt",
+        UnaryOp::Exp => "exp",
+        UnaryOp::Log => "log",
+        UnaryOp::Log2 => "log2",
+        UnaryOp::Log10 => "log10",
+        UnaryOp::Sin => "sin",
+        UnaryOp::Cos => "cos",
+        UnaryOp::Tan => "tan",
+        UnaryOp::Asin => "arcsin",
+        UnaryOp::Acos => "arccos",
+        UnaryOp::Atan => "arctan",
+        UnaryOp::Sinh => "sinh",
+        UnaryOp::Cosh => "cosh",
+        UnaryOp::Tanh => "tanh",
+        UnaryOp::Neg | UnaryOp::Exp2 => unreachable!(),
+        UnaryOp::Cbrt
+        | UnaryOp::Expm1
+        | UnaryOp::Log1p
+        | UnaryOp::Asinh
+        | UnaryOp::Acosh
+        | UnaryOp::Atanh => unreachable!("GAMS expression validation rejects {op}"),
+    };
+    write!(gms, "{name}(").unwrap();
+    write_gams_expr(gms, arena, child, false);
+    write!(gms, ")").unwrap();
 }
 
 /// Format an `f64` for use in a GAMS file.
@@ -1338,10 +1459,13 @@ mod tests {
             ObjectiveSense::Maximize => "maximizing",
         };
         let mut gms = String::new();
+        let prepared = LoweringContext::new(model).unwrap();
+        let solve_type =
+            gams_solve_type_for(model.kind(), analyze_gams_expressions(&prepared).unwrap());
         build_model_section(
             &mut gms,
-            model.kind(),
-            &LoweringContext::new(model).unwrap(),
+            solve_type,
+            &prepared,
             &vars,
             constraints,
             &socs,
@@ -1554,7 +1678,7 @@ mod tests {
         variable!(m, -5.0 <= x <= 5.0);
         objective!(m, Min, x.abs());
         let gms = render(&m, &GamsOptions::default());
-        assert!(gms.contains("Solve oximo_m using NLP minimizing v_obj;"), "got:\n{gms}");
+        assert!(gms.contains("Solve oximo_m using DNLP minimizing v_obj;"), "got:\n{gms}");
         assert!(gms.contains("abs("), "expected abs(...) in objective:\n{gms}");
     }
 
@@ -1568,6 +1692,67 @@ mod tests {
         let gms = render(&m, &GamsOptions::default());
         assert!(gms.contains("Solve oximo_m using MINLP maximizing v_obj;"), "got:\n{gms}");
         assert!(gms.contains("log("), "expected log(...) in objective:\n{gms}");
+    }
+
+    #[test]
+    fn min_max_render_natively_and_mixed_integer_nonsmooth_stays_minlp() {
+        let m = Model::new("nonsmooth_minlp");
+        variable!(m, b, Bin);
+        variable!(m, -2.0 <= x <= 2.0);
+        objective!(m, Max, x.min(b - x).max(x + b));
+        let gms = render(&m, &GamsOptions::default());
+        assert!(gms.contains("min("), "{gms}");
+        assert!(gms.contains("max("), "{gms}");
+        assert!(gms.contains("Solve oximo_m using MINLP maximizing v_obj;"), "{gms}");
+    }
+
+    #[test]
+    fn added_smooth_functions_render_with_gams_spellings() {
+        let m = Model::new("gams_functions");
+        variable!(m, 0.5 <= x <= 0.9);
+        let e = x.sqrt()
+            + x.exp2()
+            + x.tan()
+            + x.asin()
+            + x.acos()
+            + x.atan()
+            + x.sinh()
+            + x.cosh()
+            + x.tanh()
+            + x.log2()
+            + x.log10()
+            + x.atan2(x + 1.0);
+        objective!(m, Min, e);
+        let gms = render(&m, &GamsOptions::default());
+        for spelling in [
+            "sqrt(", "2 ** ", "tan(", "arcsin(", "arccos(", "arctan(", "sinh(", "cosh(", "tanh(",
+            "log2(", "log10(", "arctan2(",
+        ] {
+            assert!(gms.contains(spelling), "missing {spelling}:\n{gms}");
+        }
+        assert!(gms.contains("using NLP"), "{gms}");
+    }
+
+    #[test]
+    fn unsupported_gams_unary_families_fail_with_typed_error() {
+        for name in ["cbrt", "expm1", "log1p", "asinh"] {
+            let m = Model::new(name);
+            variable!(m, x);
+            let expr = match name {
+                "cbrt" => x.cbrt(),
+                "expm1" => x.expm1(),
+                "log1p" => x.log1p(),
+                "asinh" => x.asinh(),
+                _ => unreachable!(),
+            };
+            objective!(m, Min, expr);
+            let prepared = LoweringContext::new(&m).unwrap();
+            assert!(matches!(
+                analyze_gams_expressions(&prepared),
+                Err(SolverError::UnsupportedNonlinearOperator { backend: "GAMS", operator })
+                    if operator == name
+            ));
+        }
     }
 
     #[test]
@@ -1740,6 +1925,21 @@ mod tests {
         // IPOPT does LP/NLP/QCP only, so the integer kinds must be rejected.
         assert!(validate_solver(&o, ModelKind::MILP).is_err());
         assert!(validate_solver(&o, ModelKind::MIQP).is_err());
+    }
+
+    #[test]
+    fn nonsmooth_nlp_routes_to_dnlp_and_checks_subsolver_capability() {
+        use crate::solver_options::{GamsCplexOptions, GamsIpoptOptions, GamsSolverConfig};
+        assert_eq!(gams_solve_type_for(ModelKind::NLP, true), "DNLP");
+        assert_eq!(gams_solve_type_for(ModelKind::NLP, false), "NLP");
+        assert_eq!(gams_solve_type_for(ModelKind::MINLP, true), "MINLP");
+
+        let ipopt =
+            GamsOptions::default().solver(GamsSolverConfig::Ipopt(GamsIpoptOptions::default()));
+        assert!(validate_solver_type(&ipopt, ModelKind::NLP, "DNLP").is_ok());
+        let cplex =
+            GamsOptions::default().solver(GamsSolverConfig::Cplex(GamsCplexOptions::default()));
+        assert!(validate_solver_type(&cplex, ModelKind::NLP, "DNLP").is_err());
     }
 
     #[test]

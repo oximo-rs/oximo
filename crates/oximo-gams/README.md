@@ -2,7 +2,7 @@
 
 GAMS backend for [oximo](https://github.com/oximo-rs/oximo).
 
-Writes an oximo `Model` to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP`, `MILP`, `QP`, `MIQP`, `QCP`, `MIQCP`, `SOCP`, `MISOCP`, `NLP`, and `MINLP` model kinds, including native `SOS1` and `SOS2` constraints.
+Writes an oximo `Model` to a temporary `.gms` file, invokes the GAMS executable via `std::process::Command`, and parses the solution from a PUT-generated text file. Supports `LP`, `MILP`, `QP`, `MIQP`, `QCP`, `MIQCP`, `SOCP`, `MISOCP`, `NLP`, `DNLP`, and `MINLP` solve types, including native `SOS1` and `SOS2` constraints.
 
 The sub-solver is determined by the GAMS installation (default) or set explicitly via `GamsOptions::solver`. Any solver available in your GAMS distribution can be targeted, see [Sub-solver selection](#sub-solver-selection) below.
 
@@ -101,8 +101,18 @@ let opts = GamsOptions::default()
 ## Sub-solver selection
 
 Pass a `GamsSolverConfig` to `.solver(...)` to select a GAMS sub-solver. This emits
-`option {LP|MIP|NLP|MINLP|QCP|MIQCP} = <NAME>;` in the generated `.gms` file, scoped to
-the solve type resolved from `Model::kind()` (`QP` -> `QCP`, `MIQP` -> `MIQCP`).
+`option {LP|MIP|NLP|DNLP|MINLP|QCP|MIQCP} = <NAME>;` in the generated `.gms` file,
+scoped to the solve type resolved from the model (`QP` -> `QCP`, `MIQP` -> `MIQCP`,
+and continuous variable-dependent `abs`/`min`/`max` -> `DNLP`).
+
+### Nonlinear expressions
+
+GAMS receives exact native expressions for `sqrt`, `exp2` (as `2 ** x`), the
+trigonometric and inverse-trigonometric functions, `sinh`/`cosh`/`tanh`,
+`log2`, `log10`, `atan2`, `min`, and `max`. Continuous variable-dependent
+`abs`, `min`, and `max` route to `DNLP`, while mixed-integer models remain `MINLP`.
+`cbrt`, `expm1`, `log1p`, and inverse-hyperbolic functions return a typed
+unsupported-operator error.
 
 ```rust
 use oximo_gams::{GamsOptions, GamsSolver, GamsSolverConfig};

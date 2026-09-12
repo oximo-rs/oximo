@@ -12,6 +12,8 @@ pub enum IoError {
     Conic,
     #[error("unsupported expression node in NL writer: {0}")]
     UnsupportedNode(&'static str),
+    #[error("AMPL .nl does not document an encoding for nonlinear operator {operator}")]
+    UnsupportedNonlinearOperator { operator: &'static str },
     #[error("variable domain {0} is not representable in NL")]
     UnsupportedDomain(&'static str),
     #[error("variable {0} is used in an expression but was not added to this model")]

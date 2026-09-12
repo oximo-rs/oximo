@@ -19,6 +19,7 @@ This crate is the fundamental layer. End users depend on `oximo-core`, which re-
 | `ExprArenaCell` | Synchronized owner used by expression handles           |
 | `ExprId`        | Newtype `u32` index into an arena                       |
 | `ExprNode`      | Enum of all node kinds (see below)                      |
+| `UnaryOp`       | Public enum of unary scalar operations                  |
 | `Expr<'a>`      | Lightweight handle: `id` + borrow of the arena. `Copy`. |
 | `VarId`         | Opaque variable index                                   |
 | `ParamId`       | Opaque parameter index                                  |
@@ -32,11 +33,11 @@ Var(VarId)
 Param(ParamId)
 Add(Children) // generic n-ary add
 Mul(Children) // generic n-ary mul
-Neg(ExprId)
+Unary(UnaryOp, ExprId)
 Pow(ExprId, ExprId)
 Div(ExprId, ExprId) // numerator / denominator
-Sin(ExprId) / Cos(ExprId) / Exp(ExprId) / Log(ExprId)
-Abs(ExprId)
+Atan2(ExprId, ExprId) // y, x order
+Min(Children) / Max(Children)
 Linear { coeffs: Vec<(VarId, f64)>, constant: f64 } // LP fast-path
 ```
 
@@ -60,11 +61,25 @@ let e = x / 2.0; // constant denominator: stays linear (x*0.5)
 expr.pow(exponent) // Expr ^ Expr
 expr.powi(n: i32)  // integer exponent shorthand
 expr.powf(n: f64)  // float exponent shorthand
+expr.neg()         // explicit UnaryOp::Neg (the `-expr` operator keeps affine lowering)
 expr.sin()
 expr.cos()
+expr.tan()
 expr.exp()
-expr.log()
+expr.exp2()
+expr.expm1() // alias: exp_m1()
+expr.log()   // alias: ln()
+expr.log1p() // alias: ln_1p()
+expr.log2()
+expr.log10()
 expr.abs()
+expr.sqrt()
+expr.cbrt()
+expr.asin() / expr.acos() / expr.atan()
+expr.sinh() / expr.cosh() / expr.tanh()
+expr.asinh() / expr.acosh() / expr.atanh()
+expr.atan2(x) // self is y
+expr.min(other) / expr.max(other) // flattened n-ary nodes
 expr/expr
 ```
 
