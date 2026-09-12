@@ -218,7 +218,7 @@ impl<'a> Expr<'a> {
         }
         assert!(same_arena, "expressions belong to different arenas");
         if ids.len() == 1 {
-            return Some(first);
+            return Some(Self::new(ids[0], first.arena));
         }
         let id = first.arena.with_mut(|arena| {
             arena.push(if is_min { ExprNode::Min(ids) } else { ExprNode::Max(ids) })

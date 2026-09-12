@@ -138,3 +138,29 @@ fn pairwise_min_and_max_flatten_both_sides_in_stable_order() {
     assert_eq!(render_expr(&snapshot, minimum.id, &|v| format!("x{}", v.0)), "min(x0, x1, x2, x3)");
     assert_eq!(render_expr(&snapshot, maximum.id, &|v| format!("x{}", v.0)), "max(x0, x1, x2, x3)");
 }
+
+#[test]
+fn extrema_term_helpers_return_the_only_flattened_child() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let (empty_min, empty_max, child) = {
+        let mut nodes = arena.borrow_mut();
+        (
+            nodes.push(ExprNode::Min(Default::default())),
+            nodes.push(ExprNode::Max(Default::default())),
+            nodes.push(ExprNode::Const(7.0)),
+        )
+    };
+    let empty_min = Expr::new(empty_min, &arena);
+    let empty_max = Expr::new(empty_max, &arena);
+    let child = Expr::new(child, &arena);
+
+    let minimum = Expr::__min_terms([empty_min, child].into_iter()).unwrap();
+    let maximum = Expr::__max_terms([empty_max, child].into_iter()).unwrap();
+
+    assert_eq!(minimum.id, child.id);
+    assert_eq!(maximum.id, child.id);
+    assert_eq!(value(minimum), 7.0);
+    assert_eq!(value(maximum), 7.0);
+    assert_eq!(Expr::__min_terms([child].into_iter()).unwrap().id, child.id);
+    assert_eq!(Expr::__max_terms([child].into_iter()).unwrap().id, child.id);
+}
