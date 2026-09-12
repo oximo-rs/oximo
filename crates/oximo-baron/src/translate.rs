@@ -234,7 +234,8 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
     write_options(&mut bar, opts, RES_NAME, TIM_NAME);
     let var_order = write_var_declarations(&mut bar, vars)?;
     write_bounds(&mut bar, vars);
-    let con_order = write_equations(&mut bar, &prepared, constraints, socs)?;
+    let con_order =
+        write_equations(&mut bar, &prepared, constraints, socs, opts.convex_equation_ids())?;
     write_objective(&mut bar, &prepared, objective)?;
     write_starting_point(&mut bar, vars);
     let soc_bounds = socs
@@ -374,6 +375,7 @@ fn write_equations(
     prepared: &PreparedExpressions,
     constraints: &[Constraint],
     socs: &[SocConstraint],
+    convex_equation_ids: &[ConstraintId],
 ) -> Result<Vec<ConstraintId>, SolverError> {
     let arena = prepared.arena();
     let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
@@ -407,15 +409,59 @@ fn write_equations(
         names.push(format!("soc{i}"));
         names.push(format!("soc{i}_sign"));
     }
+    let convex_names = convex_equation_names(constraints, convex_equation_ids)?;
     if names.is_empty() {
         return Ok(emit_map);
     }
 
     writeln!(bar, "EQUATIONS {};", names.join(", ")).unwrap();
+    if !convex_names.is_empty() {
+        writeln!(bar, "CONVEX_EQUATIONS {};", convex_names.join(", ")).unwrap();
+    }
     bar.push_str(&bodies);
     write_soc_rows(bar, prepared, socs);
     writeln!(bar).unwrap();
     Ok(emit_map)
+}
+
+/// Resolve user-supplied algebraic IDs to the exact BARON row names emitted by
+/// [`write_equations`]. A range becomes two BARON rows and is rejected: asserting
+/// convexity for both sides is not implied by convexity of the combined range.
+fn convex_equation_names(
+    constraints: &[Constraint],
+    requested: &[ConstraintId],
+) -> Result<Vec<String>, SolverError> {
+    let mut names = Vec::with_capacity(requested.len());
+    for &id in requested {
+        let Some(constraint) = constraints.get(id.index()) else {
+            return Err(SolverError::Backend(format!(
+                "BARON convex-equation assertion references unknown algebraic constraint {id:?}"
+            )));
+        };
+        if !constraint.active {
+            return Err(SolverError::Backend(format!(
+                "BARON convex-equation assertion references inactive constraint '{}' ({id:?})",
+                constraint.name
+            )));
+        }
+        if constraint.is_range() {
+            return Err(SolverError::Backend(format!(
+                "BARON convex-equation assertion cannot mark two-sided range constraint '{}' \
+                 ({id:?}); express it as separate single-sided constraints and mark only the \
+                 convex sides",
+                constraint.name
+            )));
+        }
+        let Some((suffix, _, _)) = equation_rows(constraint).into_iter().flatten().next() else {
+            return Err(SolverError::Backend(format!(
+                "BARON convex-equation assertion references constraint '{}' ({id:?}), which \
+                 emits no equation",
+                constraint.name
+            )));
+        };
+        names.push(format!("c{}{suffix}", id.index()));
+    }
+    Ok(names)
 }
 
 /// Emit each explicit SOC constraint `||terms||_2 <= bound` as the polynomial
@@ -1284,7 +1330,7 @@ pub mod benchmark_support {
         let map = if parallel {
             render_parallel(&mut out, &arena, &constraints, &socs)?
         } else {
-            write_equations(&mut out, &arena, &constraints, &socs)?
+            write_equations(&mut out, &arena, &constraints, &socs, &[])?
         };
         std::hint::black_box(map);
         Ok(out)
@@ -1368,6 +1414,64 @@ mod tests {
         assert!(bar.contains("EQUATIONS c0;"), "{bar}");
         assert!(bar.contains("<= 5"), "{bar}");
         assert!(bar.contains("UPPER_BOUNDS{"), "{bar}");
+    }
+
+    #[test]
+    fn convex_equation_hint_names_selected_rows_before_their_definitions() {
+        let m = Model::new("convex_rows");
+        variable!(m, -1.0 <= x <= 1.0);
+        variable!(m, -1.0 <= y <= 1.0);
+        let disk = constraint!(m, disk, x.powi(2) + y.powi(2) <= 1.0);
+        constraint!(m, cap, x + y <= 1.0);
+        objective!(m, Min, x + y);
+
+        let options = BaronOptions::default().convex_equations([disk, disk]);
+        let bar = build_bar(&m, &options).expect("build convex equation hint").0;
+        assert!(bar.contains("EQUATIONS c0, c1;"), "{bar}");
+        assert!(bar.contains("CONVEX_EQUATIONS c0;"), "{bar}");
+        let declaration = bar.find("CONVEX_EQUATIONS c0;").unwrap();
+        let definition = bar.find("c0:").unwrap();
+        assert!(declaration < definition, "declaration must precede equation body:\n{bar}");
+    }
+
+    #[test]
+    fn convex_equation_hint_rejects_unknown_id() {
+        let m = Model::new("unknown_convex_row");
+        variable!(m, 0.0 <= x <= 1.0);
+        constraint!(m, cap, x <= 1.0);
+        objective!(m, Min, x);
+
+        let error =
+            build_bar(&m, &BaronOptions::default().convex_equation(ConstraintId(99))).unwrap_err();
+        assert!(error.to_string().contains("unknown algebraic constraint"), "{error}");
+    }
+
+    #[test]
+    fn convex_equation_hint_rejects_free_and_two_sided_rows() {
+        let m = Model::new("invalid_convex_rows");
+        variable!(m, -1.0 <= x <= 1.0);
+        let free = m.__add_constraint_interval("free", x, f64::NEG_INFINITY, f64::INFINITY);
+        let range = m.__add_constraint_interval("range", x, -0.5, 0.5);
+        objective!(m, Min, x);
+
+        let free_error = build_bar(&m, &BaronOptions::default().convex_equation(free)).unwrap_err();
+        assert!(free_error.to_string().contains("emits no equation"), "{free_error}");
+
+        let range_error =
+            build_bar(&m, &BaronOptions::default().convex_equation(range)).unwrap_err();
+        assert!(range_error.to_string().contains("two-sided range"), "{range_error}");
+    }
+
+    #[test]
+    fn convex_equation_hint_rejects_inactive_row() {
+        let m = Model::new("inactive_convex_row");
+        variable!(m, 0.0 <= x <= 1.0);
+        constraint!(m, cap, x <= 1.0);
+        let mut constraints = m.constraints().algebraic().to_vec();
+        constraints[0].active = false;
+
+        let error = convex_equation_names(&constraints, &[ConstraintId(0)]).unwrap_err();
+        assert!(error.to_string().contains("inactive constraint"), "{error}");
     }
 
     #[test]
@@ -1468,6 +1572,17 @@ mod tests {
         assert!(bar.contains("exp("), "{bar}");
         assert!(bar.contains("log("), "{bar}");
         assert!(!bar.contains('^'), "must not emit caret for variable exponent:\n{bar}");
+    }
+
+    #[test]
+    fn added_functions_use_supported_powers_and_documented_log10_mapping() {
+        let m = Model::new("added_functions");
+        variable!(m, 0.1 <= x <= 10.0);
+        objective!(m, Min, x.sqrt() + x.exp2() + x.log10());
+        let bar = render(&m);
+        assert!(bar.contains(") ^ 0.5)"), "sqrt mapping:\n{bar}");
+        assert!(bar.contains("2 ^ ("), "exp2 mapping:\n{bar}");
+        assert!(bar.contains("0.4342944819032518 * log("), "log10 mapping:\n{bar}");
     }
 
     #[test]

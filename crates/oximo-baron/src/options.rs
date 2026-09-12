@@ -1,6 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
 
+use oximo_core::ConstraintId;
 use oximo_solver::{HasUniversal, UniversalOptions};
 
 /// BARON-specific solver options.
@@ -30,6 +31,7 @@ pub struct BaronOptions {
     dbl_opts: Vec<(&'static str, f64)>,
     str_opts: Vec<(&'static str, String)>,
     raw: Vec<(String, String)>,
+    convex_equation_ids: Vec<ConstraintId>,
 }
 
 /// BARON keywords the backend writes itself; user attempts to set these via
@@ -251,6 +253,38 @@ impl BaronOptions {
         self
     }
 
+    /// Assert that one algebraic constraint defines a convex feasible set.
+    ///
+    /// BARON emits the corresponding row in `CONVEX_EQUATIONS`, allowing it to
+    /// generate supporting hyperplanes for the complete set instead of relaxing
+    /// the expression operation by operation. This is a correctness-sensitive
+    /// assertion: incorrectly marking a nonconvex constraint can make BARON
+    /// return an incorrect answer without warning.
+    ///
+    /// Two-sided range constraints are currently rejected because the BARON
+    /// adapter emits them as separate lower and upper equations. Use two explicit
+    /// single-sided constraints and mark only sides whose feasible sets are known
+    /// to be convex.
+    #[must_use]
+    pub fn convex_equation(self, constraint: ConstraintId) -> Self {
+        self.convex_equations([constraint])
+    }
+
+    /// Assert that each algebraic constraint defines a convex feasible set.
+    ///
+    /// Duplicate IDs are ignored while preserving their first occurrence.
+    /// See [`Self::convex_equation`] for correctness and range-constraint
+    /// requirements.
+    #[must_use]
+    pub fn convex_equations(mut self, constraints: impl IntoIterator<Item = ConstraintId>) -> Self {
+        for constraint in constraints {
+            if !self.convex_equation_ids.contains(&constraint) {
+                self.convex_equation_ids.push(constraint);
+            }
+        }
+        self
+    }
+
     /// Set an arbitrary BARON option by keyword, written verbatim as
     /// `keyword: value;` in the `OPTIONS{ ... }` block. Use this for any option
     /// without a dedicated builder. The `value` is emitted as-is, so use quote
@@ -270,6 +304,10 @@ impl BaronOptions {
     pub(crate) fn has_comp_iis(&self) -> bool {
         self.int_opts.iter().any(|(k, _)| *k == "CompIIS")
             || self.raw.iter().any(|(k, _)| k.eq_ignore_ascii_case("CompIIS"))
+    }
+
+    pub(crate) fn convex_equation_ids(&self) -> &[ConstraintId] {
+        &self.convex_equation_ids
     }
 }
 
@@ -351,6 +389,7 @@ pub fn write_options(bar: &mut String, o: &BaronOptions, res_name: &str, tim_nam
 mod tests {
     use std::time::Duration;
 
+    use oximo_core::ConstraintId;
     use oximo_solver::UniversalOptionsExt;
 
     use super::*;
@@ -374,6 +413,20 @@ mod tests {
         assert_eq!(o.universal.verbose, Some(true));
         assert_eq!(o.dbl_opts, vec![("EpsR", 1e-4)]);
         assert_eq!(o.baron_path.as_deref(), Some(std::path::Path::new("/opt/baron/baron")));
+    }
+
+    #[test]
+    fn convex_equation_builders_preserve_order_and_deduplicate() {
+        let options = BaronOptions::default().convex_equation(ConstraintId(2)).convex_equations([
+            ConstraintId(0),
+            ConstraintId(2),
+            ConstraintId(1),
+        ]);
+
+        assert_eq!(
+            options.convex_equation_ids(),
+            &[ConstraintId(2), ConstraintId(0), ConstraintId(1)]
+        );
     }
 
     #[test]

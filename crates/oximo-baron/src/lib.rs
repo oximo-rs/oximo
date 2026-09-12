@@ -1,9 +1,10 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
-//! References:
-//! N. Sahinidis, BARON User Manual, version 2026.4.12.
-//! The Optimization Firm, LLC, Apr. 12, 2026.
+//! Reference: [N. Sahinidis, *BARON User Manual and Installation Guide*, version
+//! 2026.9.10, The Optimization Firm, LLC, September 10, 2026][baron-manual].
+//!
+//! [baron-manual]: https://minlp-downloads.nyc3.cdn.digitaloceanspaces.com/docs/baron%20manual.pdf
 
 mod options;
 mod translate;
