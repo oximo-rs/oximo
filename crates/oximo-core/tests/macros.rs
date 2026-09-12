@@ -767,6 +767,17 @@ fn extrema_macros_accept_typed_sets() {
 }
 
 #[test]
+fn filtered_extrema_macro_does_not_capture_caller_terms_binding() {
+    let m = Model::new("extrema_hygiene");
+    variable!(m, x);
+    let __terms = x;
+
+    let lo = min!(__terms for i in 0..2 if i == 1);
+
+    assert_eq!(lo.id, x.id);
+}
+
+#[test]
 #[should_panic(expected = "expressions belong to different arenas")]
 fn extrema_macro_rejects_foreign_arenas() {
     let m = Model::new("local_extrema");

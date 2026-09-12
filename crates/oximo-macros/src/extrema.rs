@@ -48,6 +48,7 @@ pub(crate) fn expand(input: TokenStream2, kind: Extremum) -> syn::Result<TokenSt
     };
     let over = format_ident!("{name}_over");
     let terms = format_ident!("{name}_terms");
+    let terms_acc = syn::Ident::new("__terms", proc_macro2::Span::mixed_site());
 
     let Some(cond) = cond else {
         let mut expr = quote!(#body);
@@ -62,7 +63,7 @@ pub(crate) fn expand(input: TokenStream2, kind: Extremum) -> syn::Result<TokenSt
 
     let mut inner = quote! {
         if #cond {
-            __terms.push(#body);
+            #terms_acc.push(#body);
         }
     };
     for b in binds.iter().rev() {
@@ -82,8 +83,8 @@ pub(crate) fn expand(input: TokenStream2, kind: Extremum) -> syn::Result<TokenSt
         };
     }
     Ok(quote! {{
-        let mut __terms = ::std::vec::Vec::new();
+        let mut #terms_acc = ::std::vec::Vec::new();
         #inner
-        #root::__macro_support::#terms(__terms)
+        #root::__macro_support::#terms(#terms_acc)
     }})
 }
