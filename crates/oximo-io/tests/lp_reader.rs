@@ -36,6 +36,25 @@ fn indicator_separator_is_parsed_from_row_body() {
     assert_eq!(model.indicator_constraints()[0].name, "gated");
 }
 
+#[test]
+fn malformed_indicator_triggers_are_rejected() {
+    let cases = [
+        ("b = 1 + 0 -> x <= 2", "indicator trigger must be `binary = 0` or `binary = 1`"),
+        ("1 = 1 -> x <= 2", "indicator trigger must be a variable"),
+        ("b <= 1 -> x <= 2", "indicator trigger needs `=`"),
+        ("b = 2 -> x <= 2", "indicator trigger value must be 0 or 1"),
+        ("b = 1 -> x <= 2 -> y <= 3", "indicator constraint needs exactly one `->`"),
+    ];
+    for (constraint, expected_message) in cases {
+        let text = format!("Minimize\n obj: x\nSubject To\n c: {constraint}\nBinaries\n b\nEnd\n");
+        let err = read_lp(text.as_bytes()).expect_err("malformed indicator should be rejected");
+        match err {
+            IoError::InvalidLp { message, .. } => assert_eq!(message, expected_message),
+            other => panic!("expected invalid LP error, got {other:?}"),
+        }
+    }
+}
+
 fn constraint_terms(model: &Model, index: usize) -> oximo_expr::QuadraticTerms {
     let arena = model.arena();
     extract_quadratic(&arena, model.constraints().algebraic()[index].lhs)
