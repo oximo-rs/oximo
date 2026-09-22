@@ -2,6 +2,22 @@ use std::collections::HashMap;
 use std::io::{self, Read};
 
 use oximo_core::prelude::*;
+
+#[test]
+fn indicator_constraints_round_trip() {
+    let model = Model::new("indicators");
+    variable!(model, b, Binary);
+    variable!(model, x);
+    indicator_constraint!(model, on, b == 1 => x <= 4.0);
+    indicator_constraint!(model, off, b == 0 => x == 0.0);
+    indicator_constraint!(model, band, b == 1 => -2.0 <= x <= 3.0);
+    objective!(model, Min, x);
+    let text = to_mps_string(&model).expect("write indicators");
+    assert!(text.contains("INDICATORS\n"), "{text}");
+    let roundtrip = read_mps(text.as_bytes()).expect("read indicators");
+    assert_eq!(roundtrip.num_indicator_constraints(), 4);
+    assert_eq!(roundtrip.constraints().algebraic().len(), 0);
+}
 use oximo_expr::extract_quadratic;
 use oximo_io::{
     IoError, MpsQuadraticFormat, MpsReadOptions, MpsWriteOptions, read_mps, read_mps_file,
@@ -489,9 +505,8 @@ fn file_reader_uses_name_then_file_stem_fallback() {
 #[test]
 fn rejects_unsupported_sections_and_multiple_vectors() {
     {
-        let section = "INDICATORS";
-        let text = format!("NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\n{section}\nENDATA\n");
-        assert!(matches!(read_mps(text.as_bytes()), Err(IoError::UnsupportedMps { .. })));
+        let text = "NAME bad\nROWS\n N obj\nCOLUMNS\n x obj 0\nINDICATORS\n BAD x row 1\nENDATA\n";
+        assert!(matches!(read_mps(text.as_bytes()), Err(IoError::InvalidMps { .. })));
     }
     let vectors = "NAME bad\nROWS\n N obj\n L row\nCOLUMNS\n x row 1\nRHS\n first row 1\n second row 2\nENDATA\n";
     assert!(matches!(read_mps(vectors.as_bytes()), Err(IoError::UnsupportedMps { .. })));

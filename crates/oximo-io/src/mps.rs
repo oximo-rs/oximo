@@ -17,7 +17,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use oximo_core::{
-    Constraint, Domain, Model, ModelKind, ObjectiveSense, Sense, SosConstraint, SosType, var_name,
+    Constraint, Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, SosConstraint, SosType,
+    var_name,
 };
 use oximo_expr::{Expr, QuadraticTerms, VarId, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashMap;
@@ -117,6 +118,7 @@ enum SectionRank {
     Bounds,
     Quadratic,
     Sos,
+    Indicators,
     End,
 }
 
@@ -134,6 +136,7 @@ enum Section {
     QcMatrix(String),
     QSec(String),
     Sos,
+    Indicators,
     End,
 }
 
@@ -151,6 +154,7 @@ impl Section {
                 SectionRank::Quadratic
             }
             Self::Sos => SectionRank::Sos,
+            Self::Indicators => SectionRank::Indicators,
             Self::End => SectionRank::End,
         }
     }
@@ -169,6 +173,7 @@ impl Section {
             Self::QcMatrix(_) => "QCMATRIX",
             Self::QSec(_) => "QSECTION",
             Self::Sos => "SOS",
+            Self::Indicators => "INDICATORS",
             Self::End => "ENDATA",
         }
     }
@@ -200,6 +205,7 @@ struct ParsedMps {
     quadratic_rows: HashSet<String>,
     sos: Vec<ParsedSos>,
     current_sos: Option<usize>,
+    indicators: Vec<(String, String, bool)>,
     seen_sections: u8,
 }
 
@@ -237,6 +243,7 @@ impl ParsedMps {
             quadratic_rows: HashSet::new(),
             sos: Vec::new(),
             current_sos: None,
+            indicators: Vec::new(),
             seen_sections: 0,
         }
     }
@@ -355,6 +362,7 @@ fn header(items: &[Field<'_>], current: &Section) -> Option<Section> {
         ("QCMATRIX", 2) => Some(Section::QcMatrix(items[1].text.to_owned())),
         ("QSECTION", 2) => Some(Section::QSec(items[1].text.to_owned())),
         ("SOS", 1) => Some(Section::Sos),
+        ("INDICATORS", 1) => Some(Section::Indicators),
         ("ENDATA", 1) => Some(Section::End),
         _ => None,
     }
@@ -843,15 +851,6 @@ fn parse_mps_line(
         return Err(invalid_mps(line_no, 1, "content after ENDATA"));
     }
     let items = fields(line);
-    if let Some(first) = items.first()
-        && items.len() == 1
-        && first.text.eq_ignore_ascii_case("INDICATORS")
-    {
-        return Err(IoError::UnsupportedMps {
-            section: "INDICATORS".into(),
-            feature: "not represented by oximo-core".into(),
-        });
-    }
     if let Some(next) = header(&items, section) {
         if matches!(next, Section::Name) {
             if *saw_name {
@@ -905,9 +904,27 @@ fn parse_mps_line(
             parse_quadratic_record(data, section, &items, line_no, options)?;
         }
         Section::Sos => parse_sos_record(data, &items, line_no)?,
+        Section::Indicators => parse_indicator_record(data, &items, line_no)?,
         Section::Name => return Err(invalid_mps(line_no, 1, "expected NAME header")),
         Section::End => unreachable!(),
     }
+    Ok(())
+}
+
+fn parse_indicator_record(
+    data: &mut ParsedMps,
+    items: &[Field<'_>],
+    line: usize,
+) -> Result<(), IoError> {
+    if items.len() != 4 || !items[0].text.eq_ignore_ascii_case("IF") {
+        return Err(invalid_mps(line, 1, "indicator record must be `IF row binary 0|1`"));
+    }
+    let active = match items[3].text {
+        "0" => false,
+        "1" => true,
+        _ => return Err(invalid_mps(line, items[3].column, "indicator value must be 0 or 1")),
+    };
+    data.indicators.push((items[1].text.to_owned(), items[2].text.to_owned(), active));
     Ok(())
 }
 
@@ -1096,6 +1113,7 @@ fn write_sos_section<W: Write>(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines)]
 fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for column in &data.columns {
         if column.lower > column.upper {
@@ -1118,6 +1136,41 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
     for row in &data.rows {
         if row.lower > row.upper {
             return Err(invalid_mps(1, 1, format!("inconsistent range for row {:?}", row.name)));
+        }
+    }
+    let mut indicator_rows: FxHashMap<usize, (usize, bool)> = FxHashMap::default();
+    for (row_name, trigger_name, active) in &data.indicators {
+        let row = *data.row_index.get(row_name).ok_or_else(|| {
+            invalid_mps(1, 1, format!("indicator references unknown row {row_name:?}"))
+        })?;
+        let trigger = *data.column_index.get(trigger_name).ok_or_else(|| {
+            invalid_mps(1, 1, format!("indicator references unknown variable {trigger_name:?}"))
+        })?;
+        if data.columns[trigger].kind != ColumnKind::Binary {
+            return Err(invalid_mps(
+                1,
+                1,
+                format!("indicator trigger {trigger_name:?} is not binary"),
+            ));
+        }
+        let body = &data.rows[row];
+        if body.lower.is_finite()
+            && body.upper.is_finite()
+            && !body.lower.total_cmp(&body.upper).is_eq()
+        {
+            return Err(IoError::UnsupportedMps {
+                section: "INDICATORS".into(),
+                feature: "ranged indicator row".into(),
+            });
+        }
+        if !body.quadratic.is_empty() {
+            return Err(IoError::UnsupportedMps {
+                section: "INDICATORS".into(),
+                feature: "quadratic indicator row".into(),
+            });
+        }
+        if indicator_rows.insert(row, (trigger, *active)).is_some() {
+            return Err(invalid_mps(1, 1, format!("row {row_name:?} has multiple indicators")));
         }
     }
     let mut sos_names = HashSet::new();
@@ -1166,9 +1219,17 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
                 .build(),
         );
     }
-    for row in data.rows {
+    let mut pending_indicators = Vec::new();
+    for (row_index, row) in data.rows.into_iter().enumerate() {
         let expr = expression(&model, &variables, row.linear, row.quadratic, 0.0);
-        model.__add_constraint_interval(row.name, expr, row.lower, row.upper);
+        if let Some((trigger, active)) = indicator_rows.get(&row_index).copied() {
+            pending_indicators.push((row.name, trigger, active, expr, row.lower, row.upper));
+        } else {
+            model.__add_constraint_interval(row.name, expr, row.lower, row.upper);
+        }
+    }
+    for (name, trigger, active, expr, lower, upper) in pending_indicators {
+        model.__add_indicator_interval(name, variables[trigger], active, expr, lower, upper);
     }
     for set in data.sos {
         let members = set.members.into_iter().map(|(name, weight)| {
@@ -1267,16 +1328,19 @@ pub fn write_mps_with<W: Write>(
     out: &mut W,
     options: &MpsWriteOptions,
 ) -> Result<(), IoError> {
+    if model.num_soc_constraints() > 0
+        || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
+    {
+        return Err(IoError::Conic);
+    }
+    if model.has_active_indicator_constraints() {
+        return write_mps_with_indicators(model, out, *options);
+    }
     if model.has_active_sos_constraints() && options.quadratic_format == MpsQuadraticFormat::Mosek {
         return Err(IoError::UnsupportedMps {
             section: "SOS".into(),
             feature: "SOS is not supported by the MOSEK MPS dialect".into(),
         });
-    }
-    if model.num_soc_constraints() > 0
-        || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
-    {
-        return Err(IoError::Conic);
     }
     let arena = model.arena();
     let vars = model.variables();
@@ -1492,6 +1556,126 @@ pub fn write_mps_with<W: Write>(
     }
 
     writeln!(out, "ENDATA")?;
+    Ok(())
+}
+
+fn rebuild_quadratic<'a>(
+    model: &'a Model,
+    variables: &[Expr<'a>],
+    terms: &QuadraticTerms,
+) -> Expr<'a> {
+    let mut expr = model.__constant(terms.constant);
+    for &(var, coefficient) in &terms.linear {
+        expr = expr + coefficient * variables[var.index()];
+    }
+    for &(left, right, hessian) in &terms.hessian {
+        let coefficient = if left == right { hessian / 2.0 } else { hessian };
+        expr = expr + coefficient * variables[left.index()] * variables[right.index()];
+    }
+    expr
+}
+
+/// MPS indicators reference ordinary rows. Build a serialization-only model
+/// containing those body rows, then append the standard `INDICATORS` section.
+fn write_mps_with_indicators<W: Write>(
+    model: &Model,
+    out: &mut W,
+    options: MpsWriteOptions,
+) -> Result<(), IoError> {
+    let source_vars = model.variables();
+    let arena = model.arena();
+    let temporary = Model::new(model.name.clone());
+    let variables: Vec<_> = source_vars
+        .iter()
+        .map(|v| temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build())
+        .collect();
+    let mut raw_row_names = Vec::new();
+    let mut used: HashSet<String> =
+        model.constraints().algebraic().iter().map(|c| c.name.to_string()).collect();
+    for c in model.constraints().algebraic() {
+        let terms = extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+            location: format!("constraint {:?}", c.name),
+            term: "nonlinear expression".into(),
+        })?;
+        let expr = rebuild_quadratic(&temporary, &variables, &terms);
+        temporary.__add_constraint_interval(c.name.clone(), expr, c.lower, c.upper);
+        raw_row_names.push(c.name.to_string());
+    }
+    let mut records: Vec<(usize, VarId, bool)> = Vec::new();
+    for indicator in model.indicator_constraints().iter().filter(|c| c.active) {
+        let terms = extract_quadratic(&arena, indicator.lhs).expect("validated affine indicator");
+        if !terms.hessian.is_empty() {
+            return Err(IoError::UnsupportedMps {
+                section: "INDICATORS".into(),
+                feature: "quadratic indicator row".into(),
+            });
+        }
+        let mut add_body = |suffix: &str, sense: Sense, rhs: f64| {
+            let base = if suffix.is_empty() {
+                indicator.name.to_string()
+            } else {
+                format!("{}_{suffix}", indicator.name)
+            };
+            let mut name = base.clone();
+            let mut suffix = 1usize;
+            while !used.insert(name.clone()) {
+                name = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            let expr = rebuild_quadratic(&temporary, &variables, &terms);
+            let row = match sense {
+                Sense::Le => expr.le(rhs),
+                Sense::Ge => expr.ge(rhs),
+                Sense::Eq => expr.eq(rhs),
+            };
+            temporary.__add_constraint(name.clone(), row);
+            raw_row_names.push(name);
+            records.push((raw_row_names.len() - 1, indicator.trigger, indicator.active_value));
+        };
+        if let Some((sense, rhs)) = indicator.as_single() {
+            add_body("", sense, rhs);
+        } else if indicator.is_range() {
+            add_body("lo", Sense::Ge, indicator.lower);
+            add_body("hi", Sense::Le, indicator.upper);
+        }
+    }
+    for set in model.sos_constraints().iter().filter(|s| s.active) {
+        temporary.add_sos_constraint(
+            set.name.clone(),
+            set.sos_type,
+            set.members.iter().map(|member| (variables[member.variable.index()], member.weight)),
+        );
+    }
+    if model.is_feasibility() {
+        temporary.__feasibility();
+    } else if let Some(objective) = model.objective().as_ref() {
+        let terms = extract_quadratic(&arena, objective.expr).ok_or_else(|| {
+            IoError::Nonlinear { location: "objective".into(), term: "nonlinear expression".into() }
+        })?;
+        let expr = rebuild_quadratic(&temporary, &variables, &terms);
+        match objective.sense {
+            ObjectiveSense::Minimize => temporary.__minimize(expr),
+            ObjectiveSense::Maximize => temporary.__maximize(expr),
+        }
+    }
+    let mut bytes = Vec::new();
+    write_mps_with(&temporary, &mut bytes, &options)?;
+    let text = String::from_utf8(bytes).expect("MPS writer emits ASCII");
+    let end = text.rfind("ENDATA").expect("writer emits ENDATA");
+    out.write_all(&text.as_bytes()[..end])?;
+    let row_names = unique_mps_names(raw_row_names.iter().map(String::as_str), "R", ["OBJ"]);
+    let variable_names = unique_mps_names(source_vars.iter().map(|v| v.name.as_str()), "C", []);
+    writeln!(out, "INDICATORS")?;
+    for (row, trigger, value) in records {
+        writeln!(
+            out,
+            " IF {} {} {}",
+            row_names[row],
+            variable_names[trigger.index()],
+            u8::from(value)
+        )?;
+    }
+    out.write_all(&text.as_bytes()[end..])?;
     Ok(())
 }
 

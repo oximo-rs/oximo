@@ -10,6 +10,23 @@ fn objective_terms(model: &Model) -> oximo_expr::QuadraticTerms {
         .expect("quadratic objective")
 }
 
+#[test]
+fn indicator_constraints_round_trip() {
+    let model = Model::new("indicators");
+    variable!(model, b, Binary);
+    variable!(model, -10.0 <= x <= 10.0);
+    indicator_constraint!(model, on, b == 1 => x <= 4.0);
+    indicator_constraint!(model, off, b == 0 => x == 0.0);
+    indicator_constraint!(model, band, b == 1 => -2.0 <= x <= 3.0);
+    objective!(model, Min, x);
+    let output = to_lp_string(&model).expect("write indicator LP");
+    assert!(output.contains("b = 1 ->"), "{output}");
+    let roundtrip = read_lp(output.as_bytes()).expect("read indicator LP");
+    assert_eq!(roundtrip.num_indicator_constraints(), 4);
+    assert!(roundtrip.indicator_constraints()[0].active_value);
+    assert!(!roundtrip.indicator_constraints()[1].active_value);
+}
+
 fn constraint_terms(model: &Model, index: usize) -> oximo_expr::QuadraticTerms {
     let arena = model.arena();
     extract_quadratic(&arena, model.constraints().algebraic()[index].lhs)
@@ -237,12 +254,12 @@ fn unsupported_sections_are_reported() {
 }
 
 #[test]
-fn inline_sos_and_indicators_are_explicitly_unsupported() {
-    for row in [" c: S1:: x:1 y:2", " c: z = 1 -> x <= 2"] {
-        let text = format!("Minimize\n obj: x\nSubject To\n{row}\nEnd\n");
-        let err = read_lp(text.as_bytes()).unwrap_err();
-        assert!(matches!(err, IoError::UnsupportedLp { .. }), "{err:?}");
-    }
+fn inline_sos_is_explicitly_unsupported_and_indicators_validate_triggers() {
+    let text = "Minimize\n obj: x\nSubject To\n c: S1:: x:1 y:2\nEnd\n";
+    assert!(matches!(read_lp(text.as_bytes()), Err(IoError::UnsupportedLp { .. })));
+
+    let text = "Minimize\n obj: x\nSubject To\n c: z = 1 -> x <= 2\nEnd\n";
+    assert!(matches!(read_lp(text.as_bytes()), Err(IoError::InvalidLp { .. })));
 }
 
 #[test]

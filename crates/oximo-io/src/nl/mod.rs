@@ -98,6 +98,12 @@ pub fn write_nl_with<W: Write>(
             feature: "SOS constraints have no native NL segment".into(),
         });
     }
+    if model.has_active_indicator_constraints() {
+        return Err(IoError::UnsupportedNl {
+            section: "INDICATORS".into(),
+            feature: "indicator constraints have no native NL segment".into(),
+        });
+    }
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
