@@ -535,18 +535,30 @@ fn parse_constraint_line(
             feature: "SOS or indicator constraints are not represented by oximo-core".into(),
         });
     }
-    if pending.is_empty() && line.contains("->") {
-        let (head, body) = line
-            .split_once("->")
-            .ok_or_else(|| invalid_lp(line_no, 1, "indicator constraint needs exactly one `->`"))?;
-        if body.contains("->") {
+    if !pending.is_empty() && line.contains(':') && !has_comparison(pending) {
+        return Err(invalid_lp(
+            line_no,
+            1,
+            "new constraint begins before the previous constraint is complete",
+        ));
+    }
+    if pending.is_empty() {
+        *pending_line = line_no;
+    }
+    pending.push(' ');
+    pending.push_str(line);
+
+    let (name, body) = pending
+        .split_once(':')
+        .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_owned(), b));
+    if let Some((trigger_text, indicator_body)) = body.split_once("->") {
+        if indicator_body.contains("->") {
             return Err(invalid_lp(line_no, 1, "indicator constraint needs exactly one `->`"));
         }
-        let (name, trigger_text) =
-            head.split_once(':').map_or((String::new(), head.trim()), |(name, trigger)| {
-                (name.trim().to_owned(), trigger.trim())
-            });
-        let trigger_tokens = lex(trigger_text, line_no)?;
+        if !has_comparison(indicator_body) || !has_rhs(indicator_body) {
+            return Ok(());
+        }
+        let trigger_tokens = lex(trigger_text.trim(), line_no)?;
         if trigger_tokens.len() != 3 {
             return Err(invalid_lp(
                 line_no,
@@ -566,30 +578,14 @@ fn parse_constraint_line(
             Tok::Number(v) if v.to_bits() == 1.0f64.to_bits() => true,
             _ => return Err(invalid_lp(line_no, 1, "indicator trigger value must be 0 or 1")),
         };
-        let (expr, sense, rhs) = parse_row(body, line_no)?;
+        let (expr, sense, rhs) = parse_row(indicator_body, *pending_line)?;
         collect_vars(&expr, &mut p.vars, &mut p.var_set);
         if p.var_set.insert(trigger.clone()) {
             p.vars.push(trigger.clone());
         }
         p.indicators.push(ParsedLpIndicator { name, trigger, active_value, expr, sense, rhs });
-        return Ok(());
-    }
-    if !pending.is_empty() && line.contains(':') && !has_comparison(pending) {
-        return Err(invalid_lp(
-            line_no,
-            1,
-            "new constraint begins before the previous constraint is complete",
-        ));
-    }
-    if pending.is_empty() {
-        *pending_line = line_no;
-    }
-    pending.push(' ');
-    pending.push_str(line);
-    if has_comparison(pending) && has_rhs(pending) {
-        let (name, body) = pending
-            .split_once(':')
-            .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_string(), b));
+        pending.clear();
+    } else if has_comparison(body) && has_rhs(body) {
         let (expr, sense, rhs) = parse_row(body, *pending_line)?;
         collect_vars(&expr, &mut p.vars, &mut p.var_set);
         p.rows.push((name, expr, sense, rhs));

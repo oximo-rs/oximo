@@ -27,6 +27,15 @@ fn indicator_constraints_round_trip() {
     assert!(!roundtrip.indicator_constraints()[1].active_value);
 }
 
+#[test]
+fn indicator_separator_is_parsed_from_row_body() {
+    let text = "Minimize\n obj: x\nSubject To\n named->row: x <= 2\n gated: b = 1 ->\n  x >= 0\nBinaries\n b\nEnd\n";
+    let model =
+        read_lp(text.as_bytes()).expect("LP should parse row names and multiline indicators");
+    assert_eq!(model.constraints().algebraic()[0].name, "named->row");
+    assert_eq!(model.indicator_constraints()[0].name, "gated");
+}
+
 fn constraint_terms(model: &Model, index: usize) -> oximo_expr::QuadraticTerms {
     let arena = model.arena();
     extract_quadratic(&arena, model.constraints().algebraic()[index].lhs)
