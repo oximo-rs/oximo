@@ -91,6 +91,10 @@ name = "sos"
 required-features = ["gurobi"]
 
 [[example]]
+name = "indicator"
+required-features = ["gurobi"]
+
+[[example]]
 name = "sos_reformulated"
 required-features = ["highs"]
 
