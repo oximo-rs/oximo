@@ -841,7 +841,7 @@ fn build_solver_opt(
         let mut wrote = cfg.write_opt_file(&mut buf);
         if indicators.iter().any(|c| c.active) {
             if cfg.gams_name() == "SCIP" {
-                writeln!(buf, "gams/indicatorfile indicators.txt").unwrap();
+                writeln!(buf, "gams/indicatorfile=\"indicators.txt\"").unwrap();
             } else if matches!(cfg.gams_name(), "COPT" | "CPLEX" | "GUROBI" | "XPRESS") {
                 write_indicator_mappings(&mut buf, indicators);
             }
