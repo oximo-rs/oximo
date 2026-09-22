@@ -19,8 +19,12 @@ use crate::constraint::{
 use crate::domain::Domain;
 use crate::error::{Error, Result};
 use crate::indexed::{
-    IndexedConstraint, IndexedFamily, IndexedParam, IndexedRangeConstraint, IndexedVar,
-    build_storage,
+    IndexedConstraint, IndexedFamily, IndexedIndicatorConstraint, IndexedParam,
+    IndexedRangeConstraint, IndexedRangeIndicatorConstraint, IndexedVar, build_storage,
+};
+use crate::indicator::{
+    IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId,
+    RangeIndicatorConstraintHandles,
 };
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
@@ -94,6 +98,16 @@ struct PendingParam {
 #[derive(Debug)]
 struct PendingConstraint {
     name: SmolStr,
+    lhs: ExprId,
+    lower: f64,
+    upper: f64,
+}
+
+#[derive(Debug)]
+struct PendingIndicator {
+    name: SmolStr,
+    trigger: VarId,
+    active_value: bool,
     lhs: ExprId,
     lower: f64,
     upper: f64,
@@ -245,19 +259,23 @@ pub enum ConstraintRef<'a> {
     Algebraic { id: ConstraintId, constraint: &'a Constraint },
     SecondOrderCone { id: SocConstraintId, constraint: &'a SocConstraint },
     SpecialOrderedSet { id: SosConstraintId, constraint: &'a SosConstraint },
+    Indicator { id: IndicatorConstraintId, constraint: &'a IndicatorConstraint },
 }
 
 /// Unified borrowed view of every constraint declared on a [`Model`].
 ///
-/// The underlying algebraic and explicit-SOC registries remain separate, so
-/// backends can iterate a homogeneous slice without a per-constraint branch.
+/// The underlying algebraic, explicit-SOC, SOS, and indicator registries remain
+/// separate, so backends can iterate a homogeneous slice without a
+/// per-constraint branch.
 /// [`Self::iter`] visits algebraic constraints in [`ConstraintId`] order,
-/// followed by explicit cones and SOS constraints in their respective ID order.
+/// followed by explicit cones, SOS constraints, and indicator constraints in
+/// their respective ID order.
 #[derive(Debug)]
 pub struct ModelConstraints<'a> {
     algebraic: Ref<'a, Vec<Constraint>>,
     second_order_cones: Ref<'a, Vec<SocConstraint>>,
     special_ordered_sets: Ref<'a, Vec<SosConstraint>>,
+    indicators: Ref<'a, Vec<IndicatorConstraint>>,
 }
 
 impl ModelConstraints<'_> {
@@ -273,6 +291,10 @@ impl ModelConstraints<'_> {
 
     pub fn special_ordered_sets(&self) -> &[SosConstraint] {
         &self.special_ordered_sets
+    }
+
+    pub fn indicators(&self) -> &[IndicatorConstraint] {
+        &self.indicators
     }
 
     /// Iterate over all declared constraints without allocating.
@@ -292,18 +314,25 @@ impl ModelConstraints<'_> {
             self.special_ordered_sets.iter().enumerate().map(|(index, constraint)| {
                 ConstraintRef::SpecialOrderedSet { id: SosConstraintId(index as u32), constraint }
             });
-        algebraic.chain(second_order_cones).chain(special_ordered_sets)
+        let indicators = self.indicators.iter().enumerate().map(|(index, constraint)| {
+            ConstraintRef::Indicator { id: IndicatorConstraintId(index as u32), constraint }
+        });
+        algebraic.chain(second_order_cones).chain(special_ordered_sets).chain(indicators)
     }
 
-    /// Total number of algebraic, SOC, and SOS constraints.
+    /// Total number of algebraic, SOC, SOS, and indicator constraints.
     pub fn len(&self) -> usize {
-        self.algebraic.len() + self.second_order_cones.len() + self.special_ordered_sets.len()
+        self.algebraic.len()
+            + self.second_order_cones.len()
+            + self.special_ordered_sets.len()
+            + self.indicators.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.algebraic.is_empty()
             && self.second_order_cones.is_empty()
             && self.special_ordered_sets.is_empty()
+            && self.indicators.is_empty()
     }
 }
 
@@ -329,6 +358,8 @@ pub struct Model {
     pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
     pub(crate) sos_constraints: RefCell<Vec<SosConstraint>>,
     pub(crate) sos_names: RefCell<FxHashMap<SmolStr, SosConstraintId>>,
+    pub(crate) indicator_constraints: RefCell<Vec<IndicatorConstraint>>,
+    pub(crate) indicator_names: RefCell<FxHashMap<SmolStr, IndicatorConstraintId>>,
     pub(crate) sos_reformulations: RefCell<Vec<SosReformulationArtifacts>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     objective_declared: Cell<bool>,
@@ -401,6 +432,8 @@ impl Model {
             soc_names: RefCell::new(self.soc_names.borrow().clone()),
             sos_constraints: RefCell::new(self.sos_constraints.borrow().clone()),
             sos_names: RefCell::new(self.sos_names.borrow().clone()),
+            indicator_constraints: RefCell::new(self.indicator_constraints.borrow().clone()),
+            indicator_names: RefCell::new(self.indicator_names.borrow().clone()),
             sos_reformulations: RefCell::new(self.sos_reformulations.borrow().clone()),
             objective: RefCell::new(self.objective.borrow().clone()),
             objective_declared: Cell::new(self.objective_declared.get()),
@@ -419,6 +452,7 @@ impl std::fmt::Debug for Model {
             .field("constraints", &self.constraints.borrow().len())
             .field("soc_constraints", &self.soc_constraints.borrow().len())
             .field("sos_constraints", &self.sos_constraints.borrow().len())
+            .field("indicator_constraints", &self.indicator_constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
             .field("feasibility", &self.is_feasibility())
             .finish()
@@ -444,6 +478,8 @@ impl Model {
             soc_names: RefCell::new(FxHashMap::default()),
             sos_constraints: RefCell::new(Vec::new()),
             sos_names: RefCell::new(FxHashMap::default()),
+            indicator_constraints: RefCell::new(Vec::new()),
+            indicator_names: RefCell::new(FxHashMap::default()),
             sos_reformulations: RefCell::new(Vec::new()),
             objective: RefCell::new(None),
             objective_declared: Cell::new(false),
@@ -1358,21 +1394,23 @@ impl Model {
         IndexedRangeConstraint::new(keys, set.axes(), groups)
     }
 
-    /// Unified view of every algebraic, explicit SOC, and SOS constraint
-    /// declared on this model.
+    /// Unified view of every algebraic, explicit SOC, SOS, and indicator
+    /// constraint declared on this model.
     pub fn constraints(&self) -> ModelConstraints<'_> {
         ModelConstraints {
             algebraic: self.constraints.borrow(),
             second_order_cones: self.soc_constraints.borrow(),
             special_ordered_sets: self.sos_constraints.borrow(),
+            indicators: self.indicator_constraints.borrow(),
         }
     }
 
-    /// Total number of algebraic, SOC, and SOS constraints.
+    /// Total number of algebraic, SOC, SOS, and indicator constraints.
     pub fn num_constraints(&self) -> usize {
         self.constraints.borrow().len()
             + self.soc_constraints.borrow().len()
             + self.sos_constraints.borrow().len()
+            + self.indicator_constraints.borrow().len()
     }
 
     pub fn constraint_id(&self, name: &str) -> Option<ConstraintId> {
@@ -1917,6 +1955,404 @@ impl Model {
     /// inactive so their stable IDs and provenance are preserved.
     pub fn has_active_sos_constraints(&self) -> bool {
         self.sos_constraints.borrow().iter().any(|constraint| constraint.active)
+    }
+
+    // Indicator constraints
+
+    fn indicator_trigger(&self, trigger: Expr<'_>) -> VarId {
+        self.assert_expr_belongs(trigger);
+        let id = trigger.var_id().expect("indicator trigger must be a bare binary variable");
+        assert!(
+            self.variables.borrow()[id.index()].domain == Domain::Binary,
+            "indicator trigger must have binary domain"
+        );
+        id
+    }
+
+    fn register_indicator(
+        &self,
+        name: SmolStr,
+        trigger: VarId,
+        active_value: bool,
+        lhs: ExprId,
+        lower: f64,
+        upper: f64,
+    ) -> IndicatorConstraintId {
+        assert!(!lower.is_nan() && !upper.is_nan(), "indicator constraint {name:?} has NaN bound");
+        assert!(
+            classify(&self.arena.borrow(), lhs) == ExprClass::Linear,
+            "indicator consequent must be affine"
+        );
+        let mut names = self.indicator_names.borrow_mut();
+        assert!(
+            !names.contains_key(&name),
+            "indicator constraint name {name:?} already registered"
+        );
+        let mut all = self.indicator_constraints.borrow_mut();
+        let id = IndicatorConstraintId(
+            u32::try_from(all.len()).expect("indicator constraint count overflow"),
+        );
+        all.push(IndicatorConstraint {
+            name: name.clone(),
+            trigger,
+            active_value,
+            lhs,
+            lower,
+            upper,
+            active: true,
+        });
+        names.insert(name, id);
+        self.cached_kind.set(None);
+        id
+    }
+
+    fn prepare_indicator(
+        &self,
+        name: SmolStr,
+        trigger: VarId,
+        active_value: bool,
+        consequent: ConstraintExpr<'_>,
+    ) -> PendingIndicator {
+        self.assert_expr_belongs(consequent.lhs);
+        let (lower, upper) = match consequent.sense {
+            Sense::Le => (f64::NEG_INFINITY, consequent.rhs),
+            Sense::Ge => (consequent.rhs, f64::INFINITY),
+            Sense::Eq => (consequent.rhs, consequent.rhs),
+        };
+        self.prepare_indicator_interval(
+            name,
+            trigger,
+            active_value,
+            consequent.lhs.id,
+            lower,
+            upper,
+        )
+    }
+
+    fn prepare_indicator_interval(
+        &self,
+        name: SmolStr,
+        trigger: VarId,
+        active_value: bool,
+        lhs: ExprId,
+        lower: f64,
+        upper: f64,
+    ) -> PendingIndicator {
+        assert!(!lower.is_nan() && !upper.is_nan(), "indicator constraint {name:?} has NaN bound");
+        assert!(
+            classify(&self.arena.borrow(), lhs) == ExprClass::Linear,
+            "indicator consequent must be affine"
+        );
+        PendingIndicator { name, trigger, active_value, lhs, lower, upper }
+    }
+
+    fn register_indicators_batch(
+        &self,
+        items: Vec<PendingIndicator>,
+    ) -> Vec<IndicatorConstraintId> {
+        let mut names = self.indicator_names.borrow_mut();
+        validate_batch_names(
+            &names,
+            items.iter().map(|item| &item.name),
+            "indicator constraint",
+            items.len(),
+        );
+        let mut constraints = self.indicator_constraints.borrow_mut();
+        let final_count = constraints
+            .len()
+            .checked_add(items.len())
+            .expect("indicator constraint count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("indicator constraint count overflow");
+        }
+        constraints.reserve(items.len());
+        names.reserve(items.len());
+        let mut ids = Vec::with_capacity(items.len());
+        for item in items {
+            let id = IndicatorConstraintId(
+                u32::try_from(constraints.len()).expect("indicator constraint count overflow"),
+            );
+            constraints.push(IndicatorConstraint {
+                name: item.name.clone(),
+                trigger: item.trigger,
+                active_value: item.active_value,
+                lhs: item.lhs,
+                lower: item.lower,
+                upper: item.upper,
+                active: true,
+            });
+            names.insert(item.name, id);
+            ids.push(id);
+        }
+        if !ids.is_empty() {
+            self.cached_kind.set(None);
+        }
+        ids
+    }
+
+    /// Register `trigger == active_value => consequent`.
+    pub fn add_indicator_constraint<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        trigger: Expr<'a>,
+        active_value: bool,
+        consequent: ConstraintExpr<'a>,
+    ) -> IndicatorConstraintHandle<'a> {
+        self.assert_expr_belongs(consequent.lhs);
+        let trigger = self.indicator_trigger(trigger);
+        let (lower, upper) = match consequent.sense {
+            Sense::Le => (f64::NEG_INFINITY, consequent.rhs),
+            Sense::Ge => (consequent.rhs, f64::INFINITY),
+            Sense::Eq => (consequent.rhs, consequent.rhs),
+        };
+        let id = self.register_indicator(
+            name.into(),
+            trigger,
+            active_value,
+            consequent.lhs.id,
+            lower,
+            upper,
+        );
+        IndicatorConstraintHandle { model: self, id }
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_constraint<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        trigger: Expr<'a>,
+        active_value: bool,
+        consequent: ConstraintExpr<'a>,
+    ) -> IndicatorConstraintHandle<'a> {
+        self.add_indicator_constraint(name, trigger, active_value, consequent)
+    }
+
+    fn next_auto_indicator_name(&self) -> SmolStr {
+        loop {
+            let n = self.auto_seq.get();
+            self.auto_seq.set(n + 1);
+            let candidate: SmolStr = format!("_ind{n}").into();
+            if !self.indicator_names.borrow().contains_key(&candidate) {
+                break candidate;
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_constraint_auto<'a>(
+        &'a self,
+        trigger: Expr<'a>,
+        active_value: bool,
+        consequent: ConstraintExpr<'a>,
+    ) -> IndicatorConstraintHandle<'a> {
+        self.add_indicator_constraint(
+            self.next_auto_indicator_name(),
+            trigger,
+            active_value,
+            consequent,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_interval<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        trigger: Expr<'a>,
+        active_value: bool,
+        lhs: Expr<'a>,
+        lower: f64,
+        upper: f64,
+    ) -> IndicatorConstraintHandle<'a> {
+        self.assert_expr_belongs(lhs);
+        let trigger = self.indicator_trigger(trigger);
+        let id = self.register_indicator(name.into(), trigger, active_value, lhs.id, lower, upper);
+        IndicatorConstraintHandle { model: self, id }
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
+        &'a self,
+        name: &str,
+        trigger: Expr<'a>,
+        active_value: bool,
+        mid: Expr<'a>,
+        lo: B1,
+        hi: B2,
+    ) -> RangeIndicatorConstraintHandles<'a> {
+        self.assert_expr_belongs(mid);
+        let trigger = self.indicator_trigger(trigger);
+        if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
+            && mid.__class() == ExprClass::Linear
+        {
+            let pending = self.prepare_indicator_interval(
+                name.into(),
+                trigger,
+                active_value,
+                mid.id,
+                lower,
+                upper,
+            );
+            let id = self.register_indicators_batch(vec![pending])[0];
+            RangeIndicatorConstraintHandles::Interval(IndicatorConstraintHandle { model: self, id })
+        } else {
+            let lower = self.prepare_indicator(
+                format!("{name}_lo").into(),
+                trigger,
+                active_value,
+                mid.ge(lo),
+            );
+            let upper = self.prepare_indicator(
+                format!("{name}_hi").into(),
+                trigger,
+                active_value,
+                mid.le(hi),
+            );
+            let mut ids = self.register_indicators_batch(vec![lower, upper]).into_iter();
+            let lower = IndicatorConstraintHandle {
+                model: self,
+                id: ids.next().expect("lower indicator range ID missing"),
+            };
+            let upper = IndicatorConstraintHandle {
+                model: self,
+                id: ids.next().expect("upper indicator range ID missing"),
+            };
+            RangeIndicatorConstraintHandles::Split { lower, upper }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_range_auto<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
+        &'a self,
+        trigger: Expr<'a>,
+        active_value: bool,
+        mid: Expr<'a>,
+        lo: B1,
+        hi: B2,
+    ) -> RangeIndicatorConstraintHandles<'a> {
+        let name = self.next_auto_indicator_name();
+        self.__add_indicator_range(&name, trigger, active_value, mid, lo, hi)
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_constraints_over<'a, K, F>(
+        &'a self,
+        prefix: &str,
+        set: &Set<K>,
+        rule: F,
+    ) -> IndexedIndicatorConstraint<'a, K>
+    where
+        K: FromIndexKey,
+        F: Fn(K) -> (Expr<'a>, bool, ConstraintExpr<'a>),
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        let pending: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                let (trigger, value, consequent) = rule(K::from_index_key(key));
+                let trigger = self.indicator_trigger(trigger);
+                self.prepare_indicator(
+                    format_index_name(prefix, key).into(),
+                    trigger,
+                    value,
+                    consequent,
+                )
+            })
+            .collect();
+        let handles = self
+            .register_indicators_batch(pending)
+            .into_iter()
+            .map(|id| IndicatorConstraintHandle { model: self, id })
+            .collect();
+        IndexedIndicatorConstraint::new(keys, set.axes(), handles)
+    }
+
+    #[doc(hidden)]
+    pub fn __add_indicator_ranges_over<'a, K, B1, B2, F>(
+        &'a self,
+        prefix: &str,
+        set: &Set<K>,
+        rule: F,
+    ) -> IndexedRangeIndicatorConstraint<'a, K>
+    where
+        K: FromIndexKey,
+        B1: IntoRhs<'a>,
+        B2: IntoRhs<'a>,
+        F: Fn(K) -> (Expr<'a>, bool, Expr<'a>, B1, B2),
+    {
+        let keys: Vec<IndexKey> = set.iter().collect();
+        let mut pending = Vec::new();
+        let mut row_counts = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let (trigger, value, mid, lo, hi) = rule(K::from_index_key(key));
+            self.assert_expr_belongs(mid);
+            let trigger = self.indicator_trigger(trigger);
+            let name = format_index_name(prefix, key);
+            if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
+                && mid.__class() == ExprClass::Linear
+            {
+                pending.push(self.prepare_indicator_interval(
+                    name.into(),
+                    trigger,
+                    value,
+                    mid.id,
+                    lower,
+                    upper,
+                ));
+                row_counts.push(1_u8);
+            } else {
+                pending.push(self.prepare_indicator(
+                    format!("{name}_lo").into(),
+                    trigger,
+                    value,
+                    mid.ge(lo),
+                ));
+                pending.push(self.prepare_indicator(
+                    format!("{name}_hi").into(),
+                    trigger,
+                    value,
+                    mid.le(hi),
+                ));
+                row_counts.push(2_u8);
+            }
+        }
+        let mut ids = self.register_indicators_batch(pending).into_iter();
+        let handles = row_counts
+            .into_iter()
+            .map(|count| {
+                let lower = IndicatorConstraintHandle {
+                    model: self,
+                    id: ids.next().expect("indicator range ID missing"),
+                };
+                match count {
+                    1 => RangeIndicatorConstraintHandles::Interval(lower),
+                    2 => RangeIndicatorConstraintHandles::Split {
+                        lower,
+                        upper: IndicatorConstraintHandle {
+                            model: self,
+                            id: ids.next().expect("upper indicator range ID missing"),
+                        },
+                    },
+                    _ => unreachable!("indicator range must lower to one or two rows"),
+                }
+            })
+            .collect();
+        IndexedRangeIndicatorConstraint::new(keys, set.axes(), handles)
+    }
+
+    pub fn indicator_constraints(&self) -> Ref<'_, Vec<IndicatorConstraint>> {
+        self.indicator_constraints.borrow()
+    }
+    pub fn num_indicator_constraints(&self) -> usize {
+        self.indicator_constraints.borrow().len()
+    }
+    pub fn indicator_constraint_id(&self, name: &str) -> Option<IndicatorConstraintId> {
+        self.indicator_names.borrow().get(name).copied()
+    }
+    pub fn has_indicator_constraints(&self) -> bool {
+        !self.indicator_constraints.borrow().is_empty()
+    }
+    pub fn has_active_indicator_constraints(&self) -> bool {
+        self.indicator_constraints.borrow().iter().any(|c| c.active)
     }
 
     // Objective
@@ -2537,6 +2973,7 @@ mod tests {
             ConstraintRef::Algebraic { constraint, .. } => !constraint.active,
             ConstraintRef::SecondOrderCone { constraint, .. } => !constraint.active,
             ConstraintRef::SpecialOrderedSet { constraint, .. } => !constraint.active,
+            ConstraintRef::Indicator { constraint, .. } => !constraint.active,
         }));
     }
 

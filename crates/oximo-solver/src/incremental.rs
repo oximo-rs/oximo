@@ -108,6 +108,25 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
         }
     }
 
+    for indicator in prepared.constraints().indicators() {
+        if !indicator.active {
+            continue;
+        }
+        let terms = prepared.require_linear(indicator.lhs, || {
+            format!("indicator constraint {:?}", indicator.name)
+        })?;
+        hasher.write_u8(3);
+        hasher.write_u32(indicator.trigger.0);
+        hasher.write_u8(u8::from(indicator.active_value));
+        hash_row(
+            &mut hasher,
+            indicator.lower - terms.constant,
+            indicator.upper - terms.constant,
+            &terms.coeffs,
+            &mut row_terms,
+        );
+    }
+
     Ok(Snapshot { obj_costs, obj_constant, lb, ub, fingerprint: hasher.finish() })
 }
 

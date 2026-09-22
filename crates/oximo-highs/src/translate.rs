@@ -44,6 +44,9 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
+    }
     let (prob, meta) = build_problem(model)?;
     let live = make_live(prob, opts)?;
     let started = Instant::now();
@@ -97,6 +100,9 @@ pub(crate) struct Meta {
 pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> {
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
+    }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
     }
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();

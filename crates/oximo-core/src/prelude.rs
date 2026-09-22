@@ -4,7 +4,14 @@ pub use crate::constraint::{
 };
 pub use crate::domain::Domain;
 pub use crate::error::Error;
-pub use crate::indexed::{IndexedConstraint, IndexedParam, IndexedRangeConstraint, IndexedVar};
+pub use crate::indexed::{
+    IndexedConstraint, IndexedIndicatorConstraint, IndexedParam, IndexedRangeConstraint,
+    IndexedRangeIndicatorConstraint, IndexedVar,
+};
+pub use crate::indicator::{
+    IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId,
+    RangeIndicatorConstraintHandles, RangeIndicatorConstraintIds,
+};
 pub use crate::model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
 };
@@ -23,5 +30,6 @@ pub use oximo_expr::{
 };
 
 pub use oximo_macros::{
-    constraint, max, min, objective, param, set, soc_constraint, sos_constraint, sum, variable,
+    constraint, indicator_constraint, max, min, objective, param, set, soc_constraint,
+    sos_constraint, sum, variable,
 };

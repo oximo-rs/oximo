@@ -96,6 +96,9 @@ pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, Solver
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
+    }
     reject_semi_domains(model)?;
     let prepared = LoweringContext::new(model)?;
     let route = crate::convex::route(&prepared, opts)?;

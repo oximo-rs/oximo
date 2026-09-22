@@ -30,6 +30,11 @@ pub trait Solver {
         false
     }
 
+    /// Whether this backend can consume native indicator constraints.
+    fn supports_indicators(&self) -> bool {
+        false
+    }
+
     /// Whether this backend can consume all features present in `model`.
     fn supports_model(&self, model: &Model) -> bool {
         self.supports(model.kind())
@@ -38,6 +43,7 @@ pub trait Solver {
                 .iter()
                 .filter(|constraint| constraint.active)
                 .all(|constraint| self.supports_sos(constraint.sos_type))
+            && (!model.has_active_indicator_constraints() || self.supports_indicators())
     }
 
     /// Solves the given `Model` using this solver.

@@ -6,9 +6,9 @@ use gurobi_rs::constr::RangeExpr;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelId, ModelKind, ObjectiveSense, Sense,
-    SocConstraint, SocConstraintId, SosConstraint, SosConstraintId, SosType, VarId, Variable,
-    var_name,
+    Constraint, ConstraintId, Domain, IndicatorConstraint, IndicatorConstraintId, Model, ModelId,
+    ModelKind, ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint,
+    SosConstraintId, SosType, VarId, Variable, var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
@@ -60,6 +60,7 @@ pub(crate) struct Built {
     pub objective_generated: Vec<GeneratedConstraint>,
     pub soc_rows: Vec<SocHandle>,
     pub sos: Vec<(SosConstraintId, gurobi_rs::SOS)>,
+    pub indicators: Vec<(IndicatorConstraintId, Vec<gurobi_rs::GenConstr>)>,
     pub obj_constant: f64,
     pub has_semi: bool,
 }
@@ -89,6 +90,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     let constraints = model_constraints.algebraic();
     let socs = prepared.constraints().second_order_cones();
     let sos = prepared.constraints().special_ordered_sets();
+    let indicators = prepared.constraints().indicators();
     let objective = prepared.objective();
     let has_semi = vars.iter().any(|v| v.domain.semi_threshold().is_some());
 
@@ -103,6 +105,8 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         add_constraints(&prepared, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
     let soc_rows = add_soc_rows(&prepared, vars, socs, &mut gurobi_model, &gurobi_vars)?;
     let special_ordered_sets = add_sos_constraints(sos, &mut gurobi_model, &gurobi_vars)?;
+    let indicator_handles =
+        add_indicator_constraints(&prepared, indicators, &mut gurobi_model, &gurobi_vars)?;
 
     let (obj_constant, objective_generated) = match objective.as_ref() {
         Some(o) => set_objective(
@@ -136,6 +140,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         objective_generated,
         soc_rows,
         sos: special_ordered_sets,
+        indicators: indicator_handles,
         obj_constant,
         has_semi,
     })
@@ -387,6 +392,17 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
         }
     }
 
+    for (id, handles) in &built.indicators {
+        let mut selected = false;
+        for handle in handles {
+            selected |=
+                model.get_obj_attr(attr::IISGenConstr, handle).map_err(map_gurobi_err)? != 0;
+        }
+        if selected {
+            iis.indicator_constraints.push(*id);
+        }
+    }
+
     // Only model variables are scanned.
     for (i, v) in built.vars.iter().enumerate() {
         let id = VarId(u32::try_from(i).expect("var index fits u32"));
@@ -451,6 +467,76 @@ fn add_sos_constraints(
             gurobi_model.add_sos(members, ty).map(|handle| (id, handle)).map_err(map_gurobi_err)
         })
         .collect()
+}
+
+fn add_indicator_constraints(
+    prepared: &LoweringContext<'_>,
+    constraints: &[IndicatorConstraint],
+    gurobi_model: &mut gurobi_rs::Model,
+    gurobi_vars: &[gurobi_rs::Var],
+) -> Result<Vec<(IndicatorConstraintId, Vec<gurobi_rs::GenConstr>)>, SolverError> {
+    let mut result = Vec::new();
+    for (index, constraint) in constraints.iter().enumerate() {
+        if !constraint.active {
+            continue;
+        }
+        let terms = prepared.require_linear(constraint.lhs, || {
+            format!("indicator constraint {:?}", constraint.name)
+        })?;
+        let make_expr = || {
+            let mut expr = LinExpr::new();
+            for &(variable, coefficient) in terms.coeffs.iter() {
+                expr.add_term(coefficient, gurobi_vars[variable.index()]);
+            }
+            expr
+        };
+        let trigger = gurobi_vars[constraint.trigger.index()];
+        let mut handles = Vec::new();
+        if let Some((sense, rhs)) = constraint.as_single() {
+            let rhs = rhs - terms.constant;
+            let relation = match sense {
+                Sense::Le => c!(make_expr() <= rhs),
+                Sense::Ge => c!(make_expr() >= rhs),
+                Sense::Eq => c!(make_expr() == rhs),
+            };
+            handles.push(
+                gurobi_model
+                    .add_genconstr_indicator(
+                        &constraint.name,
+                        trigger,
+                        constraint.active_value,
+                        relation,
+                    )
+                    .map_err(map_gurobi_err)?,
+            );
+        } else if constraint.is_range() {
+            handles.push(
+                gurobi_model
+                    .add_genconstr_indicator(
+                        &format!("{}_lo", constraint.name),
+                        trigger,
+                        constraint.active_value,
+                        c!(make_expr() >= constraint.lower - terms.constant),
+                    )
+                    .map_err(map_gurobi_err)?,
+            );
+            handles.push(
+                gurobi_model
+                    .add_genconstr_indicator(
+                        &format!("{}_hi", constraint.name),
+                        trigger,
+                        constraint.active_value,
+                        c!(make_expr() <= constraint.upper - terms.constant),
+                    )
+                    .map_err(map_gurobi_err)?,
+            );
+        }
+        result.push((
+            IndicatorConstraintId(u32::try_from(index).expect("indicator index fits u32")),
+            handles,
+        ));
+    }
+    Ok(result)
 }
 
 fn active_sos_constraints(

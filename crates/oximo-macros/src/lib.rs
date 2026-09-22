@@ -11,6 +11,7 @@ mod bind;
 mod constraint;
 mod extrema;
 mod index;
+mod indicator;
 mod objective;
 mod param;
 mod set;
@@ -60,6 +61,13 @@ pub fn variable(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn constraint(input: TokenStream) -> TokenStream {
     constraint::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Register a native binary-triggered affine constraint.
+/// `indicator_constraint!(model, [name|name[idx]], binary == 0|1 => relation)`.
+#[proc_macro]
+pub fn indicator_constraint(input: TokenStream) -> TokenStream {
+    indicator::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// `soc_constraint!(model, [name|name = expr|name[idx]], [terms] <= bound)`,

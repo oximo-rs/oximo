@@ -47,6 +47,10 @@ impl Solver for Mosek {
         supported(kind)
     }
 
+    fn supports_indicators(&self) -> bool {
+        true
+    }
+
     fn solve(&mut self, model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts)
     }

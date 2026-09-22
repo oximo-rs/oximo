@@ -10,6 +10,7 @@ use oximo_expr::{Expr, ExprId, render_expr};
 
 use crate::constraint::{ConstraintId, Sense};
 use crate::domain::Domain;
+use crate::indicator::IndicatorConstraintId;
 use crate::model::Model;
 use crate::soc::SocConstraintId;
 use crate::sos::SosConstraintId;
@@ -110,6 +111,35 @@ pub struct SosDisplay<'a> {
     id: SosConstraintId,
 }
 
+#[derive(Debug)]
+pub struct IndicatorDisplay<'a> {
+    model: &'a Model,
+    id: IndicatorConstraintId,
+}
+
+impl fmt::Display for IndicatorDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let arena = self.model.arena.borrow();
+        let vars = self.model.variables.borrow();
+        let indicators = self.model.indicator_constraints.borrow();
+        let c = &indicators[self.id.index()];
+        let resolve = |v| var_name(&vars, v);
+        let expr = render_expr(&arena, c.lhs, &resolve);
+        write!(f, "{}: {} = {} -> ", c.name, resolve(c.trigger), u8::from(c.active_value))?;
+        match c.as_single() {
+            Some((sense, rhs)) => write!(f, "{expr} {sense} {}", fmt_num(rhs))?,
+            None if c.is_range() => {
+                write!(f, "{} <= {expr} <= {}", fmt_num(c.lower), fmt_num(c.upper))?;
+            }
+            None => write!(f, "{expr} free")?,
+        }
+        if !c.active {
+            f.write_str(" (inactive)")?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for SosDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let vars = self.model.variables.borrow();
@@ -205,6 +235,11 @@ impl Model {
     pub fn display_sos(&self, id: impl Into<SosConstraintId>) -> SosDisplay<'_> {
         SosDisplay { model: self, id: id.into() }
     }
+
+    #[must_use]
+    pub fn display_indicator(&self, id: impl Into<IndicatorConstraintId>) -> IndicatorDisplay<'_> {
+        IndicatorDisplay { model: self, id: id.into() }
+    }
 }
 
 /// Pretty-print the whole model as readable algebra:
@@ -231,10 +266,12 @@ impl fmt::Display for Model {
         let n_constraints = self.constraints.borrow().len();
         let n_socs = self.soc_constraints.borrow().len();
         let n_sos = self.sos_constraints.borrow().len();
-        if n_constraints + n_socs + n_sos > 0 {
+        let n_indicators = self.indicator_constraints.borrow().len();
+        if n_constraints + n_socs + n_sos + n_indicators > 0 {
             let n_constraints = u32::try_from(n_constraints).expect("constraint count fits u32");
             let n_socs = u32::try_from(n_socs).expect("soc count fits u32");
             let n_sos = u32::try_from(n_sos).expect("sos count fits u32");
+            let n_indicators = u32::try_from(n_indicators).expect("indicator count fits u32");
             writeln!(f, "s.t.")?;
             for i in 0..n_constraints {
                 writeln!(f, "  {}", self.display_constraint(ConstraintId(i)))?;
@@ -244,6 +281,9 @@ impl fmt::Display for Model {
             }
             for i in 0..n_sos {
                 writeln!(f, "  {}", self.display_sos(SosConstraintId(i)))?;
+            }
+            for i in 0..n_indicators {
+                writeln!(f, "  {}", self.display_indicator(IndicatorConstraintId(i)))?;
             }
         }
         {

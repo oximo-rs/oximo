@@ -11,8 +11,9 @@ use std::{fs, io};
 static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelId, ModelKind, Objective, ObjectiveSense, Sense,
-    SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType, VarId, Variable,
+    Constraint, ConstraintId, Domain, IndicatorConstraint, Model, ModelId, ModelKind, Objective,
+    ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType,
+    VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
@@ -48,11 +49,13 @@ pub fn solve(
     let nonsmooth = analyze_gams_expressions(&prepared)?;
     let solve_type = gams_solve_type_for(kind, nonsmooth);
     validate_solver_type(opts, kind, solve_type)?;
+    validate_indicator_solver(model, opts)?;
     let vars = prepared.variables();
     let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
     let socs = prepared.constraints().second_order_cones();
     let sos_constraints = prepared.constraints().special_ordered_sets();
+    let indicators = prepared.constraints().indicators();
     let objective = prepared.objective();
     let sense = objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
 
@@ -70,6 +73,7 @@ pub fn solve(
         constraints,
         socs,
         sos_constraints,
+        indicators,
         objective,
         sense_kw,
         opts,
@@ -672,17 +676,19 @@ fn build_model_section(
     constraints: &[Constraint],
     socs: &[SocConstraint],
     sos_constraints: &[SosConstraint],
+    indicators: &[IndicatorConstraint],
     objective: Option<&Objective>,
     sense_kw: &str,
     opts: &GamsOptions,
 ) -> Option<(String, String)> {
-    let solver_opt = build_solver_opt(opts);
+    let solver_opt = build_solver_opt(opts, indicators);
 
     write_preamble(gms);
     write_var_declarations(gms, vars);
     write_sos_declarations(gms, sos_constraints);
     write_bounds_and_initials(gms, vars, sos_constraints);
-    write_equations(gms, prepared, constraints, socs, sos_constraints, objective);
+    write_equations(gms, prepared, constraints, socs, sos_constraints, indicators, objective);
+    write_scip_indicator_file(gms, opts, indicators);
     write_options(gms, opts, solve_type);
     write_model_and_solve(gms, solve_type, sense_kw, solver_opt.is_some());
 
@@ -722,6 +728,26 @@ fn validate_solver_type(
         )));
     }
     Ok(())
+}
+
+fn validate_indicator_solver(model: &Model, opts: &GamsOptions) -> Result<(), SolverError> {
+    if !model.has_active_indicator_constraints() {
+        return Ok(());
+    }
+    let Some(config) = opts.solver.as_ref() else {
+        return Err(SolverError::UnsupportedIndicator);
+    };
+    if matches!(
+        config,
+        crate::GamsSolverConfig::Named(crate::GamsSolver::Custom(_))
+            | crate::GamsSolverConfig::Raw(crate::GamsSolver::Custom(_), _)
+    ) {
+        return Err(SolverError::UnsupportedIndicator);
+    }
+    match config.gams_name() {
+        "COPT" | "CPLEX" | "GUROBI" | "SCIP" | "XPRESS" => Ok(()),
+        _ => Err(SolverError::UnsupportedIndicator),
+    }
 }
 
 #[cfg(test)]
@@ -806,12 +832,50 @@ fn analyze_gams_expressions(prepared: &LoweringContext<'_>) -> Result<bool, Solv
     Ok(nonsmooth)
 }
 
-fn build_solver_opt(opts: &GamsOptions) -> Option<(String, String)> {
+fn build_solver_opt(
+    opts: &GamsOptions,
+    indicators: &[IndicatorConstraint],
+) -> Option<(String, String)> {
     opts.solver.as_ref().and_then(|cfg| {
         let mut buf = String::new();
-        cfg.write_opt_file(&mut buf)
-            .then(|| (format!("{}.opt", cfg.gams_name().to_ascii_lowercase()), buf))
+        let mut wrote = cfg.write_opt_file(&mut buf);
+        if indicators.iter().any(|c| c.active) {
+            if cfg.gams_name() == "SCIP" {
+                writeln!(buf, "gams/indicatorfile indicators.txt").unwrap();
+            } else if matches!(cfg.gams_name(), "COPT" | "CPLEX" | "GUROBI" | "XPRESS") {
+                write_indicator_mappings(&mut buf, indicators);
+            }
+            wrote = true;
+        }
+        wrote.then(|| (format!("{}.opt", cfg.gams_name().to_ascii_lowercase()), buf))
     })
+}
+
+fn write_indicator_mappings(out: &mut String, indicators: &[IndicatorConstraint]) {
+    for (index, constraint) in indicators.iter().enumerate().filter(|(_, c)| c.active) {
+        let trigger = constraint.trigger.index();
+        let value = u8::from(constraint.active_value);
+        if constraint.as_single().is_some() {
+            writeln!(out, "indic eq_ind{index}$v{trigger} {value}").unwrap();
+        } else if constraint.is_range() {
+            writeln!(out, "indic eq_ind{index}_lo$v{trigger} {value}").unwrap();
+            writeln!(out, "indic eq_ind{index}_hi$v{trigger} {value}").unwrap();
+        }
+    }
+}
+
+fn write_scip_indicator_file(
+    gms: &mut String,
+    opts: &GamsOptions,
+    indicators: &[IndicatorConstraint],
+) {
+    if opts.solver.as_ref().is_some_and(|cfg| cfg.gams_name() == "SCIP")
+        && indicators.iter().any(|c| c.active)
+    {
+        writeln!(gms, "$onecho > indicators.txt").unwrap();
+        write_indicator_mappings(gms, indicators);
+        writeln!(gms, "$offecho").unwrap();
+    }
 }
 
 fn write_preamble(gms: &mut String) {
@@ -964,12 +1028,14 @@ fn write_var_bounds(gms: &mut String, v: &Variable) {
     }
 }
 
+#[expect(clippy::too_many_lines)]
 fn write_equations(
     gms: &mut String,
     prepared: &PreparedExpressions,
     constraints: &[Constraint],
     socs: &[SocConstraint],
     sos_constraints: &[SosConstraint],
+    indicators: &[IndicatorConstraint],
     objective: Option<&Objective>,
 ) {
     let arena = prepared.arena();
@@ -988,6 +1054,20 @@ fn write_equations(
         for member_index in 0..constraint.members.len() {
             write!(gms, ", eq_sos{sos_id}_m{member_index}").unwrap();
         }
+    }
+    for (index, constraint) in indicators.iter().enumerate().filter(|(_, c)| c.active) {
+        if constraint.as_single().is_some() {
+            write!(gms, ", eq_ind{index}").unwrap();
+        } else if constraint.is_range() {
+            write!(gms, ", eq_ind{index}_lo, eq_ind{index}_hi").unwrap();
+        }
+    }
+    let mut triggers = std::collections::BTreeSet::new();
+    for constraint in indicators.iter().filter(|c| c.active) {
+        triggers.insert(constraint.trigger.index());
+    }
+    for trigger in &triggers {
+        write!(gms, ", eq_ind_use{trigger}").unwrap();
     }
     writeln!(gms, ";").unwrap();
     writeln!(gms).unwrap();
@@ -1046,6 +1126,29 @@ fn write_equations(
     }
     write_soc_equations(gms, prepared, socs);
     write_sos_link_equations(gms, sos_constraints);
+    for (index, constraint) in indicators.iter().enumerate().filter(|(_, c)| c.active) {
+        let terms = prepared.linear(constraint.lhs).expect("indicator consequent is affine");
+        if let Some((sense, rhs)) = constraint.as_single() {
+            let relation = match sense {
+                Sense::Le => "=l=",
+                Sense::Ge => "=g=",
+                Sense::Eq => "=e=",
+            };
+            write!(gms, "eq_ind{index}..").unwrap();
+            write_linear(gms, &terms, false);
+            writeln!(gms, " {relation} {};", fmt(rhs - terms.constant)).unwrap();
+        } else if constraint.is_range() {
+            write!(gms, "eq_ind{index}_lo..").unwrap();
+            write_linear(gms, &terms, false);
+            writeln!(gms, " =g= {};", fmt(constraint.lower - terms.constant)).unwrap();
+            write!(gms, "eq_ind{index}_hi..").unwrap();
+            write_linear(gms, &terms, false);
+            writeln!(gms, " =l= {};", fmt(constraint.upper - terms.constant)).unwrap();
+        }
+    }
+    for trigger in triggers {
+        writeln!(gms, "eq_ind_use{trigger}.. v{trigger} =g= 0;").unwrap();
+    }
     writeln!(gms).unwrap();
 }
 
@@ -1371,7 +1474,7 @@ pub mod benchmark_support {
         if parallel {
             write_parallel(&mut out, &arena, &constraints, &socs);
         } else {
-            write_equations(&mut out, &arena, &constraints, &socs, &[], None);
+            write_equations(&mut out, &arena, &constraints, &socs, &[], &[], None);
         }
         out
     }
@@ -1462,6 +1565,7 @@ mod tests {
         let constraints = model_constraints.algebraic();
         let socs = model.soc_constraints();
         let sos_constraints = model.sos_constraints();
+        let indicators = model.indicator_constraints();
         let objective = model.objective();
         let sense_kw = match objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense) {
             ObjectiveSense::Minimize => "minimizing",
@@ -1479,6 +1583,7 @@ mod tests {
             constraints,
             &socs,
             &sos_constraints,
+            &indicators,
             objective.as_ref(),
             sense_kw,
             opts,
@@ -1638,6 +1743,31 @@ mod tests {
         assert_eq!(gams_solver_label(&opts).as_ref(), "GAMS/CPLEX");
         // No sub-solver configured: GAMS picks its own default, so just "GAMS".
         assert_eq!(gams_solver_label(&GamsOptions::default()).as_ref(), "GAMS");
+    }
+
+    #[test]
+    fn indicators_require_supported_explicit_solver_and_preserve_options() {
+        use crate::solver_options::{GamsCplexOptions, GamsSolverConfig};
+        let model = Model::new("indicator");
+        variable!(model, b, Binary);
+        variable!(model, x);
+        indicator_constraint!(model, cap, b == 1 => x <= 3.0);
+        objective!(model, Max, x);
+        assert!(matches!(
+            validate_indicator_solver(&model, &GamsOptions::default()),
+            Err(SolverError::UnsupportedIndicator)
+        ));
+        let opts = GamsOptions::default().solver(GamsSolverConfig::Cplex(GamsCplexOptions {
+            raw: vec!["threads 2".into()],
+            ..Default::default()
+        }));
+        validate_indicator_solver(&model, &opts).unwrap();
+        let gms = render(&model, &opts);
+        assert!(gms.contains("eq_ind0.."), "{gms}");
+        assert!(gms.contains("eq_ind_use0.. v0 =g= 0;"), "{gms}");
+        let (_, option_file) = build_solver_opt(&opts, &model.indicator_constraints()).unwrap();
+        assert!(option_file.contains("threads 2"), "{option_file}");
+        assert!(option_file.contains("indic eq_ind0$v0 1"), "{option_file}");
     }
 
     #[test]

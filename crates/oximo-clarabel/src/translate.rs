@@ -152,6 +152,9 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
+    }
     let problem = build_problem(model)?;
     let settings = build_settings(opts);
     let mut solver = DefaultSolver::new(
@@ -184,6 +187,9 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
 pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
+    }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
     }
     build_problem_with(model, None)
 }
