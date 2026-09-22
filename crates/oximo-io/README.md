@@ -61,7 +61,7 @@ Widely supported by commercial and open-source solvers.
 | Quadratic import   | `QUADOBJ`, `QMATRIX`, `QCMATRIX`, and `QSECTION`. Gurobi, CPLEX or MOSEK constraint scaling is selectable. |
 | Quadratic export   | `QUADOBJ`/`QCMATRIX` for Gurobi and CPLEX, `QSECTION` for MOSEK                                            |
 | SOS sections       | Native SOS1/SOS2 sections are imported and exported. MOSEK MPS export rejects SOS                          |
-| Indicators         | Standard `INDICATORS` / `IF row binary 0|1` records; ranged bodies expand to two rows                      |
+| Indicators         | Standard `INDICATORS` / `IF row binary 0\|1` records; ranged bodies expand to two rows                     |
 | Constant terms     | Objective constants use `RHS OBJ`, constraint constants are folded into `RHS`                              |
 
 ```rust,ignore
@@ -97,15 +97,15 @@ let quadratic_mps = to_mps_string_with(&model, &write_options)?;
 
 Human-readable CPLEX LP format. Sections emitted: header comment, `Minimize`/`Maximize`, `Subject To`, `Bounds` (non-default only), `General`, `Binaries`, `Semi-Continuous`, `SOS`, `End`.
 
-| Feature            | Behavior                                                                        |
-| ------------------ | ------------------------------------------------------------------------------- |
-| Objective sense    | `Minimize` / `Maximize` keyword, no negation needed                             |
-| Quadratic terms    | CPLEX bracket notation: objective `[Q]/2`, constraints `[q]`                    |
-| Integer variables  | `General` section (integer/semi-integer), `Binaries` section                    |
-| Semicont variables | `Semi-Continuous` section, threshold emitted as the lower bound                 |
-| Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted              |
-| Objective constant | Written as a final numeric term if non-zero                                     |
-| Indicators         | Inline `binary = 0|1 -> affine relation` rows; ranged bodies expand to two rows |
+| Feature            | Behavior                                                                         |
+| ------------------ | -------------------------------------------------------------------------------- |
+| Objective sense    | `Minimize` / `Maximize` keyword, no negation needed                              |
+| Quadratic terms    | CPLEX bracket notation: objective `[Q]/2`, constraints `[q]`                     |
+| Integer variables  | `General` section (integer/semi-integer), `Binaries` section                     |
+| Semicont variables | `Semi-Continuous` section, threshold emitted as the lower bound                  |
+| Bounds             | Free variables declared with `free`; default lb=0, ub=+inf omitted               |
+| Objective constant | Written as a final numeric term if non-zero                                      |
+| Indicators         | Inline `binary = 0\|1 -> affine relation` rows; ranged bodies expand to two rows |
 
 ```rust,ignore
 use oximo_io::{write_lp, to_lp_string};
