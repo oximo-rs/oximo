@@ -139,9 +139,13 @@ impl PouncePersistent {
             }
         };
         let primary_started = Instant::now();
-        let primary = if selected_algorithm(opts)? == PounceAlgorithm::InteriorPoint
+        let resident_primary = selected_algorithm(opts)? == PounceAlgorithm::InteriorPoint
             && backend::supports_resident(&state.oracle)
-        {
+            // The upstream session constructs its own presolve wrapper without
+            // an expression provider, so FBBT requires the direct TNLP path.
+            && !(opts.effective_bool("presolve") == Some(true)
+                && opts.effective_bool("presolve_fbbt") == Some(true));
+        let primary = if resident_primary {
             let rebuild =
                 state.resident.as_ref().is_none_or(|resident| !resident.matches_options(opts));
             if rebuild {
@@ -156,8 +160,11 @@ impl PouncePersistent {
             state.resident = None;
             backend::run(model, &state.oracle, &prep, opts, state.warm.as_ref())?
         };
-        let mut outcome =
-            run_nlp_retries_after(model, &state.oracle, &prep, opts, primary_started, primary)?;
+        let mut outcome = if resident_primary {
+            run_nlp_retries_after(model, &state.oracle, &prep, opts, primary_started, primary)?
+        } else {
+            primary
+        };
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
         Ok(assemble(prep.sign, outcome, elapsed, model.id(), model.num_variables()))

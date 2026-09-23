@@ -9,9 +9,11 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use oximo_core::Model;
 use oximo_solver::{DualStatus, SolverError};
 use pounce_rs::pounce_nlp::solve_statistics::SolveStatistics;
-use pounce_rs::presolve::WarmPoint;
+use pounce_rs::presolve::{ExpressionProvider, FbbtTape, PresolveOptions, WarmPoint};
+use pounce_rs::restoration::run_second_opinion_ladder;
 use pounce_rs::session::{SessionSolution, TnlpPresolveSession};
 use pounce_rs::{
     ApplicationReturnStatus, BoundsInfo, Index, IndexStyle, IpoptApplication, IpoptCq, IpoptData,
@@ -62,6 +64,7 @@ fn to_index(v: usize) -> Index {
 /// Warm-starts from `warm` when given, and reads iteration
 /// statistics back off the application after the solve.
 pub(crate) fn run<O: DerivativeOracle + 'static>(
+    model: &Model,
     oracle: &Rc<RefCell<O>>,
     prep: &Prepared,
     opts: &PounceOptions,
@@ -91,12 +94,37 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
         });
     }
 
-    let status = app.optimize_tnlp(Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>);
+    let inner = wrap_with_fbbt_if_enabled(&mut app, model, oracle, prep, &tnlp)?;
+    let interior_point = selected_algorithm(opts)? == PounceAlgorithm::InteriorPoint;
+    if interior_point {
+        app.defer_end_verdict();
+    }
+    let base_status = app.optimize_tnlp(Rc::clone(&inner));
+    let base_stats = app.statistics();
+    let mut ladder_log = Vec::new();
+    let (status, stats, iterations) = if interior_point {
+        let ladder =
+            run_second_opinion_ladder(&mut app, inner, base_status, base_stats, &mut |line| {
+                ladder_log.push(line.to_owned());
+            });
+        let iterations = u64::try_from(ladder.total_iteration_count()).unwrap_or(u64::MAX);
+        (ladder.status, ladder.statistics, iterations)
+    } else {
+        let iterations = u64::try_from(base_stats.iteration_count.max(0)).unwrap_or(0);
+        (base_status, base_stats, iterations)
+    };
     let sqp_working = app.last_sqp_working_set().cloned();
     let termination = map_status(status);
-    let stats = app.statistics();
-    let iterations = u64::try_from(stats.iteration_count.max(0)).unwrap_or(0);
-    let raw_log = (opts.universal.verbose == Some(true)).then(|| format_raw_log(&stats, status));
+    let raw_log = (opts.universal.verbose == Some(true)).then(|| {
+        let mut log = format_raw_log(&stats, status);
+        if !ladder_log.is_empty() {
+            use std::fmt::Write as _;
+            for line in &ladder_log {
+                let _ = writeln!(log, "{line}");
+            }
+        }
+        log
+    });
 
     if let Some(captured) = &mut tnlp.borrow_mut().captured {
         captured.warm.sqp_working = sqp_working;
@@ -137,6 +165,92 @@ pub(crate) fn run<O: DerivativeOracle + 'static>(
             raw_log,
         },
     })
+}
+
+fn wrap_with_fbbt_if_enabled<O: DerivativeOracle + 'static>(
+    app: &mut IpoptApplication,
+    model: &Model,
+    oracle: &Rc<RefCell<O>>,
+    prep: &Prepared,
+    tnlp: &Rc<RefCell<OximoTnlp<O>>>,
+) -> Result<Rc<RefCell<dyn TNLP>>, SolverError> {
+    let inner = Rc::clone(tnlp) as Rc<RefCell<dyn TNLP>>;
+    let presolve_opts = PresolveOptions::from_options_list(app.options())
+        .map_err(|error| SolverError::Backend(format!("pounce presolve: {error}")))?;
+    if !presolve_opts.enabled || !presolve_opts.fbbt {
+        return Ok(inner);
+    }
+    let tapes = crate::fbbt::checked_constraint_tapes(model)?;
+    validate_fbbt_values(oracle, prep, &tapes)?;
+    tnlp.borrow_mut().fbbt_constraints = tapes;
+    let provider = Rc::clone(tnlp) as Rc<RefCell<dyn ExpressionProvider>>;
+    let wrapped = pounce_rs::presolve::wrap_with_presolve_provider(inner, provider, presolve_opts)
+        .map_err(|error| SolverError::Backend(format!("pounce presolve: {error}")))?;
+    app.set_presolve_already_applied(true);
+    Ok(wrapped)
+}
+
+fn validate_fbbt_values<O: DerivativeOracle>(
+    oracle: &Rc<RefCell<O>>,
+    prep: &Prepared,
+    tapes: &[Option<FbbtTape>],
+) -> Result<(), SolverError> {
+    use pounce_rs::presolve::pounce_presolve::fbbt::{forward_pass, forward_result};
+
+    if tapes.len() != oracle.borrow().num_constraints() {
+        return Err(SolverError::Backend(
+            "oximo-pounce: generated FBBT tape rejected: constraint count differs from TNLP".into(),
+        ));
+    }
+    let midpoint = prep
+        .x_l
+        .iter()
+        .zip(&prep.x_u)
+        .zip(&prep.x0)
+        .map(|((&lo, &hi), &start)| {
+            if lo > -crate::translate::POUNCE_INFINITY && hi < crate::translate::POUNCE_INFINITY {
+                lo + 0.5 * (hi - lo)
+            } else {
+                start
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for (label, point) in [("starting point", prep.x0.as_slice()), ("box midpoint", &midpoint)] {
+        let mut values = vec![0.0; tapes.len()];
+        oracle.borrow_mut().eval_constraints(point, &mut values);
+        for (constraint, tape) in tapes.iter().enumerate() {
+            let Some(tape) = tape.as_ref().filter(|tape| !tape.is_empty()) else {
+                continue;
+            };
+            let actual = values[constraint];
+            if !actual.is_finite() {
+                continue;
+            }
+            let slots = forward_pass(tape, point, point).map_err(|error| {
+                SolverError::Backend(format!(
+                    "oximo-pounce: generated FBBT tape rejected for constraint {constraint} at {label}: {error:?}"
+                ))
+            })?;
+            let range = forward_result(&slots);
+            let scale = [actual, range.lo, range.hi]
+                .into_iter()
+                .filter(|value| value.is_finite())
+                .fold(1.0_f64, |scale, value| scale.max(value.abs()));
+            let tolerance = f64::EPSILON.sqrt() * scale;
+            if !range.contains(actual)
+                && (range.is_empty()
+                    || actual < range.lo - tolerance
+                    || actual > range.hi + tolerance)
+            {
+                return Err(SolverError::Backend(format!(
+                    "oximo-pounce: generated FBBT tape rejected for constraint {constraint} at {label}: callback value {actual} is outside [{}, {}]",
+                    range.lo, range.hi
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A live TNLP plus POUNCE's presolve-aware warm session.
@@ -386,6 +500,7 @@ struct OximoTnlp<O> {
     g_u: Vec<f64>,
     x0: Vec<f64>,
     warm: Option<WarmStart>,
+    fbbt_constraints: Vec<Option<FbbtTape>>,
     captured: Option<Captured>,
 }
 
@@ -400,6 +515,7 @@ impl<O> OximoTnlp<O> {
             g_u: prep.g_u.clone(),
             x0: prep.x0.clone(),
             warm,
+            fbbt_constraints: Vec::new(),
             captured: None,
         }
     }
@@ -413,6 +529,12 @@ impl<O> OximoTnlp<O> {
         self.x0.clone_from(&prep.x0);
         self.warm = None;
         self.captured = None;
+    }
+}
+
+impl<O> ExpressionProvider for OximoTnlp<O> {
+    fn constraint_expression(&self, index: usize) -> Option<FbbtTape> {
+        self.fbbt_constraints.get(index).and_then(Clone::clone)
     }
 }
 
@@ -536,5 +658,48 @@ impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
             reduced,
             obj: sol.obj_value,
         });
+    }
+}
+
+#[cfg(all(test, not(feature = "enzyme")))]
+mod fbbt_tests {
+    use super::*;
+    use oximo_core::{constraint, objective, variable};
+    use oximo_solver::prepare::LoweringContext;
+
+    #[test]
+    fn tnlp_expression_provider_tightens_bounds() {
+        let model = Model::new("tnlp_fbbt");
+        variable!(model, -10.0 <= x <= 10.0);
+        objective!(model, Min, x.powi(2));
+        constraint!(model, square_cap, x.powi(2) <= 4.0);
+
+        let options = PounceOptions::default();
+        let lowering = LoweringContext::new(&model).unwrap();
+        let prep = crate::translate::setup_prepared(&lowering, &options).unwrap();
+        let oracle = Rc::new(RefCell::new(crate::hybrid::HybridOracle::new(&model)));
+        let mut tnlp = OximoTnlp::new(oracle, &prep, None);
+        tnlp.fbbt_constraints = crate::fbbt::checked_constraint_tapes(&model).unwrap();
+        let tnlp = Rc::new(RefCell::new(tnlp));
+        let inner = Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>;
+        let provider = Rc::clone(&tnlp) as Rc<RefCell<dyn ExpressionProvider>>;
+        let mut presolve_opts = PresolveOptions::defaults();
+        presolve_opts.enabled = true;
+        presolve_opts.fbbt = true;
+        let wrapped =
+            Rc::new(RefCell::new(pounce_rs::presolve::PresolveTnlp::with_expression_provider(
+                inner,
+                provider,
+                presolve_opts,
+            )));
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.options_mut().set_integer_value("print_level", 0, true, true).unwrap();
+        app.set_presolve_already_applied(true);
+        let status = app.optimize_tnlp(Rc::clone(&wrapped) as Rc<RefCell<dyn TNLP>>);
+        assert_eq!(status, ApplicationReturnStatus::SolveSucceeded);
+        let report = wrapped.borrow().fbbt_report().expect("FBBT ran");
+        assert!(report.bound_updates > 0, "{report:?}");
     }
 }
