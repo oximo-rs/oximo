@@ -1,14 +1,7 @@
 //! Conversion from oximo's expression arena to POUNCE's FBBT tapes.
-//!
-//! The builder owns the presolve/FBBT driver in `pounce-rs`.
-//! oximo only needs to provide the structural expression
-//! capability through `Problem`.
-//!
-//! This capability is currently used by the stable builder path.
-
-// TODO: Add support for Nightly/TNLP once v0.12 releases.
 
 use oximo_core::{ExprArenaSnapshot, ExprId, ExprNode, Model, UnaryOp};
+use oximo_solver::SolverError;
 use pounce_rs::{FbbtOp, FbbtTape};
 use rustc_hash::FxHashMap;
 
@@ -24,6 +17,38 @@ pub(crate) fn constraint_tapes(model: &Model) -> Vec<Option<FbbtTape>> {
         .iter()
         .map(|constraint| Some(tape_for(&arena, constraint.lhs, &mut slots)))
         .collect()
+}
+
+/// Validate tapes before handing them to the low-level TNLP presolve path.
+/// The builder path performs this validation inside `pounce-rs`.
+pub(crate) fn checked_constraint_tapes(
+    model: &Model,
+) -> Result<Vec<Option<FbbtTape>>, SolverError> {
+    let tapes = constraint_tapes(model);
+    for (constraint, tape) in tapes.iter().enumerate() {
+        let Some(tape) = tape else { continue };
+        if let Some(slot) = tape.first_invalid_slot() {
+            return Err(SolverError::Backend(format!(
+                "oximo-pounce: generated FBBT tape rejected for constraint {constraint}: invalid operand at slot {slot}"
+            )));
+        }
+        for (slot, op) in tape.ops.iter().enumerate() {
+            match *op {
+                FbbtOp::Var(variable) if variable >= model.num_variables() => {
+                    return Err(SolverError::Backend(format!(
+                        "oximo-pounce: generated FBBT tape rejected for constraint {constraint}: variable index {variable} at slot {slot} is out of range"
+                    )));
+                }
+                FbbtOp::Const(value) if !value.is_finite() => {
+                    return Err(SolverError::Backend(format!(
+                        "oximo-pounce: generated FBBT tape rejected for constraint {constraint}: non-finite constant at slot {slot}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(tapes)
 }
 
 fn tape_for(

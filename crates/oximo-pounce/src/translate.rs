@@ -126,27 +126,12 @@ pub(crate) fn solve_nlp_since_prepared(
 ) -> Result<SolverResult, SolverError> {
     let prep = setup_prepared(prepared, opts)?;
     let oracle = backend::build(model)?;
-    let outcome = run_nlp_with_retries(model, &oracle, &prep, opts, None)?;
+    let outcome = backend::run(model, &oracle, &prep, opts, None)?;
     Ok(assemble(prep.sign, outcome, started.elapsed(), model.id(), model.num_variables()))
 }
 
-/// Mirror POUNCE's two-rung second opinion for a local-infeasibility verdict.
-/// A retry is promoted only when its own convergence check succeeds.
-pub(crate) fn run_nlp_with_retries(
-    model: &Model,
-    oracle: &backend::Oracle,
-    prep: &Prepared,
-    opts: &PounceOptions,
-    warm: Option<&WarmStart>,
-) -> Result<Outcome, SolverError> {
-    let started = Instant::now();
-    let original = backend::run(model, oracle, prep, opts, warm)?;
-    run_nlp_retries_after(model, oracle, prep, opts, started, original)
-}
-
-/// Apply oximo's local-infeasibility second opinions after a caller-specific
-/// primary solve. Persistent TNLP sessions use this so retries retain the same
-/// policy without giving up their resident presolve transform.
+/// Apply local-infeasibility second opinions after a resident TNLP session.
+/// POUNCE's session API does not expose the application needed by its ladder.
 pub(crate) fn run_nlp_retries_after(
     model: &Model,
     oracle: &backend::Oracle,
