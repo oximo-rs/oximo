@@ -151,6 +151,9 @@ impl Solver for HighsPersistent {
         if model.has_active_sos_constraints() {
             return Err(SolverError::UnsupportedSos);
         }
+        if model.has_active_indicator_constraints() {
+            return Err(SolverError::UnsupportedIndicator);
+        }
         match self.solve_resident(model, opts) {
             Ok(result) => Ok(result),
             Err(e) => {

@@ -29,6 +29,20 @@ fn mps_writer_rejects_soc_constraints() {
 }
 
 #[test]
+fn mps_writer_rejects_soc_constraints_when_indicators_are_present() {
+    let m = Model::new("mixed_conic_indicator");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    variable!(m, enabled, Binary);
+    m.add_soc_constraint("cone", [x, y], t);
+    indicator_constraint!(m, gated, enabled == 1 => x <= 2.0);
+    objective!(m, Min, t);
+
+    assert!(matches!(to_mps_string(&m), Err(IoError::Conic)));
+}
+
+#[test]
 fn nl_writer_rejects_soc_constraints() {
     assert!(matches!(to_nl_string(&soc_model()), Err(IoError::Conic)));
 }

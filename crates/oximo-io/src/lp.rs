@@ -416,6 +416,16 @@ struct ParsedLp {
     vars: Vec<String>,
     var_set: FxHashSet<String>,
     sos: Vec<ParsedLpSos>,
+    indicators: Vec<ParsedLpIndicator>,
+}
+
+struct ParsedLpIndicator {
+    name: String,
+    trigger: String,
+    active_value: bool,
+    expr: Ast,
+    sense: Sense,
+    rhs: f64,
 }
 
 struct ParsedLpSos {
@@ -519,7 +529,7 @@ fn parse_constraint_line(
     pending_line: &mut usize,
     p: &mut ParsedLp,
 ) -> Result<(), IoError> {
-    if pending.is_empty() && (line.contains("::") || line.contains("->")) {
+    if pending.is_empty() && line.contains("::") {
         return Err(IoError::UnsupportedLp {
             section: "Subject To".into(),
             feature: "SOS or indicator constraints are not represented by oximo-core".into(),
@@ -537,10 +547,45 @@ fn parse_constraint_line(
     }
     pending.push(' ');
     pending.push_str(line);
-    if has_comparison(pending) && has_rhs(pending) {
-        let (name, body) = pending
-            .split_once(':')
-            .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_string(), b));
+
+    let (name, body) = pending
+        .split_once(':')
+        .map_or((String::new(), pending.as_str()), |(n, b)| (n.trim().to_owned(), b));
+    if let Some((trigger_text, indicator_body)) = body.split_once("->") {
+        if indicator_body.contains("->") {
+            return Err(invalid_lp(line_no, 1, "indicator constraint needs exactly one `->`"));
+        }
+        if !has_comparison(indicator_body) || !has_rhs(indicator_body) {
+            return Ok(());
+        }
+        let trigger_tokens = lex(trigger_text.trim(), line_no)?;
+        if trigger_tokens.len() != 3 {
+            return Err(invalid_lp(
+                line_no,
+                1,
+                "indicator trigger must be `binary = 0` or `binary = 1`",
+            ));
+        }
+        let trigger = match &trigger_tokens[0].kind {
+            Tok::Word(name) => name.clone(),
+            _ => return Err(invalid_lp(line_no, 1, "indicator trigger must be a variable")),
+        };
+        if !matches!(trigger_tokens[1].kind, Tok::Eq) {
+            return Err(invalid_lp(line_no, 1, "indicator trigger needs `=`"));
+        }
+        let active_value = match trigger_tokens[2].kind {
+            Tok::Number(v) if v.to_bits() == 0.0f64.to_bits() => false,
+            Tok::Number(v) if v.to_bits() == 1.0f64.to_bits() => true,
+            _ => return Err(invalid_lp(line_no, 1, "indicator trigger value must be 0 or 1")),
+        };
+        let (expr, sense, rhs) = parse_row(indicator_body, *pending_line)?;
+        collect_vars(&expr, &mut p.vars, &mut p.var_set);
+        if p.var_set.insert(trigger.clone()) {
+            p.vars.push(trigger.clone());
+        }
+        p.indicators.push(ParsedLpIndicator { name, trigger, active_value, expr, sense, rhs });
+        pending.clear();
+    } else if has_comparison(body) && has_rhs(body) {
         let (expr, sense, rhs) = parse_row(body, *pending_line)?;
         collect_vars(&expr, &mut p.vars, &mut p.var_set);
         p.rows.push((name, expr, sense, rhs));
@@ -688,6 +733,7 @@ fn build_model(
         .chain(p.binary.iter())
         .chain(p.semi.iter())
         .chain(p.sos.iter().flat_map(|sos| sos.members.iter().map(|(n, _)| n)))
+        .chain(p.indicators.iter().map(|indicator| &indicator.trigger))
     {
         if p.var_set.insert(n.clone()) {
             p.vars.push(n.clone());
@@ -727,6 +773,19 @@ fn build_model(
         validate_lp_row_name(name)?;
         if !used_names.insert(name.clone()) {
             return Err(invalid_lp(1, 1, format!("duplicate constraint name {name:?}")));
+        }
+    }
+    for indicator in &p.indicators {
+        if indicator.name.is_empty() {
+            continue;
+        }
+        validate_lp_row_name(&indicator.name)?;
+        if !used_names.insert(indicator.name.clone()) {
+            return Err(invalid_lp(
+                1,
+                1,
+                format!("duplicate constraint name {:?}", indicator.name),
+            ));
         }
     }
     let mut next_generated_name = 0;
@@ -771,6 +830,39 @@ fn build_model(
             })
             .collect::<Result<Vec<_>, _>>()?;
         m.add_sos_constraint(name, sos_type, members);
+    }
+    for indicator in p.indicators {
+        let mut name = indicator.name;
+        if name.is_empty() {
+            loop {
+                let candidate = format!("c{next_generated_name}");
+                next_generated_name += 1;
+                if used_names.insert(candidate.clone()) {
+                    name = candidate;
+                    break;
+                }
+            }
+        }
+        if degree(&indicator.expr) > 1 {
+            return Err(invalid_lp(1, 1, "indicator consequent must be affine"));
+        }
+        let trigger = vars.get(&indicator.trigger).copied().ok_or_else(|| {
+            invalid_lp(1, 1, format!("unknown indicator trigger {:?}", indicator.trigger))
+        })?;
+        if !binary_names.contains(&indicator.trigger) {
+            return Err(invalid_lp(
+                1,
+                1,
+                format!("indicator trigger {:?} is not binary", indicator.trigger),
+            ));
+        }
+        let e = lower(&m, &vars, indicator.expr)?;
+        let consequent = match indicator.sense {
+            Sense::Le => e.le(indicator.rhs),
+            Sense::Ge => e.ge(indicator.rhs),
+            Sense::Eq => e.eq(indicator.rhs),
+        };
+        m.add_indicator_constraint(name, trigger, indicator.active_value, consequent);
     }
     let e = lower(&m, &vars, obj)?;
     match objective_sense {
@@ -1006,8 +1098,12 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     // A collapsed range row is split into `{name}_lo` / `{name}_hi` labels at
     // export time. Those derived labels can clash with another constraint named
     // literally `{name}_lo`, so disambiguate against every registered name.
-    let mut used_labels: FxHashSet<String> =
-        constraints.iter().map(|c| c.name.to_string()).collect();
+    let indicators = model.indicator_constraints();
+    let mut used_labels: FxHashSet<String> = constraints
+        .iter()
+        .map(|c| c.name.to_string())
+        .chain(indicators.iter().map(|c| c.name.to_string()))
+        .collect();
 
     writeln!(out, "Subject To")?;
     for c in constraints {
@@ -1042,6 +1138,41 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             // representation (`>= -inf` / `<= +inf` are illegal).
             // Leave a comment so the omission is traceable in the output.
             writeln!(out, "\\* skipped free row: {} *\\", c.name)?;
+        }
+    }
+    for c in indicators.iter().filter(|c| c.active) {
+        validate_lp_row_name(&c.name)?;
+        let t = extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
+            location: format!("indicator constraint {:?}", c.name),
+            term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
+                .unwrap_or_else(|| "<nonlinear>".into()),
+        })?;
+        if !t.hessian.is_empty() {
+            return Err(IoError::Nonlinear {
+                location: format!("indicator constraint {:?}", c.name),
+                term: "quadratic indicator consequent".into(),
+            });
+        }
+        let trigger = var_name(&vars, c.trigger);
+        let prefix = format!("{trigger} = {} ->", u8::from(c.active_value));
+        if let Some((sense, rhs)) = c.as_single() {
+            let op = match sense {
+                Sense::Le => "<=",
+                Sense::Ge => ">=",
+                Sense::Eq => "=",
+            };
+            write!(out, " {}: {prefix}", c.name)?;
+            write_quadratic(out, &t, &vars, true)?;
+            writeln!(out, " {op} {}", rhs - t.constant)?;
+        } else if c.is_range() {
+            let lo_label = unique_label(&mut used_labels, &format!("{}_lo", c.name));
+            write!(out, " {lo_label}: {prefix}")?;
+            write_quadratic(out, &t, &vars, true)?;
+            writeln!(out, " >= {}", c.lower - t.constant)?;
+            let hi_label = unique_label(&mut used_labels, &format!("{}_hi", c.name));
+            write!(out, " {hi_label}: {prefix}")?;
+            write_quadratic(out, &t, &vars, true)?;
+            writeln!(out, " <= {}", c.upper - t.constant)?;
         }
     }
 

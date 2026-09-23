@@ -5,6 +5,7 @@ use oximo_expr::{Expr, ModelId};
 use rustc_hash::FxHashMap;
 
 use crate::constraint::{ConstraintHandle, RangeConstraintHandles};
+use crate::indicator::{IndicatorConstraintHandle, RangeIndicatorConstraintHandles};
 use crate::set::{Axis, FromIndexKey, IndexKey};
 
 /// Owned, ordered IDs with a domain-specific lookup index.
@@ -99,6 +100,70 @@ constraint_family!(
     /// `get` supports integer, string, and tuple keys, including sparse domains.
     IndexedConstraint, ConstraintHandle
 );
+
+/// Owned handles returned by an indexed single-relation indicator declaration.
+#[derive(Clone, Debug)]
+pub struct IndexedIndicatorConstraint<'a, K = IndexKey> {
+    storage: ConstraintFamilyStorage<IndicatorConstraintHandle<'a>>,
+    _marker: PhantomData<fn() -> K>,
+}
+
+impl<'a, K> IndexedIndicatorConstraint<'a, K> {
+    pub(crate) fn new(
+        keys: Vec<IndexKey>,
+        axes: Option<&[Axis]>,
+        values: Vec<IndicatorConstraintHandle<'a>>,
+    ) -> Self {
+        Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
+    }
+    pub fn len(&self) -> usize {
+        self.storage.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.storage.entries.is_empty()
+    }
+    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<IndicatorConstraintHandle<'a>> {
+        self.storage.get(&key.into())
+    }
+}
+
+impl<'a, K: FromIndexKey> IndexedIndicatorConstraint<'a, K> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, IndicatorConstraintHandle<'a>)> + '_ {
+        self.storage.entries.iter().map(|(key, value)| (K::from_index_key(key), *value))
+    }
+}
+
+/// Owned handles returned by an indexed two-sided indicator declaration.
+#[derive(Clone, Debug)]
+pub struct IndexedRangeIndicatorConstraint<'a, K = IndexKey> {
+    storage: ConstraintFamilyStorage<RangeIndicatorConstraintHandles<'a>>,
+    _marker: PhantomData<fn() -> K>,
+}
+
+impl<'a, K> IndexedRangeIndicatorConstraint<'a, K> {
+    pub(crate) fn new(
+        keys: Vec<IndexKey>,
+        axes: Option<&[Axis]>,
+        values: Vec<RangeIndicatorConstraintHandles<'a>>,
+    ) -> Self {
+        Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
+    }
+    pub fn len(&self) -> usize {
+        self.storage.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.storage.entries.is_empty()
+    }
+    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<RangeIndicatorConstraintHandles<'a>> {
+        self.storage.get(&key.into())
+    }
+}
+
+impl<'a, K: FromIndexKey> IndexedRangeIndicatorConstraint<'a, K> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, RangeIndicatorConstraintHandles<'a>)> + '_ {
+        self.storage.entries.iter().map(|(key, value)| (K::from_index_key(key), *value))
+    }
+}
 
 constraint_family!(
     /// Owned handle returned by an indexed two-sided range `constraint!` declaration.

@@ -67,6 +67,10 @@ impl Solver for Gurobi {
         true
     }
 
+    fn supports_indicators(&self) -> bool {
+        true
+    }
+
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts)
     }

@@ -62,12 +62,13 @@ Names are unique per registry. Registering a duplicate variable or constraint na
 
 ```rust,ignore
 m.num_variables()   // usize
-m.num_constraints() // algebraic + SOC + SOS constraints
+m.num_constraints() // algebraic + SOC + SOS + indicator constraints
 m.variables()       // Ref<'_, Vec<Variable>>
 m.constraints()     // ModelConstraints<'_>
 m.constraints().algebraic()          // typed algebraic registry
 m.constraints().second_order_cones() // typed explicit-SOC registry
 m.constraints().special_ordered_sets() // typed SOS registry
+m.constraints().indicators()         // typed indicator registry
 m.arena()          // ExprArenaSnapshot<'_>
 m.kind()           // ModelKind, cached, invalidated on change
 m.try_objective()  // Result<Objective, Error>
@@ -303,6 +304,24 @@ then appends all generated artifacts without copying the source model.
 Because the generated rows embed the current member bounds, those bounds cannot
 be changed on a reformulated model. Change bounds before reformulating, or
 produce a fresh reformulated copy after changing the source model.
+
+## Indicator constraints
+
+An indicator applies an affine row only when an existing binary variable has
+the selected value. The implication is one-way:
+
+```rust,ignore
+variable!(m, enabled, Binary);
+variable!(m, x);
+indicator_constraint!(m, capacity, enabled == 1 => x <= 10.0);
+indicator_constraint!(m, shutdown, enabled == 0 => x == 0.0);
+indicator_constraint!(m, band, enabled == 1 => -2.0 <= x <= 4.0);
+```
+
+The trigger must be a bare binary variable from the same model and the
+consequent must be affine. Native support is available in Gurobi and MOSEK;
+GAMS requires an explicitly selected COPT, CPLEX, Gurobi, SCIP, or Xpress
+subsolver.
 
 ### Second-order cone constraints
 

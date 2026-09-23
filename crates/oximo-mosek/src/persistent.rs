@@ -103,6 +103,10 @@ impl Solver for MosekPersistent {
         crate::supported(kind)
     }
 
+    fn supports_indicators(&self) -> bool {
+        true
+    }
+
     fn solve(&mut self, model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
         match self.solve_resident(model, opts) {
             Ok(result) => Ok(result),

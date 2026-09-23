@@ -82,6 +82,10 @@ impl Solver for Gams {
         true
     }
 
+    fn supports_indicators(&self) -> bool {
+        true
+    }
+
     fn solve(&mut self, model: &Model, opts: &GamsOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts, self.exec.as_deref())
     }

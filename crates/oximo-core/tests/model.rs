@@ -455,6 +455,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
         }
         ConstraintRef::SecondOrderCone { .. } => panic!("algebraic constraints come first"),
         ConstraintRef::SpecialOrderedSet { .. } => panic!("SOS constraints come last"),
+        ConstraintRef::Indicator { .. } => panic!("indicator constraints come last"),
     }
     match iter.next().expect("SOC constraint") {
         ConstraintRef::SecondOrderCone { id, constraint } => {
@@ -462,7 +463,9 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
             assert_eq!(constraint.name, "shared");
         }
         ConstraintRef::Algebraic { .. } => panic!("explicit cones come second"),
-        ConstraintRef::SpecialOrderedSet { .. } => panic!("expected SOC constraint"),
+        ConstraintRef::SpecialOrderedSet { .. } | ConstraintRef::Indicator { .. } => {
+            panic!("expected SOC constraint")
+        }
     }
     match iter.next().expect("SOS constraint") {
         ConstraintRef::SpecialOrderedSet { id, constraint } => {
@@ -471,6 +474,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
         }
         ConstraintRef::Algebraic { .. } => panic!("algebraic constraints come first"),
         ConstraintRef::SecondOrderCone { .. } => panic!("SOS constraints come last"),
+        ConstraintRef::Indicator { .. } => panic!("expected SOS constraint"),
     }
     assert!(iter.next().is_none());
 }

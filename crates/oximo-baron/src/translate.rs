@@ -51,6 +51,9 @@ pub fn solve(
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
+    }
     let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
     let (bar, var_order, con_order, soc_bounds) = build_bar(model, opts)?;
     let run = run_baron(&bar, opts, exec)?;
@@ -223,6 +226,9 @@ type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms<'static>
 fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError> {
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
+    }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
     }
     let prepared = LoweringContext::new(model)?;
     let vars = prepared.variables();

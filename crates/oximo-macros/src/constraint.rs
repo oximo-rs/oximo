@@ -80,7 +80,7 @@ pub(crate) fn computed_name(first: &TokenStream2) -> Option<TokenStream2> {
 /// A constraint relation: a single `lhs <op> rhs`, or a two-sided range that
 /// lowers to two rows.
 #[expect(clippy::large_enum_variant)]
-enum Relations {
+pub(crate) enum Relations {
     Single(TokenStream2),
     Range { mid: Expr, lo: Expr, hi: Expr },
 }
@@ -92,7 +92,7 @@ fn parse_seg(ts: TokenStream2, sums: &mut crate::sum::ModelSums) -> syn::Result<
 /// Split the relation on its relational operators. One operator yields a
 /// [`Relations::Single`]. Two like operators (`<= <=` or `>= >=`) a
 /// [`Relations::Range`].
-fn build_relations(
+pub(crate) fn build_relations(
     tokens: TokenStream2,
     root: &TokenStream2,
     sums: &mut crate::sum::ModelSums,

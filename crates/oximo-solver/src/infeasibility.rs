@@ -1,4 +1,6 @@
-use oximo_core::{ConstraintId, Model, SocConstraintId, SosConstraintId, VarId};
+use oximo_core::{
+    ConstraintId, IndicatorConstraintId, Model, SocConstraintId, SosConstraintId, VarId,
+};
 
 use crate::result::SolverResult;
 use crate::solver::Solver;
@@ -29,6 +31,7 @@ pub struct Iis {
     /// Second-order-cone constraints in the IIS.
     pub soc_constraints: Vec<SocConstraintId>,
     pub sos_constraints: Vec<SosConstraintId>,
+    pub indicator_constraints: Vec<IndicatorConstraintId>,
     /// Variable bounds in the IIS, each `(variable, which bound)`.
     pub var_bounds: Vec<(VarId, VarBoundKind)>,
 }
@@ -40,6 +43,7 @@ impl Iis {
         self.constraints.is_empty()
             && self.soc_constraints.is_empty()
             && self.sos_constraints.is_empty()
+            && self.indicator_constraints.is_empty()
             && self.var_bounds.is_empty()
     }
 
@@ -50,6 +54,7 @@ impl Iis {
         self.constraints.len()
             + self.soc_constraints.len()
             + self.sos_constraints.len()
+            + self.indicator_constraints.len()
             + self.var_bounds.len()
     }
 
@@ -107,6 +112,17 @@ impl std::fmt::Display for IisReport<'_> {
                 match sos.get(id.index()) {
                     Some(s) => writeln!(f, "  {}", s.name)?,
                     None => writeln!(f, "  <sos #{}>", id.index())?,
+                }
+            }
+        }
+
+        if !iis.indicator_constraints.is_empty() {
+            let indicators = m.indicator_constraints();
+            writeln!(f, "\nindicator constraints ({})", iis.indicator_constraints.len())?;
+            for id in &iis.indicator_constraints {
+                match indicators.get(id.index()) {
+                    Some(c) => writeln!(f, "  {}", c.name)?,
+                    None => writeln!(f, "  <indicator #{}>", id.index())?,
                 }
             }
         }
@@ -178,6 +194,7 @@ mod tests {
             constraints: vec![lo.id(), hi.id()],
             soc_constraints: Vec::new(),
             sos_constraints: vec![sos],
+            indicator_constraints: Vec::new(),
             var_bounds: vec![(x.var_id().unwrap(), VarBoundKind::Lower)],
         };
 

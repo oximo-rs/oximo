@@ -6,7 +6,7 @@ use mosek::{
     Boundkey, Dinfitem, Iinfitem, Liinfitem, Objsense, Prosta, Rescode, Solsta, Soltype,
     Streamtype, Task, TaskCB, Variabletype,
 };
-use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, SocConstraintId};
+use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraintId};
 use oximo_expr::{LinearTerms, QuadraticTerms, VarId};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
@@ -219,7 +219,67 @@ fn build_rows_and_cones(
         next_acc += 1;
     }
 
+    append_indicators(prepared, task, &mut next_afe, &mut scratch)?;
+
     Ok(Meta { kind, row_by_constraint, explicit_accs })
+}
+
+fn append_indicators(
+    prepared: &LoweringContext<'_>,
+    task: &mut TaskCB,
+    next_afe: &mut i64,
+    scratch: &mut TaskScratch,
+) -> Result<(), SolverError> {
+    let constraints = prepared.constraints();
+    for (djc, indicator) in constraints.indicators().iter().filter(|c| c.active).enumerate() {
+        let djc = i64::try_from(djc).map_err(|_| overflow("DJC index"))?;
+        let terms = prepared.require_linear(indicator.lhs, || {
+            format!("indicator constraint {:?}", indicator.name)
+        })?;
+        let trigger_afe = *next_afe;
+        let body_afe = trigger_afe + 1;
+        task.append_afes(2).map_err(backend)?;
+        task.put_afe_f_entry(
+            trigger_afe,
+            index_i32(indicator.trigger.index(), "indicator trigger")?,
+            1.0,
+        )
+        .map_err(backend)?;
+        put_afe(task, body_afe, &terms, scratch)?;
+        *next_afe += 2;
+
+        let zero = task.append_rzero_domain(1).map_err(backend)?;
+        let mut domains = vec![zero];
+        let mut afes = vec![trigger_afe];
+        let mut shifts = vec![f64::from(u8::from(indicator.active_value))];
+        if let Some((sense, rhs)) = indicator.as_single() {
+            let domain = match sense {
+                Sense::Eq => task.append_rzero_domain(1),
+                Sense::Ge => task.append_rplus_domain(1),
+                Sense::Le => task.append_rminus_domain(1),
+            }
+            .map_err(backend)?;
+            domains.push(domain);
+            afes.push(body_afe);
+            shifts.push(rhs);
+        } else if indicator.is_range() {
+            domains.push(task.append_rplus_domain(1).map_err(backend)?);
+            afes.push(body_afe);
+            shifts.push(indicator.lower);
+            domains.push(task.append_rminus_domain(1).map_err(backend)?);
+            afes.push(body_afe);
+            shifts.push(indicator.upper);
+        }
+        // Inactive clause: trigger = 1-active_value.
+        domains.push(zero);
+        afes.push(trigger_afe);
+        shifts.push(f64::from(u8::from(!indicator.active_value)));
+        let active_domains = i64::try_from(domains.len() - 1).map_err(|_| overflow("DJC term"))?;
+        task.append_djcs(1).map_err(backend)?;
+        task.put_djc(djc, &domains, &afes, &shifts, &[active_domains, 1]).map_err(backend)?;
+        task.put_djc_name(djc, &indicator.name).map_err(backend)?;
+    }
+    Ok(())
 }
 
 fn append_soc(

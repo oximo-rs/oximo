@@ -224,6 +224,10 @@ impl Solver for GurobiPersistent {
         true
     }
 
+    fn supports_indicators(&self) -> bool {
+        true
+    }
+
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
         // A mid-update failure (a failed rebuild, a partial delta push, or a solve
         // error) can leave the resident model partially modified or its snapshot

@@ -11,6 +11,7 @@ pub mod display;
 pub mod domain;
 pub mod error;
 pub mod indexed;
+pub mod indicator;
 pub mod model;
 pub mod objective;
 pub mod param;
@@ -26,10 +27,19 @@ pub use constraint::{
     Constraint, ConstraintExpr, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
     RangeConstraintIds, Relate, Sense,
 };
-pub use display::{ConstraintDisplay, ExprDisplay, ObjectiveDisplay, SocDisplay, SosDisplay};
+pub use display::{
+    ConstraintDisplay, ExprDisplay, IndicatorDisplay, ObjectiveDisplay, SocDisplay, SosDisplay,
+};
 pub use domain::Domain;
 pub use error::{Error, Result};
-pub use indexed::{IndexedConstraint, IndexedParam, IndexedRangeConstraint, IndexedVar};
+pub use indexed::{
+    IndexedConstraint, IndexedIndicatorConstraint, IndexedParam, IndexedRangeConstraint,
+    IndexedRangeIndicatorConstraint, IndexedVar,
+};
+pub use indicator::{
+    IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId,
+    RangeIndicatorConstraintHandles, RangeIndicatorConstraintIds,
+};
 pub use model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
 };
@@ -58,5 +68,6 @@ pub use oximo_expr::{
 };
 
 pub use oximo_macros::{
-    constraint, max, min, objective, param, set, soc_constraint, sos_constraint, sum, variable,
+    constraint, indicator_constraint, max, min, objective, param, set, soc_constraint,
+    sos_constraint, sum, variable,
 };

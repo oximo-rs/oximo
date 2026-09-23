@@ -542,7 +542,8 @@ impl std::fmt::Display for ModelReport<'_> {
                 .filter_map(|constraint| match constraint {
                     ConstraintRef::Algebraic { id, constraint } => Some((id, constraint)),
                     ConstraintRef::SecondOrderCone { .. }
-                    | ConstraintRef::SpecialOrderedSet { .. } => None,
+                    | ConstraintRef::SpecialOrderedSet { .. }
+                    | ConstraintRef::Indicator { .. } => None,
                 })
                 .collect();
             writeln!(f, "\nconstraints ({})", cons.len())?;

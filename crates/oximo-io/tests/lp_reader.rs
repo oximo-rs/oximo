@@ -10,6 +10,51 @@ fn objective_terms(model: &Model) -> oximo_expr::QuadraticTerms {
         .expect("quadratic objective")
 }
 
+#[test]
+fn indicator_constraints_round_trip() {
+    let model = Model::new("indicators");
+    variable!(model, b, Binary);
+    variable!(model, -10.0 <= x <= 10.0);
+    indicator_constraint!(model, on, b == 1 => x <= 4.0);
+    indicator_constraint!(model, off, b == 0 => x == 0.0);
+    indicator_constraint!(model, band, b == 1 => -2.0 <= x <= 3.0);
+    objective!(model, Min, x);
+    let output = to_lp_string(&model).expect("write indicator LP");
+    assert!(output.contains("b = 1 ->"), "{output}");
+    let roundtrip = read_lp(output.as_bytes()).expect("read indicator LP");
+    assert_eq!(roundtrip.num_indicator_constraints(), 4);
+    assert!(roundtrip.indicator_constraints()[0].active_value);
+    assert!(!roundtrip.indicator_constraints()[1].active_value);
+}
+
+#[test]
+fn indicator_separator_is_parsed_from_row_body() {
+    let text = "Minimize\n obj: x\nSubject To\n named->row: x <= 2\n gated: b = 1 ->\n  x >= 0\nBinaries\n b\nEnd\n";
+    let model =
+        read_lp(text.as_bytes()).expect("LP should parse row names and multiline indicators");
+    assert_eq!(model.constraints().algebraic()[0].name, "named->row");
+    assert_eq!(model.indicator_constraints()[0].name, "gated");
+}
+
+#[test]
+fn malformed_indicator_triggers_are_rejected() {
+    let cases = [
+        ("b = 1 + 0 -> x <= 2", "indicator trigger must be `binary = 0` or `binary = 1`"),
+        ("1 = 1 -> x <= 2", "indicator trigger must be a variable"),
+        ("b <= 1 -> x <= 2", "indicator trigger needs `=`"),
+        ("b = 2 -> x <= 2", "indicator trigger value must be 0 or 1"),
+        ("b = 1 -> x <= 2 -> y <= 3", "indicator constraint needs exactly one `->`"),
+    ];
+    for (constraint, expected_message) in cases {
+        let text = format!("Minimize\n obj: x\nSubject To\n c: {constraint}\nBinaries\n b\nEnd\n");
+        let err = read_lp(text.as_bytes()).expect_err("malformed indicator should be rejected");
+        match err {
+            IoError::InvalidLp { message, .. } => assert_eq!(message, expected_message),
+            other => panic!("expected invalid LP error, got {other:?}"),
+        }
+    }
+}
+
 fn constraint_terms(model: &Model, index: usize) -> oximo_expr::QuadraticTerms {
     let arena = model.arena();
     extract_quadratic(&arena, model.constraints().algebraic()[index].lhs)
@@ -237,12 +282,12 @@ fn unsupported_sections_are_reported() {
 }
 
 #[test]
-fn inline_sos_and_indicators_are_explicitly_unsupported() {
-    for row in [" c: S1:: x:1 y:2", " c: z = 1 -> x <= 2"] {
-        let text = format!("Minimize\n obj: x\nSubject To\n{row}\nEnd\n");
-        let err = read_lp(text.as_bytes()).unwrap_err();
-        assert!(matches!(err, IoError::UnsupportedLp { .. }), "{err:?}");
-    }
+fn inline_sos_is_explicitly_unsupported_and_indicators_validate_triggers() {
+    let text = "Minimize\n obj: x\nSubject To\n c: S1:: x:1 y:2\nEnd\n";
+    assert!(matches!(read_lp(text.as_bytes()), Err(IoError::UnsupportedLp { .. })));
+
+    let text = "Minimize\n obj: x\nSubject To\n c: z = 1 -> x <= 2\nEnd\n";
+    assert!(matches!(read_lp(text.as_bytes()), Err(IoError::InvalidLp { .. })));
 }
 
 #[test]

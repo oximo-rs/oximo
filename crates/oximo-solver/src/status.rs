@@ -123,6 +123,8 @@ pub enum SolverError {
          Model::reformulate_sos or Model::to_reformulated_sos_model"
     )]
     UnsupportedSos,
+    #[error("solver does not support native indicator constraints")]
+    UnsupportedIndicator,
     #[error("model is missing an objective")]
     NoObjective,
     #[error("{location} contains a nonlinear term unsupported by this backend: {term}")]
