@@ -323,6 +323,15 @@ consequent must be affine. Native support is available in Gurobi and MOSEK;
 GAMS requires an explicitly selected COPT, CPLEX, Gurobi, SCIP, or Xpress
 subsolver.
 
+Backends without native indicator support reject active indicators. Convert them
+explicitly with `reformulate_indicators`, or use `to_reformulated_indicator_model`
+when changing the source model isn't intended.
+
+```rust,ignore
+m.reformulate_indicators(IndicatorReformulationOptions::default())?;
+highs.solve(&m, &options)?;
+```
+
 ### Second-order cone constraints
 
 `soc_constraint!` registers `||terms||_2 <= bound`. Every term and the bound

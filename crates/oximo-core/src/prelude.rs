@@ -18,7 +18,8 @@ pub use crate::model::{
 pub use crate::objective::{Objective, ObjectiveSense};
 pub use crate::param::Parameter;
 pub use crate::reformulation::{
-    ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
+    IndicatorReformulationArtifacts, IndicatorReformulationOptions, ReformulatedModel,
+    ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
 pub use crate::set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
 pub use crate::soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};

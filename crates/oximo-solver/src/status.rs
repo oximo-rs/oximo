@@ -123,7 +123,9 @@ pub enum SolverError {
          Model::reformulate_sos or Model::to_reformulated_sos_model"
     )]
     UnsupportedSos,
-    #[error("solver does not support native indicator constraints")]
+    #[error(
+        "solver does not support native indicator constraints. Explicitly reformulate them with Model::reformulate_indicators or Model::to_reformulated_indicator_model"
+    )]
     UnsupportedIndicator,
     #[error("model is missing an objective")]
     NoObjective,

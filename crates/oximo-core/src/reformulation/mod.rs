@@ -5,8 +5,10 @@
 //! on an independent clone. Both forms preserve existing variable and constraint
 //! IDs.
 
+mod indicator;
 mod sos;
 
+pub use indicator::{IndicatorReformulationArtifacts, IndicatorReformulationOptions};
 pub use sos::{
     ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };

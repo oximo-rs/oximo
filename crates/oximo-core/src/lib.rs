@@ -46,7 +46,8 @@ pub use model::{
 pub use objective::{Objective, ObjectiveSense};
 pub use param::Parameter;
 pub use reformulation::{
-    ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
+    IndicatorReformulationArtifacts, IndicatorReformulationOptions, ReformulatedModel,
+    ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
 pub use set::{
     Axis, FromIndexKey, FromIndexKeyRef, IndexKey, IndexKeyRef, IndexTuple, KeyCat, ScalarKey, Set,
