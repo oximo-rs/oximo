@@ -10,22 +10,22 @@ Enabled by default via the `io` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = "0.6.0" # io is on by default
+oximo = "0.7.0" # io is on by default
 ```
 
 To opt out:
 
 ```toml
 [dependencies]
-oximo = { version = "0.6.0", default-features = false, features = ["highs"] }
+oximo = { version = "0.7.0", default-features = false, features = ["highs"] }
 ```
 
 To use this crate directly:
 
 ```toml
 [dependencies]
-oximo-io   = "0.6.0"
-oximo-core = "0.6.0"
+oximo-io   = "0.7.0"
+oximo-core = "0.7.0"
 ```
 
 ## Quick example

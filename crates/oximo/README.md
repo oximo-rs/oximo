@@ -98,7 +98,7 @@ For example, use HiGHS for a bundled LP/MILP/QP solver:
 
 ```toml
 [dependencies]
-oximo = { version = "0.6", features = ["highs"] }
+oximo = { version = "0.7", features = ["highs"] }
 ```
 
 Licensed or external backends may require an installed solver, environment

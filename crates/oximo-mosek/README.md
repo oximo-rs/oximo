@@ -23,7 +23,7 @@ validation message is returned as a backend error.
 
 ```toml
 [dependencies]
-oximo = { version = "0.6.0", features = ["mosek"] }
+oximo = { version = "0.7.0", features = ["mosek"] }
 
 # Optional when using MOSEK enumeration constants in option builders:
 mosek = "11.2"

@@ -27,16 +27,16 @@ Enable the `gams` feature on the umbrella `oximo` crate:
 
 ```toml
 [dependencies]
-oximo = { version = "0.6.0", features = ["gams"] }
+oximo = { version = "0.7.0", features = ["gams"] }
 ```
 
 To use this crate directly:
 
 ```toml
 [dependencies]
-oximo-gams   = "0.6.0"
-oximo-core   = "0.6.0"
-oximo-solver = "0.6.0"
+oximo-gams   = "0.7.0"
+oximo-core   = "0.7.0"
+oximo-solver = "0.7.0"
 ```
 
 ## Quick example
