@@ -375,6 +375,60 @@ fn invalid_generated_fbbt_tape_is_returned_as_a_solver_error() {
 }
 
 #[test]
+fn tnlp_fbbt_rejects_invalid_tapes_in_cold_and_persistent_solves() {
+    let m = Model::new("invalid_tnlp_fbbt_tape");
+    param!(m, offset = 0.0);
+    variable!(m, -2.0 <= x <= 2.0);
+    constraint!(m, row, offset + x <= 1.0);
+    objective!(m, Min, x.powi(2));
+    offset.set_param_value(f64::NAN);
+
+    let options = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::Nlp)
+        .presolve(true)
+        .presolve_fbbt(true)
+        .print_level(0);
+    let cold = Pounce.solve(&m, &options).unwrap_err();
+    assert!(
+        matches!(&cold, SolverError::Backend(message) if
+        message.contains("oximo-pounce: generated FBBT tape rejected")),
+        "{cold}"
+    );
+
+    let mut persistent = Pounce.persistent();
+    let resident = persistent.solve(&m, &options).unwrap_err();
+    assert!(
+        matches!(&resident, SolverError::Backend(message) if
+        message.contains("oximo-pounce: generated FBBT tape rejected")),
+        "{resident}"
+    );
+}
+
+#[test]
+fn tnlp_fbbt_solves_cold_and_persistent() {
+    let m = Model::new("tnlp_fbbt");
+    variable!(m, -10.0 <= x <= 10.0, initial = 0.0);
+    constraint!(m, square_cap, x.powi(2) <= 4.0);
+    objective!(m, Max, x);
+
+    let options = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::Nlp)
+        .presolve(true)
+        .presolve_fbbt(true)
+        .print_level(0);
+    let cold = Pounce.solve(&m, &options).unwrap();
+    assert_eq!(cold.termination, TerminationStatus::LocallyOptimal);
+    assert_close(cold.value_of(x).unwrap().unwrap(), 2.0, 1e-4, "cold x");
+
+    let mut persistent = Pounce.persistent();
+    for _ in 0..2 {
+        let result = persistent.solve(&m, &options).unwrap();
+        assert_eq!(result.termination, TerminationStatus::LocallyOptimal);
+        assert_close(result.value_of(x).unwrap().unwrap(), 2.0, 1e-4, "persistent x");
+    }
+}
+
+#[test]
 fn active_set_sqp_solves_a_qp() {
     let m = Model::new("active_set_qp");
     variable!(m, 0.0 <= x <= 5.0, initial = 0.0);
@@ -424,12 +478,33 @@ fn active_set_sqp_does_not_run_interior_point_infeasibility_retries() {
         result.raw_log.as_deref().unwrap_or("no log")
     );
     assert!(
-        result
-            .raw_log
-            .as_deref()
-            .is_some_and(|log| !log.contains("local-infeasibility second opinion")),
+        result.raw_log.as_deref().is_some_and(|log| !log.contains("second opinion")),
         "interior-point retry controls must not be applied to active-set SQP"
     );
+}
+
+#[test]
+fn direct_tnlp_reports_pounce_second_opinion() {
+    let m = Model::new("tnlp_second_opinion");
+    variable!(m, -2.0 <= x <= 2.0, initial = 0.0);
+    constraint!(m, impossible, x.powi(2) <= -1.0);
+    objective!(m, Min, x);
+
+    let options = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::Nlp)
+        .presolve(false)
+        .print_level(0)
+        .verbose(true);
+    let result = Pounce.solve(&m, &options).unwrap();
+    assert!(
+        result.raw_log.as_deref().is_some_and(|log| log.contains("second opinion")),
+        "{}",
+        result.raw_log.as_deref().unwrap_or("no log")
+    );
+    assert!(matches!(
+        result.termination,
+        TerminationStatus::LocallyInfeasible | TerminationStatus::NumericError
+    ));
 }
 
 #[test]

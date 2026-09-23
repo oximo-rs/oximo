@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 mod convex;
-#[cfg(not(feature = "enzyme"))]
 mod fbbt;
 mod options;
 mod persistent;

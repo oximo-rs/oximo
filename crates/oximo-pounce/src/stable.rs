@@ -60,7 +60,7 @@ pub(crate) fn run(
     warm: Option<&WarmStart>,
 ) -> Result<Outcome, SolverError> {
     if oracle.borrow().all_closed_form() {
-        tnlp::run(oracle, prep, opts, warm)
+        tnlp::run(model, oracle, prep, opts, warm)
     } else {
         run_builder(model, oracle, prep, opts, warm)
     }

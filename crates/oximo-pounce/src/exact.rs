@@ -36,13 +36,13 @@ pub(crate) fn supports_resident(_oracle: &Oracle) -> bool {
 
 /// Exact derivatives always drive the `TNLP` surface directly.
 pub(crate) fn run(
-    _model: &Model,
+    model: &Model,
     oracle: &Oracle,
     prep: &crate::translate::Prepared,
     opts: &crate::options::PounceOptions,
     warm: Option<&crate::translate::WarmStart>,
 ) -> Result<crate::translate::Outcome, SolverError> {
-    crate::tnlp::run(oracle, prep, opts, warm)
+    crate::tnlp::run(model, oracle, prep, opts, warm)
 }
 
 impl DerivativeOracle for NlpEvaluator {
