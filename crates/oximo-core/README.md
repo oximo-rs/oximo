@@ -328,8 +328,8 @@ explicitly with `reformulate_indicators`, or use `to_reformulated_indicator_mode
 when changing the source model isn't intended.
 
 ```rust,ignore
-let converted = m.reformulate_indicators(IndicatorReformulationOptions::default())?;
-highs.solve(&converted, &options)?;
+m.reformulate_indicators(IndicatorReformulationOptions::default())?;
+highs.solve(&m, &options)?;
 ```
 
 ### Second-order cone constraints
