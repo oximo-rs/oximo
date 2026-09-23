@@ -99,6 +99,10 @@ name = "sos_reformulated"
 required-features = ["highs"]
 
 [[example]]
+name = "indicator_reformulated"
+required-features = ["highs"]
+
+[[example]]
 name = "transport"
 required-features = ["highs"]
 

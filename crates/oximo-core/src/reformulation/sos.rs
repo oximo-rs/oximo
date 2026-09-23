@@ -46,6 +46,24 @@ pub enum ReformulationError {
          {side} bound; provide SosReformulationOptions::with_fallback_big_m(...)"
     )]
     MissingFiniteBound { constraint: SmolStr, variable: SmolStr, side: &'static str },
+    #[error("indicator constraint #{0} does not exist on this model")]
+    UnknownIndicatorConstraint(usize),
+    #[error(
+        "cannot reformulate indicator constraint {constraint:?}: its body depends on a parameter"
+    )]
+    ParameterDependentIndicator { constraint: SmolStr },
+    #[error(
+        "cannot reformulate indicator constraint {constraint:?}: body is not a finite affine expression"
+    )]
+    InvalidIndicatorExpression { constraint: SmolStr },
+    #[error(
+        "cannot reformulate indicator constraint {constraint:?}: lower bound is +infinity or upper bound is -infinity"
+    )]
+    InvalidIndicatorBounds { constraint: SmolStr },
+    #[error(
+        "cannot derive finite Big-M for indicator constraint {constraint:?} {side} side; provide IndicatorReformulationOptions::with_fallback_big_m(...)"
+    )]
+    MissingIndicatorBigM { constraint: SmolStr, side: &'static str },
 }
 
 /// IDs appended while replacing one source SOS constraint.
@@ -59,7 +77,7 @@ pub struct SosReformulationArtifacts {
 /// An independent transformed model plus source-to-generated provenance.
 #[derive(Debug)]
 pub struct ReformulatedModel {
-    model: Model,
+    pub(crate) model: Model,
 }
 
 impl ReformulatedModel {

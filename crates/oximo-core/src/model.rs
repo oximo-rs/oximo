@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use oximo_expr::{
     EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot, ExprClass, ExprId, ExprIdRemap,
-    ModelId, ModelMismatchError, ParamId, VarId, classify,
+    ModelId, ModelMismatchError, ParamId, VarId, classify, extract_linear,
 };
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -28,7 +28,7 @@ use crate::indicator::{
 };
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
-use crate::reformulation::SosReformulationArtifacts;
+use crate::reformulation::{IndicatorReformulationArtifacts, SosReformulationArtifacts};
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::soc::{SocConstraint, SocConstraintHandle, SocConstraintId, is_detected_soc};
 use crate::sos::{
@@ -361,6 +361,7 @@ pub struct Model {
     pub(crate) indicator_constraints: RefCell<Vec<IndicatorConstraint>>,
     pub(crate) indicator_names: RefCell<FxHashMap<SmolStr, IndicatorConstraintId>>,
     pub(crate) sos_reformulations: RefCell<Vec<SosReformulationArtifacts>>,
+    pub(crate) indicator_reformulations: RefCell<Vec<IndicatorReformulationArtifacts>>,
     pub(crate) objective: RefCell<Option<Objective>>,
     objective_declared: Cell<bool>,
     cached_kind: Cell<Option<ModelKind>>,
@@ -435,6 +436,7 @@ impl Model {
             indicator_constraints: RefCell::new(self.indicator_constraints.borrow().clone()),
             indicator_names: RefCell::new(self.indicator_names.borrow().clone()),
             sos_reformulations: RefCell::new(self.sos_reformulations.borrow().clone()),
+            indicator_reformulations: RefCell::new(self.indicator_reformulations.borrow().clone()),
             objective: RefCell::new(self.objective.borrow().clone()),
             objective_declared: Cell::new(self.objective_declared.get()),
             cached_kind: Cell::new(self.cached_kind.get()),
@@ -481,6 +483,7 @@ impl Model {
             indicator_constraints: RefCell::new(Vec::new()),
             indicator_names: RefCell::new(FxHashMap::default()),
             sos_reformulations: RefCell::new(Vec::new()),
+            indicator_reformulations: RefCell::new(Vec::new()),
             objective: RefCell::new(None),
             objective_declared: Cell::new(false),
             cached_kind: Cell::new(None),
@@ -690,11 +693,10 @@ impl Model {
     ///
     /// Panics if `value` is not a feasible fixing for the variable (non-finite,
     /// fractional on an integer domain, outside its bounds, or inside a
-    /// semicontinuity gap), or if the variable belongs to an SOS constraint that
-    /// has already been reformulated, because its bounds are embedded in
-    /// generated rows.
+    /// semicontinuity gap), or if its bounds are embedded in a previously
+    /// reformulated SOS or indicator row.
     pub fn fix_var(&self, id: VarId, value: f64) {
-        self.assert_sos_member_bounds_mutable(id);
+        self.assert_reformulated_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
         crate::var::assert_fixable(&v.name, v.domain, v.lb, v.ub, value);
@@ -732,10 +734,10 @@ impl Model {
     ///
     /// # Panics
     ///
-    /// Panics if the variable belongs to an SOS constraint that has already
-    /// been reformulated, because its bounds are embedded in generated rows.
+    /// Panics if the variable belongs to an SOS or indicator constraint that
+    /// has already been reformulated, because its bounds are embedded in rows.
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
-        self.assert_sos_member_bounds_mutable(id);
+        self.assert_reformulated_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
         v.lb = lb;
@@ -744,11 +746,9 @@ impl Model {
         self.cached_kind.set(None);
     }
 
-    /// Reformulation embeds the member bounds in generated Big-M rows.
-    /// Once an SOS has been reformulated, changing one of its member bounds
-    /// would make those rows stale and could either truncate or enlarge
-    /// the feasible set.
-    fn assert_sos_member_bounds_mutable(&self, id: VarId) {
+    /// SOS and indicator reformulations embed bounds in generated rows.
+    /// Changing one of those bounds could make the rows stale.
+    fn assert_reformulated_bounds_mutable(&self, id: VarId) {
         if let Some(source) = self.sos_constraints.borrow().iter().find(|constraint| {
             !constraint.active && constraint.members.iter().any(|member| member.variable == id)
         }) {
@@ -757,6 +757,30 @@ impl Model {
                  change bounds before reformulating or create a new reformulated model",
                 self.variables.borrow()[id.index()].name,
                 source.name,
+            );
+        }
+        let indicator_source = {
+            let sources = self.indicator_constraints.borrow();
+            let arena = self.arena.borrow();
+            sources
+                .iter()
+                .find(|source| {
+                    !source.active
+                        && extract_linear(&arena, source.lhs).is_some_and(|terms| {
+                            id != source.trigger
+                                && terms.coeffs.iter().any(|(variable, coefficient)| {
+                                    *variable == id && *coefficient != 0.0
+                                })
+                        })
+                })
+                .map(|source| source.name.clone())
+        };
+        if let Some(source) = indicator_source {
+            panic!(
+                "cannot change bounds of variable {:?} after indicator constraint {:?} was reformulated; \
+                 change bounds before reformulating or create a new reformulated model",
+                self.variables.borrow()[id.index()].name,
+                source,
             );
         }
     }
