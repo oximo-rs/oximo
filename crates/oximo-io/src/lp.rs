@@ -731,7 +731,9 @@ fn build_model(
     let obj_text = obj_text.split_once(':').map_or(obj_text.as_str(), |(_, x)| x);
     let obj_toks = lex(obj_text, 1)?;
     let obj = ExprParser::new(obj_toks, 1).parse()?;
-    if degree(&obj) > 2 {
+    let obj_degree = degree(&obj);
+    let feasibility = obj_degree == 0;
+    if obj_degree > 2 {
         return Err(invalid_lp(1, 1, "higher-degree expressions are not valid CPLEX LP syntax"));
     }
     collect_vars(&obj, &mut p.vars, &mut p.var_set);
@@ -905,10 +907,17 @@ fn build_model(
         };
         m.add_indicator_constraint(name, trigger, indicator.active_value, consequent);
     }
-    let e = lower(&m, &vars, obj)?;
-    match objective_sense {
-        ObjectiveSense::Minimize => m.__minimize(e),
-        ObjectiveSense::Maximize => m.__maximize(e),
+
+    // A constant-only objective (e.g. the writer's `obj: 0`) has nothing to
+    // optimize, so the model is read as a feasibility problem.
+    if feasibility {
+        m.__feasibility();
+    } else {
+        let e = lower(&m, &vars, obj)?;
+        match objective_sense {
+            ObjectiveSense::Minimize => m.__minimize(e),
+            ObjectiveSense::Maximize => m.__maximize(e),
+        }
     }
     Ok(m)
 }
@@ -1128,7 +1137,8 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 /// [`IoError::Conic`].
 ///
 /// A feasibility model (`objective!(m, Feasibility)`) is written as
-/// `Minimize` with a zero objective row.
+/// `Minimize` with a zero objective row, which [`read_lp`] reads back as a
+/// feasibility model.
 ///
 /// # Errors
 ///

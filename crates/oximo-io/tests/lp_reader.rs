@@ -403,6 +403,19 @@ fn leading_negative_coefficient_uses_implicit_multiplication() {
     );
 }
 
+#[test]
+fn constant_objective_declares_feasibility() {
+    for text in [
+        "Minimize\n obj: 0\nSubject To\n c: x >= 1\nEnd\n",
+        "Maximize\n obj: -5\nSubject To\n c: x >= 1\nEnd\n",
+        "Minimize\n obj: 2 + 3\nSubject To\n c: x >= 1\nEnd\n",
+    ] {
+        let model = read_lp(text.as_bytes()).expect("constant objective");
+        assert!(model.is_feasibility(), "{text:?}");
+        assert_eq!(model.num_constraints(), 1);
+    }
+}
+
 fn bounds_of(bounds: &str) -> Result<(f64, f64), IoError> {
     let text = format!("Minimize\n obj: x\nBounds\n{bounds}End\n");
     let model = read_lp(text.as_bytes())?;
