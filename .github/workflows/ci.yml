@@ -24,8 +24,12 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: Cargo clippy
+    name: Cargo clippy (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [highs, clarabel, clarabel-faer]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -34,7 +38,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --exclude oximo-gurobi --exclude oximo-mosek --all-targets --features oximo/highs -- -D warnings
+      - run: cargo clippy --workspace --exclude oximo-gurobi --exclude oximo-mosek --all-targets --features oximo/${{ matrix.backend }} -- -D warnings
 
   default-features:
     name: Cargo test (default features)
@@ -48,15 +52,19 @@ jobs:
       - run: cargo test -p oximo --all-targets
 
   test:
-    name: Cargo test
+    name: Cargo test (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [highs, clarabel, clarabel-faer]
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --exclude oximo-gurobi --exclude oximo-mosek --features oximo/highs
+      - run: cargo test --workspace --exclude oximo-gurobi --exclude oximo-mosek --features oximo/${{ matrix.backend }}
 
   scip:
     name: Cargo test (SCIP bundled)
