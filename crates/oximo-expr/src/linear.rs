@@ -114,30 +114,12 @@ fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
             Some(LinearTerms::owned(acc.into_coeffs(), constant))
         }
         ExprNode::Mul(children) => {
-            // Linear if and only if exactly one non-const child is linear and
-            // the rest are constants.
-            let mut scalar = 1.0;
-            let mut linear: Option<LinearTerms<'a>> = None;
+            let mut product = LinearTerms::borrowed(&[], 1.0);
             for &child in children {
-                match arena.get(child) {
-                    ExprNode::Const(c) => scalar *= c,
-                    ExprNode::Param(p) if resolve_params => scalar *= arena.param_value(*p),
-                    _ if linear.is_none() => {
-                        linear = Some(recursive_linear(arena, child, resolve_params)?);
-                    }
-                    _ => return None,
-                }
+                product =
+                    multiply_linear(product, recursive_linear(arena, child, resolve_params)?)?;
             }
-            Some(match linear {
-                None => LinearTerms::owned(Vec::new(), scalar),
-                Some(t) => {
-                    let mut coeffs = t.coeffs.into_owned();
-                    for (_, c) in &mut coeffs {
-                        *c *= scalar;
-                    }
-                    LinearTerms { coeffs: Cow::Owned(coeffs), constant: t.constant * scalar }
-                }
-            })
+            Some(product)
         }
         _ => None,
     }
@@ -151,6 +133,26 @@ struct LinearFolder<'a, A: ?Sized> {
 enum LinearState<'a> {
     Sum { rest: &'a [ExprId], acc: CoeffAccum, constant: f64 },
     Scale { child: Option<ExprId>, value: Option<LinearTerms<'a>>, scalar: f64, negate: bool },
+    Product { rest: &'a [ExprId], value: Option<LinearTerms<'a>> },
+}
+
+/// Multiply affine terms only when one side has no decision variables.
+/// Parameter-dependent constants are resolved by the caller at extraction time.
+fn multiply_linear<'a>(left: LinearTerms<'a>, right: LinearTerms<'a>) -> Option<LinearTerms<'a>> {
+    let (mut terms, scalar) = if left.coeffs.is_empty() {
+        (right, left.constant)
+    } else if right.coeffs.is_empty() {
+        (left, right.constant)
+    } else {
+        return None;
+    };
+    if !terms.coeffs.is_empty() {
+        for (_, coefficient) in terms.coeffs.to_mut() {
+            *coefficient *= scalar;
+        }
+    }
+    terms.constant *= scalar;
+    Some(terms)
 }
 
 impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
@@ -191,7 +193,22 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                             scalar *= self.arena.param_value(*p);
                         }
                         _ if linear.is_none() => linear = Some(child),
-                        _ => return Break(None),
+                        node => {
+                            let has_variables = |node: &ExprNode| match node {
+                                ExprNode::Var(_) => true,
+                                ExprNode::Linear { coeffs, .. } => !coeffs.is_empty(),
+                                _ => false,
+                            };
+                            if has_variables(node)
+                                && has_variables(self.arena.get(linear.expect("first factor")))
+                            {
+                                return Break(None);
+                            }
+                            return Continue(LinearState::Product {
+                                rest: children,
+                                value: Some(LinearTerms::borrowed(&[], 1.0)),
+                            });
+                        }
                     }
                 }
                 if linear.is_some() {
@@ -248,6 +265,15 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                     )
                 }))
             }
+            LinearState::Product { rest, value } => {
+                if value.is_some()
+                    && let Some((&child, tail)) = rest.split_first()
+                {
+                    *rest = tail;
+                    return Continue(child);
+                }
+                Break(value.take())
+            }
         }
     }
 
@@ -258,6 +284,9 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                 *constant += value.constant;
             }
             LinearState::Scale { value: slot, .. } => *slot = Some(value),
+            LinearState::Product { value: slot, .. } => {
+                *slot = slot.take().and_then(|left| multiply_linear(left, value));
+            }
         }
     }
 }
@@ -289,6 +318,9 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
 fn push_linear(arena: &mut (impl ArenaAccess + ?Sized), t: LinearTerms<'_>) -> ExprId {
     let mut coeffs = t.coeffs.into_owned();
     coeffs.retain(|(_, c)| *c != 0.0);
+    if coeffs.is_empty() {
+        return arena.constant(t.constant);
+    }
     arena.push(ExprNode::Linear { coeffs, constant: t.constant })
 }
 

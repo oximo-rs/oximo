@@ -56,7 +56,14 @@ impl Degree {
 fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
     match arena.get(id) {
         ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
-        ExprNode::Var(_) | ExprNode::Linear { .. } => Degree::One,
+        ExprNode::Var(_) => Degree::One,
+        ExprNode::Linear { coeffs, .. } => {
+            if coeffs.is_empty() {
+                Degree::Zero
+            } else {
+                Degree::One
+            }
+        }
         ExprNode::Unary(UnaryOp::Neg, inner) => recursive_degree(arena, *inner),
         ExprNode::Add(children) => {
             let mut d = Degree::Zero;
@@ -126,7 +133,10 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
         use std::ops::ControlFlow::{Break, Continue};
         let (rest, op) = match self.0.get(id) {
             ExprNode::Const(_) | ExprNode::Param(_) => return Break(Some(Degree::Zero)),
-            ExprNode::Var(_) | ExprNode::Linear { .. } => return Break(Some(Degree::One)),
+            ExprNode::Var(_) => return Break(Some(Degree::One)),
+            ExprNode::Linear { coeffs, .. } => {
+                return Break(Some(if coeffs.is_empty() { Degree::Zero } else { Degree::One }));
+            }
             ExprNode::Add(c) => (c.as_slice(), DegreeOp::Add),
             ExprNode::Mul(c) => (c.as_slice(), DegreeOp::Mul),
             ExprNode::Unary(UnaryOp::Neg, c) => (std::slice::from_ref(c), DegreeOp::Add),
@@ -207,6 +217,17 @@ mod tests {
     }
     use crate::arena::{ExprArena, ExprNode, VarId};
     use smallvec::smallvec;
+
+    #[test]
+    fn constant_linear_nodes_do_not_raise_product_degree() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let constant = arena.linear(Vec::new(), 2.0);
+        let affine = arena.push(ExprNode::Mul(smallvec![constant, x]));
+        let quadratic = arena.push(ExprNode::Mul(smallvec![affine, x]));
+        assert_eq!(classify(&arena, affine), ExprClass::Linear);
+        assert_eq!(classify(&arena, quadratic), ExprClass::Quadratic);
+    }
 
     fn var(arena: &mut ExprArena, i: u32) -> ExprId {
         arena.push(ExprNode::Var(VarId(i)))
