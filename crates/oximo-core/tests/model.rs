@@ -149,7 +149,7 @@ fn explicit_soc_with_nonlinear_constraint_is_nlp() {
 }
 
 #[test]
-#[should_panic(expected = "SOC component must be affine")]
+#[should_panic(expected = "expression must be affine, got Quadratic")]
 fn add_soc_constraint_rejects_quadratic_term() {
     let m = Model::new("bad_soc");
     variable!(m, x);

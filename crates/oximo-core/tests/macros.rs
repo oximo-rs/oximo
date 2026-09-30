@@ -759,7 +759,7 @@ fn soc_filtered_family() {
 }
 
 #[test]
-#[should_panic(expected = "SOC component must be affine")]
+#[should_panic(expected = "expression must be affine, got Quadratic")]
 fn soc_macro_rejects_quadratic_term() {
     let m = Model::new("soc_bad");
     variable!(m, x);

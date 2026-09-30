@@ -249,7 +249,7 @@ impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
 
 impl<'a> IntoAffineFunction<'a> for Expr<'a> {
     fn into_affine_function(self) -> ScalarAffineFunction<'a> {
-        self.try_into().expect("SOC component must be affine")
+        self.try_into().unwrap_or_else(|class| panic!("expression must be affine, got {class:?}"))
     }
 }
 
