@@ -447,11 +447,11 @@ pub mod benchmark_support {
         model.__minimize(x.powi(2) + y + z);
         for i in 0..rows {
             let lhs = if nonlinear {
-                x * y * z + (i as f64 + 1.0) * x
+                (x * y * z + (i as f64 + 1.0) * x).erase()
             } else if i % 2 == 0 {
                 x.powi(2) + y * z + (i as f64 + 1.0) * x
             } else {
-                x + 2.0 * y - z
+                (x + 2.0 * y - z).erase()
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -468,7 +468,7 @@ pub mod benchmark_support {
             let x = vars[i % n_vars];
             let y = vars[(i + 1) % n_vars];
             let z = vars[(i + 2) % n_vars];
-            let lhs = if i % 2 == 0 { x.powi(2) + y * z } else { x + 2.0 * y - z };
+            let lhs = if i % 2 == 0 { x.powi(2) + y * z } else { (x + 2.0 * y - z).erase() };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
         model
@@ -822,11 +822,11 @@ mod tests {
         objective!(m, Min, x.powi(2) + y + z);
         for i in 0..rows {
             let lhs = if nonlinear {
-                x * y * z + (i as f64 + 1.0) * x
+                (x * y * z + (i as f64 + 1.0) * x).erase()
             } else if i % 2 == 0 {
                 x.powi(2) + y * z + (i as f64 + 1.0) * x
             } else {
-                x + 2.0 * y - z
+                (x + 2.0 * y - z).erase()
             };
             m.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }

@@ -1,0 +1,58 @@
+error[E0277]: the trait bound `oximo_core::ScalarAffineFunction<'_>: FunctionInSet<oximo_core::SecondOrderCone>` is not satisfied
+ --> tests/ui/fail/scalar_cone.rs:6:29
+  |
+6 |     let _ = Constraint::new(affine, SecondOrderCone { dimension: 2 });
+  |             --------------- ^^^^^^ the trait `FunctionInSet<oximo_core::SecondOrderCone>` is not implemented for `oximo_core::ScalarAffineFunction<'_>`
+  |             |
+  |             required by a bound introduced by this call
+  |
+help: `oximo_core::ScalarAffineFunction<'_>` implements trait `FunctionInSet<S>`
+ --> src/function_set.rs
+  |
+  |         impl FunctionInSet<LessThan> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<LessThan>`
+  |         impl FunctionInSet<GreaterThan> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<GreaterThan>`
+  |         impl FunctionInSet<EqualTo> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<EqualTo>`
+  |         impl FunctionInSet<Interval> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<oximo_core::Interval>`
+...
+  | scalar_pairs!(ScalarAffineFunction);
+  | ----------------------------------- in this macro invocation
+note: required by a bound in `oximo_core::Constraint::<F, S>::new`
+ --> src/function_set.rs
+  |
+  | impl<F: FunctionInSet<S>, S: Set> Constraint<F, S> {
+  |         ^^^^^^^^^^^^^^^^ required by this bound in `Constraint::<F, S>::new`
+...
+  |     pub fn new(function: F, set: S) -> Self {
+  |            --- required by a bound in this associated function
+  = note: this error originates in the macro `scalar_pairs` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `oximo_core::ScalarAffineFunction<'_>: FunctionInSet<oximo_core::SecondOrderCone>` is not satisfied
+ --> tests/ui/fail/scalar_cone.rs:6:13
+  |
+6 |     let _ = Constraint::new(affine, SecondOrderCone { dimension: 2 });
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FunctionInSet<oximo_core::SecondOrderCone>` is not implemented for `oximo_core::ScalarAffineFunction<'_>`
+  |
+help: `oximo_core::ScalarAffineFunction<'_>` implements trait `FunctionInSet<S>`
+ --> src/function_set.rs
+  |
+  |         impl FunctionInSet<LessThan> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<LessThan>`
+  |         impl FunctionInSet<GreaterThan> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<GreaterThan>`
+  |         impl FunctionInSet<EqualTo> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<EqualTo>`
+  |         impl FunctionInSet<Interval> for $function<'_> {}
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<oximo_core::Interval>`
+...
+  | scalar_pairs!(ScalarAffineFunction);
+  | ----------------------------------- in this macro invocation
+note: required by a bound in `oximo_core::Constraint`
+ --> src/function_set.rs
+  |
+  | pub struct Constraint<F: FunctionInSet<S>, S: Set> {
+  |                          ^^^^^^^^^^^^^^^^ required by this bound in `Constraint`
+  = note: this error originates in the macro `scalar_pairs` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -62,7 +62,7 @@ fn documented_root_opcodes_are_exact() {
         ($name:literal, $opcode:literal, |$arg:ident| $body:expr) => {{
             let m = Model::new($name);
             variable!(m, x);
-            let $arg: oximo_expr::Expr<'_> = x;
+            let $arg = x;
             let expression = $body;
             objective!(m, Min, expression);
 

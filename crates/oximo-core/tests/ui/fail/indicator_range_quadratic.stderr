@@ -1,0 +1,33 @@
+error[E0277]: the trait bound `Expr<'_, oximo_core::Quadratic>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/indicator_range_quadratic.rs:6:52
+  |
+6 |     indicator_constraint!(m, bad, b == 1 => 0.0 <= x.square() <= 1.0);
+  |     -----------------------------------------------^^^^^^^^^^--------
+  |     |                                              |
+  |     |                                              the trait `IntoAffineFunction<'_>` is not implemented for `Expr<'_, oximo_core::Quadratic>`
+  |     required by a bound introduced by this call
+  |
+help: the following other types implement trait `IntoAffineFunction<'a>`
+ --> src/function_set.rs
+  |
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Affine>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, Constant>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_>`
+note: required by a bound in `oximo_core::Model::__add_indicator_range`
+ --> src/model.rs
+  |
+  |     pub fn __add_indicator_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
+  |            --------------------- required by a bound in this associated function
+...
+  |         mid: impl IntoAffineFunction<'a>,
+  |                   ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::__add_indicator_range`
+help: consider removing this method call, as the receiver has type `Expr<'_, oximo_core::Affine>` and `Expr<'_, oximo_core::Affine>: IntoAffineFunction<'_>` trivially holds
+  |
+6 -     indicator_constraint!(m, bad, b == 1 => 0.0 <= x.square() <= 1.0);
+6 +     indicator_constraint!(m, bad, b == 1 => 0.0 <= x <= 1.0);
+  |

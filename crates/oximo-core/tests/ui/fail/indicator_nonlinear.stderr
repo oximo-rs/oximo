@@ -1,0 +1,24 @@
+error[E0277]: the trait bound `ScalarNonlinearFunction<'_>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/indicator_nonlinear.rs:6:48
+  |
+6 |     m.add_indicator_constraint("bad", b, true, x.sin().le(1.0));
+  |       ------------------------                 ^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarNonlinearFunction<'_>`
+  |       |
+  |       required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `IntoAffineFunction<'a>`:
+            AnyScalarFunction<'a>
+            Expr<'a, Constant>
+            Expr<'a, oximo_core::Affine>
+            Expr<'a>
+            ScalarAffineFunction<'a>
+            ScalarDynamicFunction<'a>
+  = note: required for `Constraint<ScalarNonlinearFunction<'_>, LessThan>` to implement `IntoAffineConstraint<'_>`
+note: required by a bound in `oximo_core::Model::add_indicator_constraint`
+ --> src/model.rs
+  |
+  |     pub fn add_indicator_constraint<'a>(
+  |            ------------------------ required by a bound in this associated function
+...
+  |         consequent: impl IntoAffineConstraint<'a>,
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::add_indicator_constraint`

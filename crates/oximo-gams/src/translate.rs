@@ -11,9 +11,9 @@ use std::{fs, io};
 static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, IndicatorConstraint, Model, ModelId, ModelKind, Objective,
-    ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint, SosMember, SosType,
-    VarId, Variable,
+    AlgebraicConstraint, ConstraintId, Domain, IndicatorConstraint, Model, ModelId, ModelKind,
+    Objective, ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint, SosMember,
+    SosType, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
@@ -673,7 +673,7 @@ fn build_model_section(
     solve_type: &str,
     prepared: &PreparedExpressions,
     vars: &[Variable],
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     socs: &[SocConstraint],
     sos_constraints: &[SosConstraint],
     indicators: &[IndicatorConstraint],
@@ -1032,7 +1032,7 @@ fn write_var_bounds(gms: &mut String, v: &Variable) {
 fn write_equations(
     gms: &mut String,
     prepared: &PreparedExpressions,
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     socs: &[SocConstraint],
     sos_constraints: &[SosConstraint],
     indicators: &[IndicatorConstraint],
@@ -1457,9 +1457,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => x + 2.0 * y - z,
+                1 => (x + 2.0 * y - z).erase(),
                 2 => x.powi(2) + y * z + x,
-                _ => x * y * z + x.sin(),
+                _ => (x * y * z + x.sin()).erase(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -1482,7 +1482,7 @@ pub mod benchmark_support {
     fn write_parallel(
         out: &mut String,
         arena: &PreparedExpressions,
-        constraints: &[Constraint],
+        constraints: &[AlgebraicConstraint],
         socs: &[SocConstraint],
     ) {
         write!(out, "Equations\n    eq_obj").unwrap();
@@ -1510,7 +1510,11 @@ pub mod benchmark_support {
         writeln!(out).unwrap();
     }
 
-    fn constraint_fragment(arena: &PreparedExpressions, index: usize, c: &Constraint) -> String {
+    fn constraint_fragment(
+        arena: &PreparedExpressions,
+        index: usize,
+        c: &AlgebraicConstraint,
+    ) -> String {
         let mut out = String::new();
         if let Some((sense, rhs)) = c.as_single() {
             let sense = match sense {

@@ -64,7 +64,10 @@ impl SolutionPoint {
     ///
     /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
     #[inline]
-    pub fn value_of(&self, expr: Expr<'_>) -> Result<Option<f64>, ModelMismatchError> {
+    pub fn value_of<D: oximo_expr::Degree>(
+        &self,
+        expr: Expr<'_, D>,
+    ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, expr.model_id())?;
         let arena = expr.arena.borrow();
         if let ExprNode::Var(id) = arena.get(expr.id) {
@@ -301,7 +304,10 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
     #[inline]
-    pub fn value_of(&self, expr: Expr<'_>) -> Result<Option<f64>, ModelMismatchError> {
+    pub fn value_of<D: oximo_expr::Degree>(
+        &self,
+        expr: Expr<'_, D>,
+    ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, expr.model_id())?;
         self.solutions.first().map_or(Ok(None), |s| s.value_of(expr))
     }

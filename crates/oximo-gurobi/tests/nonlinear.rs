@@ -147,12 +147,11 @@ fn div_by_quadratic_denominator() {
 
 #[test]
 fn div_by_zero_constant_errors() {
-    // A literal zero denominator survives construction as a `Div` node (only
-    // nonzero constants are folded into the linear path), so lowering must
-    // reject it rather than emit an infeasible `0 * recip == 1`.
+    // An expression denominator can be zero at runtime. Keep this backend
+    // regression separate from the scalar operator's construction-time check.
     let m = Model::new("div_zero");
     variable!(m, 0.0 <= x <= 10.0);
-    objective!(m, Min, x / 0.0);
+    objective!(m, Min, x / m.__constant(0.0));
 
     let err = Gurobi.solve(&m, &GurobiOptions::default()).expect_err("expected error");
     assert!(err.to_string().contains("division by zero"), "err = {err}");

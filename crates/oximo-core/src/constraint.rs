@@ -134,11 +134,11 @@ impl ConstraintId {
 ///
 /// The single-sided senses map onto the interval as `Le(rhs) => [-inf, rhs]`,
 /// `Ge(rhs) => [rhs, +inf]`, `Eq(rhs) => [rhs, rhs]`. A two-sided range with
-/// constant bounds is `[lo, hi]`. Use [`Constraint::as_single`] to recover the
+/// constant bounds is `[lo, hi]`. Use [`AlgebraicConstraint::as_single`] to recover the
 /// single-sided sense (for backends without native two-sided rows) and
-/// [`Constraint::is_range`] to detect a genuine range.
+/// [`AlgebraicConstraint::is_range`] to detect a genuine range.
 #[derive(Clone, Debug)]
-pub struct Constraint {
+pub struct AlgebraicConstraint {
     pub name: SmolStr,
     pub lhs: ExprId,
     pub lower: f64,
@@ -146,7 +146,7 @@ pub struct Constraint {
     pub active: bool,
 }
 
-impl Constraint {
+impl AlgebraicConstraint {
     /// The two bounds are equal, i.e. this is an equality row. Uses `total_cmp`
     /// for an exact comparison: the bounds are literals (`Eq` copies the same
     /// value into both).
@@ -177,78 +177,88 @@ impl Constraint {
     }
 }
 
-/// In-progress constraint produced by [`Relate::le`] / [`Relate::ge`] /
-/// [`Relate::eq`]. Registered through the `constraint!` macro.
-#[derive(Copy, Clone, Debug)]
-pub struct ConstraintExpr<'a> {
-    pub lhs: Expr<'a>,
-    pub sense: Sense,
-    pub rhs: f64,
-}
-
-/// Build a constraint from an expression. Lives on `Expr` itself.
-pub trait Relate<'a> {
-    fn le<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a>;
-    fn ge<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a>;
-    fn eq<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a>;
-}
-
-/// What can appear on the right-hand side of a constraint. Numeric scalars
-/// stay as the canonical `rhs`. Expressions get subtracted into the LHS.
-pub trait IntoRhs<'a> {
-    fn fold_rhs(self, lhs: Expr<'a>) -> (Expr<'a>, f64);
-
-    /// The numeric value when this RHS is a pure constant bound (a literal),
-    /// else `None`. Used by the range-constraint registration to decide whether
-    /// `lo <= e <= hi` collapses to one interval row: expression/param bounds
-    /// return `None` so they stay two general constraints (keeping the symbolic
-    /// bound re-bindable). Defaults to `None`.
+/// Numeric or symbolic right-hand side of a relation.
+pub trait IntoRhs<'a, D: crate::function_set::FunctionDegree = oximo_expr::Dynamic> {
+    type Degree: crate::function_set::FunctionDegree;
+    fn fold_rhs(self, lhs: Expr<'a, D>) -> (Expr<'a, Self::Degree>, f64);
     fn const_bound(&self) -> Option<f64> {
         None
     }
 }
-
-impl<'a> IntoRhs<'a> for f64 {
-    fn fold_rhs(self, lhs: Expr<'a>) -> (Expr<'a>, f64) {
+impl<'a, D: crate::function_set::FunctionDegree> IntoRhs<'a, D> for f64 {
+    type Degree = D;
+    #[inline]
+    fn fold_rhs(self, lhs: Expr<'a, D>) -> (Expr<'a, D>, f64) {
         (lhs, self)
     }
     fn const_bound(&self) -> Option<f64> {
         Some(*self)
     }
 }
-
-impl<'a> IntoRhs<'a> for i32 {
-    fn fold_rhs(self, lhs: Expr<'a>) -> (Expr<'a>, f64) {
+impl<'a, D: crate::function_set::FunctionDegree> IntoRhs<'a, D> for i32 {
+    type Degree = D;
+    #[inline]
+    fn fold_rhs(self, lhs: Expr<'a, D>) -> (Expr<'a, D>, f64) {
         (lhs, f64::from(self))
     }
     fn const_bound(&self) -> Option<f64> {
         Some(f64::from(*self))
     }
 }
-
-impl<'a> IntoRhs<'a> for Expr<'a> {
-    fn fold_rhs(self, lhs: Expr<'a>) -> (Expr<'a>, f64) {
+impl<'a, D, R> IntoRhs<'a, D> for Expr<'a, R>
+where
+    D: crate::function_set::FunctionDegree + oximo_expr::degree::AddDegree<R>,
+    R: oximo_expr::Degree,
+    <D as oximo_expr::degree::AddDegree<R>>::Output: crate::function_set::FunctionDegree,
+{
+    type Degree = <D as oximo_expr::degree::AddDegree<R>>::Output;
+    #[inline]
+    fn fold_rhs(self, lhs: Expr<'a, D>) -> (Expr<'a, Self::Degree>, f64) {
         (lhs - self, 0.0)
     }
 }
-
-impl<'a> Relate<'a> for Expr<'a> {
-    fn le<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a> {
+use crate::function_set::{Constraint, EqualTo, FunctionDegree, GreaterThan, LessThan};
+/// Build typed relations from the expression DSL.
+pub trait Relate<'a, D: FunctionDegree = oximo_expr::Dynamic> {
+    fn le<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, LessThan>;
+    fn ge<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, GreaterThan>;
+    fn eq<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, EqualTo>;
+}
+impl<'a, D: FunctionDegree> Relate<'a, D> for Expr<'a, D> {
+    #[inline]
+    fn le<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, LessThan> {
         let (lhs, rhs) = rhs.fold_rhs(self);
-        ConstraintExpr { lhs, sense: Sense::Le, rhs }
+        Constraint::new(R::Degree::relation_function(lhs), LessThan(rhs))
     }
-
-    fn ge<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a> {
+    #[inline]
+    fn ge<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, GreaterThan> {
         let (lhs, rhs) = rhs.fold_rhs(self);
-        ConstraintExpr { lhs, sense: Sense::Ge, rhs }
+        Constraint::new(R::Degree::relation_function(lhs), GreaterThan(rhs))
     }
-
-    fn eq<R: IntoRhs<'a>>(self, rhs: R) -> ConstraintExpr<'a> {
+    #[inline]
+    fn eq<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, EqualTo> {
         let (lhs, rhs) = rhs.fold_rhs(self);
-        ConstraintExpr { lhs, sense: Sense::Eq, rhs }
+        Constraint::new(R::Degree::relation_function(lhs), EqualTo(rhs))
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::Sense;

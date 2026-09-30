@@ -555,17 +555,17 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &x)| f64::from(u32::try_from((i * 7) % 17 + 3).unwrap()) * x)
-            .sum::<oximo_core::Expr<'_>>();
+            .sum::<oximo_core::Expr<'_, oximo_core::Affine>>();
         let value = items
             .iter()
             .enumerate()
             .map(|(i, &x)| f64::from(u32::try_from((i * 11) % 23 + 5).unwrap()) * x)
-            .sum::<oximo_core::Expr<'_>>();
+            .sum::<oximo_core::Expr<'_, oximo_core::Affine>>();
         let volume = items
             .iter()
             .enumerate()
             .map(|(i, &x)| f64::from(u32::try_from((i * 13) % 31 + 2).unwrap()) * x)
-            .sum::<oximo_core::Expr<'_>>();
+            .sum::<oximo_core::Expr<'_, oximo_core::Affine>>();
         constraint!(model, capacity, weight <= 350.0);
         constraint!(model, volume_capacity, volume <= 550.0);
         objective!(model, Max, value + 100.0);

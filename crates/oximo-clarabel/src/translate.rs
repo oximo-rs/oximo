@@ -287,7 +287,7 @@ fn classify_rows(
     let arena_ref = arena;
     let vars_ref = vars;
     let expressions: &PreparedExpressions = prepared;
-    let classify_non_linear = |c: &oximo_core::Constraint| {
+    let classify_non_linear = |c: &oximo_core::AlgebraicConstraint| {
         expressions.detected_soc(vars_ref, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
             location: format!("constraint {:?}", c.name),
             term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
@@ -718,7 +718,8 @@ pub mod benchmark_support {
         let t = model.__var("t").lb(0.0).build();
         model.__minimize(t);
         for i in 0..rows {
-            let lhs = if soc { x.powi(2) + y.powi(2) - t.powi(2) } else { x + 2.0 * y - t };
+            let lhs =
+                if soc { x.powi(2) + y.powi(2) - t.powi(2) } else { (x + 2.0 * y - t).erase() };
             model.__add_constraint_auto(lhs.le(if soc { 0.0 } else { i as f64 + 10.0 }));
         }
         model

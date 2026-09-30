@@ -140,7 +140,7 @@ fn register_anonymous(model: &Expr, rel: Relations) -> TokenStream2 {
 
 fn register_named(model: &Expr, name_str: &str, rel: Relations) -> TokenStream2 {
     match rel {
-        Relations::Single(r) => quote!( (#model).__add_constraint(#name_str, #r) ),
+        Relations::Single(r) => quote!( (#model).add_constraint(#name_str, #r) ),
         Relations::Range { mid, lo, hi } => quote! {
             (#model).__add_range(#name_str, #mid, #lo, #hi)
         },
@@ -149,7 +149,7 @@ fn register_named(model: &Expr, name_str: &str, rel: Relations) -> TokenStream2 
 
 fn register_computed(model: &Expr, name_expr: &TokenStream2, rel: Relations) -> TokenStream2 {
     match rel {
-        Relations::Single(r) => quote!( (#model).__add_constraint(#name_expr, #r) ),
+        Relations::Single(r) => quote!( (#model).add_constraint(#name_expr, #r) ),
         Relations::Range { mid, lo, hi } => quote! {{
             let __name = #name_expr;
             (#model).__add_range(&__name, #mid, #lo, #hi)

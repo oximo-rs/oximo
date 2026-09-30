@@ -5,7 +5,7 @@ use oximo_expr::{
     evaluate, render_expr, simplify,
 };
 
-fn value(expr: Expr<'_>) -> f64 {
+fn value<D: oximo_expr::Degree>(expr: Expr<'_, D>) -> f64 {
     let values: &[f64] = &[];
     evaluate(&expr.arena.borrow(), expr.id, &values).unwrap()
 }
@@ -15,7 +15,7 @@ fn every_unary_method_uses_the_public_operation_enum() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let x = Expr::constant(&arena, 1.25);
     let expressions = [
-        (x.neg(), UnaryOp::Neg),
+        (x.neg().nonlinear(), UnaryOp::Neg),
         (x.abs(), UnaryOp::Abs),
         (x.sqrt(), UnaryOp::Sqrt),
         (x.cbrt(), UnaryOp::Cbrt),

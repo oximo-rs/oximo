@@ -38,14 +38,14 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let expanded = match second {
         None => {
             let (terms, bound) = parse_relation(first, &mut sums)?;
-            quote!( (#model).__add_soc_constraint_auto([#(#terms),*], #bound) )
+            quote!( (#model).__add_soc_constraint_auto([#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound) )
         }
         Some(rel_tokens) => {
             // Computed name at run-time: `soc_constraint!(m, name = expr, ..)`.
             if let Some(name_expr) = computed_name(&first) {
                 let (terms, bound) = parse_relation(rel_tokens, &mut sums)?;
                 return Ok(sums.wrap(quote!(
-                    (#model).add_soc_constraint(#name_expr, [#(#terms),*], #bound)
+                    (#model).add_soc_constraint(#name_expr, [#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound)
                 )));
             }
 
@@ -57,7 +57,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             let (terms, bound) = parse_relation(rel_tokens, &mut sums)?;
             match binds {
                 None => quote!(
-                    (#model).add_soc_constraint(#name_str, [#(#terms),*], #bound)
+                    (#model).add_soc_constraint(#name_str, [#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound)
                 ),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
@@ -68,7 +68,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                         (#model).__add_soc_constraints_over(
                             #name_str,
                             &(#set),
-                            |#param| { #used ([#(#terms),*], #bound) },
+                            |#param| { #used ([#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound) },
                         );
                     }
                 }

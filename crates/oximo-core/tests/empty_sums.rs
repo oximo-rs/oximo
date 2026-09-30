@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use oximo_core::prelude::*;
 use oximo_expr::{evaluate, extract_linear};
 
-fn value(expr: Expr<'_>) -> f64 {
+fn value<D: oximo_expr::Degree>(expr: Expr<'_, D>) -> f64 {
     evaluate(&expr.arena.borrow(), expr.id, &&[1.0, 2.0, 3.0][..]).unwrap()
 }
 

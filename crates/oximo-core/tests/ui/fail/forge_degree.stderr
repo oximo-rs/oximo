@@ -1,0 +1,10 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/forge_degree.rs:5:31
+  |
+5 |     let _: Expr<'_, Affine> = x * x;
+  |            ----------------   ^^^^^ expected `Expr<'_, Affine>`, found `Expr<'_, Quadratic>`
+  |            |
+  |            expected due to this
+  |
+  = note: expected struct `oximo_core::Expr<'_, oximo_core::Affine>`
+             found struct `oximo_core::Expr<'_, oximo_core::Quadratic>`

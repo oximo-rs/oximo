@@ -16,14 +16,14 @@ pub use crate::sum::SumDomain;
 /// empty domain. This is the implementation behind the anchored
 /// `sum!(model, body for ...)` form.
 #[must_use]
-pub fn sum_over_in<'a, K, D, F>(
+pub fn sum_over_in<'a, E: oximo_expr::Degree, K, D, F>(
     arena: &'a oximo_expr::ExprArenaCell,
     domain: &D,
     f: F,
-) -> oximo_expr::Expr<'a>
+) -> oximo_expr::Expr<'a, E>
 where
     D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> oximo_expr::Expr<'a>,
+    F: FnMut(K) -> oximo_expr::Expr<'a, E>,
 {
     oximo_expr::Expr::__sum_terms_in(arena, domain.keys().map(f))
 }
@@ -31,44 +31,56 @@ where
 /// Flatten already-collected `sum!` terms into one expression (a single n-ary
 /// `Add`).
 #[must_use]
-pub fn sum_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
+pub fn sum_terms<'a, E: oximo_expr::Degree>(
+    terms: Vec<oximo_expr::Expr<'a, E>>,
+) -> oximo_expr::Expr<'a, E> {
     terms.into_iter().sum()
 }
 
 /// Flatten collected terms, returning a model-owned zero when the collection
 /// is empty. This is used by the filtered anchored `sum!` form.
 #[must_use]
-pub fn sum_terms_in<'a>(
+pub fn sum_terms_in<'a, E: oximo_expr::Degree>(
     arena: &'a oximo_expr::ExprArenaCell,
-    terms: Vec<oximo_expr::Expr<'a>>,
-) -> oximo_expr::Expr<'a> {
+    terms: Vec<oximo_expr::Expr<'a, E>>,
+) -> oximo_expr::Expr<'a, E> {
     oximo_expr::Expr::__sum_terms_in(arena, terms.into_iter())
 }
 
 #[must_use]
-pub fn min_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
+pub fn min_terms<'a, E: oximo_expr::Degree>(
+    terms: Vec<oximo_expr::Expr<'a, E>>,
+) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear> {
     oximo_expr::Expr::__min_terms(terms.into_iter())
         .expect("min! with an `if` filter produced no terms")
 }
 
 #[must_use]
-pub fn max_terms<'a>(terms: Vec<oximo_expr::Expr<'a>>) -> oximo_expr::Expr<'a> {
+pub fn max_terms<'a, E: oximo_expr::Degree>(
+    terms: Vec<oximo_expr::Expr<'a, E>>,
+) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear> {
     oximo_expr::Expr::__max_terms(terms.into_iter())
         .expect("max! with an `if` filter produced no terms")
 }
 
-pub fn min_over<'a, K, D, F>(domain: &D, f: F) -> oximo_expr::Expr<'a>
+pub fn min_over<'a, E: oximo_expr::Degree, K, D, F>(
+    domain: &D,
+    f: F,
+) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear>
 where
     D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> oximo_expr::Expr<'a>,
+    F: FnMut(K) -> oximo_expr::Expr<'a, E>,
 {
     oximo_expr::Expr::__min_terms(domain.keys().map(f)).expect("min! on empty domain")
 }
 
-pub fn max_over<'a, K, D, F>(domain: &D, f: F) -> oximo_expr::Expr<'a>
+pub fn max_over<'a, E: oximo_expr::Degree, K, D, F>(
+    domain: &D,
+    f: F,
+) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear>
 where
     D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> oximo_expr::Expr<'a>,
+    F: FnMut(K) -> oximo_expr::Expr<'a, E>,
 {
     oximo_expr::Expr::__max_terms(domain.keys().map(f)).expect("max! on empty domain")
 }
@@ -167,3 +179,5 @@ where
 {
     Set::product(a, b)
 }
+
+pub use crate::function_set::IntoAffineFunction;

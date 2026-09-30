@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use oximo_core::{Constraint, Domain, Model, Sense, Variable};
+use oximo_core::{AlgebraicConstraint, Domain, Model, Sense, Variable};
 
 use super::analyze::{Analysis, Row};
 use super::options::{NlFormat, WriteOptions};
@@ -36,7 +36,7 @@ pub(crate) struct Stats {
 impl Stats {
     pub(crate) fn build(
         vars: &[Variable],
-        constraints: &[Constraint],
+        constraints: &[AlgebraicConstraint],
         analysis: &Analysis,
         _perm: &Permutation,
         opts: &WriteOptions,

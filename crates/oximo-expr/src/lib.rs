@@ -3,6 +3,7 @@
 
 mod arena;
 mod classify;
+pub mod degree;
 mod eval;
 mod fold;
 mod handle;
@@ -19,8 +20,9 @@ pub use arena::{
     ModelMismatchError, ParamId, UnaryOp, VarId,
 };
 pub use classify::{ExprClass, classify};
+pub use degree::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
 pub use eval::{EvalContext, EvalError, evaluate};
-pub use handle::Expr;
+pub use handle::{ClassifiedExpr, Expr, ExprData};
 pub use linear::{LinearTerms, SignedExpr, describe_nonlinear_term, extract_linear, split_linear};
 pub use ops::dot;
 pub use quadratic::{QuadraticTerms, extract_quadratic};

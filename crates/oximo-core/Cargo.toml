@@ -25,6 +25,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 oximo-expr.workspace = true
+trybuild = "1"
 
 [lints]
 workspace = true
@@ -37,3 +38,7 @@ harness = false
 name = "construction"
 harness = false
 required-features = ["benchmark-support"]
+
+[[bench]]
+name = "typed_ir"
+harness = false

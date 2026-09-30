@@ -769,7 +769,7 @@ fn build_model(
         if let Some(Some(v)) = starts.get(j) {
             b = b.initial(*v);
         }
-        vars.push(b.build());
+        vars.push(b.build().erase());
     }
     let mut exprs = Vec::with_capacity(h.n_con);
     let c_nodes = p.c_expr.iter().cloned().chain(std::iter::repeat(None));
@@ -823,7 +823,7 @@ fn build_model(
 
 fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<Expr<'a>, IoError> {
     match n {
-        Node::Const(x) => Ok(m.__constant(x)),
+        Node::Const(x) => Ok(m.__constant(x).erase()),
         Node::Var(i) => {
             vars.get(i).copied().ok_or_else(|| invalid("expression", "variable index out of range"))
         }
@@ -831,24 +831,24 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<E
             let child_depth = next_expression_depth(depth)?;
             let x = lower(m, vars, *a, child_depth)?;
             Ok(match c {
-                15 => x.abs(),
+                15 => x.abs().erase(),
                 16 => -x,
-                37 => x.tanh(),
-                38 => x.tan(),
-                39 => x.sqrt(),
-                40 => x.sinh(),
-                41 => x.sin(),
-                42 => x.log10(),
-                43 => x.log(),
-                44 => x.exp(),
-                45 => x.cosh(),
-                46 => x.cos(),
-                47 => x.atanh(),
-                49 => x.atan(),
-                50 => x.asinh(),
-                51 => x.asin(),
-                52 => x.acosh(),
-                53 => x.acos(),
+                37 => x.tanh().erase(),
+                38 => x.tan().erase(),
+                39 => x.sqrt().erase(),
+                40 => x.sinh().erase(),
+                41 => x.sin().erase(),
+                42 => x.log10().erase(),
+                43 => x.log().erase(),
+                44 => x.exp().erase(),
+                45 => x.cosh().erase(),
+                46 => x.cos().erase(),
+                47 => x.atanh().erase(),
+                49 => x.atan().erase(),
+                50 => x.asinh().erase(),
+                51 => x.asin().erase(),
+                52 => x.acosh().erase(),
+                53 => x.acos().erase(),
                 _ => return Err(invalid("expression", "unsupported unary opcode")),
             })
         }
@@ -862,19 +862,21 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<E
                 2 => x * y,
                 3 => x / y,
                 5 => x.pow(y),
-                48 => x.atan2(y),
+                48 => x.atan2(y).erase(),
                 _ => return Err(invalid("expression", "unsupported binary opcode")),
             })
         }
         Node::Nary(code, xs) => {
             let mut it = xs.into_iter();
             let Some(first) = it.next() else {
-                return Ok(m.__constant(match code {
-                    54 => 0.0,
-                    11 => f64::INFINITY,
-                    12 => f64::NEG_INFINITY,
-                    _ => return Err(invalid("expression", "unsupported n-ary opcode")),
-                }));
+                return Ok(m
+                    .__constant(match code {
+                        54 => 0.0,
+                        11 => f64::INFINITY,
+                        12 => f64::NEG_INFINITY,
+                        _ => return Err(invalid("expression", "unsupported n-ary opcode")),
+                    })
+                    .erase());
             };
             let child_depth = next_expression_depth(depth)?;
             let mut e = lower(m, vars, first, child_depth)?;
@@ -882,8 +884,8 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<E
                 let next = lower(m, vars, x, child_depth)?;
                 e = match code {
                     54 => e + next,
-                    11 => e.min(next),
-                    12 => e.max(next),
+                    11 => e.min(next).erase(),
+                    12 => e.max(next).erase(),
                     _ => return Err(invalid("expression", "unsupported n-ary opcode")),
                 };
             }
@@ -1079,8 +1081,8 @@ mod tests {
     #[test]
     fn reads_binary_writer_output() {
         let m = Model::new("binary");
-        let x = m.__var("x").bounds(0.0, 10.0).build();
-        let y = m.__var("y").bounds(-2.0, 2.0).build();
+        let x = m.__var("x").bounds(0.0, 10.0).build().erase();
+        let y = m.__var("y").bounds(-2.0, 2.0).build().erase();
         m.__add_constraint("row", (x.sin() + 2.0 * y).le(4.0));
         m.__minimize(x.powi(2) + y);
         let mut bytes = Vec::new();
@@ -1094,7 +1096,7 @@ mod tests {
     #[test]
     fn preserves_range_rows() {
         let m = Model::new("range");
-        let x = m.__var("x").bounds(-10.0, 10.0).build();
+        let x = m.__var("x").bounds(-10.0, 10.0).build().erase();
         m.__add_range("band", x, -1.0, 2.0);
         m.__minimize(x);
         let text = super::super::to_nl_string(&m).unwrap();
@@ -1106,8 +1108,8 @@ mod tests {
     #[test]
     fn restores_integer_domain_buckets() {
         let m = Model::new("integer");
-        let x = m.__var("x").binary().build();
-        let y = m.__var("y").integer().bounds(-3.0, 3.0).build();
+        let x = m.__var("x").binary().build().erase();
+        let y = m.__var("y").integer().bounds(-3.0, 3.0).build().erase();
         m.__add_constraint("row", (x + y).ge(0.0));
         m.__minimize(x + y);
         let text = super::super::to_nl_string(&m).unwrap();

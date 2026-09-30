@@ -1,4 +1,33 @@
 use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode, UnaryOp};
+use crate::fold::Folder;
+
+/// A small root cache. Most scalar nodes are cheaper to classify directly.
+/// Retaining only eight compound roots keeps per-arena memory bounded.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExprClassCache {
+    entries: smallvec::SmallVec<[(ExprId, ExprClass); 8]>,
+}
+
+impl ExprClassCache {
+    pub(crate) fn get(&mut self, id: ExprId) -> Option<ExprClass> {
+        let position = self.entries.iter().rposition(|&(root, _)| root == id)?;
+        let entry = self.entries[position];
+        if position + 1 != self.entries.len() {
+            self.entries.remove(position);
+            self.entries.push(entry);
+        }
+        Some(entry.1)
+    }
+
+    pub(crate) fn insert(&mut self, id: ExprId, class: ExprClass) {
+        if let Some(position) = self.entries.iter().position(|&(root, _)| root == id) {
+            self.entries.remove(position);
+        } else if self.entries.len() == 8 {
+            self.entries.remove(0);
+        }
+        self.entries.push((id, class));
+    }
+}
 
 /// Highest-degree polynomial class an expression belongs to, ignoring constant
 /// folding. Used by backends to pick between linear, quadratic, and general
@@ -26,6 +55,14 @@ enum Degree {
 }
 
 impl Degree {
+    fn class(self) -> ExprClass {
+        match self {
+            Self::Zero | Self::One => ExprClass::Linear,
+            Self::Two => ExprClass::Quadratic,
+            Self::Higher => ExprClass::Nonlinear,
+        }
+    }
+
     /// `+` on a sum: take the maximum, saturating at `Higher`.
     fn add(self, other: Degree) -> Degree {
         self.max(other)
@@ -56,7 +93,14 @@ impl Degree {
 fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
     match arena.get(id) {
         ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
-        ExprNode::Var(_) | ExprNode::Linear { .. } => Degree::One,
+        ExprNode::Var(_) => Degree::One,
+        ExprNode::Linear { coeffs, .. } => {
+            if coeffs.is_empty() {
+                Degree::Zero
+            } else {
+                Degree::One
+            }
+        }
         ExprNode::Unary(UnaryOp::Neg, inner) => recursive_degree(arena, *inner),
         ExprNode::Add(children) => {
             let mut d = Degree::Zero;
@@ -80,7 +124,7 @@ fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
         }
         ExprNode::Pow(base, exp) => {
             let ExprNode::Const(e) = arena.get(*exp) else { return Degree::Higher };
-            if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+            if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                 return Degree::Higher;
             }
             // Bucket the exponent into the only values `Degree::pow` treats
@@ -126,7 +170,10 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
         use std::ops::ControlFlow::{Break, Continue};
         let (rest, op) = match self.0.get(id) {
             ExprNode::Const(_) | ExprNode::Param(_) => return Break(Some(Degree::Zero)),
-            ExprNode::Var(_) | ExprNode::Linear { .. } => return Break(Some(Degree::One)),
+            ExprNode::Var(_) => return Break(Some(Degree::One)),
+            ExprNode::Linear { coeffs, .. } => {
+                return Break(Some(if coeffs.is_empty() { Degree::Zero } else { Degree::One }));
+            }
             ExprNode::Add(c) => (c.as_slice(), DegreeOp::Add),
             ExprNode::Mul(c) => (c.as_slice(), DegreeOp::Mul),
             ExprNode::Unary(UnaryOp::Neg, c) => (std::slice::from_ref(c), DegreeOp::Add),
@@ -134,7 +181,7 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
                 let ExprNode::Const(e) = self.0.get(*exp) else {
                     return Break(Some(Degree::Higher));
                 };
-                if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+                if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                     return Break(Some(Degree::Higher));
                 }
                 let n = match e.round() {
@@ -187,11 +234,32 @@ pub fn classify(arena: &ExprArena, id: ExprId) -> ExprClass {
 }
 
 pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> ExprClass {
-    match degree(arena, id) {
-        Degree::Zero | Degree::One => ExprClass::Linear,
-        Degree::Two => ExprClass::Quadratic,
-        Degree::Higher => ExprClass::Nonlinear,
+    // Finish small, shallow expressions without cache locks or traversal
+    // metadata.
+    let small = match arena.get(id) {
+        ExprNode::Add(children) | ExprNode::Mul(children) => children.len() <= 8,
+        _ => true,
+    };
+    if small {
+        let folder = DegreeFolder(arena);
+        match folder.start(id) {
+            std::ops::ControlFlow::Break(Some(value)) => return value.class(),
+            std::ops::ControlFlow::Continue(mut state) => {
+                if let std::ops::ControlFlow::Break(Some(value)) = folder.next(&mut state) {
+                    return value.class();
+                }
+            }
+            std::ops::ControlFlow::Break(None) => unreachable!("degree classification is total"),
+        }
     }
+    // Expensive roots are cached independently in canonical arenas, snapshots,
+    // and worker forks.
+    if let Some(class) = arena.cached_class(id) {
+        return class;
+    }
+    let class = degree(arena, id).class();
+    arena.cache_class(id, class);
+    class
 }
 
 #[cfg(test)]
@@ -207,6 +275,61 @@ mod tests {
     }
     use crate::arena::{ExprArena, ExprNode, VarId};
     use smallvec::smallvec;
+
+    #[test]
+    fn cached_roots_follow_mutation_without_affecting_snapshots() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let y = arena.var(VarId(1));
+        let product = arena.push(ExprNode::Mul(smallvec![x, y]));
+        let root = arena.push(ExprNode::Add(smallvec![product, product]));
+        assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+        assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+        let snapshot = arena.clone();
+        *arena.get_mut(y) = ExprNode::Unary(UnaryOp::Sin, x);
+        assert_eq!(classify(&arena, root), ExprClass::Nonlinear);
+        assert_eq!(classify(&snapshot, root), ExprClass::Quadratic);
+    }
+
+    #[test]
+    fn cloned_arenas_cache_divergent_nodes_independently() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let square = arena.push(ExprNode::Mul(smallvec![x, x]));
+        let sine = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
+        let mut clone = arena.clone();
+        let left = arena.push(ExprNode::Add(smallvec![square, x]));
+        let right = clone.push(ExprNode::Add(smallvec![sine, x]));
+        assert_eq!(left, right);
+        for _ in 0..2 {
+            assert_eq!(classify(&arena, left), ExprClass::Quadratic);
+            assert_eq!(classify(&clone, right), ExprClass::Nonlinear);
+        }
+    }
+
+    #[test]
+    fn classification_cache_is_independent_of_parameter_values() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let p = arena.new_param(0.0);
+        let param = arena.param(p);
+        let square = arena.push(ExprNode::Mul(smallvec![x, x]));
+        let root = arena.push(ExprNode::Mul(smallvec![param, square]));
+        assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+        arena.set_param_value(p, 3.0);
+        assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+    }
+
+    #[test]
+    fn constant_linear_nodes_do_not_raise_product_degree() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let constant = arena.linear(Vec::new(), 2.0);
+        let affine = arena.push(ExprNode::Mul(smallvec![constant, x]));
+        let quadratic = arena.push(ExprNode::Mul(smallvec![affine, x]));
+        assert_eq!(classify(&arena, affine), ExprClass::Linear);
+        assert_eq!(classify(&arena, quadratic), ExprClass::Quadratic);
+    }
 
     fn var(arena: &mut ExprArena, i: u32) -> ExprId {
         arena.push(ExprNode::Var(VarId(i)))

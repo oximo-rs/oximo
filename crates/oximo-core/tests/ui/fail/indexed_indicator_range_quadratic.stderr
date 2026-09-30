@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `Expr<'_, oximo_core::Quadratic>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/indexed_indicator_range_quadratic.rs:6:5
+  |
+6 |     indicator_constraint!(m, bad[i in 0..2], b[i] == 1 => 0.0 <= x[i].square() <= 1.0);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `Expr<'_, oximo_core::Quadratic>`
+  |
+help: the following other types implement trait `IntoAffineFunction<'a>`
+ --> src/function_set.rs
+  |
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Affine>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, Constant>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_>`
+note: required by a bound in `oximo_core::Model::__add_indicator_ranges_over`
+ --> src/model.rs
+  |
+  |     pub fn __add_indicator_ranges_over<'a, K, B1, B2, F, D: Degree, E: Degree>(
+  |            --------------------------- required by a bound in this associated function
+...
+  |         Expr<'a, E>: IntoAffineFunction<'a>,
+  |                      ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::__add_indicator_ranges_over`
+  = note: this error originates in the macro `indicator_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)

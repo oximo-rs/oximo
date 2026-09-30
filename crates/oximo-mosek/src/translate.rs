@@ -651,7 +651,7 @@ pub mod benchmark_support {
         let t = model.__var("t").lb(0.0).build();
         for i in 0..rows {
             let (lhs, rhs) = match degree {
-                1 => (x + 2.0 * y - t, i as f64 + 10.0),
+                1 => ((x + 2.0 * y - t).erase(), i as f64 + 10.0),
                 2 => (x.powi(2) + y, i as f64 + 10.0),
                 _ => (x.powi(2) + y.powi(2) - t.powi(2), 0.0),
             };

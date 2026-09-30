@@ -1,3 +1,4 @@
+use crate::degree::{AddDegree, Degree, DivDegree, MulDegree, Nonlinear};
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use crate::arena::{Children, ExprId, ExprNode};
@@ -8,47 +9,47 @@ use crate::linear::{add_into, add_n, div_into, mul_into, neg_into, sub_into};
 // Expr <op> Expr
 // -----------------------------------------------------------------------------
 
-impl<'a> Add for Expr<'a> {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self {
+impl<'a, L: Degree + AddDegree<R>, R: Degree> Add<Expr<'a, R>> for Expr<'a, L> {
+    type Output = Expr<'a, <L as AddDegree<R>>::Output>;
+    fn add(self, rhs: Expr<'a, R>) -> Self::Output {
         self.assert_same_arena(rhs);
         let id = self.arena.with_mut(|arena| add_into(arena, self.id, rhs.id));
-        Self::new(id, self.arena)
+        Expr::from_id(id, self.arena)
     }
 }
 
-impl<'a> Sub for Expr<'a> {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self {
+impl<'a, L: Degree + AddDegree<R>, R: Degree> Sub<Expr<'a, R>> for Expr<'a, L> {
+    type Output = Expr<'a, <L as AddDegree<R>>::Output>;
+    fn sub(self, rhs: Expr<'a, R>) -> Self::Output {
         self.assert_same_arena(rhs);
         let id = self.arena.with_mut(|arena| sub_into(arena, self.id, rhs.id));
-        Self::new(id, self.arena)
+        Expr::from_id(id, self.arena)
     }
 }
 
-impl<'a> Mul for Expr<'a> {
-    type Output = Self;
-    fn mul(self, rhs: Self) -> Self {
+impl<'a, L: Degree + MulDegree<R>, R: Degree> Mul<Expr<'a, R>> for Expr<'a, L> {
+    type Output = Expr<'a, <L as MulDegree<R>>::Output>;
+    fn mul(self, rhs: Expr<'a, R>) -> Self::Output {
         self.assert_same_arena(rhs);
         let id = self.arena.with_mut(|arena| mul_into(arena, self.id, rhs.id));
-        Self::new(id, self.arena)
+        Expr::from_id(id, self.arena)
     }
 }
 
-impl<'a> Div for Expr<'a> {
-    type Output = Self;
-    fn div(self, rhs: Self) -> Self {
+impl<'a, L: Degree + DivDegree<R>, R: Degree> Div<Expr<'a, R>> for Expr<'a, L> {
+    type Output = Expr<'a, <L as DivDegree<R>>::Output>;
+    fn div(self, rhs: Expr<'a, R>) -> Self::Output {
         self.assert_same_arena(rhs);
         let id = self.arena.with_mut(|arena| div_into(arena, self.id, rhs.id));
-        Self::new(id, self.arena)
+        Expr::from_id(id, self.arena)
     }
 }
 
-impl<'a> Neg for Expr<'a> {
+impl<'a, D: Degree> Neg for Expr<'a, D> {
     type Output = Self;
     fn neg(self) -> Self {
         let id = self.arena.with_mut(|arena| neg_into(arena, self.id));
-        Self::new(id, self.arena)
+        Expr::from_id(id, self.arena)
     }
 }
 
@@ -59,83 +60,84 @@ impl<'a> Neg for Expr<'a> {
 
 macro_rules! impl_scalar_ops {
     ($scalar:ty, $to_f64:expr) => {
-        impl<'a> Add<$scalar> for Expr<'a> {
+        impl<'a, D: Degree> Add<$scalar> for Expr<'a, D> {
             type Output = Self;
             fn add(self, rhs: $scalar) -> Self {
                 let id = self.arena.with_mut(|arena| {
                     let rhs_id = arena.constant($to_f64(rhs));
                     add_into(arena, self.id, rhs_id)
                 });
-                Self::new(id, self.arena)
+                Expr::from_id(id, self.arena)
             }
         }
 
-        impl<'a> Add<Expr<'a>> for $scalar {
-            type Output = Expr<'a>;
-            fn add(self, rhs: Expr<'a>) -> Expr<'a> {
+        impl<'a, D: Degree> Add<Expr<'a, D>> for $scalar {
+            type Output = Expr<'a, D>;
+            fn add(self, rhs: Expr<'a, D>) -> Expr<'a, D> {
                 rhs + self
             }
         }
 
-        impl<'a> Sub<$scalar> for Expr<'a> {
+        impl<'a, D: Degree> Sub<$scalar> for Expr<'a, D> {
             type Output = Self;
             fn sub(self, rhs: $scalar) -> Self {
                 let id = self.arena.with_mut(|arena| {
                     let rhs_id = arena.constant($to_f64(rhs));
                     sub_into(arena, self.id, rhs_id)
                 });
-                Self::new(id, self.arena)
+                Expr::from_id(id, self.arena)
             }
         }
 
-        impl<'a> Sub<Expr<'a>> for $scalar {
-            type Output = Expr<'a>;
-            fn sub(self, rhs: Expr<'a>) -> Expr<'a> {
+        impl<'a, D: Degree> Sub<Expr<'a, D>> for $scalar {
+            type Output = Expr<'a, D>;
+            fn sub(self, rhs: Expr<'a, D>) -> Expr<'a, D> {
                 let id = rhs.arena.with_mut(|arena| {
                     let lhs_id = arena.constant($to_f64(self));
                     sub_into(arena, lhs_id, rhs.id)
                 });
-                Expr::new(id, rhs.arena)
+                Expr::from_id(id, rhs.arena)
             }
         }
 
-        impl<'a> Mul<$scalar> for Expr<'a> {
+        impl<'a, D: Degree> Mul<$scalar> for Expr<'a, D> {
             type Output = Self;
             fn mul(self, rhs: $scalar) -> Self {
                 let id = self.arena.with_mut(|arena| {
                     let rhs_id = arena.constant($to_f64(rhs));
                     mul_into(arena, self.id, rhs_id)
                 });
-                Self::new(id, self.arena)
+                Expr::from_id(id, self.arena)
             }
         }
 
-        impl<'a> Mul<Expr<'a>> for $scalar {
-            type Output = Expr<'a>;
-            fn mul(self, rhs: Expr<'a>) -> Expr<'a> {
+        impl<'a, D: Degree> Mul<Expr<'a, D>> for $scalar {
+            type Output = Expr<'a, D>;
+            fn mul(self, rhs: Expr<'a, D>) -> Expr<'a, D> {
                 rhs * self
             }
         }
 
-        impl<'a> Div<$scalar> for Expr<'a> {
+        impl<'a, D: Degree> Div<$scalar> for Expr<'a, D> {
             type Output = Self;
             fn div(self, rhs: $scalar) -> Self {
+                assert!($to_f64(rhs) != 0.0, "expression division by zero");
                 let id = self.arena.with_mut(|arena| {
                     let rhs_id = arena.constant($to_f64(rhs));
                     div_into(arena, self.id, rhs_id)
                 });
-                Self::new(id, self.arena)
+                Expr::from_id(id, self.arena)
             }
         }
 
-        impl<'a> Div<Expr<'a>> for $scalar {
-            type Output = Expr<'a>;
-            fn div(self, rhs: Expr<'a>) -> Expr<'a> {
+        impl<'a, D: Degree> Div<Expr<'a, D>> for $scalar {
+            type Output = Expr<'a, Nonlinear>;
+            fn div(self, rhs: Expr<'a, D>) -> Expr<'a, Nonlinear> {
                 let id = rhs.arena.with_mut(|arena| {
                     let lhs_id = arena.constant($to_f64(self));
                     div_into(arena, lhs_id, rhs.id)
                 });
-                Expr::new(id, rhs.arena)
+                Expr::from_id(id, rhs.arena)
             }
         }
     };
@@ -165,7 +167,7 @@ fn sum_children(first: ExprId, rest: impl Iterator<Item = ExprId>) -> Children {
     }
 }
 
-impl<'a> std::iter::Sum for Expr<'a> {
+impl<'a, D: Degree> std::iter::Sum for Expr<'a, D> {
     fn sum<I: Iterator<Item = Self>>(mut iter: I) -> Self {
         let first = iter.next().expect("Expr::sum on empty iterator");
         let ids = sum_children(
@@ -176,11 +178,11 @@ impl<'a> std::iter::Sum for Expr<'a> {
             }),
         );
         let id = first.arena.with_mut(|arena| add_n(arena, ids));
-        Self::new(id, first.arena)
+        Expr::from_id(id, first.arena)
     }
 }
 
-impl<'a> Expr<'a> {
+impl<'a, D: Degree> Expr<'a, D> {
     /// Macro-helper summation that evaluates every term before checking arena
     /// ownership, matching the former collect-then-sum behavior. Returns `None`
     /// for an empty domain so the caller can preserve its own diagnostic.
@@ -197,7 +199,7 @@ impl<'a> Expr<'a> {
         );
         assert!(same_arena, "expressions belong to different arenas");
         let id = first.arena.with_mut(|arena| add_n(arena, ids));
-        Some(Self::new(id, first.arena))
+        Some(Expr::from_id(id, first.arena))
     }
 
     /// Model-anchored summation. Validate all term owners before emitting the
@@ -208,7 +210,7 @@ impl<'a> Expr<'a> {
         mut iter: impl Iterator<Item = Self>,
     ) -> Self {
         let Some(first) = iter.next() else {
-            return Self::constant(arena, 0.0);
+            return Expr::from_id(arena.with_mut(|a| a.constant(0.0)), arena);
         };
         let mut same_arena = std::ptr::eq(arena, first.arena);
         let ids = sum_children(
@@ -220,10 +222,13 @@ impl<'a> Expr<'a> {
         );
         assert!(same_arena, "sum! terms belong to a different model");
         let id = arena.with_mut(|arena| add_n(arena, ids));
-        Self::new(id, arena)
+        Expr::from_id(id, arena)
     }
 
-    fn extrema_terms(mut iter: impl Iterator<Item = Self>, is_min: bool) -> Option<Self> {
+    fn extrema_terms(
+        mut iter: impl Iterator<Item = Self>,
+        is_min: bool,
+    ) -> Option<Expr<'a, Nonlinear>> {
         let first = iter.next()?;
         let mut same_arena = true;
         let mut ids = Children::new();
@@ -241,29 +246,29 @@ impl<'a> Expr<'a> {
         }
         assert!(same_arena, "expressions belong to different arenas");
         if ids.len() == 1 {
-            return Some(Self::new(ids[0], first.arena));
+            return Some(Expr::from_id(ids[0], first.arena));
         }
         let id = first.arena.with_mut(|arena| {
             arena.push(if is_min { ExprNode::Min(ids) } else { ExprNode::Max(ids) })
         });
-        Some(Self::new(id, first.arena))
+        Some(Expr::from_id(id, first.arena))
     }
 
     /// Macro support for constructing a flat n-ary minimum.
     #[doc(hidden)]
-    pub fn __min_terms(iter: impl Iterator<Item = Self>) -> Option<Self> {
+    pub fn __min_terms(iter: impl Iterator<Item = Self>) -> Option<Expr<'a, Nonlinear>> {
         Self::extrema_terms(iter, true)
     }
 
     /// Macro support for constructing a flat n-ary maximum.
     #[doc(hidden)]
-    pub fn __max_terms(iter: impl Iterator<Item = Self>) -> Option<Self> {
+    pub fn __max_terms(iter: impl Iterator<Item = Self>) -> Option<Expr<'a, Nonlinear>> {
         Self::extrema_terms(iter, false)
     }
 }
 
-impl<'a, 'b> std::iter::Sum<&'b Expr<'a>> for Expr<'a> {
-    fn sum<I: Iterator<Item = &'b Expr<'a>>>(iter: I) -> Self {
+impl<'a, 'b, D: Degree> std::iter::Sum<&'b Expr<'a, D>> for Expr<'a, D> {
+    fn sum<I: Iterator<Item = &'b Expr<'a, D>>>(iter: I) -> Self {
         iter.copied().sum()
     }
 }
@@ -276,7 +281,7 @@ impl<'a, 'b> std::iter::Sum<&'b Expr<'a>> for Expr<'a> {
 /// # Panics
 /// Panics if `exprs` and `coeffs` have different lengths, or if `exprs`
 /// is empty (the result needs an arena handle).
-pub fn dot<'a>(exprs: &[Expr<'a>], coeffs: &[f64]) -> Expr<'a> {
+pub fn dot<'a, D: Degree>(exprs: &[Expr<'a, D>], coeffs: &[f64]) -> Expr<'a, D> {
     assert_eq!(
         exprs.len(),
         coeffs.len(),

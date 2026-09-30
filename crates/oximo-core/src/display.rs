@@ -201,7 +201,7 @@ impl Model {
     /// Display adapter for an expression handle, resolving variable names
     /// against this model.
     #[must_use]
-    pub fn display_expr(&self, e: Expr<'_>) -> ExprDisplay<'_> {
+    pub fn display_expr<D: oximo_expr::Degree>(&self, e: Expr<'_, D>) -> ExprDisplay<'_> {
         self.display_expr_id(e.id)
     }
 
