@@ -25,6 +25,7 @@ criterion_group! {
         suite::baron::bench,
         suite::gurobi::bench,
         suite::mosek::bench,
+        suite::scip::bench,
         suite::enzyme::bench
 }
 criterion_main!(benches);

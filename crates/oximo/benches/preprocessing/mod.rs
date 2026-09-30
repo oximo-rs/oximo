@@ -9,3 +9,4 @@ pub mod io;
 pub mod model;
 pub mod mosek;
 pub mod pounce;
+pub mod scip;
