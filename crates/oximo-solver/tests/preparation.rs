@@ -120,6 +120,27 @@ fn explicit_form_recovers_affine_rows() {
 }
 
 #[test]
+fn typed_soc_extracts_compound_constants_and_live_parameter_coefficients() {
+    let model = Model::new("compound coefficients");
+    variable!(model, x);
+    variable!(model, t >= 0.0);
+    param!(model, p = 2.0);
+    let c = oximo_core::Expr::constant(x.arena(), 2.0);
+    model.add_soc_constraint("cone", [(-c) * x, (p + 3.0) * x, (2.0 * p) * x], t);
+    objective!(model, Min, t);
+    let before = LoweringContext::new(&model).unwrap();
+    model.set_param(p, 7.0).unwrap();
+    let after = LoweringContext::new(&model).unwrap();
+    for (prepared, expected) in [(&before, [-2.0, 5.0, 4.0]), (&after, [-2.0, 10.0, 14.0])] {
+        let form = prepared.explicit_soc(&prepared.constraints().second_order_cones()[0]).unwrap();
+        for (term, coefficient) in form.terms.iter().zip(expected) {
+            assert_eq!(term.coeffs.as_ref(), &[(x.var_id().unwrap(), coefficient)]);
+            assert_eq!(term.constant, 0.0);
+        }
+    }
+}
+
+#[test]
 fn explicit_cones_use_the_same_parameter_snapshot_as_polynomials() {
     let model = Model::new("cone_snapshot");
     variable!(model, x);

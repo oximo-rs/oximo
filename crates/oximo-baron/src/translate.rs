@@ -8,7 +8,7 @@ use std::time::Instant;
 use std::{fs, io};
 
 use oximo_core::{
-    Constraint, ConstraintId, Domain, Model, ModelId, ModelMismatchError, Objective,
+    AlgebraicConstraint, ConstraintId, Domain, Model, ModelId, ModelMismatchError, Objective,
     ObjectiveSense, Sense, SocConstraint, SocConstraintId, VarId, Variable,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
@@ -369,7 +369,7 @@ fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
 
 type EquationRow = (&'static str, &'static str, f64);
 
-fn equation_rows(c: &Constraint) -> [Option<EquationRow>; 2] {
+fn equation_rows(c: &AlgebraicConstraint) -> [Option<EquationRow>; 2] {
     oximo_solver::prepare::row_sides(c).map(|side| {
         side.map(|(sense, rhs)| {
             let suffix =
@@ -393,7 +393,7 @@ fn equation_rows(c: &Constraint) -> [Option<EquationRow>; 2] {
 fn write_equations(
     bar: &mut String,
     prepared: &PreparedExpressions,
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     socs: &[SocConstraint],
     convex_equation_ids: &[ConstraintId],
 ) -> Result<Vec<ConstraintId>, SolverError> {
@@ -448,7 +448,7 @@ fn write_equations(
 /// [`write_equations`]. A range becomes two BARON rows and is rejected: asserting
 /// convexity for both sides is not implied by convexity of the combined range.
 fn convex_equation_names(
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     requested: &[ConstraintId],
 ) -> Result<Vec<String>, SolverError> {
     let mut names = Vec::with_capacity(requested.len());
@@ -1343,9 +1343,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => x + 2.0 * y - z,
+                1 => (x + 2.0 * y - z).erase(),
                 2 => x.powi(2) + y * z + x,
-                _ => x * y * z + x.exp(),
+                _ => (x * y * z + x.exp()).erase(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -1369,7 +1369,7 @@ pub mod benchmark_support {
     fn render_parallel(
         out: &mut String,
         arena: &PreparedExpressions,
-        constraints: &[Constraint],
+        constraints: &[AlgebraicConstraint],
         socs: &[SocConstraint],
     ) -> Result<Vec<ConstraintId>, SolverError> {
         let mut emit_map = Vec::with_capacity(constraints.len());
@@ -1404,7 +1404,7 @@ pub mod benchmark_support {
     fn constraint_fragment(
         arena: &PreparedExpressions,
         index: usize,
-        c: &Constraint,
+        c: &AlgebraicConstraint,
     ) -> Result<String, SolverError> {
         if !expr_has_var(arena, c.lhs) {
             return Err(SolverError::Backend(format!(

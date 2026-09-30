@@ -122,7 +122,7 @@ impl<'a> VarBuilder<'a> {
         self
     }
 
-    pub fn build(self) -> Expr<'a> {
+    pub fn build(self) -> Expr<'a, oximo_expr::Affine> {
         self.model.register_var(self)
     }
 }

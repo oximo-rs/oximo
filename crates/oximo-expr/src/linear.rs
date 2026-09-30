@@ -121,6 +121,20 @@ fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
             }
             Some(product)
         }
+        ExprNode::Pow(base, exp) => {
+            let ExprNode::Const(exponent) = *arena.get(*exp) else { return None };
+            if !exponent.is_finite()
+                || (exponent - exponent.round()).abs() >= f64::EPSILON
+                || exponent < 0.0
+            {
+                return None;
+            }
+            if exponent.round() == 0.0 {
+                return Some(LinearTerms::borrowed(&[], 1.0));
+            }
+            let terms = recursive_linear(arena, *base, resolve_params)?;
+            affine_power(terms, exponent.round())
+        }
         _ => None,
     }
 }
@@ -134,6 +148,18 @@ enum LinearState<'a> {
     Sum { rest: &'a [ExprId], acc: CoeffAccum, constant: f64 },
     Scale { child: Option<ExprId>, value: Option<LinearTerms<'a>>, scalar: f64, negate: bool },
     Product { rest: &'a [ExprId], value: Option<LinearTerms<'a>> },
+    Power { child: Option<ExprId>, value: Option<LinearTerms<'a>>, exponent: f64 },
+}
+
+#[expect(clippy::float_cmp, reason = "the exponent has been validated and rounded to an integer")]
+fn affine_power(terms: LinearTerms<'_>, exponent: f64) -> Option<LinearTerms<'_>> {
+    if exponent == 1.0 {
+        Some(terms)
+    } else if terms.coeffs.is_empty() {
+        Some(LinearTerms::borrowed(&[], terms.constant.powf(exponent)))
+    } else {
+        None
+    }
 }
 
 /// Multiply affine terms only when one side has no decision variables.
@@ -221,6 +247,23 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                 }
                 Some(LinearTerms::owned(Vec::new(), scalar))
             }
+            ExprNode::Pow(base, exp) => {
+                let ExprNode::Const(exponent) = *self.arena.get(*exp) else { return Break(None) };
+                if !exponent.is_finite()
+                    || (exponent - exponent.round()).abs() >= f64::EPSILON
+                    || exponent < 0.0
+                {
+                    return Break(None);
+                }
+                if exponent.round() == 0.0 {
+                    return Break(Some(LinearTerms::borrowed(&[], 1.0)));
+                }
+                return Continue(LinearState::Power {
+                    child: Some(*base),
+                    value: None,
+                    exponent: exponent.round(),
+                });
+            }
             _ => None,
         })
     }
@@ -228,6 +271,12 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
     fn next(&self, state: &mut Self::State) -> std::ops::ControlFlow<Option<Self::Value>, ExprId> {
         use std::ops::ControlFlow::{Break, Continue};
         match state {
+            LinearState::Power { child, value, exponent } => {
+                if let Some(child) = child.take() {
+                    return Continue(child);
+                }
+                Break(value.take().and_then(|terms| affine_power(terms, *exponent)))
+            }
             LinearState::Sum { rest, acc, constant } => {
                 while let Some((&child, tail)) = rest.split_first() {
                     *rest = tail;
@@ -283,7 +332,9 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                 acc.extend_from_slice(&value.coeffs);
                 *constant += value.constant;
             }
-            LinearState::Scale { value: slot, .. } => *slot = Some(value),
+            LinearState::Scale { value: slot, .. } | LinearState::Power { value: slot, .. } => {
+                *slot = Some(value);
+            }
             LinearState::Product { value: slot, .. } => {
                 *slot = slot.take().and_then(|left| multiply_linear(left, value));
             }

@@ -1,3 +1,10 @@
+use crate::function_set::IntoAffineFunction;
+use crate::function_set::{
+    AlgebraicConstraintIr, Constraint, ConstraintIr, GreaterThan, Interval, IntoAffineConstraint,
+    IntoFunction, LessThan, LowerConstraint, ScalarFunction, SecondOrderCone, Set as ConstraintSet,
+    SocConstraintIr, VectorAffineFunction, validate_bounds,
+};
+use oximo_expr::{Affine, Constant, Degree};
 use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
@@ -13,8 +20,7 @@ use smol_str::SmolStr;
 #[cfg(test)]
 use crate::constraint::RangeConstraintIds;
 use crate::constraint::{
-    Constraint, ConstraintExpr, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
-    Relate, Sense,
+    AlgebraicConstraint, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles, Relate,
 };
 use crate::domain::Domain;
 use crate::error::{Error, Result};
@@ -65,7 +71,7 @@ fn arena_key(arena: &ExprArenaCell) -> usize {
     std::ptr::from_ref(arena) as usize
 }
 
-fn assert_expr_arena(expr: Expr<'_>, expected: usize) {
+fn assert_expr_arena<D: Degree>(expr: Expr<'_, D>, expected: usize) {
     assert_eq!(arena_key(expr.arena), expected, "expression belongs to a different model");
 }
 
@@ -114,16 +120,10 @@ struct PendingIndicator {
 }
 
 impl PendingConstraint {
-    fn from_expr(name: SmolStr, constraint: ConstraintExpr<'_>) -> Self {
-        let (lower, upper) = match constraint.sense {
-            Sense::Le => (f64::NEG_INFINITY, constraint.rhs),
-            Sense::Ge => (constraint.rhs, f64::INFINITY),
-            Sense::Eq => (constraint.rhs, constraint.rhs),
-        };
-        assert!(
-            !lower.is_nan() && !upper.is_nan(),
-            "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
-        );
+    fn from_expr<'a>(name: SmolStr, constraint: impl Into<AlgebraicConstraintIr<'a>>) -> Self {
+        let constraint: AlgebraicConstraintIr = constraint.into();
+        let (lower, upper) = (constraint.lower, constraint.upper);
+        validate_bounds(lower, upper);
         Self { name, lhs: constraint.lhs.id, lower, upper }
     }
 
@@ -138,20 +138,40 @@ struct PendingRangeBatch {
     row_counts: Vec<u8>,
 }
 
-fn prepare_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
+fn prepare_range<
+    'a,
+    D: crate::function_set::FunctionDegree,
+    B1: IntoRhs<'a, D>,
+    B2: IntoRhs<'a, D>,
+>(
     name: String,
-    mid: Expr<'a>,
+    mid: Expr<'a, D>,
     lo: B1,
     hi: B2,
 ) -> (PendingConstraint, Option<PendingConstraint>) {
-    if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
-        && mid.__class() == ExprClass::Linear
-    {
-        assert!(
-            !lower.is_nan() && !upper.is_nan(),
-            "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
-        );
-        (PendingConstraint { name: name.into(), lhs: mid.id, lower, upper }, None)
+    if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
+        let function = mid.into_function();
+        validate_bounds(lower, upper);
+        if function.is_affine() {
+            (
+                PendingConstraint::from_expr(
+                    name.into(),
+                    Constraint::new(function, Interval { lower, upper }),
+                ),
+                None,
+            )
+        } else {
+            (
+                PendingConstraint::from_expr(
+                    format!("{name}_lo").into(),
+                    Constraint::new(function, GreaterThan(lower)),
+                ),
+                Some(PendingConstraint::from_expr(
+                    format!("{name}_hi").into(),
+                    Constraint::new(function, LessThan(upper)),
+                )),
+            )
+        }
     } else {
         (
             PendingConstraint::from_expr(format!("{name}_lo").into(), mid.ge(lo)),
@@ -176,24 +196,20 @@ impl PendingSoc {
     }
 }
 
-fn prepare_soc<'a>(
+fn prepare_soc<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
     name: SmolStr,
-    terms: impl IntoIterator<Item = Expr<'a>>,
-    bound: Expr<'a>,
+    terms: impl IntoIterator<Item = A>,
+    bound: B,
+    expected_arena: usize,
 ) -> PendingSoc {
-    let terms: Vec<ExprId> = terms
-        .into_iter()
-        .map(|term| {
-            assert!(
-                term.__class() == ExprClass::Linear,
-                "SOC constraint {name:?} has a non-affine term"
-            );
-            term.id
-        })
-        .collect();
-    assert!(!terms.is_empty(), "SOC constraint {name:?} has no terms");
-    assert!(bound.__class() == ExprClass::Linear, "SOC constraint {name:?} has a non-affine bound");
-    PendingSoc { name, terms, bound: bound.id }
+    let function = VectorAffineFunction::new(
+        std::iter::once(bound.into_affine_function())
+            .chain(terms.into_iter().map(IntoAffineFunction::into_affine_function)),
+    );
+    assert_expr_arena(function.first, expected_arena);
+    let dimension = function.dimension();
+    let ir = Constraint::new(function, SecondOrderCone { dimension }).into_ir();
+    PendingSoc { name, terms: ir.0.rest, bound: ir.0.first.id }
 }
 
 #[derive(Debug)]
@@ -256,7 +272,7 @@ impl fmt::Display for ModelKind {
 /// boundary without changing either representation.
 #[derive(Copy, Clone, Debug)]
 pub enum ConstraintRef<'a> {
-    Algebraic { id: ConstraintId, constraint: &'a Constraint },
+    Algebraic { id: ConstraintId, constraint: &'a AlgebraicConstraint },
     SecondOrderCone { id: SocConstraintId, constraint: &'a SocConstraint },
     SpecialOrderedSet { id: SosConstraintId, constraint: &'a SosConstraint },
     Indicator { id: IndicatorConstraintId, constraint: &'a IndicatorConstraint },
@@ -272,7 +288,7 @@ pub enum ConstraintRef<'a> {
 /// their respective ID order.
 #[derive(Debug)]
 pub struct ModelConstraints<'a> {
-    algebraic: Ref<'a, Vec<Constraint>>,
+    algebraic: Ref<'a, Vec<AlgebraicConstraint>>,
     second_order_cones: Ref<'a, Vec<SocConstraint>>,
     special_ordered_sets: Ref<'a, Vec<SosConstraint>>,
     indicators: Ref<'a, Vec<IndicatorConstraint>>,
@@ -280,7 +296,7 @@ pub struct ModelConstraints<'a> {
 
 impl ModelConstraints<'_> {
     /// Algebraic constraints in [`ConstraintId`] order.
-    pub fn algebraic(&self) -> &[Constraint] {
+    pub fn algebraic(&self) -> &[AlgebraicConstraint] {
         &self.algebraic
     }
 
@@ -352,7 +368,7 @@ pub struct Model {
     pub(crate) var_names: RefCell<FxHashMap<SmolStr, VarId>>,
     pub(crate) parameters: RefCell<Vec<Parameter>>,
     pub(crate) param_names: RefCell<FxHashMap<SmolStr, ParamId>>,
-    pub(crate) constraints: RefCell<Vec<Constraint>>,
+    pub(crate) constraints: RefCell<Vec<AlgebraicConstraint>>,
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) soc_constraints: RefCell<Vec<SocConstraint>>,
     pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
@@ -371,7 +387,7 @@ pub struct Model {
 }
 
 impl Model {
-    fn assert_expr_belongs(&self, expr: Expr<'_>) {
+    fn assert_expr_belongs<'a, D: Degree>(&self, expr: Expr<'a, D>) {
         assert_expr_arena(expr, arena_key(&self.arena));
     }
 
@@ -382,7 +398,10 @@ impl Model {
     }
 
     #[inline]
-    fn ensure_expr_model(&self, expr: Expr<'_>) -> std::result::Result<(), ModelMismatchError> {
+    fn ensure_expr_model<'a, D: Degree>(
+        &self,
+        expr: Expr<'a, D>,
+    ) -> std::result::Result<(), ModelMismatchError> {
         self.ensure_model_id(expr.model_id())
     }
 
@@ -516,7 +535,7 @@ impl Model {
 
     /// Construct a constant expression for format readers and other adapters.
     #[doc(hidden)]
-    pub fn __constant(&self, value: f64) -> Expr<'_> {
+    pub fn __constant(&self, value: f64) -> Expr<'_, Constant> {
         Expr::constant(&self.arena, value)
     }
 
@@ -529,7 +548,7 @@ impl Model {
 
     /// Called by [`VarBuilder::build`]. Pushes the var into the registry and
     /// returns its `Expr` handle.
-    pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a> {
+    pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a, Affine> {
         let mut names = self.var_names.borrow_mut();
         assert!(
             !names.contains_key(&b.name),
@@ -553,7 +572,11 @@ impl Model {
         Expr::from_var(&self.arena, id)
     }
 
-    fn register_vars_batch<'a>(&'a self, items: &[PendingVar], domain: Domain) -> Vec<Expr<'a>> {
+    fn register_vars_batch<'a>(
+        &'a self,
+        items: &[PendingVar],
+        domain: Domain,
+    ) -> Vec<Expr<'a, Affine>> {
         let mut names = self.var_names.borrow_mut();
         validate_batch_names(&names, items.iter().map(|item| &item.name), "variable", items.len());
         let mut vars = self.variables.borrow_mut();
@@ -578,8 +601,8 @@ impl Model {
                 initial: None,
             });
             names.insert(item.name.clone(), id);
-            let node = arena.var(id);
-            handles.push(Expr::new(node, &self.arena));
+            let handle = arena.var_expr(id);
+            handles.push(handle);
         }
         self.cached_kind.set(None);
         handles
@@ -622,7 +645,7 @@ impl Model {
     ///
     /// Panics if `id` is not registered on this model.
     #[must_use]
-    pub fn variable_handle(&self, id: VarId) -> Expr<'_> {
+    pub fn variable_handle(&self, id: VarId) -> Expr<'_, Affine> {
         assert!(id.index() < self.variables.borrow().len(), "unknown variable ID {id:?}");
         Expr::from_var(&self.arena, id)
     }
@@ -677,7 +700,12 @@ impl Model {
     ///
     /// Returns [`ModelMismatchError`] if `e` belongs to another model.
     #[inline]
-    pub fn fix(&self, e: Expr<'_>, value: f64) -> std::result::Result<(), ModelMismatchError> {
+    pub fn fix<'a>(
+        &self,
+        e: impl Into<Expr<'a>>,
+        value: f64,
+    ) -> std::result::Result<(), ModelMismatchError> {
+        let e: Expr = e.into();
         self.ensure_expr_model(e)?;
         let id = e.var_id().expect("Model::fix expects a single-variable expression");
         self.fix_var(id, value);
@@ -718,11 +746,12 @@ impl Model {
     ///
     /// Returns [`ModelMismatchError`] if `e` belongs to another model.
     #[inline]
-    pub fn set_initial(
+    pub fn set_initial<'a>(
         &self,
-        e: Expr<'_>,
+        e: impl Into<Expr<'a>>,
         value: f64,
     ) -> std::result::Result<(), ModelMismatchError> {
+        let e: Expr = e.into();
         self.ensure_expr_model(e)?;
         let id = e.var_id().expect("Model::set_initial expects a single-variable expression");
         self.variables.borrow_mut()[id.index()].initial = Some(value);
@@ -800,7 +829,7 @@ impl Model {
     ///
     /// Panics if a parameter with the same name is already registered.
     #[doc(hidden)]
-    pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a> {
+    pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a, Constant> {
         self.register_param(name.into(), value)
     }
 
@@ -811,20 +840,20 @@ impl Model {
     /// # Panics
     ///
     /// Panics if a parameter with the same name is already registered.
-    fn register_param(&self, name: SmolStr, value: f64) -> Expr<'_> {
+    fn register_param(&self, name: SmolStr, value: f64) -> Expr<'_, Constant> {
         assert!(
             !self.param_names.borrow().contains_key(&name),
             "parameter name {name:?} is already registered on this model"
         );
-        let (id, node) = {
+        let (id, handle) = {
             let mut a = self.arena.borrow_mut();
             let id = a.new_param(value);
-            (id, a.param(id))
+            (id, a.param_expr(id))
         };
         self.parameters.borrow_mut().push(Parameter { id, name: name.clone() });
         self.param_names.borrow_mut().insert(name, id);
         self.cached_kind.set(None);
-        Expr::new(node, &self.arena)
+        handle
     }
 
     /// Macro-facing entry point backing the indexed form of the `param!` macro
@@ -886,7 +915,7 @@ impl Model {
         IndexedFamily { storage, model_id: self.id(), _marker: PhantomData }
     }
 
-    fn register_params_batch<'a>(&'a self, items: &[PendingParam]) -> Vec<Expr<'a>> {
+    fn register_params_batch<'a>(&'a self, items: &[PendingParam]) -> Vec<Expr<'a, Constant>> {
         let mut names = self.param_names.borrow_mut();
         validate_batch_names(&names, items.iter().map(|item| &item.name), "parameter", items.len());
         let mut params = self.parameters.borrow_mut();
@@ -902,10 +931,10 @@ impl Model {
         let mut handles = Vec::with_capacity(items.len());
         for item in items {
             let id = arena.new_param(item.value);
-            let node = arena.param(id);
+            let handle = arena.param_expr(id);
             params.push(Parameter { id, name: item.name.clone() });
             names.insert(item.name.clone(), id);
-            handles.push(Expr::new(node, &self.arena));
+            handles.push(handle);
         }
         handles
     }
@@ -960,11 +989,12 @@ impl Model {
     ///
     /// Returns [`ModelMismatchError`] if `p` belongs to another model.
     #[inline]
-    pub fn set_param(
+    pub fn set_param<'a>(
         &self,
-        p: Expr<'_>,
+        p: impl Into<Expr<'a>>,
         value: f64,
     ) -> std::result::Result<(), ModelMismatchError> {
+        let p: Expr = p.into();
         self.ensure_expr_model(p)?;
         let id = p.param_id().expect("Model::set_param expects a single-parameter expression");
         self.set_param_id(id, value);
@@ -998,10 +1028,11 @@ impl Model {
     /// # Errors
     ///
     /// Returns [`ModelMismatchError`] if `p` belongs to another model.
-    pub fn param_value_of(
+    pub fn param_value_of<'a>(
         &self,
-        p: Expr<'_>,
+        p: impl Into<Expr<'a>>,
     ) -> std::result::Result<Option<f64>, ModelMismatchError> {
+        let p: Expr = p.into();
         self.ensure_expr_model(p)?;
         Ok(p.param_id().map(|id| self.param_value(id)))
     }
@@ -1018,6 +1049,29 @@ impl Model {
         self.parameters.borrow().len()
     }
 
+    /// Register a mathematically compatible function/set pair in the heterogeneous IR.
+    pub fn add_constraint<F, S>(
+        &self,
+        name: impl Into<SmolStr>,
+        constraint: Constraint<F, S>,
+    ) -> <F::Ir as ConstraintIr>::Handle
+    where
+        S: ConstraintSet,
+        F: LowerConstraint<S>,
+    {
+        constraint.into_ir().register(self, name.into())
+    }
+
+    pub(crate) fn register_algebraic_ir(
+        &self,
+        name: SmolStr,
+        ir: AlgebraicConstraintIr<'_>,
+    ) -> ConstraintHandle {
+        self.ensure_expr_model(ir.lhs).unwrap_or_else(|error| panic!("{error}"));
+        let id = self.register_constraint(name, ir.lhs.id, ir.lower, ir.upper);
+        ConstraintHandle::new(id, self.id())
+    }
+
     // Constraints
 
     /// Macro-facing entry point backing the `constraint!` macro. Not part of the
@@ -1028,17 +1082,14 @@ impl Model {
     /// Panics if a constraint with the same name is already registered, or if
     /// the constraint count exceeds `u32::MAX`.
     #[doc(hidden)]
-    pub fn __add_constraint(
+    pub fn __add_constraint<'a>(
         &self,
         name: impl Into<SmolStr>,
-        c: ConstraintExpr<'_>,
+        c: impl Into<AlgebraicConstraintIr<'a>>,
     ) -> ConstraintHandle {
+        let c: AlgebraicConstraintIr = c.into();
         self.assert_expr_belongs(c.lhs);
-        let (lower, upper) = match c.sense {
-            Sense::Le => (f64::NEG_INFINITY, c.rhs),
-            Sense::Ge => (c.rhs, f64::INFINITY),
-            Sense::Eq => (c.rhs, c.rhs),
-        };
+        let (lower, upper) = (c.lower, c.upper);
         ConstraintHandle::new(
             self.register_constraint(name.into(), c.lhs.id, lower, upper),
             self.id(),
@@ -1059,15 +1110,12 @@ impl Model {
         lower: f64,
         upper: f64,
     ) -> ConstraintId {
-        assert!(
-            !lower.is_nan() && !upper.is_nan(),
-            "constraint {name:?} has NaN bound (lower={lower}, upper={upper})"
-        );
+        validate_bounds(lower, upper);
         let mut by_name = self.constraint_names.borrow_mut();
         assert!(!by_name.contains_key(&name), "constraint name {name:?} already registered");
         let mut all = self.constraints.borrow_mut();
         let id = ConstraintId(u32::try_from(all.len()).expect("constraint count overflow"));
-        all.push(Constraint { name: name.clone(), lhs, lower, upper, active: true });
+        all.push(AlgebraicConstraint { name: name.clone(), lhs, lower, upper, active: true });
         by_name.insert(name, id);
         self.cached_kind.set(None);
         id
@@ -1091,7 +1139,7 @@ impl Model {
         for item in items {
             let id =
                 ConstraintId(u32::try_from(constraints.len()).expect("constraint count overflow"));
-            constraints.push(Constraint {
+            constraints.push(AlgebraicConstraint {
                 name: item.name.clone(),
                 lhs: item.lhs,
                 lower: item.lower,
@@ -1120,29 +1168,36 @@ impl Model {
     /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
     /// internal counter. Backs the name-less form of the `constraint!` macro.
     #[doc(hidden)]
-    pub fn __add_constraint_auto(&self, c: ConstraintExpr<'_>) -> ConstraintHandle {
+    pub fn __add_constraint_auto<'a>(
+        &self,
+        c: impl Into<AlgebraicConstraintIr<'a>>,
+    ) -> ConstraintHandle {
+        let c: AlgebraicConstraintIr = c.into();
         self.__add_constraint(self.next_auto_name(), c)
     }
 
     /// Register a canonical interval row. This is intentionally hidden from
     /// the public builder API; file readers need to preserve native range rows.
     #[doc(hidden)]
-    pub fn __add_constraint_interval(
+    pub fn __add_constraint_interval<'a>(
         &self,
         name: impl Into<SmolStr>,
-        lhs: Expr<'_>,
+        lhs: impl Into<Expr<'a>>,
         lower: f64,
         upper: f64,
     ) -> ConstraintId {
+        let lhs: Expr = lhs.into();
         self.assert_expr_belongs(lhs);
-        self.register_constraint(name.into(), lhs.id, lower, upper)
+        self.add_constraint(name, Constraint::new(lhs.into_function(), Interval { lower, upper }))
+            .id()
     }
 
     /// Bulk-register constraints. Each entry is `(name, ConstraintExpr)`.
     /// Useful with `.par_iter().map(...).collect()` style construction.
-    pub fn add_constraints<'a, I>(&'a self, items: I)
+    pub fn add_constraints<'a, I, C>(&'a self, items: I)
     where
-        I: IntoIterator<Item = (SmolStr, ConstraintExpr<'a>)>,
+        I: IntoIterator<Item = (SmolStr, C)>,
+        C: Into<AlgebraicConstraintIr<'a>>,
     {
         for (name, c) in items {
             self.__add_constraint(name, c);
@@ -1154,7 +1209,7 @@ impl Model {
     /// (any [`FromIndexKey`]: `i64`, `i32`, `usize`, `String`, raw `IndexKey`, or
     /// tuples up to arity 4). Not part of the stable public API.
     #[doc(hidden)]
-    pub fn __add_constraints_over<'a, K, F>(
+    pub fn __add_constraints_over<'a, K, F, C>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1162,12 +1217,13 @@ impl Model {
     ) -> IndexedConstraint<K>
     where
         K: FromIndexKey,
-        F: Fn(K) -> ConstraintExpr<'a> + Send + Sync,
+        F: Fn(K) -> C + Send + Sync,
+        C: Into<AlgebraicConstraintIr<'a>>,
     {
         self.add_constraints_over_with(name_prefix, set, &rule, None)
     }
 
-    fn add_constraints_over_with<'a, K, F>(
+    fn add_constraints_over_with<'a, K, F, C>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1176,13 +1232,14 @@ impl Model {
     ) -> IndexedConstraint<K>
     where
         K: FromIndexKey,
-        F: Fn(K) -> ConstraintExpr<'a> + Send + Sync,
+        F: Fn(K) -> C + Send + Sync,
+        C: Into<AlgebraicConstraintIr<'a>>,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_ALGEBRAIC_THRESHOLD) {
             let mut ids = Vec::with_capacity(keys.len());
             for key in &keys {
-                let constraint = rule(K::from_index_key(key));
+                let constraint: AlgebraicConstraintIr = rule(K::from_index_key(key)).into();
                 self.assert_expr_belongs(constraint.lhs);
                 let name: SmolStr = format_index_name(name_prefix, key).into();
                 ids.push(self.__add_constraint(name, constraint));
@@ -1203,7 +1260,8 @@ impl Model {
                         .iter()
                         .map(|key| {
                             let name = format_index_name(name_prefix, key).into();
-                            let constraint = rule(K::from_index_key(key));
+                            let constraint: AlgebraicConstraintIr =
+                                rule(K::from_index_key(key)).into();
                             assert_expr_arena(constraint.lhs, expected_arena);
                             PendingConstraint::from_expr(name, constraint)
                         })
@@ -1240,27 +1298,40 @@ impl Model {
 
     /// Macro-facing entry point for a two-sided range `lo <= mid <= hi`.
     ///
-    /// Collapses to a single interval [`Constraint`] named `name` only when both
+    /// Collapses to a single interval [`AlgebraicConstraint`] named `name` only when both
     /// bounds are pure constants and the body is linear (the condition under which
     /// one two-sided row is representable).
     #[doc(hidden)]
-    pub fn __add_range<'a, B1, B2>(
+    pub fn __add_range<'a, B1, B2, D: crate::function_set::FunctionDegree>(
         &'a self,
         name: &str,
-        mid: Expr<'a>,
+        mid: Expr<'a, D>,
         lo: B1,
         hi: B2,
     ) -> RangeConstraintHandles
     where
-        B1: IntoRhs<'a>,
-        B2: IntoRhs<'a>,
+        B1: IntoRhs<'a, D>,
+        B2: IntoRhs<'a, D>,
     {
         self.assert_expr_belongs(mid);
-        if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
-            RangeConstraintHandles::Interval(ConstraintHandle::new(
-                self.register_constraint(name.into(), mid.id, lower, upper),
-                self.id(),
-            ))
+        if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
+            validate_bounds(lower, upper);
+            let function = mid.into_function();
+            if function.is_affine() {
+                RangeConstraintHandles::Interval(
+                    self.add_constraint(name, Constraint::new(function, Interval { lower, upper })),
+                )
+            } else {
+                let lower = self.__add_constraint(
+                    format!("{name}_lo"),
+                    Constraint::new(function, GreaterThan(lower)),
+                );
+                let upper = self.__add_constraint(
+                    format!("{name}_hi"),
+                    Constraint::new(function, LessThan(upper)),
+                );
+                RangeConstraintHandles::Split { lower, upper }
+            }
         } else {
             let lower = self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
             let upper = self.__add_constraint(format!("{name}_hi"), mid.le(hi));
@@ -1270,22 +1341,31 @@ impl Model {
 
     /// Anonymous form of [`Self::__add_range`] (auto-named rows).
     #[doc(hidden)]
-    pub fn __add_range_auto<'a, B1, B2>(
+    pub fn __add_range_auto<'a, B1, B2, D: crate::function_set::FunctionDegree>(
         &'a self,
-        mid: Expr<'a>,
+        mid: Expr<'a, D>,
         lo: B1,
         hi: B2,
     ) -> RangeConstraintHandles
     where
-        B1: IntoRhs<'a>,
-        B2: IntoRhs<'a>,
+        B1: IntoRhs<'a, D>,
+        B2: IntoRhs<'a, D>,
     {
         self.assert_expr_belongs(mid);
-        if let Some((lower, upper)) = self.collapse_bounds(mid.id, &lo, &hi) {
-            RangeConstraintHandles::Interval(ConstraintHandle::new(
-                self.register_constraint(self.next_auto_name(), mid.id, lower, upper),
-                self.id(),
-            ))
+        if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
+            validate_bounds(lower, upper);
+            let function = mid.into_function();
+            if function.is_affine() {
+                RangeConstraintHandles::Interval(self.add_constraint(
+                    self.next_auto_name(),
+                    Constraint::new(function, Interval { lower, upper }),
+                ))
+            } else {
+                let lower =
+                    self.__add_constraint_auto(Constraint::new(function, GreaterThan(lower)));
+                let upper = self.__add_constraint_auto(Constraint::new(function, LessThan(upper)));
+                RangeConstraintHandles::Split { lower, upper }
+            }
         } else {
             let lower = self.__add_constraint_auto(mid.ge(lo));
             let upper = self.__add_constraint_auto(mid.le(hi));
@@ -1293,24 +1373,10 @@ impl Model {
         }
     }
 
-    /// The interval `(lower, upper)` a range collapses to, or `None` (keep two
-    /// rows). Requires both bounds to be literal constants and the body `mid` to
-    /// be linear.
-    fn collapse_bounds<'a>(
-        &self,
-        mid: ExprId,
-        lo: &impl IntoRhs<'a>,
-        hi: &impl IntoRhs<'a>,
-    ) -> Option<(f64, f64)> {
-        let lower = lo.const_bound()?;
-        let upper = hi.const_bound()?;
-        (classify(&self.arena.borrow(), mid) == ExprClass::Linear).then_some((lower, upper))
-    }
-
     /// Macro-facing entry point for a two-sided range family. Each key maps to
     /// one interval row or separate lower/upper rows (see [`Self::__add_range`]).
     #[doc(hidden)]
-    pub fn __add_range_constraints_over<'a, K, B1, B2, F>(
+    pub fn __add_range_constraints_over<'a, K, B1, B2, F, D: crate::function_set::FunctionDegree>(
         &'a self,
         name: &str,
         set: &Set<K>,
@@ -1318,14 +1384,14 @@ impl Model {
     ) -> IndexedRangeConstraint<K>
     where
         K: FromIndexKey,
-        B1: IntoRhs<'a>,
-        B2: IntoRhs<'a>,
-        F: Fn(K) -> (Expr<'a>, B1, B2) + Send + Sync,
+        B1: IntoRhs<'a, D>,
+        B2: IntoRhs<'a, D>,
+        F: Fn(K) -> (Expr<'a, D>, B1, B2) + Send + Sync,
     {
         self.add_range_constraints_over_with(name, set, &rule, None)
     }
 
-    fn add_range_constraints_over_with<'a, K, B1, B2, F>(
+    fn add_range_constraints_over_with<'a, K, B1, B2, F, D: crate::function_set::FunctionDegree>(
         &'a self,
         name: &str,
         set: &Set<K>,
@@ -1334,9 +1400,9 @@ impl Model {
     ) -> IndexedRangeConstraint<K>
     where
         K: FromIndexKey,
-        B1: IntoRhs<'a>,
-        B2: IntoRhs<'a>,
-        F: Fn(K) -> (Expr<'a>, B1, B2) + Send + Sync,
+        B1: IntoRhs<'a, D>,
+        B2: IntoRhs<'a, D>,
+        F: Fn(K) -> (Expr<'a, D>, B1, B2) + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_RANGE_THRESHOLD) {
@@ -1465,33 +1531,28 @@ impl Model {
     /// Panics if a SOC constraint with the same name is already registered, if
     /// `terms` is empty, if any term or the bound is not affine, or if the
     /// count exceeds `u32::MAX`.
-    pub fn add_soc_constraint<'a>(
+    pub fn add_soc_constraint<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
         &'a self,
         name: impl Into<SmolStr>,
-        terms: impl IntoIterator<Item = Expr<'a>>,
-        bound: Expr<'a>,
+        terms: impl IntoIterator<Item = A>,
+        bound: B,
     ) -> SocConstraintHandle {
-        let name = name.into();
-        let arena = self.arena.borrow();
-        let terms: Vec<ExprId> = terms
-            .into_iter()
-            .map(|e| {
-                self.assert_expr_belongs(e);
-                assert!(
-                    classify(&arena, e.id) == ExprClass::Linear,
-                    "SOC constraint {name:?} has a non-affine term"
-                );
-                e.id
-            })
-            .collect();
-        assert!(!terms.is_empty(), "SOC constraint {name:?} has no terms");
-        self.assert_expr_belongs(bound);
-        assert!(
-            classify(&arena, bound.id) == ExprClass::Linear,
-            "SOC constraint {name:?} has a non-affine bound"
+        let function = VectorAffineFunction::new(
+            std::iter::once(bound.into_affine_function())
+                .chain(terms.into_iter().map(IntoAffineFunction::into_affine_function)),
         );
-        drop(arena);
+        let dimension = function.dimension();
+        self.add_constraint(name, Constraint::new(function, SecondOrderCone { dimension }))
+    }
 
+    pub(crate) fn register_soc_ir(
+        &self,
+        name: SmolStr,
+        ir: SocConstraintIr<'_>,
+    ) -> SocConstraintHandle {
+        self.ensure_expr_model(ir.0.first).unwrap_or_else(|error| panic!("{error}"));
+        let terms = ir.0.rest;
+        let bound = ir.0.first;
         let mut by_name = self.soc_names.borrow_mut();
         assert!(!by_name.contains_key(&name), "SOC constraint name {name:?} already registered");
         let mut all = self.soc_constraints.borrow_mut();
@@ -1546,10 +1607,10 @@ impl Model {
     /// from an internal counter. Backs the name-less form of the
     /// `soc_constraint!` macro. Not part of the stable public API.
     #[doc(hidden)]
-    pub fn __add_soc_constraint_auto<'a>(
+    pub fn __add_soc_constraint_auto<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
         &'a self,
-        terms: impl IntoIterator<Item = Expr<'a>>,
-        bound: Expr<'a>,
+        terms: impl IntoIterator<Item = A>,
+        bound: B,
     ) -> SocConstraintHandle {
         self.add_soc_constraint(self.next_auto_soc_name(), terms, bound)
     }
@@ -1559,20 +1620,34 @@ impl Model {
     /// closure returns the cone's `(terms, bound)` pair for each typed key.
     /// Not part of the stable public API.
     #[doc(hidden)]
-    pub fn __add_soc_constraints_over<'a, K, T, F>(
+    pub fn __add_soc_constraints_over<
+        'a,
+        K,
+        T,
+        F,
+        A: IntoAffineFunction<'a>,
+        B: IntoAffineFunction<'a>,
+    >(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
         rule: F,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = Expr<'a>>,
-        F: Fn(K) -> (T, Expr<'a>) + Send + Sync,
+        T: IntoIterator<Item = A>,
+        F: Fn(K) -> (T, B) + Send + Sync,
     {
         self.add_soc_constraints_over_with(name_prefix, set, &rule, None);
     }
 
-    fn add_soc_constraints_over_with<'a, K, T, F>(
+    fn add_soc_constraints_over_with<
+        'a,
+        K,
+        T,
+        F,
+        A: IntoAffineFunction<'a>,
+        B: IntoAffineFunction<'a>,
+    >(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1580,19 +1655,14 @@ impl Model {
         forced_parallel: Option<bool>,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = Expr<'a>>,
-        F: Fn(K) -> (T, Expr<'a>) + Send + Sync,
+        T: IntoIterator<Item = A>,
+        F: Fn(K) -> (T, B) + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOC_THRESHOLD) {
             for key in &keys {
                 let name: SmolStr = format_index_name(name_prefix, key).into();
                 let (terms, bound) = rule(K::from_index_key(key));
-                let terms: Vec<_> = terms.into_iter().collect();
-                for &term in &terms {
-                    self.assert_expr_belongs(term);
-                }
-                self.assert_expr_belongs(bound);
                 self.add_soc_constraint(name, terms, bound);
             }
             return;
@@ -1612,12 +1682,7 @@ impl Model {
                         .map(|key| {
                             let name = format_index_name(name_prefix, key).into();
                             let (terms, bound) = rule(K::from_index_key(key));
-                            assert_expr_arena(bound, expected_arena);
-                            let terms: Vec<_> = terms.into_iter().collect();
-                            for &term in &terms {
-                                assert_expr_arena(term, expected_arena);
-                            }
-                            prepare_soc(name, terms, bound)
+                            prepare_soc(name, terms, bound, expected_arena)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1688,11 +1753,11 @@ impl Model {
     ///
     /// Panics when a member belongs to another model, is not a bare variable,
     /// or the name, members, variables, or weights violate SOS invariants.
-    pub fn add_sos_constraint<'a>(
+    pub fn add_sos_constraint<'a, D: Degree>(
         &'a self,
         name: impl Into<SmolStr>,
         sos_type: SosType,
-        members: impl IntoIterator<Item = (Expr<'a>, f64)>,
+        members: impl IntoIterator<Item = (Expr<'a, D>, f64)>,
     ) -> SosConstraintHandle<'a> {
         let name = name.into();
         let members: Vec<SosMember> = members
@@ -1817,11 +1882,11 @@ impl Model {
     ///
     /// Panics under the same conditions as [`Self::add_sos_constraint`], or
     /// when the iterator contains more than `u32::MAX` members.
-    pub fn add_sos_constraint_auto_weights<'a>(
+    pub fn add_sos_constraint_auto_weights<'a, D: Degree>(
         &'a self,
         name: impl Into<SmolStr>,
         sos_type: SosType,
-        variables: impl IntoIterator<Item = Expr<'a>>,
+        variables: impl IntoIterator<Item = Expr<'a, D>>,
     ) -> SosConstraintHandle<'a> {
         self.add_sos_constraint(
             name,
@@ -1848,25 +1913,25 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_sos_constraint_auto<'a>(
+    pub fn __add_sos_constraint_auto<'a, D: Degree>(
         &'a self,
         sos_type: SosType,
-        members: impl IntoIterator<Item = (Expr<'a>, f64)>,
+        members: impl IntoIterator<Item = (Expr<'a, D>, f64)>,
     ) -> SosConstraintHandle<'a> {
         self.add_sos_constraint(self.next_auto_sos_name(), sos_type, members)
     }
 
     #[doc(hidden)]
-    pub fn __add_sos_constraint_auto_weights<'a>(
+    pub fn __add_sos_constraint_auto_weights<'a, D: Degree>(
         &'a self,
         sos_type: SosType,
-        variables: impl IntoIterator<Item = Expr<'a>>,
+        variables: impl IntoIterator<Item = Expr<'a, D>>,
     ) -> SosConstraintHandle<'a> {
         self.add_sos_constraint_auto_weights(self.next_auto_sos_name(), sos_type, variables)
     }
 
     #[doc(hidden)]
-    pub fn __add_sos_constraints_over<'a, K, T, F>(
+    pub fn __add_sos_constraints_over<'a, K, T, F, D: Degree>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1874,13 +1939,13 @@ impl Model {
         rule: F,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = (Expr<'a>, f64)>,
+        T: IntoIterator<Item = (Expr<'a, D>, f64)>,
         F: Fn(K) -> T + Send + Sync,
     {
         self.add_sos_constraints_over_with(name_prefix, set, sos_type, &rule, None);
     }
 
-    fn add_sos_constraints_over_with<'a, K, T, F>(
+    fn add_sos_constraints_over_with<'a, K, T, F, D: Degree>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1889,7 +1954,7 @@ impl Model {
         forced_parallel: Option<bool>,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = (Expr<'a>, f64)>,
+        T: IntoIterator<Item = (Expr<'a, D>, f64)>,
         F: Fn(K) -> T + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
@@ -1910,7 +1975,7 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_sos_constraints_over_auto_weights<'a, K, T, F>(
+    pub fn __add_sos_constraints_over_auto_weights<'a, K, T, F, D: Degree>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1918,13 +1983,13 @@ impl Model {
         rule: F,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = Expr<'a>>,
+        T: IntoIterator<Item = Expr<'a, D>>,
         F: Fn(K) -> T + Send + Sync,
     {
         self.add_sos_constraints_over_auto_weights_with(name_prefix, set, sos_type, &rule, None);
     }
 
-    fn add_sos_constraints_over_auto_weights_with<'a, K, T, F>(
+    fn add_sos_constraints_over_auto_weights_with<'a, K, T, F, D: Degree>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -1933,7 +1998,7 @@ impl Model {
         forced_parallel: Option<bool>,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = Expr<'a>>,
+        T: IntoIterator<Item = Expr<'a, D>>,
         F: Fn(K) -> T + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
@@ -1983,7 +2048,8 @@ impl Model {
 
     // Indicator constraints
 
-    fn indicator_trigger(&self, trigger: Expr<'_>) -> VarId {
+    fn indicator_trigger<'a>(&self, trigger: impl Into<Expr<'a>>) -> VarId {
+        let trigger: Expr = trigger.into();
         self.assert_expr_belongs(trigger);
         let id = trigger.var_id().expect("indicator trigger must be a bare binary variable");
         assert!(
@@ -2002,11 +2068,9 @@ impl Model {
         lower: f64,
         upper: f64,
     ) -> IndicatorConstraintId {
-        assert!(!lower.is_nan() && !upper.is_nan(), "indicator constraint {name:?} has NaN bound");
-        assert!(
-            classify(&self.arena.borrow(), lhs) == ExprClass::Linear,
-            "indicator consequent must be affine"
-        );
+        validate_bounds(lower, upper);
+        let class = classify(&self.arena.borrow(), lhs);
+        assert!(class == ExprClass::Linear, "indicator consequent must be affine, got {class:?}");
         let mut names = self.indicator_names.borrow_mut();
         assert!(
             !names.contains_key(&name),
@@ -2030,19 +2094,16 @@ impl Model {
         id
     }
 
-    fn prepare_indicator(
+    fn prepare_indicator<'a>(
         &self,
         name: SmolStr,
         trigger: VarId,
         active_value: bool,
-        consequent: ConstraintExpr<'_>,
+        consequent: impl IntoAffineConstraint<'a>,
     ) -> PendingIndicator {
+        let consequent = consequent.into_affine_constraint().0;
         self.assert_expr_belongs(consequent.lhs);
-        let (lower, upper) = match consequent.sense {
-            Sense::Le => (f64::NEG_INFINITY, consequent.rhs),
-            Sense::Ge => (consequent.rhs, f64::INFINITY),
-            Sense::Eq => (consequent.rhs, consequent.rhs),
-        };
+        let (lower, upper) = (consequent.lower, consequent.upper);
         self.prepare_indicator_interval(
             name,
             trigger,
@@ -2062,7 +2123,7 @@ impl Model {
         lower: f64,
         upper: f64,
     ) -> PendingIndicator {
-        assert!(!lower.is_nan() && !upper.is_nan(), "indicator constraint {name:?} has NaN bound");
+        validate_bounds(lower, upper);
         assert!(
             classify(&self.arena.borrow(), lhs) == ExprClass::Linear,
             "indicator consequent must be affine"
@@ -2115,27 +2176,27 @@ impl Model {
     }
 
     /// Register `trigger == active_value => consequent`.
+    ///
+    /// # Panics
+    /// Panics for invalid triggers, non-affine dynamic consequents, invalid bounds,
+    /// foreign ownership, duplicate names, or count overflow.
     pub fn add_indicator_constraint<'a>(
         &'a self,
         name: impl Into<SmolStr>,
-        trigger: Expr<'a>,
+        trigger: impl Into<Expr<'a>>,
         active_value: bool,
-        consequent: ConstraintExpr<'a>,
+        consequent: impl IntoAffineConstraint<'a>,
     ) -> IndicatorConstraintHandle<'a> {
-        self.assert_expr_belongs(consequent.lhs);
         let trigger = self.indicator_trigger(trigger);
-        let (lower, upper) = match consequent.sense {
-            Sense::Le => (f64::NEG_INFINITY, consequent.rhs),
-            Sense::Ge => (consequent.rhs, f64::INFINITY),
-            Sense::Eq => (consequent.rhs, consequent.rhs),
-        };
+        let consequent = consequent.into_affine_constraint().0;
+        self.assert_expr_belongs(consequent.lhs);
         let id = self.register_indicator(
             name.into(),
             trigger,
             active_value,
             consequent.lhs.id,
-            lower,
-            upper,
+            consequent.lower,
+            consequent.upper,
         );
         IndicatorConstraintHandle { model: self, id }
     }
@@ -2144,10 +2205,11 @@ impl Model {
     pub fn __add_indicator_constraint<'a>(
         &'a self,
         name: impl Into<SmolStr>,
-        trigger: Expr<'a>,
+        trigger: impl Into<Expr<'a>>,
         active_value: bool,
-        consequent: ConstraintExpr<'a>,
+        consequent: impl IntoAffineConstraint<'a>,
     ) -> IndicatorConstraintHandle<'a> {
+        let trigger: Expr = trigger.into();
         self.add_indicator_constraint(name, trigger, active_value, consequent)
     }
 
@@ -2165,10 +2227,11 @@ impl Model {
     #[doc(hidden)]
     pub fn __add_indicator_constraint_auto<'a>(
         &'a self,
-        trigger: Expr<'a>,
+        trigger: impl Into<Expr<'a>>,
         active_value: bool,
-        consequent: ConstraintExpr<'a>,
+        consequent: impl IntoAffineConstraint<'a>,
     ) -> IndicatorConstraintHandle<'a> {
+        let trigger: Expr = trigger.into();
         self.add_indicator_constraint(
             self.next_auto_indicator_name(),
             trigger,
@@ -2181,14 +2244,16 @@ impl Model {
     pub fn __add_indicator_interval<'a>(
         &'a self,
         name: impl Into<SmolStr>,
-        trigger: Expr<'a>,
+        trigger: impl Into<Expr<'a>>,
         active_value: bool,
-        lhs: Expr<'a>,
+        lhs: impl Into<Expr<'a>>,
         lower: f64,
         upper: f64,
     ) -> IndicatorConstraintHandle<'a> {
+        let trigger: Expr = trigger.into();
+        let lhs: Expr = lhs.into();
         self.assert_expr_belongs(lhs);
-        let trigger = self.indicator_trigger(trigger);
+        let trigger = self.indicator_trigger(trigger.erase());
         let id = self.register_indicator(name.into(), trigger, active_value, lhs.id, lower, upper);
         IndicatorConstraintHandle { model: self, id }
     }
@@ -2197,14 +2262,16 @@ impl Model {
     pub fn __add_indicator_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
         &'a self,
         name: &str,
-        trigger: Expr<'a>,
+        trigger: impl Into<Expr<'a>>,
         active_value: bool,
-        mid: Expr<'a>,
+        mid: impl IntoAffineFunction<'a>,
         lo: B1,
         hi: B2,
     ) -> RangeIndicatorConstraintHandles<'a> {
+        let trigger: Expr = trigger.into();
+        let mid = mid.into_affine_function().expression().erase();
         self.assert_expr_belongs(mid);
-        let trigger = self.indicator_trigger(trigger);
+        let trigger = self.indicator_trigger(trigger.erase());
         if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
             && mid.__class() == ExprClass::Linear
         {
@@ -2223,13 +2290,13 @@ impl Model {
                 format!("{name}_lo").into(),
                 trigger,
                 active_value,
-                mid.ge(lo),
+                mid.ge(lo).into_ir().into_affine(),
             );
             let upper = self.prepare_indicator(
                 format!("{name}_hi").into(),
                 trigger,
                 active_value,
-                mid.le(hi),
+                mid.le(hi).into_ir().into_affine(),
             );
             let mut ids = self.register_indicators_batch(vec![lower, upper]).into_iter();
             let lower = IndicatorConstraintHandle {
@@ -2247,18 +2314,20 @@ impl Model {
     #[doc(hidden)]
     pub fn __add_indicator_range_auto<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
         &'a self,
-        trigger: Expr<'a>,
+        trigger: impl Into<Expr<'a>>,
         active_value: bool,
-        mid: Expr<'a>,
+        mid: impl IntoAffineFunction<'a>,
         lo: B1,
         hi: B2,
     ) -> RangeIndicatorConstraintHandles<'a> {
+        let trigger: Expr = trigger.into();
+        let mid = mid.into_affine_function().expression().erase();
         let name = self.next_auto_indicator_name();
         self.__add_indicator_range(&name, trigger, active_value, mid, lo, hi)
     }
 
     #[doc(hidden)]
-    pub fn __add_indicator_constraints_over<'a, K, F>(
+    pub fn __add_indicator_constraints_over<'a, K, F, C, D: Degree>(
         &'a self,
         prefix: &str,
         set: &Set<K>,
@@ -2266,14 +2335,15 @@ impl Model {
     ) -> IndexedIndicatorConstraint<'a, K>
     where
         K: FromIndexKey,
-        F: Fn(K) -> (Expr<'a>, bool, ConstraintExpr<'a>),
+        F: Fn(K) -> (Expr<'a, D>, bool, C),
+        C: IntoAffineConstraint<'a>,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         let pending: Vec<_> = keys
             .iter()
             .map(|key| {
                 let (trigger, value, consequent) = rule(K::from_index_key(key));
-                let trigger = self.indicator_trigger(trigger);
+                let trigger = self.indicator_trigger(trigger.erase());
                 self.prepare_indicator(
                     format_index_name(prefix, key).into(),
                     trigger,
@@ -2291,7 +2361,7 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_indicator_ranges_over<'a, K, B1, B2, F>(
+    pub fn __add_indicator_ranges_over<'a, K, B1, B2, F, D: Degree, E: Degree>(
         &'a self,
         prefix: &str,
         set: &Set<K>,
@@ -2301,15 +2371,17 @@ impl Model {
         K: FromIndexKey,
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
-        F: Fn(K) -> (Expr<'a>, bool, Expr<'a>, B1, B2),
+        F: Fn(K) -> (Expr<'a, D>, bool, Expr<'a, E>, B1, B2),
+        Expr<'a, E>: IntoAffineFunction<'a>,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         let mut pending = Vec::new();
         let mut row_counts = Vec::with_capacity(keys.len());
         for key in &keys {
             let (trigger, value, mid, lo, hi) = rule(K::from_index_key(key));
+            let mid = mid.into_affine_function().expression().erase();
             self.assert_expr_belongs(mid);
-            let trigger = self.indicator_trigger(trigger);
+            let trigger = self.indicator_trigger(trigger.erase());
             let name = format_index_name(prefix, key);
             if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
                 && mid.__class() == ExprClass::Linear
@@ -2328,13 +2400,13 @@ impl Model {
                     format!("{name}_lo").into(),
                     trigger,
                     value,
-                    mid.ge(lo),
+                    mid.ge(lo).into_ir().into_affine(),
                 ));
                 pending.push(self.prepare_indicator(
                     format!("{name}_hi").into(),
                     trigger,
                     value,
-                    mid.le(hi),
+                    mid.le(hi).into_ir().into_affine(),
                 ));
                 row_counts.push(2_u8);
             }
@@ -2384,14 +2456,16 @@ impl Model {
     /// Macro-facing entry point backing `objective!(m, Min, ..)`. Not part of the
     /// stable public API.
     #[doc(hidden)]
-    pub fn __minimize(&self, expr: Expr<'_>) {
+    pub fn __minimize<'a>(&self, expr: impl Into<Expr<'a>>) {
+        let expr: Expr = expr.into();
         self.set_objective(expr, ObjectiveSense::Minimize);
     }
 
     /// Macro-facing entry point backing `objective!(m, Max, ..)`. Not part of the
     /// stable public API.
     #[doc(hidden)]
-    pub fn __maximize(&self, expr: Expr<'_>) {
+    pub fn __maximize<'a>(&self, expr: impl Into<Expr<'a>>) {
+        let expr: Expr = expr.into();
         self.set_objective(expr, ObjectiveSense::Maximize);
     }
 
@@ -2405,7 +2479,8 @@ impl Model {
         self.cached_kind.set(None);
     }
 
-    fn set_objective(&self, expr: Expr<'_>, sense: ObjectiveSense) {
+    fn set_objective<'a>(&self, expr: impl Into<Expr<'a>>, sense: ObjectiveSense) {
+        let expr: Expr = expr.into();
         self.assert_expr_belongs(expr);
         *self.objective.borrow_mut() = Some(Objective { expr: expr.id, sense });
         self.objective_declared.set(true);
@@ -2749,9 +2824,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => x + 2.0 * y - z,
+                1 => (x + 2.0 * y - z).erase(),
                 2 => x.powi(2) + y,
-                _ => x * y * z,
+                _ => (x * y * z).erase(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -3143,7 +3218,7 @@ mod tests {
             let ranges = model.add_range_constraints_over_with(
                 "r",
                 keys,
-                &|i| (if i % 2 == 0 { x + 1.0 } else { x.powi(2) }, 0.0, 10.0),
+                &|i| (if i % 2 == 0 { (x + 1.0).erase() } else { x.powi(2) }, 0.0, 10.0),
                 Some(parallel),
             );
             for (key, id) in ordinary.iter() {
@@ -3320,7 +3395,7 @@ mod tests {
             let arena_len = model.arena().len();
             let keys = Set::range(0..128usize);
             let rule = |i: usize| {
-                let body = if i.is_multiple_of(2) { x + 1.0 } else { x.powi(2) };
+                let body = if i.is_multiple_of(2) { (x + 1.0).erase() } else { x.powi(2) };
                 assert!(duplicate_name || i != 17, "deliberate range callback panic");
                 (body, 0.0, 10.0)
             };

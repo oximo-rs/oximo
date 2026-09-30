@@ -1,5 +1,5 @@
 pub use crate::constraint::{
-    Constraint, ConstraintExpr, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
+    AlgebraicConstraint, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
     RangeConstraintIds, Relate, Sense,
 };
 pub use crate::domain::Domain;
@@ -34,3 +34,11 @@ pub use oximo_macros::{
     constraint, indicator_constraint, max, min, objective, param, set, soc_constraint,
     sos_constraint, sum, variable,
 };
+
+pub use crate::function_set::{
+    AffineConstraintIr, AnyScalarFunction, Constraint, EqualTo, Function, FunctionInSet,
+    GreaterThan, Interval, IntoAffineConstraint, IntoAffineFunction, IntoFunction, LessThan,
+    LowerConstraint, ScalarAffineFunction, ScalarDynamicFunction, ScalarNonlinearFunction,
+    ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet, VectorAffineFunction,
+};
+pub use oximo_expr::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};

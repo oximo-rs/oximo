@@ -387,7 +387,7 @@ fn degree(a: &Ast) -> u32 {
 
 fn lower<'a>(m: &'a Model, vars: &HashMap<String, Expr<'a>>, a: Ast) -> Result<Expr<'a>, IoError> {
     match a {
-        Ast::Const(x) => Ok(m.__constant(x)),
+        Ast::Const(x) => Ok(m.__constant(x).erase()),
         Ast::Var(v) => {
             vars.get(&v).copied().ok_or_else(|| invalid_lp(1, 1, format!("unknown variable {v}")))
         }
@@ -805,7 +805,7 @@ fn build_model(
         };
         vars.insert(
             var_name.clone(),
-            m.__var(var_name.clone()).bounds(lb, ub).domain(domain).build(),
+            m.__var(var_name.clone()).bounds(lb, ub).domain(domain).build().erase(),
         );
     }
     let mut used_names = HashSet::new();
@@ -852,13 +852,14 @@ fn build_model(
                 ),
             ));
         }
+        validate_lp_rhs(sense, rhs)?;
         let e = lower(&m, &vars, expr)?;
         m.__add_constraint(
             name,
             match sense {
-                Sense::Le => e.le(rhs),
-                Sense::Ge => e.ge(rhs),
-                Sense::Eq => e.eq(rhs),
+                Sense::Le => e.le(rhs).into_ir(),
+                Sense::Ge => e.ge(rhs).into_ir(),
+                Sense::Eq => e.eq(rhs).into_ir(),
             },
         );
     }
@@ -899,13 +900,16 @@ fn build_model(
                 format!("indicator trigger {:?} is not binary", indicator.trigger),
             ));
         }
+        validate_lp_rhs(indicator.sense, indicator.rhs)?;
         let e = lower(&m, &vars, indicator.expr)?;
+        let affine =
+            e.try_affine().map_err(|_| invalid_lp(1, 1, "indicator consequent must be affine"))?;
         let consequent = match indicator.sense {
-            Sense::Le => e.le(indicator.rhs),
-            Sense::Ge => e.ge(indicator.rhs),
-            Sense::Eq => e.eq(indicator.rhs),
+            Sense::Le => affine.le(indicator.rhs).into_ir(),
+            Sense::Ge => affine.ge(indicator.rhs).into_ir(),
+            Sense::Eq => affine.eq(indicator.rhs).into_ir(),
         };
-        m.add_indicator_constraint(name, trigger, indicator.active_value, consequent);
+        m.add_indicator_constraint(name, trigger, indicator.active_value, consequent.into_affine());
     }
 
     // A constant-only objective (e.g. the writer's `obj: 0`) has nothing to
@@ -920,6 +924,19 @@ fn build_model(
         }
     }
     Ok(m)
+}
+
+fn validate_lp_rhs(sense: Sense, rhs: f64) -> Result<(), IoError> {
+    let invalid = rhs.is_nan()
+        || match sense {
+            Sense::Le => rhs == f64::NEG_INFINITY,
+            Sense::Ge => rhs == f64::INFINITY,
+            Sense::Eq => !rhs.is_finite(),
+        };
+    if invalid {
+        return Err(invalid_lp(1, 1, "constraint has invalid numeric bound"));
+    }
+    Ok(())
 }
 
 fn validate_lp_variable_name(name: &str) -> Result<(), IoError> {

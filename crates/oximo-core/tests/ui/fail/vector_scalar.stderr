@@ -1,0 +1,32 @@
+error[E0277]: the trait bound `oximo_core::VectorAffineFunction<'_>: FunctionInSet<oximo_core::LessThan>` is not satisfied
+ --> tests/ui/fail/vector_scalar.rs:6:13
+  |
+6 |     let _ = Constraint::<VectorAffineFunction<'_>, LessThan<f64>>::new(vector, LessThan(1.0));
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FunctionInSet<oximo_core::LessThan>` is not implemented for `oximo_core::VectorAffineFunction<'_>`
+  |
+help: the trait `FunctionInSet<oximo_core::LessThan>` is not implemented for `oximo_core::VectorAffineFunction<'_>`
+      but trait `FunctionInSet<oximo_core::SecondOrderCone>` is implemented for it
+ --> src/function_set.rs
+  |
+  | impl FunctionInSet<SecondOrderCone> for VectorAffineFunction<'_> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `oximo_core::SecondOrderCone`, found `oximo_core::LessThan`
+note: required by a bound in `oximo_core::Constraint`
+ --> src/function_set.rs
+  |
+  | pub struct Constraint<F: FunctionInSet<S>, S: Set> {
+  |                          ^^^^^^^^^^^^^^^^ required by this bound in `Constraint`
+
+error[E0599]: the associated function or constant `new` exists for struct `oximo_core::Constraint<oximo_core::VectorAffineFunction<'_>, oximo_core::LessThan>`, but its trait bounds were not satisfied
+ --> tests/ui/fail/vector_scalar.rs:6:68
+  |
+6 |     let _ = Constraint::<VectorAffineFunction<'_>, LessThan<f64>>::new(vector, LessThan(1.0));
+  |                                                                    ^^^ associated function or constant cannot be called due to unsatisfied trait bounds
+  |
+ ::: src/function_set.rs
+  |
+  | pub struct VectorAffineFunction<'a> {
+  | ----------------------------------- doesn't satisfy `_: FunctionInSet<LessThan>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `oximo_core::VectorAffineFunction<'_>: FunctionInSet<oximo_core::LessThan>`

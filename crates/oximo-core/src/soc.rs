@@ -3,7 +3,7 @@ use oximo_expr::{
 };
 use smol_str::SmolStr;
 
-use crate::constraint::{Constraint, Sense};
+use crate::constraint::{AlgebraicConstraint, Sense};
 use crate::var::Variable;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -88,7 +88,11 @@ pub struct SocForm {
 
 /// Extract and validate the diagonal quadratic form shared by SOC recognition
 /// and model-kind inference.
-fn soc_quadratic(vars: &[Variable], c: &Constraint, q: &QuadraticTerms) -> Option<(VarId, f64)> {
+fn soc_quadratic(
+    vars: &[Variable],
+    c: &AlgebraicConstraint,
+    q: &QuadraticTerms,
+) -> Option<(VarId, f64)> {
     let (sense, rhs) = c.as_single()?;
     if sense != Sense::Le {
         return None;
@@ -125,7 +129,11 @@ fn soc_quadratic(vars: &[Variable], c: &Constraint, q: &QuadraticTerms) -> Optio
 /// This does not materialize a [`SocForm`]. Model-kind
 /// inference only needs this predicate and can avoid allocating one
 /// `LinearTerms` coefficient vector per cone member.
-pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constraint) -> bool {
+pub(crate) fn is_detected_soc(
+    arena: &ExprArena,
+    vars: &[Variable],
+    c: &AlgebraicConstraint,
+) -> bool {
     if !matches!(c.as_single(), Some((Sense::Le, _))) {
         return false;
     }
@@ -153,7 +161,7 @@ pub(crate) fn is_detected_soc(arena: &ExprArena, vars: &[Variable], c: &Constrai
 #[doc(hidden)]
 pub fn __detect_soc_from_quadratic(
     vars: &[Variable],
-    c: &Constraint,
+    c: &AlgebraicConstraint,
     q: &QuadraticTerms,
 ) -> Option<SocForm> {
     let (t, n) = soc_quadratic(vars, c, q)?;

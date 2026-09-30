@@ -149,7 +149,7 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
         }
         ExprNode::Pow(base, exp) => {
             let ExprNode::Const(e) = arena.get(*exp) else { return None };
-            if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+            if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                 return None;
             }
             match e.round() {
@@ -212,7 +212,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
             }
             ExprNode::Pow(base, exp) => {
                 let ExprNode::Const(e) = self.0.get(*exp) else { return Break(None) };
-                if (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+                if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                     return Break(None);
                 }
                 let op = match e.round() {

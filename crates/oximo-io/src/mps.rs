@@ -17,8 +17,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use oximo_core::{
-    Constraint, Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, SosConstraint, SosType,
-    var_name,
+    AlgebraicConstraint, Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, SosConstraint,
+    SosType, var_name,
 };
 use oximo_expr::{Expr, QuadraticTerms, VarId, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashMap;
@@ -1002,7 +1002,7 @@ fn expression<'a>(
     quadratic: impl IntoIterator<Item = ((usize, usize), f64)>,
     constant: f64,
 ) -> Expr<'a> {
-    let mut expr = model.__constant(constant);
+    let mut expr = model.__constant(constant).erase();
     for (column, coefficient) in linear {
         if coefficient != 0.0 {
             expr = expr + coefficient * variables[column];
@@ -1216,7 +1216,8 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
                 .__var(column.name.clone())
                 .bounds(model_lower, column.upper)
                 .domain(domain)
-                .build(),
+                .build()
+                .erase(),
         );
     }
     let mut pending_indicators = Vec::new();
@@ -1453,7 +1454,7 @@ pub fn write_mps_with<W: Write>(
         }
     }
 
-    if constraints.iter().any(Constraint::is_range) {
+    if constraints.iter().any(AlgebraicConstraint::is_range) {
         writeln!(out, "RANGES")?;
         for (c, row_name) in constraints.iter().zip(row_names.iter()) {
             if c.is_range() {
@@ -1564,7 +1565,7 @@ fn rebuild_quadratic<'a>(
     variables: &[Expr<'a>],
     terms: &QuadraticTerms,
 ) -> Expr<'a> {
-    let mut expr = model.__constant(terms.constant);
+    let mut expr = model.__constant(terms.constant).erase();
     for &(var, coefficient) in &terms.linear {
         expr = expr + coefficient * variables[var.index()];
     }
@@ -1587,7 +1588,9 @@ fn write_mps_with_indicators<W: Write>(
     let temporary = Model::new(model.name.clone());
     let variables: Vec<_> = source_vars
         .iter()
-        .map(|v| temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build())
+        .map(|v| {
+            temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build().erase()
+        })
         .collect();
     let mut raw_row_names = Vec::new();
     let mut used: HashSet<String> =
@@ -1624,9 +1627,9 @@ fn write_mps_with_indicators<W: Write>(
             }
             let expr = rebuild_quadratic(&temporary, &variables, &terms);
             let row = match sense {
-                Sense::Le => expr.le(rhs),
-                Sense::Ge => expr.ge(rhs),
-                Sense::Eq => expr.eq(rhs),
+                Sense::Le => expr.le(rhs).into_ir(),
+                Sense::Ge => expr.ge(rhs).into_ir(),
+                Sense::Eq => expr.eq(rhs).into_ir(),
             };
             temporary.__add_constraint(name.clone(), row);
             raw_row_names.push(name);

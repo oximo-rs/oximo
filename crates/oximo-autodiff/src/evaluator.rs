@@ -736,9 +736,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => x + 2.0 * y - z,
+                1 => (x + 2.0 * y - z).erase(),
                 2 => x.powi(2) + y * z,
-                _ => x * y * z + x.sin(),
+                _ => (x * y * z + x.sin()).erase(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }

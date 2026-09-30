@@ -6,8 +6,8 @@ use gurobi_rs::constr::RangeExpr;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_core::{
-    Constraint, ConstraintId, Domain, IndicatorConstraint, IndicatorConstraintId, Model, ModelId,
-    ModelKind, ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint,
+    AlgebraicConstraint, ConstraintId, Domain, IndicatorConstraint, IndicatorConstraintId, Model,
+    ModelId, ModelKind, ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint,
     SosConstraintId, SosType, VarId, Variable, var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term};
@@ -591,7 +591,7 @@ pub(crate) struct SocHandle {
 #[expect(clippy::too_many_lines)]
 fn add_constraints(
     prepared: &PreparedExpressions,
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
@@ -1174,9 +1174,9 @@ pub mod benchmark_support {
         let z = model.__var("z").lb(-5.0).ub(5.0).build();
         for i in 0..rows {
             let lhs = match degree {
-                1 => x + 2.0 * y - z,
+                1 => (x + 2.0 * y - z).erase(),
                 2 => x.powi(2) + y,
-                _ => x * y * z,
+                _ => (x * y * z).erase(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }

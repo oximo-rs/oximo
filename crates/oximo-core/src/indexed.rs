@@ -179,9 +179,9 @@ constraint_family!(
 /// product of ranges). `Sparse` (string sets, sparse `from_ints`, or any
 /// `filter`ed family) keeps the original hash map.
 #[derive(Clone)]
-pub(crate) enum Storage<'a> {
-    Dense { data: Vec<Expr<'a>>, keys: Vec<IndexKey>, axes: Box<[Axis]> },
-    Sparse(FxHashMap<IndexKey, Expr<'a>>),
+pub(crate) enum Storage<'a, D: oximo_expr::Degree> {
+    Dense { data: Vec<Expr<'a, D>>, keys: Vec<IndexKey>, axes: Box<[Axis]> },
+    Sparse(FxHashMap<IndexKey, Expr<'a, D>>),
 }
 
 mod sealed {
@@ -196,6 +196,7 @@ mod sealed {
 /// implementation.
 #[doc(hidden)]
 pub trait Family: sealed::Sealed {
+    type Degree: oximo_expr::Degree;
     /// Type name used in [`Debug`](std::fmt::Debug) output.
     const NAME: &'static str;
 }
@@ -213,9 +214,11 @@ pub struct ParamFamily;
 impl sealed::Sealed for VarFamily {}
 impl sealed::Sealed for ParamFamily {}
 impl Family for VarFamily {
+    type Degree = oximo_expr::Affine;
     const NAME: &'static str = "IndexedVar";
 }
 impl Family for ParamFamily {
+    type Degree = oximo_expr::Constant;
     const NAME: &'static str = "IndexedParam";
 }
 
@@ -229,8 +232,8 @@ impl Family for ParamFamily {
 /// When the domain is a contiguous integer range (or a Cartesian product of
 /// ranges) the family is stored densely (see the internal `Storage`).
 /// String, sparse, and `filter`ed families fall back to a hash map.
-pub struct IndexedFamily<'a, K = IndexKey, F = VarFamily> {
-    pub(crate) storage: Storage<'a>,
+pub struct IndexedFamily<'a, K = IndexKey, F: Family = VarFamily> {
+    pub(crate) storage: Storage<'a, F::Degree>,
     pub(crate) model_id: ModelId,
     pub(crate) _marker: PhantomData<fn() -> (K, F)>,
 }
@@ -243,7 +246,7 @@ pub type IndexedVar<'a, K = IndexKey> = IndexedFamily<'a, K, VarFamily>;
 /// Re-bind a single entry with [`Model::set_param_idx`](crate::Model::set_param_idx).
 pub type IndexedParam<'a, K = IndexKey> = IndexedFamily<'a, K, ParamFamily>;
 
-impl<'a, K, F> Clone for IndexedFamily<'a, K, F> {
+impl<'a, K, F: Family> Clone for IndexedFamily<'a, K, F> {
     fn clone(&self) -> Self {
         Self { storage: self.storage.clone(), model_id: self.model_id, _marker: PhantomData }
     }
@@ -255,7 +258,7 @@ impl<'a, K, F: Family> std::fmt::Debug for IndexedFamily<'a, K, F> {
     }
 }
 
-impl<'a, K, F> IndexedFamily<'a, K, F> {
+impl<'a, K, F: Family> IndexedFamily<'a, K, F> {
     /// Identity of the model that created this indexed family.
     #[must_use]
     pub const fn model_id(&self) -> ModelId {
@@ -287,15 +290,15 @@ impl<'a, K, F> IndexedFamily<'a, K, F> {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&IndexKey, &Expr<'a>)> + '_ {
-        let it: Box<dyn Iterator<Item = (&IndexKey, &Expr<'a>)>> = match &self.storage {
+    pub fn iter(&self) -> impl Iterator<Item = (&IndexKey, &Expr<'a, F::Degree>)> + '_ {
+        let it: Box<dyn Iterator<Item = (&IndexKey, &Expr<'a, F::Degree>)>> = match &self.storage {
             Storage::Dense { data, keys, .. } => Box::new(keys.iter().zip(data.iter())),
             Storage::Sparse(m) => Box::new(m.iter()),
         };
         it
     }
 
-    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<Expr<'a>> {
+    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<Expr<'a, F::Degree>> {
         match &self.storage {
             Storage::Sparse(m) => m.get(&key.into()).copied(),
             Storage::Dense { data, axes, .. } => {
@@ -310,16 +313,16 @@ impl<'a, K, F> IndexedFamily<'a, K, F> {
     ///
     /// # Panics
     /// Panics if the coordinates are out of range/not present.
-    pub fn at<const N: usize>(&self, coords: [usize; N]) -> Expr<'a> {
+    pub fn at<const N: usize>(&self, coords: [usize; N]) -> Expr<'a, F::Degree> {
         *self.get_ref(&coords).expect("indexed family: coordinates not present")
     }
 
     /// Fallible form of [`Self::at`].
-    pub fn get_at<const N: usize>(&self, coords: [usize; N]) -> Option<Expr<'a>> {
+    pub fn get_at<const N: usize>(&self, coords: [usize; N]) -> Option<Expr<'a, F::Degree>> {
         self.get_ref(&coords).copied()
     }
 
-    fn get_ref(&self, coords: &[usize]) -> Option<&Expr<'a>> {
+    fn get_ref(&self, coords: &[usize]) -> Option<&Expr<'a, F::Degree>> {
         match &self.storage {
             Storage::Dense { data, axes, .. } => {
                 grid_offset_coords(axes, coords).map(|off| &data[off])
@@ -329,15 +332,15 @@ impl<'a, K, F> IndexedFamily<'a, K, F> {
     }
 }
 
-impl<'a, K: FromIndexKey, F> IndexedFamily<'a, K, F> {
+impl<'a, K: FromIndexKey, F: Family> IndexedFamily<'a, K, F> {
     /// Iterate the family's entries with each key decoded to the typed `K`.
-    pub fn keys(&self) -> impl Iterator<Item = (K, Expr<'a>)> + '_ {
+    pub fn keys(&self) -> impl Iterator<Item = (K, Expr<'a, F::Degree>)> + '_ {
         self.iter().map(|(k, e)| (K::from_index_key(k), *e))
     }
 }
 
-impl<'a, K, F, Q: Into<IndexKey>> Index<Q> for IndexedFamily<'a, K, F> {
-    type Output = Expr<'a>;
+impl<'a, K, F: Family, Q: Into<IndexKey>> Index<Q> for IndexedFamily<'a, K, F> {
+    type Output = Expr<'a, F::Degree>;
     fn index(&self, key: Q) -> &Self::Output {
         match &self.storage {
             Storage::Sparse(m) => m.get(&key.into()).expect("indexed family: key not present"),
@@ -349,8 +352,8 @@ impl<'a, K, F, Q: Into<IndexKey>> Index<Q> for IndexedFamily<'a, K, F> {
     }
 }
 
-impl<'a, K, F> Index<&IndexKey> for IndexedFamily<'a, K, F> {
-    type Output = Expr<'a>;
+impl<'a, K, F: Family> Index<&IndexKey> for IndexedFamily<'a, K, F> {
+    type Output = Expr<'a, F::Degree>;
     fn index(&self, key: &IndexKey) -> &Self::Output {
         match &self.storage {
             Storage::Sparse(m) => m.get(key).expect("indexed family: key not present"),
@@ -362,26 +365,26 @@ impl<'a, K, F> Index<&IndexKey> for IndexedFamily<'a, K, F> {
     }
 }
 
-impl<'a, K, F, const N: usize> Index<[usize; N]> for IndexedFamily<'a, K, F> {
-    type Output = Expr<'a>;
+impl<'a, K, F: Family, const N: usize> Index<[usize; N]> for IndexedFamily<'a, K, F> {
+    type Output = Expr<'a, F::Degree>;
     fn index(&self, coords: [usize; N]) -> &Self::Output {
         self.get_ref(&coords).expect("indexed family: coordinates not present")
     }
 }
 
 /// Build [`Storage`] from ordered keys and their already-registered handles.
-pub(crate) fn build_storage<'a>(
+pub(crate) fn build_storage<'a, D: oximo_expr::Degree>(
     keys: Vec<IndexKey>,
     axes: Option<Box<[Axis]>>,
-    values: Vec<Expr<'a>>,
-) -> Storage<'a> {
+    values: Vec<Expr<'a, D>>,
+) -> Storage<'a, D> {
     assert_eq!(keys.len(), values.len(), "indexed storage key/value length mismatch");
     if let Some(axes) = axes {
         if keys.iter().enumerate().all(|(i, key)| grid_offset(&axes, key) == Some(i)) {
             return Storage::Dense { data: values, keys, axes };
         }
         let total = keys.len();
-        let mut data: Vec<Option<Expr<'a>>> = vec![None; total];
+        let mut data: Vec<Option<Expr<'a, D>>> = vec![None; total];
         let mut kept: Vec<Option<IndexKey>> = vec![None; total];
         for (key, expr) in keys.into_iter().zip(values) {
             let off = grid_offset(&axes, &key).expect("dense grid key out of range");

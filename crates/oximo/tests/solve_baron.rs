@@ -58,7 +58,7 @@ fn baron_lp_duals_and_reduced_costs() {
     let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual - 1.0).abs() < 1e-6, "dual={dual}");
 
-    let rc = |v: Expr<'_>| result.reduced_costs.get(&v.var_id().unwrap()).copied();
+    let rc = |v: Expr<'_, Affine>| result.reduced_costs.get(&v.var_id().unwrap()).copied();
     let rcx = rc(x).expect("reduced cost missing for x");
     let rcy = rc(y).expect("reduced cost missing for y");
     assert!(rcx.abs() < 1e-6, "reduced_cost(x)={rcx}");
@@ -135,8 +135,8 @@ fn baron_iis_pinpoints_conflicting_constraints() {
     let opts = BaronOptions::default().time_limit(Duration::from_secs(30));
     let iis = Baron::new().compute_iis(&m, &opts).expect("compute_iis");
     assert!(!iis.is_empty());
-    assert!(iis.constraints.contains(&floor), "floor missing from IIS: {iis:?}");
-    assert!(iis.constraints.contains(&ceil), "ceil missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&floor.id()), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil.id()), "ceil missing from IIS: {iis:?}");
 
     let report = iis.report(&m).to_string();
     assert!(report.contains("floor") && report.contains("ceil"), "{report}");

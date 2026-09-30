@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `ScalarQuadraticFunction<'_>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/indexed_indicator_quadratic.rs:6:5
+  |
+6 |     indicator_constraint!(m, bad[i in 0..2], b[i] == 1 => x[i].square() <= 1.0);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarQuadraticFunction<'_>`
+  |
+  = help: the following other types implement trait `IntoAffineFunction<'a>`:
+            AnyScalarFunction<'a>
+            Expr<'a, Constant>
+            Expr<'a, oximo_core::Affine>
+            Expr<'a>
+            ScalarAffineFunction<'a>
+            ScalarDynamicFunction<'a>
+  = note: required for `Constraint<ScalarQuadraticFunction<'_>, LessThan>` to implement `IntoAffineConstraint<'_>`
+note: required by a bound in `oximo_core::Model::__add_indicator_constraints_over`
+ --> src/model.rs
+  |
+  |     pub fn __add_indicator_constraints_over<'a, K, F, C, D: Degree>(
+  |            -------------------------------- required by a bound in this associated function
+...
+  |         C: IntoAffineConstraint<'a>,
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::__add_indicator_constraints_over`
+  = note: this error originates in the macro `indicator_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)

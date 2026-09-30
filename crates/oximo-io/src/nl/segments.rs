@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use oximo_core::{Constraint, Objective, ObjectiveSense, Sense, Variable};
+use oximo_core::{AlgebraicConstraint, Objective, ObjectiveSense, Sense, Variable};
 use oximo_expr::{ExprArena, VarId};
 use rustc_hash::FxHashMap;
 
@@ -23,7 +23,7 @@ pub(crate) fn write_segments<W: Write>(
     w: &mut Writer<'_, W>,
     arena: &ExprArena,
     vars: &[Variable],
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     objective: Option<&Objective>,
     analysis: &Analysis,
     perm: &Permutation,
@@ -199,7 +199,7 @@ fn write_d_segment<W: Write>(w: &mut Writer<'_, W>, duals: &[(u32, f64)]) -> Res
 /// `r` segment (D. M. Gay, Table 17).
 fn write_r_segment<W: Write>(
     w: &mut Writer<'_, W>,
-    constraints: &[Constraint],
+    constraints: &[AlgebraicConstraint],
     perm: &Permutation,
     analysis: &Analysis,
     complementarity: &[(usize, Complementarity)],

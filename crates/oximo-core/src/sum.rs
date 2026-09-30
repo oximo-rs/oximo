@@ -90,10 +90,10 @@ impl SumDomain<i32> for std::ops::Range<i32> {
 /// Macro-facing entry point backing the `sum!` macro. Not part of the stable
 /// public API.
 #[doc(hidden)]
-pub fn __sum_over<'a, K, D, F>(domain: &D, f: F) -> Expr<'a>
+pub fn __sum_over<'a, E: oximo_expr::Degree, K, D, F>(domain: &D, f: F) -> Expr<'a, E>
 where
     D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> Expr<'a>,
+    F: FnMut(K) -> Expr<'a, E>,
 {
     Expr::__sum_terms(domain.keys().map(f)).expect("sum_over on empty domain")
 }
@@ -246,7 +246,7 @@ mod tests {
         let m = Model::new("empty");
         let empty = Set::range(0..0);
         let _x = m.__indexed_var("x", &Set::range(0..1)).lb(0.0).build();
-        let _ = __sum_over(&empty, |_: usize| panic!("closure should not run"));
+        let _: Expr = __sum_over(&empty, |_: usize| panic!("closure should not run"));
     }
 
     #[test]
@@ -255,6 +255,6 @@ mod tests {
         let m = Model::new("empty_slice");
         let _x = m.__indexed_var("x", &Set::range(0..1)).lb(0.0).build();
         let empty: &[usize] = &[];
-        let _ = __sum_over(empty, |_: usize| panic!("closure should not run"));
+        let _: Expr = __sum_over(empty, |_: usize| panic!("closure should not run"));
     }
 }

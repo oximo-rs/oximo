@@ -25,6 +25,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 oximo-expr.workspace = true
+trybuild = "1"
 
 [lints]
 workspace = true

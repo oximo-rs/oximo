@@ -1,12 +1,14 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use parking_lot::{Mutex, MutexGuard};
 use smallvec::SmallVec;
 use thiserror::Error;
+
+use crate::classify::{ExprClass, ExprClassCache};
 
 static NEXT_MODEL_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -231,10 +233,25 @@ pub enum ExprNode {
     },
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct ExprArena {
     nodes: Arc<Vec<ExprNode>>,
     param_values: Arc<Vec<f64>>,
+    classifications: Mutex<Option<Box<ExprClassCache>>>,
+}
+
+// The cache holds derived values only, never calls user code while locked, and
+// cannot leave the expression nodes partially mutated when unwinding.
+impl std::panic::RefUnwindSafe for ExprArena {}
+
+impl Clone for ExprArena {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: Arc::clone(&self.nodes),
+            param_values: Arc::clone(&self.param_values),
+            classifications: Mutex::default(),
+        }
+    }
 }
 
 impl ExprArena {
@@ -243,7 +260,7 @@ impl ExprArena {
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self { nodes: Arc::new(Vec::with_capacity(cap)), param_values: Arc::new(Vec::new()) }
+        Self { nodes: Arc::new(Vec::with_capacity(cap)), ..Self::default() }
     }
 
     /// Clone this arena while reserving room for nodes that will immediately
@@ -253,7 +270,11 @@ impl ExprArena {
     pub fn __clone_with_additional_capacity(&self, additional_nodes: usize) -> Self {
         let mut nodes = Vec::with_capacity(self.nodes.len().saturating_add(additional_nodes));
         nodes.extend_from_slice(&self.nodes);
-        Self { nodes: Arc::new(nodes), param_values: Arc::new(self.param_values.as_ref().clone()) }
+        Self {
+            nodes: Arc::new(nodes),
+            param_values: Arc::new(self.param_values.as_ref().clone()),
+            classifications: Mutex::default(),
+        }
     }
 
     /// Reserve room for additional expression nodes without changing IDs.
@@ -293,6 +314,9 @@ impl ExprArena {
 
     #[inline]
     pub fn get_mut(&mut self, id: ExprId) -> &mut ExprNode {
+        // A changed child can invalidate any cached root. Appending nodes and
+        // rebinding parameters preserve structural degree and need no reset.
+        *self.classifications.get_mut() = None;
         &mut Arc::make_mut(&mut self.nodes)[id.index()]
     }
 
@@ -367,6 +391,8 @@ pub(crate) trait ArenaAccess {
     fn get(&self, id: ExprId) -> &ExprNode;
     fn param_value(&self, id: ParamId) -> f64;
     fn push(&mut self, node: ExprNode) -> ExprId;
+    fn cached_class(&self, id: ExprId) -> Option<ExprClass>;
+    fn cache_class(&self, id: ExprId, class: ExprClass);
 
     fn constant(&mut self, value: f64) -> ExprId {
         self.push(ExprNode::Const(value))
@@ -378,6 +404,14 @@ pub(crate) trait ArenaAccess {
 }
 
 impl ArenaAccess for ExprArena {
+    fn cached_class(&self, id: ExprId) -> Option<ExprClass> {
+        self.classifications.lock().as_deref_mut().and_then(|cache| cache.get(id))
+    }
+
+    fn cache_class(&self, id: ExprId, class: ExprClass) {
+        self.classifications.lock().get_or_insert_with(Box::default).insert(id, class);
+    }
+
     fn get(&self, id: ExprId) -> &ExprNode {
         self.get(id)
     }
@@ -396,6 +430,7 @@ impl ArenaAccess for ExprArena {
 pub struct FrozenExprArena {
     nodes: Arc<Vec<ExprNode>>,
     param_values: Arc<Vec<f64>>,
+    classifications: ExprClassCache,
 }
 
 impl FrozenExprArena {
@@ -408,15 +443,25 @@ impl FrozenExprArena {
 struct ForkedExprArena {
     base: FrozenExprArena,
     nodes: Vec<ExprNode>,
+    classifications: RefCell<ExprClassCache>,
 }
 
 impl ForkedExprArena {
     fn new(base: FrozenExprArena) -> Self {
-        Self { base, nodes: Vec::new() }
+        let classifications = RefCell::new(base.classifications.clone());
+        Self { base, nodes: Vec::new(), classifications }
     }
 }
 
 impl ArenaAccess for ForkedExprArena {
+    fn cached_class(&self, id: ExprId) -> Option<ExprClass> {
+        self.classifications.borrow_mut().get(id)
+    }
+
+    fn cache_class(&self, id: ExprId, class: ExprClass) {
+        self.classifications.borrow_mut().insert(id, class);
+    }
+
     fn get(&self, id: ExprId) -> &ExprNode {
         let index = id.index();
         if index < self.base.nodes.len() {
@@ -744,9 +789,8 @@ impl Deref for ExprArenaSnapshot<'_> {
 }
 
 pub struct ExprArenaWriteGuard<'a> {
-    // Remove the thread-local marker before unlocking the mutex. There is no
-    // user code between field drops, so another operation cannot observe the
-    // short transition.
+    // Remove the thread-local marker before unlocking the mutex.
+    // There is no user code between field drops.
     cell: &'a ExprArenaCell,
     _installed: InstalledWriteGuard,
     guard: MutexGuard<'a, ExprArena>,
@@ -772,9 +816,49 @@ impl Deref for ExprArenaWriteGuard<'_> {
     }
 }
 
-impl DerefMut for ExprArenaWriteGuard<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.guard
+impl<'a> ExprArenaWriteGuard<'a> {
+    /// Append a node. Previously issued handles remain immutable.
+    pub fn push(&mut self, node: ExprNode) -> ExprId {
+        self.guard.push(node)
+    }
+
+    pub fn constant(&mut self, value: f64) -> ExprId {
+        self.guard.constant(value)
+    }
+
+    pub fn var(&mut self, var: VarId) -> ExprId {
+        self.guard.var(var)
+    }
+
+    pub fn param(&mut self, param: ParamId) -> ExprId {
+        self.guard.param(param)
+    }
+
+    pub fn linear(&mut self, coeffs: Vec<(VarId, f64)>, constant: f64) -> ExprId {
+        self.guard.linear(coeffs, constant)
+    }
+
+    pub fn new_param(&mut self, value: f64) -> ParamId {
+        self.guard.new_param(value)
+    }
+
+    pub fn set_param_value(&mut self, param: ParamId, value: f64) {
+        self.guard.set_param_value(param, value);
+    }
+
+    #[doc(hidden)]
+    pub fn __reserve_nodes(&mut self, count: usize) {
+        self.guard.__reserve_nodes(count);
+    }
+
+    pub fn var_expr(&mut self, var: VarId) -> crate::Expr<'a, crate::Affine> {
+        let id = self.guard.var(var);
+        crate::Expr::from_id(id, self.cell)
+    }
+
+    pub fn param_expr(&mut self, param: ParamId) -> crate::Expr<'a, crate::Constant> {
+        let id = self.guard.param(param);
+        crate::Expr::from_id(id, self.cell)
     }
 }
 
@@ -795,6 +879,13 @@ impl ExprArenaBatchGuard<'_> {
         FrozenExprArena {
             nodes: Arc::clone(&self.arena.nodes),
             param_values: Arc::clone(&self.arena.param_values),
+            classifications: self
+                .arena
+                .classifications
+                .lock()
+                .as_deref()
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
@@ -951,6 +1042,38 @@ mod tests {
         let value = evaluate(&arena, root, &values).unwrap();
         let expected = ((0.5_f64.sin() * 0.25_f64.cos()).exp() / 2.5).powi(2);
         assert!((value - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn classification_caches_do_not_alias_worker_local_ids() {
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&cell, VarId(0));
+        let mut batch = cell.__begin_batch();
+        let snapshot = batch.snapshot();
+        let mut forks = vec![
+            cell.__with_fork(snapshot.clone(), || {
+                let root = (x.square() + x).erase();
+                for _ in 0..2 {
+                    assert_eq!(root.__class(), ExprClass::Quadratic);
+                }
+                root.id()
+            }),
+            cell.__with_fork(snapshot.clone(), || {
+                let root = (x.sin() + x).erase();
+                for _ in 0..2 {
+                    assert_eq!(root.__class(), ExprClass::Nonlinear);
+                }
+                root.id()
+            }),
+        ];
+        assert_eq!(forks[0].value, forks[1].value);
+        drop(snapshot);
+        let remaps = batch.merge(&mut forks);
+        let roots: Vec<_> =
+            forks.iter().zip(remaps).map(|(fork, remap)| remap.apply(fork.value)).collect();
+        drop(batch);
+        assert_eq!(Expr::new(roots[0], &cell).__class(), ExprClass::Quadratic);
+        assert_eq!(Expr::new(roots[1], &cell).__class(), ExprClass::Nonlinear);
     }
 
     #[test]

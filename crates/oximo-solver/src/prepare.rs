@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oximo_core::{
-    Constraint, Model, ModelConstraints, ModelKind, Objective, ObjectiveSense, Sense,
+    AlgebraicConstraint, Model, ModelConstraints, ModelKind, Objective, ObjectiveSense, Sense,
     SocConstraint, SocForm, Variable,
 };
 use oximo_expr::{
@@ -318,7 +318,7 @@ impl<'a> LoweringContext<'a> {
     }
 
     /// An optional alternative, never a replacement for the original row.
-    pub fn detected_soc(&self, row: &Constraint) -> Option<SocForm> {
+    pub fn detected_soc(&self, row: &AlgebraicConstraint) -> Option<SocForm> {
         self.expressions.detected_soc(self.variables(), row)
     }
 }
@@ -326,14 +326,14 @@ impl<'a> LoweringContext<'a> {
 /// Bounds for a polynomial body with its constant removed. No row is dropped,
 /// split, relaxed or reclassified as feasible/infeasible by this operation.
 #[inline]
-pub fn shifted_bounds(row: &Constraint, constant: f64) -> (f64, f64) {
+pub fn shifted_bounds(row: &AlgebraicConstraint, constant: f64) -> (f64, f64) {
     (row.lower - constant, row.upper - constant)
 }
 
 /// Optional single-sided view, in lower/upper order for a range. Free rows
 /// produce no sides. The caller owns native row ordering and provenance.
 #[inline]
-pub fn row_sides(row: &Constraint) -> [Option<(Sense, f64)>; 2] {
+pub fn row_sides(row: &AlgebraicConstraint) -> [Option<(Sense, f64)>; 2] {
     match row.as_single() {
         Some(single) => [Some(single), None],
         None if row.is_range() => [Some((Sense::Ge, row.lower)), Some((Sense::Le, row.upper))],
@@ -405,7 +405,11 @@ impl PreparedExpressions {
     }
 
     /// Detect an optional cone representation using cached polynomial terms.
-    pub fn detected_soc(&self, variables: &[Variable], row: &Constraint) -> Option<SocForm> {
+    pub fn detected_soc(
+        &self,
+        variables: &[Variable],
+        row: &AlgebraicConstraint,
+    ) -> Option<SocForm> {
         let q = self.quadratic(row.lhs)?;
         oximo_core::__detect_soc_from_quadratic(variables, row, &q)
     }

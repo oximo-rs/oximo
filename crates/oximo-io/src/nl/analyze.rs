@@ -14,7 +14,7 @@
 //! variable sets `nl_vars_c`, `nl_vars_o` only count vars appearing inside the
 //! nonlinear residual.
 
-use oximo_core::{Constraint, Domain, Objective, Variable};
+use oximo_core::{AlgebraicConstraint, Domain, Objective, Variable};
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, SignedExpr, VarId, split_linear};
 use rustc_hash::FxHashSet;
 
@@ -63,7 +63,7 @@ impl Analysis {
     pub(crate) fn build(
         arena: &ExprArena,
         vars: &[Variable],
-        constraints: &[Constraint],
+        constraints: &[AlgebraicConstraint],
         objective: Option<&Objective>,
         nonfinite_strings: bool,
     ) -> Result<Self, IoError> {
@@ -260,9 +260,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => x + 2.0 * y - z,
+                1 => (x + 2.0 * y - z).erase(),
                 2 => x.powi(2) + y * z,
-                _ => x * y * z + x.sin(),
+                _ => (x * y * z + x.sin()).erase(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -286,7 +286,7 @@ pub mod benchmark_support {
 
     fn row(
         arena: &ExprArena,
-        c: &Constraint,
+        c: &AlgebraicConstraint,
     ) -> Result<(Row, Vec<VarId>, FxHashSet<VarId>), IoError> {
         let (linear, residual) = split_linear(arena, c.lhs);
         let mut all: FxHashSet<VarId> = linear.coeffs.iter().map(|(v, _)| *v).collect();
@@ -302,7 +302,7 @@ pub mod benchmark_support {
     fn build(
         arena: &ExprArena,
         vars: &[Variable],
-        constraints: &[Constraint],
+        constraints: &[AlgebraicConstraint],
         objective: &Objective,
         parallel: bool,
     ) -> Result<Analysis, IoError> {

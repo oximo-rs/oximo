@@ -136,8 +136,8 @@ fn gurobi_iis_pinpoints_conflicting_constraints() {
 
     let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute_iis");
     assert!(!iis.is_empty());
-    assert!(iis.constraints.contains(&floor), "floor missing from IIS: {iis:?}");
-    assert!(iis.constraints.contains(&ceil), "ceil missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&floor.id()), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil.id()), "ceil missing from IIS: {iis:?}");
 
     let report = iis.report(&m).to_string();
     assert!(report.contains("floor") && report.contains("ceil"), "{report}");
@@ -170,8 +170,8 @@ fn gurobi_persistent_iis_reuses_resident_model() {
     assert!(r.termination.is_infeasible(), "expected infeasible, got {:?}", r.termination);
 
     let iis = h.compute_iis().expect("compute_iis on resident model");
-    assert!(iis.constraints.contains(&floor), "floor missing from IIS: {iis:?}");
-    assert!(iis.constraints.contains(&ceil), "ceil missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&floor.id()), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil.id()), "ceil missing from IIS: {iis:?}");
 }
 
 #[test]

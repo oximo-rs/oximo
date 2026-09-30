@@ -91,7 +91,7 @@ fn sos_registry_and_display_are_complete() {
 #[should_panic(expected = "has no members")]
 fn sos_rejects_empty_members() {
     let m = Model::new("empty");
-    m.add_sos_constraint("empty", SosType::Sos1, []);
+    m.add_sos_constraint("empty", SosType::Sos1, [] as [(Expr, f64); 0]);
 }
 
 #[test]

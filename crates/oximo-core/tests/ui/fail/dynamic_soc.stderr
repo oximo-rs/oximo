@@ -1,0 +1,13 @@
+error[E0271]: type mismatch resolving `<[ScalarDynamicFunction<'_>; 1] as IntoIterator>::Item == ScalarAffineFunction<'_>`
+ --> tests/ui/fail/dynamic_soc.rs:6:39
+  |
+6 |     let _ = VectorAffineFunction::new([function]);
+  |             ------------------------- ^^^^^^^^^^ expected `ScalarAffineFunction<'_>`, found `ScalarDynamicFunction<'_>`
+  |             |
+  |             required by a bound introduced by this call
+  |
+note: required by a bound in `oximo_core::VectorAffineFunction::<'a>::new`
+ --> src/function_set.rs
+  |
+  |     pub fn new(components: impl IntoIterator<Item = ScalarAffineFunction<'a>>) -> Self {
+  |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `VectorAffineFunction::<'a>::new`

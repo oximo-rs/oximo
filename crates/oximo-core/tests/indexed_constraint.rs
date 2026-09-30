@@ -158,7 +158,7 @@ fn range_family_can_mix_interval_and_split_entries() {
     let m = Model::new("mixed_range_ids");
     variable!(m, x);
     constraint!(m, prior, x >= 0.0);
-    let bodies = [x, x.powi(2), x + 1.0];
+    let bodies = [x.erase(), x.powi(2), (x + 1.0).erase()];
     let ranges: IndexedRangeConstraint<usize> =
         constraint!(m, ranges[i in 0..3], 4.0 >= bodies[i] >= 0.0);
     assert_eq!(ranges.len(), 3);
