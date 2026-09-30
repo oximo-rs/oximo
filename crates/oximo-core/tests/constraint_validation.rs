@@ -175,17 +175,19 @@ fn indicator_inputs_are_checked_before_registration() {
 
 #[test]
 fn indexed_invalid_infinity_rolls_back_worker_nodes_and_rows() {
-    let m = Model::new("batch bounds");
-    variable!(m, x[i in 0..2048]);
-    let mut bounds = [1.0; 2048];
-    bounds[1000] = f64::NEG_INFINITY;
-    let before = m.arena().len();
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| {
-            constraint!(m, rows[i in 0..2048], x[i] + 1.0 <= bounds[i]);
-        }))
-        .is_err()
-    );
-    assert_eq!(m.num_constraints(), 0);
-    assert_eq!(m.arena().len(), before);
+    rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap().install(|| {
+        let m = Model::new("batch bounds");
+        variable!(m, x[i in 0..2048]);
+        let mut bounds = [1.0; 2048];
+        bounds[1000] = f64::NEG_INFINITY;
+        let before = m.arena().len();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                constraint!(m, rows[i in 0..2048], x[i] + 1.0 <= bounds[i]);
+            }))
+            .is_err()
+        );
+        assert_eq!(m.num_constraints(), 0);
+        assert_eq!(m.arena().len(), before);
+    });
 }
