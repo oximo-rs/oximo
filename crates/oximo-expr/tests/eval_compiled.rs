@@ -1,5 +1,3 @@
-#![expect(clippy::float_cmp)]
-
 use oximo_expr::{EvalContext, ParamId};
 use oximo_expr::{
     ExprArena, ExprId, ExprNode, UnaryOp, VarId, Visitor, evaluate, walk, walk_shared,

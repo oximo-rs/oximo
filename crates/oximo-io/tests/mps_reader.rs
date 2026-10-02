@@ -486,7 +486,7 @@ fn feasibility_mps_gets_zero_minimization_objective() {
     let model = read_mps(text.as_bytes()).expect("feasibility MPS");
     assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Minimize);
     let objective = quadratic_terms(&model, true);
-    assert!(objective.linear.is_empty());
+    assert_eq!(objective.linear, Vec::<(VarId, f64)>::new());
     assert!(close(objective.constant, 0.0));
 }
 

@@ -225,7 +225,7 @@ fn nl_writer_emits_param_in_nonlinear_term() {
     constraint!(m, c, k * x.powi(2) <= 10.0);
     objective!(m, Min, x);
     let nl = to_nl_string(&m).unwrap();
-    assert!(!nl.is_empty());
+    assert_ne!(nl, "");
 }
 
 #[test]

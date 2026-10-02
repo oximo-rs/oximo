@@ -244,6 +244,6 @@ mod tests {
         let o = GamsOptions::default();
         let mut gms = String::new();
         write_options(&mut gms, &o, "LP");
-        assert!(gms.is_empty());
+        assert_eq!(gms, "");
     }
 }

@@ -1,5 +1,3 @@
-#![expect(clippy::float_cmp)]
-
 use oximo_expr::{
     Children, Expr, ExprArena, ExprArenaCell, ExprClass, ExprNode, UnaryOp, VarId, classify,
     evaluate, render_expr, simplify,

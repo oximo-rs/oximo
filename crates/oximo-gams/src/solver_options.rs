@@ -288,14 +288,14 @@ mod tests {
     fn empty_options_write_nothing() {
         let mut buf = String::new();
         assert!(!GamsSolverConfig::Baron(GamsBaronOptions::default()).write_opt_file(&mut buf));
-        assert!(buf.is_empty());
+        assert_eq!(buf, "");
     }
 
     #[test]
     fn named_writes_nothing_but_raw_variant_does() {
         let mut buf = String::new();
         assert!(!GamsSolverConfig::Named(GamsSolver::Baron).write_opt_file(&mut buf));
-        assert!(buf.is_empty());
+        assert_eq!(buf, "");
 
         let cfg = GamsSolverConfig::Raw(GamsSolver::Xpress, vec!["miptol 1e-6".into()]);
         let mut buf = String::new();

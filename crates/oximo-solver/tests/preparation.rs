@@ -1,4 +1,3 @@
-#![allow(clippy::float_cmp)]
 use std::sync::Arc;
 
 use oximo_core::{

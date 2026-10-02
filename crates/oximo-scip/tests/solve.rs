@@ -48,7 +48,7 @@ fn milp_and_solution_pool() {
     let output = Scip::new().solve_detailed(&m, &ScipOptions::default().max_solutions(20)).unwrap();
     close(output.result.objective().unwrap(), 5.0);
     assert_eq!(m.kind(), ModelKind::MILP);
-    assert!(!output.statistics_json.is_empty());
+    assert_ne!(output.statistics_json, "");
     assert!(output.result.dual.is_empty());
     let objs = output.result.solutions.iter().map(|s| s.objective.unwrap()).collect::<Vec<_>>();
     assert!(objs.windows(2).all(|v| v[0] >= v[1]));

@@ -1,5 +1,3 @@
-#![expect(clippy::float_cmp)]
-
 use oximo_core::prelude::*;
 
 #[test]

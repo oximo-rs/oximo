@@ -640,7 +640,7 @@ mod tests {
         assert!(o.cons[2].is_nonlinear());
         assert!(!o.exact_hessian, "one nonlinear slot must drop the exact Hessian");
         assert!(!o.all_closed_form(), "mixed model must route to the builder");
-        assert!(o.hess_structure.is_empty());
+        assert_eq!(o.hess_structure, Vec::<(usize, usize)>::new());
         assert_eq!(
             o.jac_structure,
             vec![
@@ -801,10 +801,10 @@ mod tests {
 
         w.set_param_value(0.0);
         oracle.refresh(&m);
-        assert!(oracle.jac_structure.is_empty());
+        assert_eq!(oracle.jac_structure, Vec::<(usize, usize)>::new());
         let mut jac = Vec::new();
         oracle.eval_constraint_jacobian(&[3.0], &mut jac);
-        assert!(jac.is_empty());
+        assert_eq!(jac, Vec::<f64>::new());
 
         w.set_param_value(2.0);
         oracle.refresh(&m);

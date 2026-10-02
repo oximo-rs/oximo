@@ -1,4 +1,3 @@
-#![allow(clippy::float_cmp)]
 use oximo_core::{ConstraintId, VarId};
 use oximo_solver::reconstruct::{
     ObjectiveTransform, accumulate_dual, normalize_result, project_primal, relative_gap,

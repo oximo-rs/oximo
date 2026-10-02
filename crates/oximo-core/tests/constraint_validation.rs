@@ -1,5 +1,3 @@
-#![expect(clippy::float_cmp)]
-
 use oximo_core::prelude::*;
 use oximo_expr::{ExprClass, extract_linear};
 use std::panic::{AssertUnwindSafe, catch_unwind};

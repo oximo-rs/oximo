@@ -655,7 +655,7 @@ mod tests {
         let linear = arena.push(ExprNode::Linear { coeffs: vec![(VarId(0), 2.0)], constant: 1.0 });
         let (direct, residual) = split_linear(&arena, linear);
         assert!(matches!(direct.coeffs, Cow::Borrowed(_)));
-        assert!(residual.is_empty());
+        assert_eq!(residual, Vec::<SignedExpr>::new());
 
         let y = arena.push(ExprNode::Var(VarId(1)));
         let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, y));

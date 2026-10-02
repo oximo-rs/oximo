@@ -1,8 +1,6 @@
 //! Tests for SOC pattern detection (polynomial recognition) and the normalized
 //! `SocForm` views backends translate from.
 
-#![expect(clippy::float_cmp)]
-
 use oximo_core::prelude::*;
 
 fn detect_first(m: &Model) -> Option<SocForm> {

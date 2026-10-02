@@ -1,5 +1,3 @@
-#![allow(clippy::float_cmp, reason = "These sums of small integers are exactly representable")]
-
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -108,6 +106,7 @@ fn model_macros_supply_context_including_qualified_sums() {
 }
 
 #[test]
+#[expect(clippy::float_cmp, reason = "these sums have exactly representable unit coefficients")]
 fn indexed_sums_work_with_serial_and_parallel_arena_forks() {
     for threads in [1, 4] {
         rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
