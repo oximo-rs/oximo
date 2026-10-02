@@ -89,7 +89,7 @@ fn flat_sum_preserves_subtraction_parentheses_and_variable_order() {
     let arena = model.arena();
     let objective = model.try_objective().unwrap();
     let terms = oximo_expr::extract_quadratic(&arena, objective.expr).unwrap();
-    assert!(terms.hessian.is_empty());
+    assert_eq!(terms.hessian, Vec::<(VarId, VarId, f64)>::new());
     assert_eq!(terms.constant.to_bits(), 7.0_f64.to_bits());
     assert_eq!(terms.linear, vec![(oximo_expr::VarId(1), 2.0), (oximo_expr::VarId(2), 2.0)]);
 }

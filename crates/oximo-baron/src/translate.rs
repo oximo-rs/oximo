@@ -2140,7 +2140,7 @@ The above solution has an objective value of:  0.0
 ";
         let iis = parse_iis(res);
         assert_eq!(iis.constraints, vec![ConstraintId(0)]);
-        assert!(iis.soc_constraints.is_empty());
+        assert_eq!(iis.soc_constraints, Vec::<oximo_core::SocConstraintId>::new());
         assert_eq!(
             iis.var_bounds,
             vec![(VarId(0), VarBoundKind::Lower), (VarId(1), VarBoundKind::Lower)]
@@ -2178,7 +2178,7 @@ The above solution has an objective value of:  0.0
 ";
         let iis = parse_iis(res);
         assert_eq!(iis.constraints, vec![ConstraintId(0), ConstraintId(1)]);
-        assert!(iis.var_bounds.is_empty());
+        assert_eq!(iis.var_bounds, Vec::<(VarId, VarBoundKind)>::new());
     }
 
     #[test]

@@ -514,11 +514,11 @@ mod tests {
     #[test]
     fn default_vecs_are_empty() {
         let o = PounceOptions::default();
-        assert!(o.num_opts.is_empty());
-        assert!(o.int_opts.is_empty());
-        assert!(o.str_opts.is_empty());
-        assert!(o.bool_opts.is_empty());
-        assert!(o.extra.is_empty());
+        assert_eq!(o.num_opts, Vec::<(&str, f64)>::new());
+        assert_eq!(o.int_opts, Vec::<(&str, i32)>::new());
+        assert_eq!(o.str_opts, Vec::<(&str, String)>::new());
+        assert_eq!(o.bool_opts, Vec::<(&str, bool)>::new());
+        assert_eq!(o.extra, Vec::<(String, PounceOptionValue)>::new());
     }
 
     #[test]

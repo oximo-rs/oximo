@@ -1,6 +1,6 @@
 //! Stable tests: tape compilation/evaluation against `oximo_expr::evaluate`,
 //! slot classification, and sparsity patterns.
-#![expect(clippy::unreadable_literal, clippy::cast_precision_loss, clippy::float_cmp)]
+#![expect(clippy::unreadable_literal, clippy::cast_precision_loss)]
 
 use oximo_autodiff::slot::{
     FunctionSlot, SlotKind, linear_gradient_add, linear_value, quadratic_gradient_add,

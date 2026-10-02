@@ -6,5 +6,5 @@ error[E0308]: mismatched types
   |            |
   |            expected due to this
   |
-  = note: expected struct `oximo_core::Expr<'_, oximo_core::Affine>`
-             found struct `oximo_core::Expr<'_, oximo_core::Quadratic>`
+  = note: expected struct `Expr<'_, oximo_core::Affine>`
+             found struct `Expr<'_, oximo_core::Quadratic>`

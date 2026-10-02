@@ -1,4 +1,3 @@
-#![expect(clippy::float_cmp)]
 #![expect(clippy::many_single_char_names)]
 
 use oximo_core::function_set::{AlgebraicConstraintIr, IntoAffineFunction};

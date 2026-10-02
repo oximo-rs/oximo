@@ -352,8 +352,8 @@ fn disconnected_graph_recovers_exactly() {
 #[test]
 fn empty_pattern_has_no_coloring_state() {
     let coloring = star_hessian_coloring(&[]);
-    assert!(coloring.groups.is_empty());
-    assert!(coloring.recover.is_empty());
+    assert_eq!(coloring.groups, Vec::<Vec<usize>>::new());
+    assert_eq!(coloring.recover, Vec::<(usize, usize)>::new());
 }
 
 #[test]
@@ -379,6 +379,6 @@ fn nonsmooth_branch_unions_do_not_add_cross_terms() {
     assert_eq!(hessian_pattern(&arena, minimum), vec![(0, 0), (1, 1)]);
 
     let affine_min = arena.push(ExprNode::Min([x, y].into_iter().collect()));
-    assert!(hessian_pattern(&arena, affine_min).is_empty());
+    assert_eq!(hessian_pattern(&arena, affine_min), Vec::<(u32, u32)>::new());
     assert_eq!(variable_support(&arena, affine_min), vec![0, 1]);
 }

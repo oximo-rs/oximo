@@ -370,7 +370,7 @@ mod tests {
         let sq = a.push(ExprNode::Pow(x, two));
         let q = extract_quadratic(&a, sq).unwrap();
         assert_eq!(q.hessian, vec![(v(0), v(0), 2.0)]);
-        assert!(q.linear.is_empty());
+        assert_eq!(q.linear, Vec::<(VarId, f64)>::new());
         assert!(q.constant.abs() < f64::EPSILON);
     }
 
@@ -382,7 +382,7 @@ mod tests {
         let xy = a.push(ExprNode::Mul(smallvec![x, y]));
         let q = extract_quadratic(&a, xy).unwrap();
         assert_eq!(q.hessian, vec![(v(1), v(0), 1.0)]);
-        assert!(q.linear.is_empty());
+        assert_eq!(q.linear, Vec::<(VarId, f64)>::new());
     }
 
     #[test]
@@ -427,7 +427,7 @@ mod tests {
         let five = a.push(ExprNode::Const(5.0));
         let expr = a.push(ExprNode::Add(smallvec![mul, five]));
         let q = extract_quadratic(&a, expr).unwrap();
-        assert!(q.hessian.is_empty());
+        assert_eq!(q.hessian, Vec::<(VarId, VarId, f64)>::new());
         assert_eq!(q.linear, vec![(v(0), 3.0)]);
         assert!((q.constant - 5.0).abs() < f64::EPSILON);
     }
@@ -437,8 +437,8 @@ mod tests {
         let mut a = ExprArena::new();
         let c = a.push(ExprNode::Const(7.0));
         let q = extract_quadratic(&a, c).unwrap();
-        assert!(q.hessian.is_empty());
-        assert!(q.linear.is_empty());
+        assert_eq!(q.hessian, Vec::<(VarId, VarId, f64)>::new());
+        assert_eq!(q.linear, Vec::<(VarId, f64)>::new());
         assert!((q.constant - 7.0).abs() < f64::EPSILON);
     }
 
