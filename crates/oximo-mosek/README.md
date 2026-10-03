@@ -2,8 +2,8 @@
 
 [MOSEK](https://www.mosek.com/) 11.2 backend for [oximo](https://crates.io/crates/oximo).
 
-This backend supports LP, MILP, convex QP/MIQP, convex QCP/MIQCP, and
-SOCP/MISOCP models. MOSEK validates convexity.
+This backend supports LP, MILP, convex QP/MIQP, convex QCP/MIQCP,
+SOCP/MISOCP, and continuous SDP models. MOSEK validates convexity.
 
 Install [MOSEK 11.2](https://www.mosek.com/downloads/), configure a valid license, and point `MOSEK_BINDIR_112` at
 the platform `bin` directory when it is not in MOSEK's default location.
@@ -15,6 +15,8 @@ the platform `bin` directory when it is not in MOSEK's default location.
 | `LP`, `MILP`     | Yes                                                                           |
 | `QP`, `MIQP`     | Yes when the objective is convex for minimization or concave for maximization |
 | `QCP`, `MIQCP`   | Yes when the quadratic rows and objective satisfy MOSEK's convexity rules     |
+| `SDP`            | Yes, with an affine objective and linear/SOC rows                             |
+| `MISDP`          | No                                                                            |
 | `SOCP`, `MISOCP` | Yes, for explicit oximo cones and detected diagonal quadratic cones           |
 
 Quadratic expressions use MOSEK's lower-triangular `0.5 x'Qx` convention.

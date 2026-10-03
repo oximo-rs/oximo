@@ -41,6 +41,9 @@ use crate::options::apply as apply_options;
 ///
 /// Panics if model variable IDs overflow `u32`.
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -98,6 +101,9 @@ pub(crate) struct Meta {
 /// Returns a [`SolverError`] if the model kind is unsupported, a domain cannot be
 /// represented, or an expression is not linear/quadratic as required.
 pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -252,6 +258,7 @@ pub(crate) fn extract_result(
             solutions,
             dual,
             soc_dual: FxHashMap::default(),
+            psd_dual: FxHashMap::default(),
             reduced_costs,
             best_bound,
             gap: mixed_integer.then(|| solved.double_info_value(c"mip_gap").ok()).flatten(),

@@ -26,6 +26,19 @@ pub enum ClarabelDirectSolve {
     Faer,
 }
 
+/// Clique merging strategy for SDP chordal decomposition.
+#[cfg(feature = "sdp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sdp")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClarabelChordalMerge {
+    /// Keep the cliques produced by the sparsity analysis separate.
+    None,
+    /// Merge parent and child cliques in the clique tree.
+    ParentChild,
+    /// Merge cliques using Clarabel's clique graph heuristic (the default).
+    CliqueGraph,
+}
+
 /// Declare every scalar [`ClarabelOptions`] option once. Its `Option<T>` field
 /// and its `#[must_use]` builder are generated from the same entry, keeping the
 /// field name identical to the matching `clarabel::solver::CoreSettings` field.
@@ -33,7 +46,7 @@ macro_rules! clarabel_options {
     ($($(#[$meta:meta])* $name:ident : $ty:ty),* $(,)?) => {
         /// Clarabel-specific solver options.
         ///
-        /// A typed mirror of the tunable, non-feature-gated fields of
+        /// A typed mirror of the tunable fields of
         /// `clarabel::solver::CoreSettings`. Every field is `Option`, `None`
         /// leaves Clarabel's own default in place, so the defaults quoted below
         /// are informational.
@@ -47,6 +60,10 @@ macro_rules! clarabel_options {
             pub universal: UniversalOptions,
             /// Direct linear (KKT) solver method. Clarabel default `Auto`.
             pub direct_solve_method: Option<ClarabelDirectSolve>,
+            /// Clique merging strategy. Clarabel default `CliqueGraph`.
+            #[cfg(feature = "sdp")]
+            #[cfg_attr(docsrs, doc(cfg(feature = "sdp")))]
+            pub chordal_decomposition_merge_method: Option<ClarabelChordalMerge>,
             $(
                 $(#[$meta])*
                 pub $name: Option<$ty>,
@@ -58,6 +75,15 @@ macro_rules! clarabel_options {
             #[must_use]
             pub fn direct_solve_method(mut self, m: ClarabelDirectSolve) -> Self {
                 self.direct_solve_method = Some(m);
+                self
+            }
+
+            /// Select the clique merging strategy for SDP chordal decomposition.
+            #[cfg(feature = "sdp")]
+            #[cfg_attr(docsrs, doc(cfg(feature = "sdp")))]
+            #[must_use]
+            pub fn chordal_decomposition_merge_method(mut self, m: ClarabelChordalMerge) -> Self {
+                self.chordal_decomposition_merge_method = Some(m);
                 self
             }
 
@@ -147,6 +173,16 @@ clarabel_options! {
     /// Drop structural zeros from sparse inputs (disables parametric updating).
     /// Clarabel default `false`.
     input_sparse_dropzeros: bool,
+    /// Decompose sparse PSD cones into smaller clique cones. Clarabel default `true`.
+    /// Disable this, presolve and zero dropping to permit persistent numeric updates.
+    /// Larger undecomposed cones can cost more per iteration.
+    #[cfg(feature = "sdp")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sdp")))]
+    chordal_decomposition_enable: bool,
+    /// Assemble decomposed PSD cones in compact form. Clarabel default `true`.
+    #[cfg(feature = "sdp")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "sdp")))]
+    chordal_decomposition_compact: bool,
 }
 
 impl HasUniversal for ClarabelOptions {

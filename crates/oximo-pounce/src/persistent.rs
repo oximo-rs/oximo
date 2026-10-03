@@ -86,6 +86,9 @@ impl PouncePersistent {
         model: &Model,
         opts: &PounceOptions,
     ) -> Result<SolverResult, SolverError> {
+        if model.has_active_psd_constraints() {
+            return Err(SolverError::UnsupportedConstraint("PSD"));
+        }
         if model.has_active_sos_constraints() {
             return Err(SolverError::UnsupportedSos);
         }

@@ -34,9 +34,11 @@ struct State {
 /// skipped setup (equilibration structure, symbolic factorization, allocations).
 ///
 /// In-place updates are rejected by Clarabel when presolve or structural-zero
-/// dropping altered the problem, in which case the handle falls back to a
-/// rebuild. Set `presolve_enable(false)` and `input_sparse_dropzeros(false)`
-/// (the defaults leave presolve on) to keep the fast path available.
+/// dropping or SDP chordal decomposition altered the problem, in which case
+/// the handle falls back to a rebuild. Set `presolve_enable(false)`,
+/// `input_sparse_dropzeros(false)` and, for SDP, `chordal_decomposition_enable(false)`
+/// to keep the fast path available. Disabling decomposition can increase the
+/// cost of solving each PSD block.
 ///
 /// A failed `solve` leaves the handle without a resident model; the next call
 /// rebuilds from scratch.
@@ -110,6 +112,10 @@ impl Solver for ClarabelPersistent {
 
     fn name(&self) -> &str {
         NAME
+    }
+
+    fn supports_psd(&self) -> bool {
+        cfg!(feature = "sdp")
     }
 
     fn supports(&self, kind: ModelKind) -> bool {
@@ -258,6 +264,122 @@ mod tests {
             let cold = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
             assert_eq!(warm.termination, TerminationStatus::Optimal, "wt {wv}");
             assert!(close(warm.objective().unwrap(), cold.objective().unwrap()), "wt {wv}");
+        }
+    }
+
+    #[cfg(feature = "sdp")]
+    #[test]
+    fn persistent_sparse_psd_rebuilds_after_chordal_update_rejection() {
+        use clarabel::solver::DataUpdateError;
+
+        let m = Model::new("sparse PSD");
+        variable!(m, t);
+        param!(m, p = 1.0);
+        let identity = SymmetricMatrix::from_upper_fn(8, |i, j| f64::from(u8::from(i == j)));
+        let path = SymmetricMatrix::from_upper_fn(8, |i, j| f64::from(u8::from(j == i + 1)));
+        let matrix = t * identity - p * path;
+        let cone = psd_constraint!(m, &matrix);
+        objective!(m, Min, t);
+        let options = ClarabelOptions::default()
+            .presolve_enable(false)
+            .tol_gap_abs(1e-10)
+            .tol_gap_rel(1e-10)
+            .tol_feas(1e-10);
+        let mut solver = Clarabel.persistent();
+        let first = solver.solve(&m, &options).unwrap();
+        assert_eq!(first.termination, TerminationStatus::Optimal);
+
+        m.set_param(p, 2.0).unwrap();
+        let new = super::build_problem(&m).unwrap();
+        let state = solver.state.as_mut().unwrap();
+        assert!(state.problem.same_structure(&new));
+        assert!(matches!(
+            state.solver.update_data(&new.p_mat, &new.q, &new.a_mat, &new.b),
+            Err(DataUpdateError::ChordalDecompositionIsActive)
+        ));
+
+        let result = solver.solve(&m, &options).unwrap();
+        assert_eq!(result.termination, TerminationStatus::Optimal);
+        let angle = std::f64::consts::PI / 9.0;
+        assert!(close(result.objective().unwrap(), 4.0 * angle.cos()));
+        let primal = result.value_of_matrix(&matrix).unwrap().unwrap();
+        let dual = result.psd_dual_of(cone).unwrap().unwrap();
+        // F[0,7] is structurally zero, so its nonzero dual entry must be
+        // supplied by PSD completion rather than zero-filled clique readback.
+        assert!(close(dual[(0, 7)], 2.0 / 9.0 * angle.sin() * (8.0 * angle).sin()));
+        assert!(close(dual.trace(), 1.0));
+        assert!(close(primal.frobenius(dual), 0.0));
+    }
+
+    #[cfg(feature = "sdp")]
+    #[test]
+    fn persistent_sparse_psd_chordal_settings_preserve_duals_and_updates() {
+        use crate::ClarabelChordalMerge::{CliqueGraph, None, ParentChild};
+
+        let m = Model::new("chordal settings");
+        variable!(m, t);
+        param!(m, p = 1.0);
+        let matrix = SymmetricMatrix::from_upper_fn(8, |i, j| {
+            if i == j { t } else { (-p * f64::from(u8::from(j == i + 1))).into() }
+        });
+        let cone = psd_constraint!(m, &matrix);
+        objective!(m, Min, t);
+        let mut solver = Clarabel.persistent();
+        let angle = std::f64::consts::PI / 9.0;
+        // Changing immutable chordal settings must rebuild the resident solver.
+        for (scale, enable, compact, merge) in [
+            (1.0, true, false, None),
+            (2.0, false, true, CliqueGraph),
+            (0.5, true, true, ParentChild),
+            (3.0, false, false, None),
+        ] {
+            let options = ClarabelOptions::default()
+                .presolve_enable(false)
+                .chordal_decomposition_enable(enable)
+                .chordal_decomposition_compact(compact)
+                .chordal_decomposition_merge_method(merge)
+                .tol_gap_abs(1e-10)
+                .tol_gap_rel(1e-10)
+                .tol_feas(1e-10);
+            m.set_param(p, scale).unwrap();
+            let result = solver.solve(&m, &options).unwrap();
+            assert_eq!(result.termination, TerminationStatus::Optimal);
+            assert!(close(result.objective().unwrap(), scale * 2.0 * angle.cos()));
+            let dual = result.psd_dual_of(cone).unwrap().unwrap();
+            assert!(close(dual[(0, 7)], 2.0 / 9.0 * angle.sin() * (8.0 * angle).sin()));
+            assert!(close(dual.trace(), 1.0));
+            if !enable {
+                assert!(solver.state.as_ref().unwrap().solver.is_data_update_allowed());
+            }
+            m.set_param(p, scale * 1.5).unwrap();
+            let updated = solver.solve(&m, &options).unwrap();
+            assert!(close(updated.objective().unwrap(), scale * 3.0 * angle.cos()));
+        }
+    }
+
+    #[cfg(feature = "sdp")]
+    #[test]
+    fn persistent_psd_coefficients_keep_native_updates_available_at_zero() {
+        let m = Model::new("PSD coefficient");
+        variable!(m, t);
+        variable!(m, x);
+        m.fix(x, 1.0).unwrap();
+        param!(m, p = 1.0);
+        psd_constraint!(m, SymmetricMatrix::from_upper_triangle(2, [t, p * x, t]));
+        objective!(m, Min, t);
+        let options = ClarabelOptions::default().presolve_enable(false);
+        let mut solver = Clarabel.persistent();
+        solver.solve(&m, &options).unwrap();
+
+        for coefficient in [2.0_f64, 0.0, -2.0] {
+            m.set_param(p, coefficient).unwrap();
+            let new = super::build_problem(&m).unwrap();
+            let state = solver.state.as_ref().unwrap();
+            assert!(state.problem.same_structure(&new));
+            assert!(state.solver.is_data_update_allowed());
+            let result = solver.solve(&m, &options).unwrap();
+            assert_eq!(result.termination, TerminationStatus::Optimal);
+            assert!(close(result.objective().unwrap(), coefficient.abs()));
         }
     }
 

@@ -62,7 +62,7 @@ Names are unique per registry. Registering a duplicate variable or constraint na
 
 ```rust,ignore
 m.num_variables()   // usize
-m.num_constraints() // algebraic + SOC + SOS + indicator constraints
+m.num_constraints() // algebraic + SOC + PSD + SOS + indicator constraints
 m.variables()       // Ref<'_, Vec<Variable>>
 m.constraints()     // ModelConstraints<'_>
 m.constraints().algebraic()          // typed algebraic registry
@@ -392,9 +392,26 @@ picks the `MI*` variant of the row that matches:
 |---------------------------|------------------------------------------------------------------|
 | `NLP`/`MINLP`             | Any nonlinear expression (degree > 2, transcendentals, division) |
 | `QCP`/`MIQCP`             | Any quadratic constraint not recognized as a second-order cone   |
+| `SDP`/`MISDP`             | Active affine PSD matrix constraints                             |
 | `SOCP`/`MISOCP`           | Second-order cones present (explicit or detected)                |
 | `QP`/`MIQP`               | Quadratic objective, linear constraints                          |
 | `LP`/`MILP`               | Everything linear                                                |
+
+## Symmetric matrices and PSD constraints
+
+`symmetric_variable!(m, X[n])` declares n(n+1)/2 independent continuous variables.
+Use `X[(i, j)]` in Rust or `X[i, j]` inside modeling macros. Both mirrored entries
+refer to the same variable. Register PSD membership with `psd_constraint!(m, &X)`.
+
+`SymmetricMatrix<T>` stores unscaled upper-triangle entries in column order.
+Explicit upper/lower triangle constructors and `from_upper_fn` supply symmetric
+matrix data. `try_from_rows` accepts dense arrays, vectors or borrowed rows,
+rejecting empty, nonsquare or asymmetric input with a `SymmetricMatrixError`.
+Symmetry is checked exactly, without averaging or a tolerance.
+`SymmetricMatrix::<f64>::identity(n)` supplies the numeric identity matrix.
+Matrix arithmetic preserves scalar degrees. Trace and Frobenius
+helpers produce scalar expressions. PSD constraints pair `SymmetricAffineFunction`
+with one `PositiveSemidefiniteCone`.
 
 ## License
 

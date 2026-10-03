@@ -6,6 +6,7 @@ pub mod infeasibility;
 pub mod options;
 pub mod persistent;
 pub mod prepare;
+pub mod psd;
 pub mod reconstruct;
 pub mod result;
 pub mod solver;

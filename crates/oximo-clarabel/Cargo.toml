@@ -6,15 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Clarabel LP/QP/SOCP conic backend for oximo"
+description = "Clarabel LP/QP/SOCP/SDP conic backend for oximo"
 readme = "README.md"
 
 [features]
 benchmark-support = []
+sdp = ["clarabel/sdp", "clarabel/blas-src", "clarabel/lapack-src"]
+sdp-openblas = ["sdp", "clarabel/sdp-openblas"]
+sdp-mkl = ["sdp", "clarabel/sdp-mkl"]
+sdp-accelerate = ["sdp", "clarabel/sdp-accelerate"]
 faer = ["clarabel/faer-sparse"]
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["faer", "sdp-openblas"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -27,6 +31,12 @@ rustc-hash.workspace = true
 
 [dev-dependencies]
 oximo-highs.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "sdp"
+harness = false
+required-features = ["sdp", "benchmark-support"]
 
 [lints]
 workspace = true

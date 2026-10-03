@@ -44,6 +44,9 @@ pub fn solve(
     opts: &GamsOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();
     let nonsmooth = analyze_gams_expressions(&prepared)?;
@@ -416,6 +419,7 @@ fn parseoximo_solution(
             solutions,
             dual: if has_sol { dual } else { FxHashMap::default() },
             soc_dual,
+            psd_dual: FxHashMap::default(),
             reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
             termination,
             primal_status: PrimalStatus::NoSolution,
@@ -703,6 +707,9 @@ pub(crate) fn gams_solve_type(kind: ModelKind) -> &'static str {
         ModelKind::MIQP | ModelKind::MIQCP | ModelKind::MISOCP => "MIQCP",
         ModelKind::NLP => "NLP",
         ModelKind::MINLP => "MINLP",
+        ModelKind::SDP | ModelKind::MISDP => {
+            unreachable!("PSD constraints rejected before GAMS translation")
+        }
     }
 }
 

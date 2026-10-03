@@ -48,6 +48,9 @@ pub fn solve(
     opts: &BaronOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -224,6 +227,9 @@ fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<Baron
 type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms<'static>>);
 
 fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -868,6 +874,7 @@ fn parse_solution(
             solutions,
             dual,
             soc_dual,
+            psd_dual: FxHashMap::default(),
             reduced_costs,
             termination,
             primal_status: PrimalStatus::NoSolution,

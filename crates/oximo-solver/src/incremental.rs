@@ -46,6 +46,9 @@ pub struct Snapshot {
 /// cone program (explicit [`oximo_core::SocConstraint`]s or SOC-shaped
 /// quadratic constraints detected by [`Model::kind`]).
 pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let prepared = crate::prepare::LoweringContext::new(model)?;
     let kind = prepared.kind();
     if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {

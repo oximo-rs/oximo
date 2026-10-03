@@ -13,10 +13,12 @@ pub mod error;
 pub mod function_set;
 pub mod indexed;
 pub mod indicator;
+pub mod matrix;
 pub mod model;
 pub mod objective;
 pub mod param;
 pub mod prelude;
+pub mod psd;
 pub mod reformulation;
 pub mod set;
 pub mod soc;
@@ -70,8 +72,8 @@ pub use oximo_expr::{
 };
 
 pub use oximo_macros::{
-    constraint, indicator_constraint, max, min, objective, param, set, soc_constraint,
-    sos_constraint, sum, variable,
+    constraint, indicator_constraint, max, min, objective, param, psd_constraint, set,
+    soc_constraint, sos_constraint, sum, symmetric_variable, variable,
 };
 
 pub use crate::function_set::{
@@ -81,3 +83,9 @@ pub use crate::function_set::{
     ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet, VectorAffineFunction,
 };
 pub use oximo_expr::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
+
+pub use matrix::{MatrixScalar, SymmetricMatrix, SymmetricMatrixError, triangle_len};
+pub use psd::{
+    IntoAffineMatrixEntry, IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint,
+    PsdConstraintHandle, PsdConstraintId, PsdConstraintIr, SymmetricAffineFunction,
+};

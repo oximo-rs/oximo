@@ -77,3 +77,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo +stable test -p oximo-scip --tests
       - run: cargo +stable run -p oximo --no-default-features --features scip --example scip_minlp
+
+  sdp:
+    name: Cargo test (Clarabel SDP OpenBLAS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y gfortran
+      - run: cargo check -p oximo --no-default-features --features clarabel-sdp
+      - run: cargo test -p oximo-clarabel --features sdp-openblas --lib
+      - run: cargo test -p oximo --features clarabel-sdp-openblas --test solve_sdp
+      - run: cargo clippy -p oximo-core -p oximo-solver -p oximo-clarabel -p oximo --all-targets --features oximo/clarabel-sdp-openblas -- -D warnings

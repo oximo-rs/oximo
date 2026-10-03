@@ -89,6 +89,9 @@ pub fn write_nl_with<W: Write>(
     out: &mut W,
     opts: &WriteOptions,
 ) -> Result<(), IoError> {
+    if model.has_active_psd_constraints() {
+        return Err(IoError::Conic);
+    }
     if model.num_soc_constraints() > 0 {
         return Err(IoError::Conic);
     }
