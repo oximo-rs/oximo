@@ -12,14 +12,19 @@
 //!    affine coefficients.
 //!
 //! A `Maximize` objective negates `P`/`q` on the way in and the objective
-//! value and duals on the way out. Duals follow the LP convention
-//! `gradient = A' y` of the problem as posed. SOC blocks and variable-bound
-//! rows carry no [`ConstraintId`] and are skipped. Reduced costs are not
-//! reported.
+//! value and scalar row duals on the way out. Scalar duals follow the LP
+//! convention `gradient = A' y` of the problem as posed. PSD cone multipliers
+//! retain their cone sign for either objective sense and use separate block
+//! readback metadata. SOC blocks and variable-bound rows carry no
+//! [`ConstraintId`]. Reduced costs are not reported.
 
 // TODO: Add convex-QCP-to-SOC reformulation?
 
+use oximo_core::PsdConstraintId;
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+#[cfg(feature = "sdp")]
+use oximo_solver::psd::svec_coordinates;
+use oximo_solver::psd::{PsdTriangleOrder, unpack_svec};
 use oximo_solver::reconstruct::{DualProjection, ObjectiveTransform, normalize_result};
 
 use std::time::{Duration, Instant};
@@ -111,6 +116,7 @@ pub(crate) struct Meta {
     soc_block_starts: Vec<usize>,
     /// Count of leading SOC blocks that are explicit cones (duals reported).
     n_explicit: usize,
+    psd_blocks: Vec<(PsdConstraintId, usize, usize)>,
 }
 
 /// A translated Clarabel problem, conic data plus the [`Meta`] to read its
@@ -145,7 +151,7 @@ impl Problem {
 /// # Errors
 ///
 /// Returns [`SolverError::UnsupportedKind`] for anything but continuous
-/// LP/QP/SOCP, [`SolverError::Backend`] for semicontinuous/semi-integer
+/// LP/QP/SOCP/SDP, [`SolverError::Backend`] for semicontinuous/semi-integer
 /// domains or a Clarabel setup failure, and [`SolverError::Nonlinear`] if an
 /// expression defeats extraction.
 pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, SolverError> {
@@ -177,7 +183,7 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
 /// # Errors
 ///
 /// Returns [`SolverError::UnsupportedKind`] for anything but continuous
-/// LP/QP/SOCP, [`SolverError::Backend`] for a semicontinuous/semi-integer
+/// LP/QP/SOCP/SDP, [`SolverError::Backend`] for a semicontinuous/semi-integer
 /// domain or an out-of-arena SOC member, and [`SolverError::Nonlinear`] if an
 /// expression defeats extraction.
 ///
@@ -195,6 +201,11 @@ pub(crate) fn build_problem(model: &Model) -> Result<Problem, SolverError> {
 }
 
 fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, SolverError> {
+    if model.has_active_psd_constraints() && !cfg!(feature = "sdp") {
+        return Err(SolverError::UnsupportedConstraint(
+            "PSD (enable a clarabel-sdp BLAS provider feature)",
+        ));
+    }
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();
     if !crate::supported(kind) {
@@ -215,12 +226,32 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     let (soc_sizes, soc_block_starts, n_explicit) =
         soc_blocks(&rows, &explicit_forms, &mut acc, soc_capacity);
 
+    #[cfg_attr(not(feature = "sdp"), allow(unused_mut))]
+    let mut cones = build_cones(m_zero, m_nonneg, &soc_sizes);
+    #[cfg_attr(not(feature = "sdp"), allow(unused_mut))]
+    let mut psd_blocks = Vec::new();
+    #[cfg(feature = "sdp")]
+    for (index, constraint) in
+        prepared.constraints().positive_semidefinite().iter().enumerate().filter(|(_, c)| c.active)
+    {
+        let matrix = prepared.explicit_psd(constraint)?;
+        let n = matrix.side_dimension();
+        psd_blocks.push((
+            PsdConstraintId(u32::try_from(index).expect("PSD count overflow")),
+            acc.b.len(),
+            n,
+        ));
+        for (k, scale) in svec_coordinates(n, PsdTriangleOrder::UpperColumn) {
+            let entry = &matrix.upper_triangle()[k];
+            acc.push(entry, -scale, scale * entry.constant);
+        }
+        cones.push(SupportedConeT::PSDTriangleConeT(n));
+    }
+
     let Rows { a_trip, b, row_duals } = acc;
     let m = b.len();
     let a_mat = csc_from_triplets(m, n, a_trip);
     let p_mat = csc_from_triplets(n, n, p_trip);
-    let cones = build_cones(m_zero, m_nonneg, &soc_sizes);
-
     Ok(Problem {
         p_mat,
         q,
@@ -234,6 +265,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
             row_duals,
             soc_block_starts,
             n_explicit,
+            psd_blocks,
         },
     })
 }
@@ -501,6 +533,7 @@ pub(crate) fn read_result(
     let mut solutions = Vec::new();
     let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
     let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
+    let mut psd_dual = FxHashMap::default();
     if has_point {
         let primal =
             oximo_solver::reconstruct::project_dense_primal(&solver.solution.x, meta.num_variables)
@@ -517,6 +550,13 @@ pub(crate) fn read_result(
         for (k, &start) in meta.soc_block_starts.iter().take(meta.n_explicit).enumerate() {
             if let Some(&z0) = solver.solution.z.get(start) {
                 soc_dual.insert(SocConstraintId(u32::try_from(k).expect("SOC count overflow")), z0);
+            }
+        }
+        for &(id, start, n) in &meta.psd_blocks {
+            if let Some(values) = solver.solution.z.get(start..start + oximo_core::triangle_len(n))
+                && let Some(matrix) = unpack_svec(n, values, PsdTriangleOrder::UpperColumn)
+            {
+                psd_dual.insert(id, matrix);
             }
         }
     }
@@ -542,6 +582,7 @@ pub(crate) fn read_result(
             solutions,
             dual,
             soc_dual,
+            psd_dual,
             reduced_costs: FxHashMap::default(),
             best_bound,
             gap: None,
@@ -648,6 +689,19 @@ pub(crate) fn build_settings(o: &ClarabelOptions) -> DefaultSettings<f64> {
         presolve_enable,
         input_sparse_dropzeros,
     );
+    #[cfg(feature = "sdp")]
+    {
+        apply_opt!(chordal_decomposition_enable, chordal_decomposition_compact);
+        if let Some(method) = o.chordal_decomposition_merge_method {
+            s.chordal_decomposition_merge_method = match method {
+                crate::ClarabelChordalMerge::None => "none",
+                crate::ClarabelChordalMerge::ParentChild => "parent_child",
+                crate::ClarabelChordalMerge::CliqueGraph => "clique_graph",
+            }
+            .into();
+        }
+        s.chordal_decomposition_complete_dual = true;
+    }
     s
 }
 
@@ -804,6 +858,7 @@ mod tests {
             obj_constant: 5.0,
             row_duals: Vec::new(),
             soc_block_starts: Vec::new(),
+            psd_blocks: Vec::new(),
             n_explicit: 0,
         };
 
@@ -819,6 +874,7 @@ mod tests {
             obj_constant: 0.0,
             row_duals: Vec::new(),
             soc_block_starts: Vec::new(),
+            psd_blocks: Vec::new(),
             n_explicit: 0,
         };
 

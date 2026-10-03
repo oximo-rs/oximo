@@ -76,6 +76,10 @@ pub use oximo_baron::BaronOptions;
 #[cfg_attr(docsrs, doc(cfg(feature = "clarabel")))]
 pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions};
 
+#[cfg(feature = "clarabel-sdp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "clarabel-sdp")))]
+pub use oximo_clarabel::ClarabelChordalMerge;
+
 #[cfg(feature = "pounce")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
 pub use oximo_pounce::{
@@ -136,6 +140,10 @@ pub mod prelude {
     #[cfg(feature = "clarabel")]
     #[cfg_attr(docsrs, doc(cfg(feature = "clarabel")))]
     pub use oximo_clarabel::{ClarabelDirectSolve, ClarabelOptions, ClarabelPersistent};
+
+    #[cfg(feature = "clarabel-sdp")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "clarabel-sdp")))]
+    pub use oximo_clarabel::ClarabelChordalMerge;
 
     #[cfg(feature = "pounce")]
     #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]

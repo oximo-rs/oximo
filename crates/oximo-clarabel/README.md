@@ -4,8 +4,8 @@
 
 Wraps the [`clarabel`](https://crates.io/crates/clarabel) crate: an open-source,
 pure-Rust interior-point solver for convex conic programs. Supports `LP`, convex `QP`
-(quadratic objective, linear constraints), and `SOCP` model kinds. It has no
-integer support, so mixed-integer models are rejected.
+(quadratic objective, linear constraints), and `SOCP` model kinds, plus `SDP` with an optional BLAS/LAPACK provider.
+It has no integer support, so mixed-integer models are rejected.
 
 ## Usage
 
@@ -60,6 +60,8 @@ cargo run -p oximo --example gradostat_multiperiod_socp --features clarabel
 |------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|
 | `LP`                                           | Yes                                                                                                                       |
 | `QP` (quadratic objective, linear constraints) | Yes, the objective Hessian must be positive semidefinite (Clarabel does not check and a non-convex `P` fails numerically) |
+| `SDP`                                          | Yes, with an SDP feature and BLAS/LAPACK provider                                                                         |
+| `MISDP`                                        | No                                                                                                                        |
 | `SOCP`                                         | Yes                                                                                                                       |
 | `MILP`/`MIQP`/`MISOCP`                         | No, Clarabel has no integer support (returned as `UnsupportedKind`)                                                       |
 | `QCP`/`MIQCP`                                  | No, convex-QCP-to-SOC reformulation is not implemented. Write the constraint in SOC form instead.                         |
@@ -157,6 +159,17 @@ let opts = ClarabelOptions::default()
 - `best_bound` / `gap` - always `None` (conic solver, no MIP bound)
 - `solve_time` - wall time measured around the Clarabel solve call
 - `iterations` - interior-point iteration count
+
+## SDP build features
+
+Enable `clarabel-sdp-openblas`, `clarabel-sdp-mkl`, or `clarabel-sdp-accelerate` on `oximo`.
+Select one provider.
+
+SDP models may have affine or convex quadratic objectives and linear/SOC rows.
+Each affine symmetric matrix becomes an upper-column scaled `PSDTriangleConeT`.
+Matrix duals use ordinary entries and are PSD multipliers for either objective
+sense. Off-diagonal native dual coordinates are divided by `sqrt(2)`. Matrix primal
+readback comes from the original scalar variables, including shared mirrors.
 
 ## License
 

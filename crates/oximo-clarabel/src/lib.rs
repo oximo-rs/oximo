@@ -9,6 +9,9 @@ mod translate;
 #[doc(hidden)]
 pub use translate::benchmark_support;
 
+#[cfg(feature = "sdp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sdp")))]
+pub use options::ClarabelChordalMerge;
 pub use options::{ClarabelDirectSolve, ClarabelOptions};
 pub use persistent::ClarabelPersistent;
 pub use translate::solve;
@@ -20,7 +23,7 @@ use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
 ///
 /// Clarabel is a pure-Rust interior-point solver for convex conic programs:
 /// linear programs, convex quadratic objectives, and second-order cone
-/// constraints.
+/// constraints. PSD constraints require the optional SDP feature and BLAS/LAPACK.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Clarabel;
 
@@ -33,6 +36,7 @@ pub(crate) const NAME: &str = "Clarabel";
 /// QCP is out until convex quadratic constraints are reformulated to SOC.
 pub(crate) const fn supported(kind: ModelKind) -> bool {
     matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::SOCP)
+        || (cfg!(feature = "sdp") && matches!(kind, ModelKind::SDP))
 }
 
 impl Solver for Clarabel {
@@ -44,6 +48,10 @@ impl Solver for Clarabel {
 
     fn supports(&self, kind: ModelKind) -> bool {
         supported(kind)
+    }
+
+    fn supports_psd(&self) -> bool {
+        cfg!(feature = "sdp")
     }
 
     fn solve(

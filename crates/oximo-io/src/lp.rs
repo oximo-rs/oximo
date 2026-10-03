@@ -1163,6 +1163,9 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 /// [`IoError::NoObjective`] when the model declares no objective at all
 #[expect(clippy::too_many_lines)]
 pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
+    if model.has_active_psd_constraints() {
+        return Err(IoError::Conic);
+    }
     if model.num_soc_constraints() > 0
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
     {

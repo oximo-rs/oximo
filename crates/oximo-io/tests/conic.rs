@@ -89,3 +89,15 @@ fn text_writers_omit_reformulated_source_sos_constraints() {
         assert!(!mps.contains("\nSOS\n"));
     }
 }
+
+#[test]
+fn all_exporters_reject_psd_even_with_nonlinear_model_kind() {
+    let m = Model::new("psd");
+    variable!(m, x);
+    psd_constraint!(m, SymmetricMatrix::from_upper_triangle(1, [x]));
+    objective!(m, Min, x.exp());
+    assert_eq!(m.kind(), ModelKind::NLP);
+    assert!(matches!(to_lp_string(&m), Err(IoError::Conic)));
+    assert!(matches!(to_mps_string(&m), Err(IoError::Conic)));
+    assert!(matches!(to_nl_string(&m), Err(IoError::Conic)));
+}

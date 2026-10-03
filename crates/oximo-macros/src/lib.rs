@@ -14,6 +14,7 @@ mod index;
 mod indicator;
 mod objective;
 mod param;
+mod psd;
 mod set;
 mod soc;
 mod sos;
@@ -282,4 +283,16 @@ fn next_seg(segs: &mut std::vec::IntoIter<TokenStream2>) -> syn::Result<TokenStr
     segs.next().ok_or_else(|| {
         syn::Error::new(proc_macro2::Span::call_site(), "malformed relation: missing an operand")
     })
+}
+
+/// Declare a real symmetric matrix: `symmetric_variable!(model, X[n])`.
+#[proc_macro]
+pub fn symmetric_variable(input: TokenStream) -> TokenStream {
+    psd::symmetric_variable(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Register a PSD matrix constraint: `psd_constraint!(model, [name,] matrix)`.
+#[proc_macro]
+pub fn psd_constraint(input: TokenStream) -> TokenStream {
+    psd::constraint(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }

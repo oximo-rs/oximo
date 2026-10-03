@@ -143,6 +143,9 @@ pub(crate) struct Snapshot {
 impl Snapshot {
     pub(crate) fn prepare(model: &Model) -> Result<Self, SolverError> {
         crate::check_name(&model.name)?;
+        if model.has_active_psd_constraints() {
+            return Err(SolverError::UnsupportedConstraint("PSD"));
+        }
         let p = LoweringContext::new(model)?;
         let mut columns = Vec::new();
         for v in p.variables() {

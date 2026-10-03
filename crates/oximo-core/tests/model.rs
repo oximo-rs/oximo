@@ -447,6 +447,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
 
     let mut iter = constraints.iter();
     match iter.next().expect("algebraic constraint") {
+        ConstraintRef::PositiveSemidefinite { .. } => panic!("unexpected PSD constraint"),
         ConstraintRef::Algebraic { id, constraint } => {
             assert_eq!(id, ConstraintId(0));
             assert_eq!(constraint.name, "shared");
@@ -460,6 +461,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
             assert_eq!(id, soc_id.id());
             assert_eq!(constraint.name, "shared");
         }
+        ConstraintRef::PositiveSemidefinite { .. } => panic!("unexpected PSD constraint"),
         ConstraintRef::Algebraic { .. } => panic!("explicit cones come second"),
         ConstraintRef::SpecialOrderedSet { .. } | ConstraintRef::Indicator { .. } => {
             panic!("expected SOC constraint")
@@ -470,6 +472,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
             assert_eq!(id, sos_id);
             assert_eq!(constraint.name, "sos");
         }
+        ConstraintRef::PositiveSemidefinite { .. } => panic!("unexpected PSD constraint"),
         ConstraintRef::Algebraic { .. } => panic!("algebraic constraints come first"),
         ConstraintRef::SecondOrderCone { .. } => panic!("SOS constraints come last"),
         ConstraintRef::Indicator { .. } => panic!("expected SOS constraint"),

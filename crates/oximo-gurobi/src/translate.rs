@@ -40,6 +40,9 @@ pub(crate) fn map_gurobi_err(e: gurobi_rs::Error) -> SolverError {
 pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
     let kind = model.kind();
     validate_model_operators(model)?;
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let env = default_env()?;
     let mut built = build(model, opts, &env)?;
     run_and_collect(&mut built, kind)
@@ -73,6 +76,9 @@ pub(crate) struct Built {
 /// cannot represent or Gurobi reports an error during setup.
 pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
     validate_model_operators(model)?;
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();
     let nonlinear_kind = matches!(
@@ -237,6 +243,7 @@ fn collect_after_optimize(
             solutions,
             dual,
             soc_dual,
+            psd_dual: FxHashMap::default(),
             reduced_costs,
             best_bound,
             gap: built.model.get_attr(attr::MIPGap).ok(),
@@ -263,6 +270,9 @@ where
     F: gurobi_rs::callback::Callback,
 {
     let kind = model.kind();
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let env = default_env()?;
     let mut built = build(model, opts, &env)?;
     run_and_collect_with_callback(&mut built, kind, callback, mask)
@@ -283,6 +293,9 @@ where
 ///
 /// Panics if a constraint, SOC, or variable index overflows `u32`.
 pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let env = default_env()?;
     let mut built = build(model, opts, &env)?;
     // Force a definite Infeasible/Unbounded verdict so we don't ask for an IIS on an
