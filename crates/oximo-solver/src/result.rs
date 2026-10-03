@@ -52,7 +52,7 @@ impl SolutionPoint {
     /// Returns `Ok(None)` if any entry needs a missing primal variable.
     /// Parameter values are read from each expression's model arena at query
     /// time. Evaluate the matrix before rebinding parameters to retain its
-	/// solved values.
+    /// solved values.
     ///
     /// # Errors
     /// Returns a model ownership error for any foreign expression.
@@ -432,8 +432,8 @@ impl SolverResult {
 
     /// Ordinary PSD multiplier matrix, or `None` when unavailable.
     /// Both objective senses return a cone multiplier Y.
-	/// Stationarity uses `sigma*f(x) - <Y,F(x)>`, sigma=1 for
-	/// minimization and -1 for maximization.
+    /// Stationarity uses `sigma*f(x) - <Y,F(x)>`, sigma=1 for
+    /// minimization and -1 for maximization.
     ///
     /// # Errors
     /// Returns a model ownership error for a foreign constraint.
