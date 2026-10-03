@@ -78,6 +78,7 @@ solved depends on the selected backend:
 - Mixed-integer quadratic and quadratically constrained programming (MIQP/MIQCP)
 - Mixed-integer nonlinear programming (MINLP)
 - Second-order cone programming (SOCP/MISOCP)
+- Semidefinite programming (SDP)
 
 ## Solver features
 
@@ -91,6 +92,7 @@ solved depends on the selected backend:
 | `baron`                   | BARON - global non-convex solver (requires licensed install) | no      |
 | `clarabel`                | Clarabel conic solver (pure Rust, no install)                | no      |
 | `clarabel-faer`           | Clarabel with the faer sparse linear-algebra backend         | no      |
+| `clarabel-sdp`            | Clarabel SDP support (requires a BLAS/LAPACK provider)       | no      |
 | `clarabel-sdp-openblas`   | Clarabel SDP with OpenBLAS                                   | no      |
 | `clarabel-sdp-mkl`        | Clarabel SDP with Intel MKL                                  | no      |
 | `clarabel-sdp-accelerate` | Clarabel SDP with Apple Accelerate                           | no      |
