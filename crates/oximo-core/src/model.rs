@@ -4,6 +4,10 @@ use crate::function_set::{
     IntoFunction, LessThan, LowerConstraint, ScalarFunction, SecondOrderCone, Set as ConstraintSet,
     SocConstraintIr, VectorAffineFunction, validate_bounds,
 };
+use crate::{
+    IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint, PsdConstraintHandle,
+    PsdConstraintId, PsdConstraintIr, SymmetricMatrix,
+};
 use oximo_expr::{Affine, Constant, Degree};
 use std::cell::{Cell, Ref, RefCell};
 use std::fmt;
@@ -244,6 +248,8 @@ pub enum ModelKind {
     MIQCP,
     SOCP,
     MISOCP,
+    SDP,
+    MISDP,
     NLP,
     MINLP,
 }
@@ -259,6 +265,8 @@ impl fmt::Display for ModelKind {
             Self::MIQCP => "MIQCP",
             Self::SOCP => "SOCP",
             Self::MISOCP => "MISOCP",
+            Self::SDP => "SDP",
+            Self::MISDP => "MISDP",
             Self::NLP => "NLP",
             Self::MINLP => "MINLP",
         })
@@ -267,12 +275,13 @@ impl fmt::Display for ModelKind {
 
 /// A borrowed constraint from a [`Model`].
 ///
-/// Algebraic, explicitly declared second-order-cone, and SOS constraints
+/// Algebraic, explicitly declared SOC/PSD, SOS, and indicator constraints
 /// retain their typed IDs and storage. This enum provides a unified inspection
 /// boundary without changing either representation.
 #[derive(Copy, Clone, Debug)]
 pub enum ConstraintRef<'a> {
     Algebraic { id: ConstraintId, constraint: &'a AlgebraicConstraint },
+    PositiveSemidefinite { id: PsdConstraintId, constraint: &'a PsdConstraint },
     SecondOrderCone { id: SocConstraintId, constraint: &'a SocConstraint },
     SpecialOrderedSet { id: SosConstraintId, constraint: &'a SosConstraint },
     Indicator { id: IndicatorConstraintId, constraint: &'a IndicatorConstraint },
@@ -280,7 +289,7 @@ pub enum ConstraintRef<'a> {
 
 /// Unified borrowed view of every constraint declared on a [`Model`].
 ///
-/// The underlying algebraic, explicit-SOC, SOS, and indicator registries remain
+/// The underlying algebraic, explicit-SOC, PSD, SOS, and indicator registries remain
 /// separate, so backends can iterate a homogeneous slice without a
 /// per-constraint branch.
 /// [`Self::iter`] visits algebraic constraints in [`ConstraintId`] order,
@@ -290,6 +299,7 @@ pub enum ConstraintRef<'a> {
 pub struct ModelConstraints<'a> {
     algebraic: Ref<'a, Vec<AlgebraicConstraint>>,
     second_order_cones: Ref<'a, Vec<SocConstraint>>,
+    positive_semidefinite: Ref<'a, Vec<PsdConstraint>>,
     special_ordered_sets: Ref<'a, Vec<SosConstraint>>,
     indicators: Ref<'a, Vec<IndicatorConstraint>>,
 }
@@ -303,6 +313,11 @@ impl ModelConstraints<'_> {
     /// Explicit second-order-cone constraints in [`SocConstraintId`] order.
     pub fn second_order_cones(&self) -> &[SocConstraint] {
         &self.second_order_cones
+    }
+
+    /// PSD matrix constraints in stable ID order.
+    pub fn positive_semidefinite(&self) -> &[PsdConstraint] {
+        &self.positive_semidefinite
     }
 
     pub fn special_ordered_sets(&self) -> &[SosConstraint] {
@@ -333,13 +348,17 @@ impl ModelConstraints<'_> {
         let indicators = self.indicators.iter().enumerate().map(|(index, constraint)| {
             ConstraintRef::Indicator { id: IndicatorConstraintId(index as u32), constraint }
         });
-        algebraic.chain(second_order_cones).chain(special_ordered_sets).chain(indicators)
+        let psd = self.positive_semidefinite.iter().enumerate().map(|(index, constraint)| {
+            ConstraintRef::PositiveSemidefinite { id: PsdConstraintId(index as u32), constraint }
+        });
+        algebraic.chain(second_order_cones).chain(psd).chain(special_ordered_sets).chain(indicators)
     }
 
-    /// Total number of algebraic, SOC, SOS, and indicator constraints.
+    /// Total number of algebraic, SOC, PSD, SOS, and indicator constraints.
     pub fn len(&self) -> usize {
         self.algebraic.len()
             + self.second_order_cones.len()
+            + self.positive_semidefinite.len()
             + self.special_ordered_sets.len()
             + self.indicators.len()
     }
@@ -347,6 +366,7 @@ impl ModelConstraints<'_> {
     pub fn is_empty(&self) -> bool {
         self.algebraic.is_empty()
             && self.second_order_cones.is_empty()
+            && self.positive_semidefinite.is_empty()
             && self.special_ordered_sets.is_empty()
             && self.indicators.is_empty()
     }
@@ -372,6 +392,8 @@ pub struct Model {
     pub(crate) constraint_names: RefCell<FxHashMap<SmolStr, ConstraintId>>,
     pub(crate) soc_constraints: RefCell<Vec<SocConstraint>>,
     pub(crate) soc_names: RefCell<FxHashMap<SmolStr, SocConstraintId>>,
+    pub(crate) psd_constraints: RefCell<Vec<PsdConstraint>>,
+    pub(crate) psd_names: RefCell<FxHashMap<SmolStr, PsdConstraintId>>,
     pub(crate) sos_constraints: RefCell<Vec<SosConstraint>>,
     pub(crate) sos_names: RefCell<FxHashMap<SmolStr, SosConstraintId>>,
     pub(crate) indicator_constraints: RefCell<Vec<IndicatorConstraint>>,
@@ -450,6 +472,8 @@ impl Model {
             constraint_names: RefCell::new(cloned_constraint_names),
             soc_constraints: RefCell::new(self.soc_constraints.borrow().clone()),
             soc_names: RefCell::new(self.soc_names.borrow().clone()),
+            psd_constraints: RefCell::new(self.psd_constraints.borrow().clone()),
+            psd_names: RefCell::new(self.psd_names.borrow().clone()),
             sos_constraints: RefCell::new(self.sos_constraints.borrow().clone()),
             sos_names: RefCell::new(self.sos_names.borrow().clone()),
             indicator_constraints: RefCell::new(self.indicator_constraints.borrow().clone()),
@@ -472,6 +496,7 @@ impl std::fmt::Debug for Model {
             .field("params", &self.parameters.borrow().len())
             .field("constraints", &self.constraints.borrow().len())
             .field("soc_constraints", &self.soc_constraints.borrow().len())
+            .field("psd_constraints", &self.psd_constraints.borrow().len())
             .field("sos_constraints", &self.sos_constraints.borrow().len())
             .field("indicator_constraints", &self.indicator_constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
@@ -497,6 +522,8 @@ impl Model {
             constraint_names: RefCell::new(FxHashMap::default()),
             soc_constraints: RefCell::new(Vec::new()),
             soc_names: RefCell::new(FxHashMap::default()),
+            psd_constraints: RefCell::new(Vec::new()),
+            psd_names: RefCell::new(FxHashMap::default()),
             sos_constraints: RefCell::new(Vec::new()),
             sos_names: RefCell::new(FxHashMap::default()),
             indicator_constraints: RefCell::new(Vec::new()),
@@ -1490,15 +1517,17 @@ impl Model {
         ModelConstraints {
             algebraic: self.constraints.borrow(),
             second_order_cones: self.soc_constraints.borrow(),
+            positive_semidefinite: self.psd_constraints.borrow(),
             special_ordered_sets: self.sos_constraints.borrow(),
             indicators: self.indicator_constraints.borrow(),
         }
     }
 
-    /// Total number of algebraic, SOC, SOS, and indicator constraints.
+    /// Total number of algebraic, SOC, PSD, SOS, and indicator constraints.
     pub fn num_constraints(&self) -> usize {
         self.constraints.borrow().len()
             + self.soc_constraints.borrow().len()
+            + self.psd_constraints.borrow().len()
             + self.sos_constraints.borrow().len()
             + self.indicator_constraints.borrow().len()
     }
@@ -1515,6 +1544,188 @@ impl Model {
     /// Bind a raw algebraic constraint ID to this model.
     pub fn constraint_handle_from_id(&self, id: ConstraintId) -> Option<ConstraintHandle> {
         (id.index() < self.constraints.borrow().len()).then(|| ConstraintHandle::new(id, self.id()))
+    }
+
+    /// Declare a continuous symmetric matrix with shared mirrored scalar variables.
+    ///
+    /// # Panics
+    /// Panics for invalid dimensions, duplicate entry names, or count overflow.
+    pub fn add_symmetric_variable(
+        &self,
+        name: &str,
+        n: usize,
+    ) -> SymmetricMatrix<Expr<'_, Affine>> {
+        let len = crate::triangle_len(n);
+        let final_count = self.num_variables().checked_add(len).expect("variable count overflow");
+        u32::try_from(final_count - 1).expect("variable count overflow");
+        let items = SymmetricMatrix::from_upper_fn(n, |i, j| PendingVar {
+            name: format!("{name}[{i},{j}]").into(),
+            lb: f64::NEG_INFINITY,
+            ub: f64::INFINITY,
+        });
+        let handles = self.register_vars_batch(items.upper_triangle(), Domain::Real);
+        SymmetricMatrix::from_upper_triangle(n, handles)
+    }
+
+    /// Register an explicitly symmetric affine matrix in the real PSD cone.
+    ///
+    /// # Panics
+    /// Panics for invalid ownership, non-affine dynamic entries, duplicate names, or count overflow.
+    pub fn add_psd_constraint<'a>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        matrix: impl IntoSymmetricAffineFunction<'a>,
+    ) -> PsdConstraintHandle {
+        let function = matrix.into_symmetric_affine_function(self);
+        let side_dimension = function.matrix().side_dimension();
+        self.add_constraint(
+            name,
+            Constraint::new(function, PositiveSemidefiniteCone { side_dimension }),
+        )
+    }
+
+    pub(crate) fn register_psd_ir(
+        &self,
+        name: SmolStr,
+        ir: PsdConstraintIr<'_>,
+    ) -> PsdConstraintHandle {
+        for &entry in ir.0.matrix().upper_triangle() {
+            self.assert_expr_belongs(entry);
+        }
+        let matrix = ir.0.matrix().map(|entry| entry.id());
+        let mut names = self.psd_names.borrow_mut();
+        validate_batch_names(&names, [&name], "PSD constraint", 1);
+        let mut all = self.psd_constraints.borrow_mut();
+        let id = PsdConstraintId(u32::try_from(all.len()).expect("PSD count overflow"));
+        all.push(PsdConstraint { name: name.clone(), matrix, active: true });
+        names.insert(name, id);
+        self.invalidate_kind();
+        PsdConstraintHandle::new(id, self.id())
+    }
+
+    #[doc(hidden)]
+    pub fn __add_psd_constraint_auto<'a>(
+        &'a self,
+        matrix: impl IntoSymmetricAffineFunction<'a>,
+    ) -> PsdConstraintHandle {
+        loop {
+            let n = self.auto_seq.get();
+            self.auto_seq.set(n.checked_add(1).expect("constraint name count overflow"));
+            let name = format!("_psd{n}");
+            if !self.psd_names.borrow().contains_key(name.as_str()) {
+                return self.add_psd_constraint(name, matrix);
+            }
+        }
+    }
+
+    /// Transactional indexed PSD registration with deterministic worker arena remapping.
+    #[doc(hidden)]
+    pub fn __add_psd_constraints_over<'a, K, M, F>(&'a self, prefix: &str, set: &Set<K>, rule: F)
+    where
+        K: FromIndexKey,
+        M: IntoSymmetricAffineFunction<'a>,
+        F: Fn(K) -> M + Send + Sync,
+    {
+        let keys: Vec<_> = set.iter().collect();
+        let arena = &self.arena;
+        let expected_arena = arena_key(arena);
+        let mut batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let prepare = |chunk: &[IndexKey]| {
+            arena.__with_fork(snapshot.clone(), || {
+                chunk
+                    .iter()
+                    .map(|key| {
+                        let function =
+                            rule(K::from_index_key(key)).__into_symmetric_affine_function(arena);
+                        for &entry in function.matrix().upper_triangle() {
+                            assert_expr_arena(entry, expected_arena);
+                        }
+                        (
+                            SmolStr::from(format_index_name(prefix, key)),
+                            function.matrix().map(|entry| entry.id()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let mut forks: Vec<_> = if indexed_parallel(keys.len(), None, PAR_INDEXED_SOC_THRESHOLD) {
+            keys.par_chunks(indexed_chunk_size(keys.len())).map(prepare).collect()
+        } else {
+            vec![prepare(&keys)]
+        };
+        drop(snapshot);
+        let mut names = self.psd_names.borrow_mut();
+        validate_batch_names(
+            &names,
+            forks.iter().flat_map(|fork| fork.value.iter().map(|(name, _)| name)),
+            "PSD constraint",
+            keys.len(),
+        );
+        let mut all = self.psd_constraints.borrow_mut();
+        let final_count = all.len().checked_add(keys.len()).expect("PSD count overflow");
+        if final_count > 0 {
+            u32::try_from(final_count - 1).expect("PSD count overflow");
+        }
+        let remaps = batch.merge(&mut forks);
+        drop(batch);
+        for (fork, remap) in forks.into_iter().zip(remaps) {
+            for (name, matrix) in fork.value {
+                let id = PsdConstraintId(u32::try_from(all.len()).expect("PSD count overflow"));
+                all.push(PsdConstraint {
+                    name: name.clone(),
+                    matrix: matrix.map(|&entry| remap.apply(entry)),
+                    active: true,
+                });
+                names.insert(name, id);
+            }
+        }
+        self.invalidate_kind();
+    }
+
+    pub fn psd_constraints(&self) -> Ref<'_, Vec<PsdConstraint>> {
+        self.psd_constraints.borrow()
+    }
+
+    pub fn num_psd_constraints(&self) -> usize {
+        self.psd_constraints.borrow().len()
+    }
+
+    pub fn has_active_psd_constraints(&self) -> bool {
+        self.psd_constraints.borrow().iter().any(|c| c.active)
+    }
+
+    pub fn psd_constraint_id(&self, name: &str) -> Option<PsdConstraintId> {
+        self.psd_names.borrow().get(name).copied()
+    }
+
+    pub fn psd_constraint_handle(&self, name: &str) -> Option<PsdConstraintHandle> {
+        self.psd_constraint_id(name).map(|id| PsdConstraintHandle::new(id, self.id()))
+    }
+
+    pub fn psd_constraint_handle_from_id(
+        &self,
+        id: PsdConstraintId,
+    ) -> Option<PsdConstraintHandle> {
+        (id.index() < self.num_psd_constraints()).then(|| PsdConstraintHandle::new(id, self.id()))
+    }
+
+    /// Change PSD activity while invalidating the cached model classification.
+    ///
+    /// # Errors
+    /// Returns an ownership error for a foreign model handle.
+    ///
+    /// # Panics
+    /// Panics for an invalid constraint ID.
+    pub fn set_psd_active(
+        &self,
+        handle: PsdConstraintHandle,
+        active: bool,
+    ) -> std::result::Result<(), ModelMismatchError> {
+        self.ensure_model_id(handle.model_id())?;
+        self.psd_constraints.borrow_mut()[handle.index()].active = active;
+        self.invalidate_kind();
+        Ok(())
     }
 
     // Second-order cone constraints
@@ -1741,9 +1952,9 @@ impl Model {
             .then(|| SocConstraintHandle::new(id, self.id()))
     }
 
-    /// Whether the model carries any explicit second-order cone constraints.
+    /// Whether the model carries any explicit SOC or PSD constraints.
     pub fn has_cones(&self) -> bool {
-        !self.soc_constraints.borrow().is_empty()
+        !self.soc_constraints.borrow().is_empty() || !self.psd_constraints.borrow().is_empty()
     }
 
     /// Register an explicit SOS1 or SOS2 constraint. Members must be bare
@@ -2529,9 +2740,10 @@ impl Model {
     /// 1. any nonlinear expression (objective or constraint) -> `NLP`
     /// 2. any quadratic constraint not recognized by the structural SOC
     ///    predicate -> `QCP`
-    /// 3. cones present (explicit or detected) -> `SOCP`
-    /// 4. quadratic objective -> `QP`
-    /// 5. otherwise -> `LP`
+    /// 3. active PSD matrices -> `SDP`
+    /// 4. SOC cones present (explicit or detected) -> `SOCP`
+    /// 5. quadratic objective -> `QP`
+    /// 6. otherwise -> `LP`
     pub fn kind(&self) -> ModelKind {
         if let Some(k) = self.cached_kind.get() {
             return k;
@@ -2621,6 +2833,8 @@ impl Model {
             pick(ModelKind::NLP, ModelKind::MINLP)
         } else if plain_quad_con {
             pick(ModelKind::QCP, ModelKind::MIQCP)
+        } else if self.has_active_psd_constraints() {
+            pick(ModelKind::SDP, ModelKind::MISDP)
         } else if has_soc {
             pick(ModelKind::SOCP, ModelKind::MISOCP)
         } else if obj_class == ExprClass::Quadratic {
@@ -3069,6 +3283,7 @@ mod tests {
         let constraints = m.constraints();
         assert_eq!(constraints.len(), 3);
         assert!(constraints.iter().all(|entry| match entry {
+            ConstraintRef::PositiveSemidefinite { constraint, .. } => !constraint.active,
             ConstraintRef::Algebraic { constraint, .. } => !constraint.active,
             ConstraintRef::SecondOrderCone { constraint, .. } => !constraint.active,
             ConstraintRef::SpecialOrderedSet { constraint, .. } => !constraint.active,

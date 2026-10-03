@@ -103,6 +103,16 @@ impl Solver for MosekPersistent {
         crate::supported(kind)
     }
 
+    fn supports_psd(&self) -> bool {
+        true
+    }
+
+    fn supports_model(&self, model: &Model) -> bool {
+        crate::supported(model.kind())
+            && !model.has_active_sos_constraints()
+            && crate::psd_compatible(model)
+    }
+
     fn supports_indicators(&self) -> bool {
         true
     }

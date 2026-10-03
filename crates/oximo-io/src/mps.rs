@@ -1329,6 +1329,9 @@ pub fn write_mps_with<W: Write>(
     out: &mut W,
     options: &MpsWriteOptions,
 ) -> Result<(), IoError> {
+    if model.has_active_psd_constraints() {
+        return Err(IoError::Conic);
+    }
     if model.num_soc_constraints() > 0
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
     {

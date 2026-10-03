@@ -145,7 +145,8 @@ impl GamsSolverConfig {
     /// [`GamsSolver::Custom`] and any unrecognized name return `true`.
     #[must_use]
     pub fn supports(&self, kind: ModelKind) -> bool {
-        solver_supports_type(self.gams_name(), gams_solve_type(kind))
+        !matches!(kind, ModelKind::SDP | ModelKind::MISDP)
+            && solver_supports_type(self.gams_name(), gams_solve_type(kind))
     }
 }
 

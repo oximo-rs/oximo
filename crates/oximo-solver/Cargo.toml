@@ -22,5 +22,9 @@ criterion.workspace = true
 name = "extraction_cache"
 harness = false
 
+[[bench]]
+name = "sdp"
+harness = false
+
 [lints]
 workspace = true

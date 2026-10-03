@@ -8,7 +8,7 @@ pub enum IoError {
         "expected a linear or quadratic expression in {location}, found nonlinear term: {term}"
     )]
     Nonlinear { location: String, term: String },
-    #[error("second-order cone constraints cannot be represented in this format")]
+    #[error("SOC/PSD cone constraints cannot be represented in this format")]
     Conic,
     #[error("unsupported expression node in NL writer: {0}")]
     UnsupportedNode(&'static str),

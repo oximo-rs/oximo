@@ -84,6 +84,9 @@ impl GurobiPersistent {
 
     /// Discard any resident instance and rebuild from the current model state.
     fn rebuild(&mut self, model: &Model, opts: &GurobiOptions) -> Result<(), SolverError> {
+        if model.has_active_psd_constraints() {
+            return Err(SolverError::UnsupportedConstraint("PSD"));
+        }
         let env = match self.env.as_ref() {
             Some(env) => env,
             None => self.env.insert(default_env()?),

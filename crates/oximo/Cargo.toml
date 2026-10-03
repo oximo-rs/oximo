@@ -20,6 +20,10 @@ mosek = ["dep:oximo-mosek"]
 gams = ["dep:oximo-gams"]
 baron = ["dep:oximo-baron"]
 clarabel = ["dep:oximo-clarabel"]
+clarabel-sdp = ["clarabel", "oximo-clarabel/sdp"]
+clarabel-sdp-openblas = ["clarabel-sdp", "oximo-clarabel/sdp-openblas"]
+clarabel-sdp-mkl = ["clarabel-sdp", "oximo-clarabel/sdp-mkl"]
+clarabel-sdp-accelerate = ["clarabel-sdp", "oximo-clarabel/sdp-accelerate"]
 clarabel-faer = ["clarabel", "oximo-clarabel/faer"]
 pounce = ["dep:oximo-pounce"]
 scip = ["dep:oximo-scip", "oximo-scip/bundled"]
@@ -108,6 +112,10 @@ required-features = ["highs"]
 [[example]]
 name = "transport"
 required-features = ["highs"]
+
+[[example]]
+name = "sdp"
+required-features = ["clarabel-sdp"]
 
 [[example]]
 name = "parametric_pricing"

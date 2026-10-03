@@ -1,3 +1,4 @@
+use oximo_core::{PsdConstraintHandle, PsdConstraintId, SymmetricMatrix};
 use std::borrow::Cow;
 use std::time::Duration;
 
@@ -45,6 +46,33 @@ impl SolutionPoint {
     #[must_use]
     pub const fn model_id(&self) -> ModelId {
         self.model_id
+    }
+
+    /// Evaluate ordinary entries of a symmetric matrix at this point.
+    /// Returns `Ok(None)` if any entry needs a missing primal variable.
+    /// Parameter values are read from each expression's model arena at query
+    /// time. Evaluate the matrix before rebinding parameters to retain its
+    /// solved values.
+    ///
+    /// # Errors
+    /// Returns a model ownership error for any foreign expression.
+    pub fn value_of_matrix<D: oximo_expr::Degree>(
+        &self,
+        matrix: &SymmetricMatrix<Expr<'_, D>>,
+    ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
+        // We validate every owner even if a previous entry has no primal value.
+        for entry in matrix.upper_triangle() {
+            ensure_model_id(self.model_id, entry.model_id())?;
+        }
+        let arena = matrix[(0, 0)].arena.borrow();
+        let context = PointContext(&self.primal);
+        let entries = matrix
+            .upper_triangle()
+            .iter()
+            .map(|entry| evaluate(&arena, entry.id(), &context).ok())
+            .collect::<Option<Vec<_>>>();
+        Ok(entries
+            .map(|entries| SymmetricMatrix::from_upper_triangle(matrix.side_dimension(), entries)))
     }
 
     /// Look up a primal value by raw `VarId`. Raw IDs carry no model provenance;
@@ -211,6 +239,7 @@ pub struct SolverResult {
     pub solutions: Vec<SolutionPoint>,
     pub dual: FxHashMap<ConstraintId, f64>,
     pub soc_dual: FxHashMap<SocConstraintId, f64>,
+    pub psd_dual: FxHashMap<PsdConstraintId, SymmetricMatrix<f64>>,
     pub reduced_costs: FxHashMap<VarId, f64>,
     /// The best objective bound reported by the backend.
     pub best_bound: Option<f64>,
@@ -237,6 +266,7 @@ impl Default for SolverResult {
             solutions: Vec::new(),
             dual: FxHashMap::default(),
             soc_dual: FxHashMap::default(),
+            psd_dual: FxHashMap::default(),
             reduced_costs: FxHashMap::default(),
             best_bound: None,
             gap: None,
@@ -381,6 +411,38 @@ impl SolverResult {
         let Some(point) = self.solution(solution_index) else { return Ok(None) };
         ensure_model_id(self.model_id, point.model_id)?;
         Ok(evaluate_soc_at(point, model, constraint.id()))
+    }
+
+    /// Evaluate a symmetric expression matrix at the best solution.
+    /// Returns `Ok(None)` when there is no solution or an entry needs a missing
+    /// primal variable. Parameters use their current model values, so evaluate
+    /// before rebinding them if you need the matrix from this solve.
+    ///
+    /// # Errors
+    /// Returns a model ownership error for a foreign matrix.
+    pub fn value_of_matrix<D: oximo_expr::Degree>(
+        &self,
+        matrix: &SymmetricMatrix<Expr<'_, D>>,
+    ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
+        for entry in matrix.upper_triangle() {
+            ensure_model_id(self.model_id, entry.model_id())?;
+        }
+        self.best().map_or(Ok(None), |point| point.value_of_matrix(matrix))
+    }
+
+    /// Ordinary PSD multiplier matrix, or `None` when unavailable.
+    /// Both objective senses return a cone multiplier Y.
+    /// Stationarity uses `sigma*f(x) - <Y,F(x)>`, sigma=1 for
+    /// minimization and -1 for maximization.
+    ///
+    /// # Errors
+    /// Returns a model ownership error for a foreign constraint.
+    pub fn psd_dual_of(
+        &self,
+        constraint: PsdConstraintHandle,
+    ) -> Result<Option<&SymmetricMatrix<f64>>, ModelMismatchError> {
+        ensure_model_id(self.model_id, constraint.model_id())?;
+        Ok(self.psd_dual.get(&constraint.id()))
     }
 
     /// Look up an algebraic constraint multiplier, rejecting a handle from a
@@ -547,7 +609,8 @@ impl std::fmt::Display for ModelReport<'_> {
                 .iter()
                 .filter_map(|constraint| match constraint {
                     ConstraintRef::Algebraic { id, constraint } => Some((id, constraint)),
-                    ConstraintRef::SecondOrderCone { .. }
+                    ConstraintRef::PositiveSemidefinite { .. }
+                    | ConstraintRef::SecondOrderCone { .. }
                     | ConstraintRef::SpecialOrderedSet { .. }
                     | ConstraintRef::Indicator { .. } => None,
                 })
@@ -557,6 +620,23 @@ impl std::fmt::Display for ModelReport<'_> {
             for (id, c) in cons {
                 let d = r.dual.get(&id).copied().map_or_else(|| "n/a".to_owned(), num);
                 writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
+            }
+        }
+
+        if !m.psd_constraints().is_empty() {
+            writeln!(f, "\npsd constraints ({})", m.num_psd_constraints())?;
+            for (index, constraint) in m.psd_constraints().iter().enumerate() {
+                let id = PsdConstraintId(u32::try_from(index).expect("PSD index fits u32"));
+                if let Some(matrix) = r.psd_dual.get(&id) {
+                    writeln!(
+                        f,
+                        "  {}  dual (upper triangle) = {:?}",
+                        constraint.name,
+                        matrix.upper_triangle()
+                    )?;
+                } else {
+                    writeln!(f, "  {}  dual = n/a", constraint.name)?;
+                }
             }
         }
 

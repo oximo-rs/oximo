@@ -59,20 +59,23 @@ The modeling layer supports a range of algebraic optimization problems. The avai
 
 ## Features
 
-| Feature         | What it adds                                                   | Default |
-| --------------- | -------------------------------------------------------------- | ------- |
-| `highs`         | HiGHS - LP/MILP/QP solver (bundled, requires a C/C++ compiler) | no      |
-| `io`            | NL, MPS, and LP file readers and writers                       | yes     |
-| `gurobi`        | Gurobi v13+ solver (requires licensed install)                 | no      |
-| `mosek`         | MOSEK 11.2 - convex LP/MIP/QP/QCP/SOCP solver                  | no      |
-| `gams`          | GAMS bridge - solve type depends on the selected sub-solver    | no      |
-| `baron`         | BARON - global non-convex solver (requires licensed install)   | no      |
-| `clarabel`      | Clarabel - LP/QP/SOCP conic solver (pure Rust, no install)     | no      |
-| `clarabel-faer` | Clarabel with the faer sparse linear-algebra backend           | no      |
-| `pounce`        | POUNCE - pure-Rust IPOPT for LP/QP/QCP/NLP (no install)        | no      |
-| `pounce-enzyme` | POUNCE with exact Enzyme derivatives (nightly)                 | no      |
-| `scip`          | SCIP via russcip - LP/MILP/QP/QCP/SOCP/NLP/MINLP (bundled)     | no      |
-| `scip-system`   | SCIP via a system installation (set `SCIPOPTDIR`)              | no      |
+| Feature                   | What it adds                                                 | Default |
+| ------------------------- | ------------------------------------------------------------ | ------- |
+| `io`                      | NL, MPS, and LP file readers and writers                     | yes     |
+| `highs`                   | HiGHS solver (bundled, requires a C/C++ compiler)            | no      |
+| `gurobi`                  | Gurobi v13+ solver (requires licensed install)               | no      |
+| `mosek`                   | MOSEK 11.2 solver                                            | no      |
+| `gams`                    | GAMS bridge                                                  | no      |
+| `baron`                   | BARON - global non-convex solver (requires licensed install) | no      |
+| `clarabel`                | Clarabel conic solver (pure Rust, no install)                | no      |
+| `clarabel-faer`           | Clarabel with the faer sparse linear-algebra backend         | no      |
+| `clarabel-sdp-openblas`   | Clarabel SDP with OpenBLAS                                   | no      |
+| `clarabel-sdp-mkl`        | Clarabel SDP with Intel MKL                                  | no      |
+| `clarabel-sdp-accelerate` | Clarabel SDP with Apple Accelerate                           | no      |
+| `pounce`                  | POUNCE - pure-Rust IPOPT port (no install)                   | no      |
+| `pounce-enzyme`           | POUNCE with exact Enzyme derivatives (nightly)               | no      |
+| `scip`                    | SCIP (bundled)                                               | no      |
+| `scip-system`             | SCIP via a system installation (set `SCIPOPTDIR`)            | no      |
 
 ## Workspace layout
 

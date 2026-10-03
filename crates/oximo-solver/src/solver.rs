@@ -35,9 +35,15 @@ pub trait Solver {
         false
     }
 
+    /// Whether this backend supports real affine PSD matrix constraints.
+    fn supports_psd(&self) -> bool {
+        false
+    }
+
     /// Whether this backend can consume all features present in `model`.
     fn supports_model(&self, model: &Model) -> bool {
         self.supports(model.kind())
+            && (!model.has_active_psd_constraints() || self.supports_psd())
             && model
                 .sos_constraints()
                 .iter()

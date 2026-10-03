@@ -25,7 +25,8 @@ pub(crate) const NAME: &str = "MOSEK";
 pub(crate) const fn supported(kind: ModelKind) -> bool {
     matches!(
         kind,
-        ModelKind::LP
+        ModelKind::SDP
+            | ModelKind::LP
             | ModelKind::MILP
             | ModelKind::QP
             | ModelKind::MIQP
@@ -47,6 +48,14 @@ impl Solver for Mosek {
         supported(kind)
     }
 
+    fn supports_psd(&self) -> bool {
+        true
+    }
+
+    fn supports_model(&self, model: &Model) -> bool {
+        supported(model.kind()) && !model.has_active_sos_constraints() && psd_compatible(model)
+    }
+
     fn supports_indicators(&self) -> bool {
         true
     }
@@ -62,4 +71,17 @@ impl PersistentSolver for Mosek {
     fn persistent(&self) -> MosekPersistent {
         MosekPersistent::new()
     }
+}
+
+/// Native quadratic objectives are not included in the initial MOSEK SDP path.
+pub(crate) fn psd_compatible(model: &Model) -> bool {
+    if !model.has_active_psd_constraints() {
+        return true;
+    }
+    model.kind() == ModelKind::SDP
+        && !model.has_active_indicator_constraints()
+        && model
+            .objective()
+            .as_ref()
+            .is_none_or(|o| oximo_expr::extract_linear(&model.arena(), o.expr).is_some())
 }

@@ -93,6 +93,9 @@ pub(crate) fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -270,6 +273,9 @@ pub(crate) fn setup_prepared(
     prepared: &LoweringContext<'_>,
     opts: &PounceOptions,
 ) -> Result<Prepared, SolverError> {
+    if prepared.constraints().positive_semidefinite().iter().any(|c| c.active) {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let kind = prepared.kind();
     if !matches!(
         kind,
@@ -466,6 +472,7 @@ pub(crate) fn assemble(
             solutions,
             dual,
             soc_dual,
+            psd_dual: FxHashMap::default(),
             reduced_costs,
             best_bound: None,
             gap: None,

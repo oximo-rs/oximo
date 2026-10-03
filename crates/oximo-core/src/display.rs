@@ -267,7 +267,7 @@ impl fmt::Display for Model {
         let n_socs = self.soc_constraints.borrow().len();
         let n_sos = self.sos_constraints.borrow().len();
         let n_indicators = self.indicator_constraints.borrow().len();
-        if n_constraints + n_socs + n_sos + n_indicators > 0 {
+        if n_constraints + n_socs + n_sos + n_indicators + self.num_psd_constraints() > 0 {
             let n_constraints = u32::try_from(n_constraints).expect("constraint count fits u32");
             let n_socs = u32::try_from(n_socs).expect("soc count fits u32");
             let n_sos = u32::try_from(n_sos).expect("sos count fits u32");
@@ -278,6 +278,24 @@ impl fmt::Display for Model {
             }
             for i in 0..n_socs {
                 writeln!(f, "  {}", self.display_soc(SocConstraintId(i)))?;
+            }
+            for constraint in self.psd_constraints.borrow().iter() {
+                let arena = self.arena.borrow();
+                let vars = self.variables.borrow();
+                write!(
+                    f,
+                    "  {}: symmetric {}x{} [",
+                    constraint.name,
+                    constraint.matrix.side_dimension(),
+                    constraint.matrix.side_dimension()
+                )?;
+                for (index, &entry) in constraint.matrix.upper_triangle().iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(&render_expr(&arena, entry, &|v| var_name(&vars, v)))?;
+                }
+                writeln!(f, "] in PSD{}", if constraint.active { "" } else { " (inactive)" })?;
             }
             for i in 0..n_sos {
                 writeln!(f, "  {}", self.display_sos(SosConstraintId(i)))?;

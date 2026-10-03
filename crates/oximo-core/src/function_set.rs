@@ -9,7 +9,7 @@
 //! The typed values are built in the following process:
 //!
 //! ```text
-//! Expr<D> -> Constraint<F, S> -> LowerConstraint -> scalar/SOC IR -> Model
+//! Expr<D> -> Constraint<F, S> -> LowerConstraint -> scalar/SOC/PSD IR -> Model
 //! ```
 //!
 //! [`FunctionInSet<S>`](FunctionInSet) marks supported function/set pairs at
@@ -50,7 +50,7 @@
 //! # Lowering and extensions
 //!
 //! [`Model`] keeps heterogeneous scalar rows as [`crate::AlgebraicConstraint`],
-//! alongside its SOC, SOS, and indicator registries. Function wrappers retain
+//! alongside its SOC, PSD, SOS, and indicator registries. Function wrappers retain
 //! symbolic arena expressions rather than extracting coefficients or freezing
 //! parameter values.
 //!
@@ -359,7 +359,7 @@ impl<'a, D: FunctionDegree> IntoFunction for Expr<'a, D> {
     }
 }
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 

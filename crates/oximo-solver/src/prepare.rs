@@ -225,6 +225,35 @@ impl<'a> LoweringContext<'a> {
         })
     }
 
+    /// Extract an active PSD matrix in ordinary upper-column coordinates.
+    ///
+    /// # Errors
+    /// Returns an expression error if an entry is not affine at current parameter values.
+    pub fn explicit_psd(
+        &self,
+        psd: &oximo_core::PsdConstraint,
+    ) -> Result<oximo_core::SymmetricMatrix<AffineTerms<'_>>, SolverError> {
+        let entries = psd
+            .matrix
+            .upper_triangle()
+            .iter()
+            .map(|&expr| {
+                let terms =
+                    self.require_linear(expr, || format!("PSD constraint {:?}", psd.name))?;
+                if !terms.constant.is_finite()
+                    || terms.coeffs.iter().any(|&(_, value)| !value.is_finite())
+                {
+                    return Err(SolverError::Backend(format!(
+                        "nonfinite affine entry in PSD constraint {:?}",
+                        psd.name
+                    )));
+                }
+                Ok(terms)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(oximo_core::SymmetricMatrix::from_upper_triangle(psd.matrix.side_dimension(), entries))
+    }
+
     pub fn variables(&self) -> &[Variable] {
         &self.variables
     }

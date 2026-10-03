@@ -147,10 +147,12 @@ pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> Solve
     if result.dual_status != DualStatus::FeasiblePoint {
         result.dual.clear();
         result.soc_dual.clear();
+        result.psd_dual.clear();
         result.reduced_costs.clear();
     }
     result.dual.retain(|_, v| v.is_finite());
     result.soc_dual.retain(|_, v| v.is_finite() && *v >= 0.0);
+    result.psd_dual.retain(|_, matrix| matrix.upper_triangle().iter().all(|v| v.is_finite()));
     result.reduced_costs.retain(|_, v| v.is_finite());
     result.best_bound = result.best_bound.filter(|v| v.is_finite());
     if result.primal_status == PrimalStatus::OptimalPoint && result.best_bound.is_none() {

@@ -1,4 +1,6 @@
+use oximo_core::PsdConstraintId;
 use oximo_solver::prepare::{LoweringContext, PolynomialTerms};
+use oximo_solver::psd::{PsdTriangleOrder, svec_coordinates, unpack_svec};
 use oximo_solver::reconstruct::normalize_result;
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,7 @@ pub(crate) struct Meta {
     kind: ModelKind,
     row_by_constraint: Vec<Option<i32>>,
     explicit_accs: Vec<(SocConstraintId, i64, usize)>,
+    psd_accs: Vec<(PsdConstraintId, i64, usize)>,
 }
 
 /// Reusable native upload buffers.
@@ -55,6 +58,11 @@ pub(crate) fn build_task(
 ) -> Result<(TaskCB, Meta), SolverError> {
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
+    }
+    if !crate::psd_compatible(model) {
+        return Err(SolverError::UnsupportedConstraint(
+            "MOSEK PSD requires a continuous affine objective and linear/SOC rows",
+        ));
     }
     let prepared = LoweringContext::new(model)?;
     let kind = prepared.kind();
@@ -219,9 +227,46 @@ fn build_rows_and_cones(
         next_acc += 1;
     }
 
+    let mut psd_accs = Vec::new();
+    for (index, constraint) in
+        prepared.constraints().positive_semidefinite().iter().enumerate().filter(|(_, c)| c.active)
+    {
+        let matrix = prepared.explicit_psd(constraint)?;
+        let n = matrix.side_dimension();
+        let dim = oximo_core::triangle_len(n);
+        let native_dim = i64::try_from(dim).map_err(|_| overflow("PSD dimension"))?;
+        task.append_afes(native_dim).map_err(backend)?;
+        let first = next_afe;
+        for (k, scale) in svec_coordinates(n, PsdTriangleOrder::LowerColumn) {
+            let entry = &matrix.upper_triangle()[k];
+            let scaled = LinearTerms {
+                coeffs: entry
+                    .coeffs
+                    .iter()
+                    .map(|&(var, c)| (var, c * scale))
+                    .collect::<Vec<_>>()
+                    .into(),
+                constant: entry.constant * scale,
+            };
+            put_afe(task, next_afe, &scaled, &mut scratch)?;
+            next_afe += 1;
+        }
+        let domain = task.append_svec_psd_cone_domain(native_dim).map_err(backend)?;
+        scratch.acc_rhs.clear();
+        scratch.acc_rhs.resize(dim, 0.0);
+        task.append_acc_seq(domain, first, &scratch.acc_rhs).map_err(backend)?;
+        task.put_acc_name(next_acc, &constraint.name).map_err(backend)?;
+        psd_accs.push((
+            PsdConstraintId(u32::try_from(index).map_err(|_| overflow("PSD count"))?),
+            next_acc,
+            n,
+        ));
+        next_acc += 1;
+    }
+
     append_indicators(prepared, task, &mut next_afe, &mut scratch)?;
 
-    Ok(Meta { kind, row_by_constraint, explicit_accs })
+    Ok(Meta { kind, row_by_constraint, explicit_accs, psd_accs })
 }
 
 fn append_indicators(
@@ -411,6 +456,7 @@ fn extract_result(
     let mut solutions = Vec::new();
     let mut dual = FxHashMap::default();
     let mut soc_dual = FxHashMap::default();
+    let mut psd_dual = FxHashMap::default();
     let mut reduced_costs = FxHashMap::default();
     if has_point {
         let mut values = vec![0.0; variables.len()];
@@ -430,6 +476,21 @@ fn extract_result(
             &mut reduced_costs,
         )?;
         collect_continuous_soc_duals(task, solution_type, meta, &mut soc_dual);
+        for &(id, acc, n) in &meta.psd_accs {
+            let mut values = vec![0.0; oximo_core::triangle_len(n)];
+            if task.get_acc_dot_y(solution_type, acc, &mut values).is_ok() {
+                // MOSEK returns objective-signed ACC multipliers. Restore the
+                // objective-independent PSD cone multiplier used by oximo.
+                if model.objective().as_ref().is_some_and(|o| o.sense == ObjectiveSense::Maximize) {
+                    for value in &mut values {
+                        *value = -*value;
+                    }
+                }
+                if let Some(matrix) = unpack_svec(n, &values, PsdTriangleOrder::LowerColumn) {
+                    psd_dual.insert(id, matrix);
+                }
+            }
+        }
     }
 
     let bound_defined = mixed_integer
@@ -459,6 +520,7 @@ fn extract_result(
             solutions,
             dual,
             soc_dual,
+            psd_dual,
             reduced_costs,
             best_bound,
             gap: mixed_integer.then(|| task.get_dou_inf(Dinfitem::MIO_OBJ_REL_GAP).ok()).flatten(),
