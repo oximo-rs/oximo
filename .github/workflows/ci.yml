@@ -81,6 +81,8 @@ jobs:
   sdp:
     name: Cargo test (Clarabel SDP OpenBLAS)
     runs-on: ubuntu-latest
+    env:
+      OPENBLAS_TARGET: CORE2
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,6 +91,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: sdp-openblas-core2-v1
       - run: sudo apt-get update && sudo apt-get install -y gfortran
       - run: cargo check -p oximo --no-default-features --features clarabel-sdp
       - run: cargo test -p oximo-clarabel --features sdp-openblas --lib
