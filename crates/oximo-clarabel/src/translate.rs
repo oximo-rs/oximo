@@ -552,8 +552,6 @@ pub(crate) fn read_result(
                 soc_dual.insert(SocConstraintId(u32::try_from(k).expect("SOC count overflow")), z0);
             }
         }
-    }
-    if native_status == SolverStatus::Solved {
         for &(id, start, n) in &meta.psd_blocks {
             if let Some(values) = solver.solution.z.get(start..start + oximo_core::triangle_len(n))
                 && let Some(matrix) = unpack_svec(n, values, PsdTriangleOrder::UpperColumn)
