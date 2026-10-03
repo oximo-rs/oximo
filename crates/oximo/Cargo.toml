@@ -91,6 +91,7 @@ required-features = ["_benchmark-support"]
 
 [[example]]
 name = "baron_robot"
+required-features = ["baron"]
 doc-scrape-examples = false
 
 [[example]]

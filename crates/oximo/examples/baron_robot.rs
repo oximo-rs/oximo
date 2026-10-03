@@ -25,7 +25,6 @@
 //! Run (requires a licensed BARON on PATH):
 //!   cargo run -p oximo --example baron_robot --features baron
 
-#[cfg(feature = "baron")]
 #[expect(clippy::unreadable_literal)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use oximo::prelude::*;
@@ -96,10 +95,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
-}
-
-#[cfg(not(feature = "baron"))]
-fn main() {
-    println!("Enable the BARON backend:");
-    println!("  cargo run -p oximo --example baron_robot --features baron");
 }
