@@ -11,7 +11,7 @@ use crate::{Affine, Degree, Expr, ExprArenaCell};
 /// Reusable accumulator for incremental affine construction.
 ///
 /// Unlike repeated binary `+`, adding terms writes no arena nodes.
-//// Numeric terms are merged at [`Self::build`] while parameter-dependent
+/// Numeric terms are merged at [`Self::build`] while parameter-dependent
 /// terms stay symbolic. Construction is linear in the number of supplied
 /// coefficient entries for unshared additive inputs.
 /// Shared subexpressions use the usual extraction memoization.
@@ -105,7 +105,7 @@ impl<'a> AffineBuilder<'a> {
 
     /// Emit an expression and reset the builder, retaining scratch capacity.
     /// Numeric input emits one `Linear` node (or a constant), while symbolic
-	/// input preserves ordered numeric segments under a flat sum.
+    /// input preserves ordered numeric segments under a flat sum.
     #[expect(clippy::float_cmp, reason = "only an exact unit weight can omit multiplication")]
     pub fn build(&mut self) -> Expr<'a, Affine> {
         let id = self.arena.with_mut(|arena| {
