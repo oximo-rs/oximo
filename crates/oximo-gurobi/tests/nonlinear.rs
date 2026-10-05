@@ -2,10 +2,32 @@
 
 use oximo_core::prelude::*;
 use oximo_gurobi::{Gurobi, GurobiOptions};
-use oximo_solver::{InfeasibilityDiagnosis, Solver};
+use oximo_solver::{InfeasibilityDiagnosis, Solver, UniversalOptionsExt};
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
+}
+
+#[test]
+fn general_constraints_and_smooth_terms_solve_in_both_operand_orders() {
+    for kind in 0..3 {
+        for reversed in [false, true] {
+            let m = Model::new("general_argument_order");
+            variable!(m, x, lb = 1.0, ub = 1.0);
+            let zero = 0.0 * x;
+            let general = match kind {
+                0 => x.abs(),
+                1 => x.min(zero),
+                _ => x.max(zero),
+            };
+            let expression = if reversed { x.sin() + general } else { general + x.sin() };
+            objective!(m, Min, expression);
+            let result = Gurobi.solve(&m, &GurobiOptions::default().verbose(false)).unwrap();
+            assert_solved(&result);
+            let expected = 1.0_f64.sin() + if kind == 1 { 0.0 } else { 1.0 };
+            assert!(close(result.objective().unwrap(), expected, 1e-8));
+        }
+    }
 }
 
 fn assert_solved(r: &oximo_solver::SolverResult) {
@@ -227,4 +249,24 @@ fn nested_min_max_use_native_general_constraints() {
     let result = Gurobi.solve(&m, &GurobiOptions::default()).expect("solve nested extrema");
     assert_solved(&result);
     assert!(close(result.objective().unwrap(), -1.0, 1e-8));
+}
+
+#[test]
+fn deep_deferred_sum_inside_exp_translates_on_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(|| {
+            let m = Model::new("deep_deferred_sum");
+            variable!(m, x[i in 0..4096], lb = 0.0, ub = 0.0);
+            let sum = (0..4096).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+            m.add_constraint("row", sum.exp().le(1.0));
+            objective!(m, Min, x[0]);
+            let options =
+                GurobiOptions::default().verbose(false).time_limit(std::time::Duration::ZERO);
+            let result = Gurobi.solve(&m, &options).expect("translate deep deferred sum");
+            assert_eq!(result.termination, oximo_solver::TerminationStatus::TimeLimit);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
