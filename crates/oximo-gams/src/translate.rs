@@ -1276,106 +1276,134 @@ fn write_linear(gms: &mut String, t: &LinearTerms<'_>, include_constant: bool) {
     }
 }
 
-/// Recursive infix printer for a GAMS-compatible expression.
+/// Stack-safe infix printer for a GAMS-compatible expression.
+#[expect(clippy::too_many_lines, reason = "exhaustive stack machine preserves GAMS formatting")]
 fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_space: bool) {
-    if leading_space {
-        write!(gms, " ").unwrap();
+    enum Task {
+        Node(ExprId, bool),
+        Text(&'static str),
+        IntegerPowerEnd(f64),
+        BinaryRight(ExprId, bool),
     }
-    match arena.get(id) {
-        ExprNode::Const(c) => write!(gms, "{}", fmt(*c)).unwrap(),
-        ExprNode::Var(v) => write!(gms, "v{}", v.index()).unwrap(),
-        ExprNode::Param(p) => write!(gms, "{}", fmt(arena.param_value(*p))).unwrap(),
-        ExprNode::Linear { coeffs, constant } => {
-            let t = LinearTerms::borrowed(coeffs, *constant);
-            write!(gms, "(").unwrap();
-            write_linear(gms, &t, true);
-            write!(gms, " )").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Neg, inner) => {
-            write!(gms, "(-").unwrap();
-            write_gams_expr(gms, arena, *inner, true);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Add(children) => {
-            write!(gms, "(").unwrap();
-            for (i, c) in children.iter().enumerate() {
-                if i > 0 {
-                    write!(gms, " +").unwrap();
+    let mut pending = vec![Task::Node(id, leading_space)];
+    while let Some(task) = pending.pop() {
+        let (mut id, mut leading_space) = match task {
+            Task::Text(text) => {
+                gms.push_str(text);
+                continue;
+            }
+            Task::IntegerPowerEnd(exponent) => {
+                write!(gms, ", {:.0})", exponent.round()).unwrap();
+                continue;
+            }
+            Task::BinaryRight(right, product) => {
+                gms.push_str(if product { " *" } else { " +" });
+                pending.push(Task::Text(")"));
+                (right, true)
+            }
+            Task::Node(id, leading_space) => (id, leading_space),
+        };
+        loop {
+            if leading_space {
+                gms.push(' ');
+            }
+            match arena.get(id) {
+                ExprNode::Const(c) => write!(gms, "{}", fmt(*c)).unwrap(),
+                ExprNode::Var(v) => write!(gms, "v{}", v.index()).unwrap(),
+                ExprNode::Param(p) => write!(gms, "{}", fmt(arena.param_value(*p))).unwrap(),
+                ExprNode::Linear { coeffs, constant } => {
+                    gms.push('(');
+                    write_linear(gms, &LinearTerms::borrowed(coeffs, *constant), true);
+                    gms.push_str(" )");
                 }
-                write_gams_expr(gms, arena, *c, true);
-            }
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Mul(children) => {
-            write!(gms, "(").unwrap();
-            for (i, c) in children.iter().enumerate() {
-                if i > 0 {
-                    write!(gms, " *").unwrap();
+                ExprNode::Unary(UnaryOp::Neg, inner) => {
+                    gms.push_str("(-");
+                    pending.extend([Task::Text(")"), Task::Node(*inner, true)]);
                 }
-                write_gams_expr(gms, arena, *c, true);
-            }
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Pow(base, exp) => {
-            // GAMS's `**` lowers to `rPower(x, r)`, which rejects negative
-            // bases. For small integer constant exponents emit `power(x, n)`
-            // (accepts any real base), otherwise fall back to `**`.
-            //
-            // The 1e9 cap keeps the cast safe and rejects nonsense huge exponents
-            // that would still satisfy the integer check after f64 rounding.
-            if let ExprNode::Const(c) = arena.get(*exp)
-                && (c - c.round()).abs() < f64::EPSILON
-                && c.abs() <= 1e9
-            {
-                write!(gms, "power(").unwrap();
-                write_gams_expr(gms, arena, *base, false);
-                write!(gms, ", {:.0})", c.round()).unwrap();
-                return;
-            }
-            write!(gms, "(").unwrap();
-            write_gams_expr(gms, arena, *base, false);
-            write!(gms, " **").unwrap();
-            write_gams_expr(gms, arena, *exp, true);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Div(num, den) => {
-            write!(gms, "(").unwrap();
-            write_gams_expr(gms, arena, *num, false);
-            write!(gms, " /").unwrap();
-            write_gams_expr(gms, arena, *den, true);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Unary(op, a) => write_gams_unary(gms, arena, *op, *a),
-        ExprNode::Atan2(y, x) => {
-            write!(gms, "arctan2(").unwrap();
-            write_gams_expr(gms, arena, *y, false);
-            write!(gms, ", ").unwrap();
-            write_gams_expr(gms, arena, *x, false);
-            write!(gms, ")").unwrap();
-        }
-        ExprNode::Min(children) | ExprNode::Max(children) => {
-            let name = if matches!(arena.get(id), ExprNode::Min(_)) { "min" } else { "max" };
-            write!(gms, "{name}(").unwrap();
-            for (index, child) in children.iter().enumerate() {
-                if index > 0 {
-                    write!(gms, ", ").unwrap();
+                ExprNode::Add(children)
+                | ExprNode::Mul(children)
+                | ExprNode::Min(children)
+                | ExprNode::Max(children) => {
+                    let (prefix, separator, space) = match arena.get(id) {
+                        ExprNode::Add(_) => ("(", " +", true),
+                        ExprNode::Mul(_) => ("(", " *", true),
+                        ExprNode::Min(_) => ("min(", ", ", false),
+                        _ => ("max(", ", ", false),
+                    };
+                    gms.push_str(prefix);
+                    // Retain one continuation per deferred binary prefix.
+                    if space && children.len() == 2 {
+                        pending.push(Task::BinaryRight(
+                            children[1],
+                            matches!(arena.get(id), ExprNode::Mul(_)),
+                        ));
+                        id = children[0];
+                        leading_space = true;
+                        continue;
+                    }
+                    pending.push(Task::Text(")"));
+                    for (index, child) in children.iter().enumerate().rev() {
+                        pending.push(Task::Node(*child, space));
+                        if index > 0 {
+                            pending.push(Task::Text(separator));
+                        }
+                    }
                 }
-                write_gams_expr(gms, arena, *child, false);
+                ExprNode::Pow(base, exponent) => {
+                    // GAMS ** rejects negative bases.
+					// Integer power() accepts them so we cap the exponent
+					// to keep the existing conversion rule safe.
+                    if let ExprNode::Const(c) = arena.get(*exponent)
+                        && (c - c.round()).abs() < f64::EPSILON
+                        && c.abs() <= 1e9
+                    {
+                        gms.push_str("power(");
+                        pending.extend([Task::IntegerPowerEnd(*c), Task::Node(*base, false)]);
+                    } else {
+                        gms.push('(');
+                        pending.extend([
+                            Task::Text(")"),
+                            Task::Node(*exponent, true),
+                            Task::Text(" **"),
+                            Task::Node(*base, false),
+                        ]);
+                    }
+                }
+                ExprNode::Div(num, den) => {
+                    gms.push('(');
+                    pending.extend([
+                        Task::Text(")"),
+                        Task::Node(*den, true),
+                        Task::Text(" /"),
+                        Task::Node(*num, false),
+                    ]);
+                }
+                ExprNode::Unary(op, child) => {
+                    if *op == UnaryOp::Exp2 {
+                        gms.push_str("(2 ** ");
+                    } else {
+                        gms.push_str(gams_unary_name(*op));
+                        gms.push('(');
+                    }
+                    pending.extend([Task::Text(")"), Task::Node(*child, false)]);
+                }
+                ExprNode::Atan2(y, x) => {
+                    gms.push_str("arctan2(");
+                    pending.extend([
+                        Task::Text(")"),
+                        Task::Node(*x, false),
+                        Task::Text(", "),
+                        Task::Node(*y, false),
+                    ]);
+                }
             }
-            write!(gms, ")").unwrap();
+            break;
         }
     }
 }
 
-#[inline]
-fn write_gams_unary(gms: &mut String, arena: &ExprArena, op: UnaryOp, child: ExprId) {
-    if op == UnaryOp::Exp2 {
-        write!(gms, "(2 ** ").unwrap();
-        write_gams_expr(gms, arena, child, false);
-        write!(gms, ")").unwrap();
-        return;
-    }
-    let name = match op {
+fn gams_unary_name(op: UnaryOp) -> &'static str {
+    match op {
         UnaryOp::Abs => "abs",
         UnaryOp::Sqrt => "sqrt",
         UnaryOp::Exp => "exp",
@@ -1397,11 +1425,10 @@ fn write_gams_unary(gms: &mut String, arena: &ExprArena, op: UnaryOp, child: Exp
         | UnaryOp::Log1p
         | UnaryOp::Asinh
         | UnaryOp::Acosh
-        | UnaryOp::Atanh => unreachable!("GAMS expression validation rejects {op}"),
-    };
-    write!(gms, "{name}(").unwrap();
-    write_gams_expr(gms, arena, child, false);
-    write!(gms, ")").unwrap();
+        | UnaryOp::Atanh => {
+            unreachable!("GAMS expression validation rejects {op}")
+        }
+    }
 }
 
 /// Format an `f64` for use in a GAMS file.
@@ -1600,6 +1627,32 @@ mod tests {
             opts,
         );
         gms
+    }
+
+    #[test]
+    fn deferred_affine_sum_in_nonlinear_row_renders_without_stack_overflow() {
+        let m = Model::new("deep affine row");
+        variable!(m, x[i in 0..20_000]);
+        let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+        m.add_constraint("row", sum.exp().le(1.0));
+        objective!(m, Min, x[0]);
+        let output = render(&m, &GamsOptions::default());
+        assert!(output.contains("exp("));
+        assert!(output.contains("v19999"));
+    }
+
+    #[test]
+    fn deeply_nested_nonlinear_objective_and_row_render_without_stack_overflow() {
+        let m = Model::new("deep nonlinear row");
+        variable!(m, x);
+        let mut expression = x.exp();
+        for _ in 0..20_000 {
+            expression = expression.exp();
+        }
+        m.add_constraint("row", expression.le(1.0));
+        objective!(m, Min, expression);
+        let output = render(&m, &GamsOptions::default());
+        assert_eq!(output.matches("exp(").count(), 2 * 20_001);
     }
 
     #[test]
