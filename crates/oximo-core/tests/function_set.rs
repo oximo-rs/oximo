@@ -5,6 +5,52 @@ use oximo_core::prelude::*;
 use oximo_expr::{ExprClass, evaluate, extract_linear, extract_quadratic};
 
 #[test]
+fn affine_builder_registers_typed_and_parallel_constraints() {
+    let m = Model::new("builder");
+    variable!(m, x[i in 0..128]);
+    param!(m, p = 2.0);
+    let mut builder: AffineBuilder<'_> = m.affine_builder();
+    for i in 0..128 {
+        builder.add_term(1.0, x[i]);
+    }
+    builder.add_term(3.0, p * x[0]).add_constant(5.0);
+    let expression: Expr<'_, Affine> = builder.build();
+    m.add_constraint("row", expression.le(100.0));
+    p.set_param_value(4.0);
+    let snapshot = m.arena();
+    let terms = extract_linear(&snapshot, expression.id()).unwrap();
+    assert_eq!(terms.coeffs.len(), 128);
+    assert!((terms.coeffs[0].1 - 13.0).abs() < f64::EPSILON);
+    assert_eq!(m.kind(), ModelKind::LP);
+    drop(snapshot);
+
+    constraint!(m, rows[i in 0..2048], {
+        let mut local = AffineBuilder::new(x[0].arena());
+        local.add_term(1.0, x[i % 128]);
+        local.build()
+    } <= 1.0);
+    assert_eq!(m.num_constraints(), 2049);
+}
+
+#[test]
+fn compensated_builder_keeps_small_coefficient_in_registered_row() {
+    let m = Model::new("compensated builder");
+    variable!(m, x);
+    let mut builder = m.compensated_affine_builder();
+    for weight in [1e16, 1.0, -1e16] {
+        builder.add_term(weight, x);
+    }
+    let expression = builder.build();
+    let row = m.add_constraint("row", expression.le(2.0));
+    let rows = m.constraints();
+    let registered = rows.algebraic()[row.index()].lhs;
+    let arena = m.arena();
+    let terms = extract_linear(&arena, registered).unwrap();
+    assert_eq!(terms.coeffs, vec![(x.var_id().unwrap(), 1.0)]);
+    assert_eq!(m.kind(), ModelKind::LP);
+}
+
+#[test]
 fn operators_and_families_carry_static_degree() {
     let m = Model::new("degrees");
     variable!(m, x[i in 0..3]);

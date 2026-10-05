@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod affine_builder;
 mod arena;
 mod classify;
 pub mod degree;
@@ -14,6 +15,7 @@ mod render;
 mod simplify;
 mod visit;
 
+pub use affine_builder::AffineBuilder;
 pub use arena::{
     Children, ExprArena, ExprArenaBatchGuard, ExprArenaCell, ExprArenaSnapshot,
     ExprArenaWriteGuard, ExprId, ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ModelId,
