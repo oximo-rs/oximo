@@ -1,9 +1,91 @@
 use std::borrow::Cow;
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 
 use crate::arena::{ArenaAccess, Children, ExprArena, ExprId, ExprNode, UnaryOp, VarId};
+
+const MAX_EAGER_COEFFICIENTS: usize = 32;
+const MAX_EAGER_NODES: usize = 64;
+
+/// Stack-backed merging avoids a hash table and per-variable vectors for the
+/// small numeric expressions that dominate scalar model construction.
+struct SmallLinear {
+    coeffs: SmallVec<[(VarId, f64); MAX_EAGER_COEFFICIENTS]>,
+    constant: f64,
+}
+
+impl SmallLinear {
+    fn new() -> Self {
+        Self { coeffs: SmallVec::new(), constant: 0.0 }
+    }
+
+    fn add(&mut self, var: VarId, coefficient: f64) -> bool {
+        if let Some((_, value)) = self.coeffs.iter_mut().find(|(v, _)| *v == var) {
+            *value += coefficient;
+        } else {
+            if self.coeffs.len() == MAX_EAGER_COEFFICIENTS {
+                return false;
+            }
+            self.coeffs.push((var, coefficient));
+        }
+        true
+    }
+
+    fn terminal(&mut self, node: &ExprNode) -> bool {
+        match node {
+            ExprNode::Const(c) => self.constant += c,
+            ExprNode::Var(v) => {
+                if !self.add(*v, 1.0) {
+                    return false;
+                }
+                self.constant += 0.0;
+            }
+            ExprNode::Linear { coeffs, constant } => {
+                for &(var, coefficient) in coeffs {
+                    if !self.add(var, coefficient) {
+                        return false;
+                    }
+                }
+                self.constant += constant;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn operand(&mut self, arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
+        if let ExprNode::Add(children) = arena.get(id) {
+            // We use wide flat numeric prefix because it is cheap if its
+			// merged support is small.
+            let mut segment = Self::new();
+            for &child in children {
+                if !segment.terminal(arena.get(child)) {
+                    return false;
+                }
+            }
+            self.constant += segment.constant;
+            for (var, coefficient) in segment.coeffs {
+                if !self.add(var, coefficient) {
+                    return false;
+                }
+            }
+            true
+        } else {
+            let ok = self.terminal(arena.get(id));
+            // Direct leaves have not gone through a sum's initial +0.
+            self.constant = match arena.get(id) {
+                ExprNode::Const(c) | ExprNode::Linear { constant: c, .. } => *c,
+                _ => self.constant,
+            };
+            ok
+        }
+    }
+
+    fn push(self, arena: &mut (impl ArenaAccess + ?Sized)) -> ExprId {
+        push_linear(arena, LinearTerms::owned(self.coeffs.into_vec(), self.constant))
+    }
+}
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
 ///
@@ -38,13 +120,18 @@ impl<'a> LinearTerms<'a> {
 
 /// Accumulator that merges duplicate `(VarId, coeff)` terms while
 /// preserving the order each variable is first seen.
-struct CoeffAccum {
-    coeffs: Vec<(VarId, f64)>,
+#[derive(Debug)]
+pub(crate) struct CoeffAccum {
+    pub(crate) coeffs: Vec<(VarId, f64)>,
     slot: FxHashMap<VarId, usize>,
 }
 
 impl CoeffAccum {
-    fn with_capacity(n: usize) -> Self {
+    pub(crate) fn clear(&mut self) {
+        self.coeffs.clear();
+        self.slot.clear();
+    }
+    pub(crate) fn with_capacity(n: usize) -> Self {
         Self {
             coeffs: Vec::with_capacity(n),
             slot: FxHashMap::with_capacity_and_hasher(n, FxBuildHasher),
@@ -53,22 +140,23 @@ impl CoeffAccum {
 
     /// Add `c` to `v`'s running coefficient, appending `v` the first time it is
     /// seen.
-    fn add(&mut self, v: VarId, c: f64) {
-        if let Some(&i) = self.slot.get(&v) {
-            self.coeffs[i].1 += c;
-        } else {
-            self.slot.insert(v, self.coeffs.len());
-            self.coeffs.push((v, c));
+    pub(crate) fn add(&mut self, v: VarId, c: f64) {
+        match self.slot.entry(v) {
+            std::collections::hash_map::Entry::Occupied(slot) => self.coeffs[*slot.get()].1 += c,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(self.coeffs.len());
+                self.coeffs.push((v, c));
+            }
         }
     }
 
-    fn extend_from_slice(&mut self, terms: &[(VarId, f64)]) {
+    pub(crate) fn extend_from_slice(&mut self, terms: &[(VarId, f64)]) {
         for &(v, c) in terms {
             self.add(v, c);
         }
     }
 
-    fn into_coeffs(self) -> Vec<(VarId, f64)> {
+    pub(crate) fn into_coeffs(self) -> Vec<(VarId, f64)> {
         self.coeffs
     }
 }
@@ -139,13 +227,82 @@ fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
     }
 }
 
-struct LinearFolder<'a, A: ?Sized> {
+struct LinearFolder<'a, 'b, A: ?Sized> {
     arena: &'a A,
     resolve_params: bool,
+    root: ExprId,
+    // Decide lazily so flat sums keep their allocation-free traversal setup.
+    flatten_sums: &'b std::cell::Cell<Option<bool>>,
+    sum_magnitude: &'b std::cell::Cell<f64>,
+}
+
+// Keep the wide-sum loop independent of the larger deferred fold state.
+fn flat_scaled_var<A: ArenaAccess + ?Sized>(
+    arena: &A,
+    children: &[ExprId],
+    resolve_params: bool,
+) -> Option<(VarId, f64)> {
+    let [left, right] = children else { return None };
+    let scalar = |id| match arena.get(id) {
+        ExprNode::Const(value) => Some(*value),
+        ExprNode::Param(param) if resolve_params => Some(arena.param_value(*param)),
+        _ => None,
+    };
+    match (arena.get(*left), arena.get(*right)) {
+        (_, ExprNode::Var(var)) => Some((*var, 1.0 * scalar(*left)?)),
+        (ExprNode::Var(var), _) => Some((*var, 1.0 * scalar(*right)?)),
+        _ => None,
+    }
+}
+
+#[inline(never)]
+fn flat_linear<'a, A: ArenaAccess + ?Sized>(
+    arena: &'a A,
+    children: &[ExprId],
+    resolve_params: bool,
+) -> Option<LinearTerms<'a>> {
+    let terminal = |id| match arena.get(id) {
+        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Linear { .. } => true,
+        ExprNode::Param(_) => resolve_params,
+        ExprNode::Mul(children) => flat_scaled_var(arena, children, resolve_params).is_some(),
+        _ => false,
+    };
+    if children.first().is_some_and(|&id| !terminal(id))
+        || children.last().is_some_and(|&id| !terminal(id))
+    {
+        return None;
+    }
+    let mut acc = CoeffAccum::with_capacity(children.len());
+    let mut constant = 0.0;
+    for &child in children {
+        match arena.get(child) {
+            ExprNode::Var(var) => {
+                acc.add(*var, 1.0);
+                constant += 0.0;
+            }
+            ExprNode::Const(value) => constant += value,
+            ExprNode::Param(param) if resolve_params => constant += arena.param_value(*param),
+            ExprNode::Linear { coeffs, constant: value } => {
+                if let [(var, coefficient)] = coeffs.as_slice() {
+                    acc.add(*var, *coefficient);
+                } else {
+                    acc.extend_from_slice(coeffs);
+                }
+                constant += value;
+            }
+            ExprNode::Mul(children) => {
+                let (var, scalar) = flat_scaled_var(arena, children, resolve_params)?;
+                acc.add(var, 1.0 * scalar);
+                constant += 0.0 * scalar;
+            }
+            _ => return None,
+        }
+    }
+    Some(LinearTerms::owned(acc.into_coeffs(), constant))
 }
 
 enum LinearState<'a> {
-    Sum { rest: &'a [ExprId], acc: CoeffAccum, constant: f64 },
+    Sum { rest: &'a [ExprId], pending: crate::fold::SumFrames<'a>, acc: CoeffAccum, constant: f64 },
     Scale { child: Option<ExprId>, value: Option<LinearTerms<'a>>, scalar: f64, negate: bool },
     Product { rest: &'a [ExprId], value: Option<LinearTerms<'a>> },
     Power { child: Option<ExprId>, value: Option<LinearTerms<'a>>, exponent: f64 },
@@ -181,7 +338,7 @@ fn multiply_linear<'a>(left: LinearTerms<'a>, right: LinearTerms<'a>) -> Option<
     Some(terms)
 }
 
-impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
+impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, '_, A> {
     type Value = LinearTerms<'a>;
     type State = LinearState<'a>;
 
@@ -197,6 +354,7 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
             ExprNode::Add(children) => {
                 return Continue(LinearState::Sum {
                     rest: children,
+                    pending: None,
                     acc: CoeffAccum::with_capacity(children.len()),
                     constant: 0.0,
                 });
@@ -277,22 +435,42 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
                 }
                 Break(value.take().and_then(|terms| affine_power(terms, *exponent)))
             }
-            LinearState::Sum { rest, acc, constant } => {
-                while let Some((&child, tail)) = rest.split_first() {
+            LinearState::Sum { rest, pending, acc, constant } => {
+                loop {
+                    let Some((&child, tail)) = rest.split_first() else {
+                        if let Some((next, previous_constant)) =
+                            pending.as_mut().and_then(|frames| frames.pop())
+                        {
+                            *constant += previous_constant;
+                            *rest = next;
+                            continue;
+                        }
+                        break;
+                    };
                     *rest = tail;
                     // Accumulate terminals directly: a wide sum needs no per-variable vectors.
                     match self.arena.get(child) {
                         ExprNode::Var(v) => {
                             acc.add(*v, 1.0);
                             *constant += 0.0;
+                            crate::fold::record_sum_magnitude(self.sum_magnitude, 1.0);
                         }
-                        ExprNode::Const(c) => *constant += c,
+                        ExprNode::Const(c) => {
+                            *constant += c;
+                            crate::fold::record_sum_magnitude(self.sum_magnitude, *c);
+                        }
                         ExprNode::Param(p) if self.resolve_params => {
-                            *constant += self.arena.param_value(*p);
+                            let value = self.arena.param_value(*p);
+                            *constant += value;
+                            crate::fold::record_sum_magnitude(self.sum_magnitude, value);
                         }
                         ExprNode::Linear { coeffs, constant: c } => {
                             acc.extend_from_slice(coeffs);
                             *constant += c;
+                            crate::fold::record_sum_magnitude(
+                                self.sum_magnitude,
+                                c.abs() + coeffs.iter().map(|(_, c)| c.abs()).sum::<f64>(),
+                            );
                         }
                         _ => return Continue(child),
                     }
@@ -331,6 +509,10 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
             LinearState::Sum { acc, constant, .. } => {
                 acc.extend_from_slice(&value.coeffs);
                 *constant += value.constant;
+                crate::fold::record_sum_magnitude(
+                    self.sum_magnitude,
+                    value.constant.abs() + value.coeffs.iter().map(|(_, c)| c.abs()).sum::<f64>(),
+                );
             }
             LinearState::Scale { value: slot, .. } | LinearState::Power { value: slot, .. } => {
                 *slot = Some(value);
@@ -340,9 +522,86 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, A> {
             }
         }
     }
+
+    fn inline(&self, state: &mut Self::State, child: ExprId) -> bool {
+        if let LinearState::Sum { rest, pending, constant, .. } = state
+            && let ExprNode::Add(children) = self.arena.get(child)
+        {
+            let flatten = self.flatten_sums.get().unwrap_or_else(|| {
+                let flatten = !bounded_affine(self.arena, &[self.root], self.resolve_params);
+                self.flatten_sums.set(Some(flatten));
+                flatten
+            });
+            if !flatten {
+                return false;
+            }
+            pending.get_or_insert_with(Box::default).push((*rest, *constant));
+            *constant = 0.0;
+            *rest = children;
+            return true;
+        }
+        false
+    }
 }
 
-fn as_linear<'a, A: ArenaAccess + ?Sized>(
+/// Keep operator construction bounded even when an operand is a large sum.
+#[inline]
+fn small_affine(arena: &(impl ArenaAccess + ?Sized), ids: &[ExprId]) -> bool {
+    // Most eager operands are already terminals, we avoid traversal scratch and
+    // the full node match for these common scalar modeling operations.
+    let mut coefficients = 0;
+    for &id in ids {
+        coefficients += match arena.get(id) {
+            ExprNode::Const(_) => 0,
+            ExprNode::Var(_) => 1,
+            ExprNode::Linear { coeffs, .. } => coeffs.len(),
+            _ => return bounded_affine(arena, ids, false),
+        };
+        if coefficients > MAX_EAGER_COEFFICIENTS {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn bounded_affine(
+    arena: &(impl ArenaAccess + ?Sized),
+    ids: &[ExprId],
+    resolve_params: bool,
+) -> bool {
+    let mut stack = SmallVec::<[ExprId; MAX_EAGER_NODES]>::from_slice(ids);
+    let mut nodes = 0;
+    let mut coefficients = 0;
+    while let Some(id) = stack.pop() {
+        nodes += 1;
+        if nodes > MAX_EAGER_NODES {
+            return false;
+        }
+        match arena.get(id) {
+            ExprNode::Const(_) => {}
+            ExprNode::Param(_) if resolve_params => {}
+            ExprNode::Var(_) => coefficients += 1,
+            ExprNode::Linear { coeffs, .. } => coefficients += coeffs.len(),
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                if children.len() > MAX_EAGER_NODES - nodes
+                    || stack.len() + children.len() > MAX_EAGER_NODES
+                {
+                    return false;
+                }
+                stack.extend_from_slice(children);
+            }
+            ExprNode::Unary(UnaryOp::Neg, child) => stack.push(*child),
+            ExprNode::Pow(base, exp) => stack.extend_from_slice(&[*base, *exp]),
+            _ => return false,
+        }
+        if coefficients > MAX_EAGER_COEFFICIENTS {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) fn as_linear<'a, A: ArenaAccess + ?Sized>(
     arena: &'a A,
     mut id: ExprId,
     resolve_params: bool,
@@ -352,13 +611,52 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
         id = *child;
         negations += 1;
     }
-    let mut value = crate::fold::fold(arena, id, LinearFolder { arena, resolve_params })?;
+    if negations == 0
+        && let ExprNode::Add(children) = arena.get(id)
+        && let Some(terms) = flat_linear(arena, children, resolve_params)
+    {
+        return Some(terms);
+    }
+    let flatten_sums = std::cell::Cell::new(None);
+    let sum_magnitude = std::cell::Cell::new(0.0);
+    let mut value = crate::fold::fold(
+        arena,
+        id,
+        LinearFolder {
+            arena,
+            resolve_params,
+            root: id,
+            flatten_sums: &flatten_sums,
+            sum_magnitude: &sum_magnitude,
+        },
+    )?;
+    if flatten_sums.get() == Some(true)
+        && (!sum_magnitude.get().is_finite()
+            || !value.constant.is_finite()
+            || value.coeffs.iter().any(|(_, c)| !c.is_finite()))
+        && crate::fold::finite_inputs(arena, id, resolve_params)
+    {
+        // Preserve original grouping on either side of an overflow.
+        value = crate::fold::fold(
+            arena,
+            id,
+            LinearFolder {
+                arena,
+                resolve_params,
+                root: id,
+                flatten_sums: &std::cell::Cell::new(Some(false)),
+                sum_magnitude: &std::cell::Cell::new(f64::INFINITY),
+            },
+        )?;
+    }
     if negations != 0 {
         let coeffs = value.coeffs.to_mut();
-        for _ in 0..negations {
-            for (_, c) in coeffs.iter_mut() {
+        for (_, c) in coeffs.iter_mut() {
+            for _ in 0..negations {
                 *c = -*c;
             }
+        }
+        for _ in 0..negations {
             value.constant = -value.constant;
         }
     }
@@ -366,7 +664,7 @@ fn as_linear<'a, A: ArenaAccess + ?Sized>(
 }
 
 /// Materialize linear terms into a fresh `Linear` node in the arena.
-fn push_linear(arena: &mut (impl ArenaAccess + ?Sized), t: LinearTerms<'_>) -> ExprId {
+pub(crate) fn push_linear(arena: &mut (impl ArenaAccess + ?Sized), t: LinearTerms<'_>) -> ExprId {
     let mut coeffs = t.coeffs.into_owned();
     coeffs.retain(|(_, c)| *c != 0.0);
     if coeffs.is_empty() {
@@ -375,14 +673,33 @@ fn push_linear(arena: &mut (impl ArenaAccess + ?Sized), t: LinearTerms<'_>) -> E
     arena.push(ExprNode::Linear { coeffs, constant: t.constant })
 }
 
-/// Build `lhs + rhs`, preserving the linear fast-path when both sides are
-/// linear. Falls back to an n-ary `Add` node otherwise.
+/// Build `lhs + rhs`, eagerly merging small numeric affine operands.
+/// Large or symbolic operands retain an immutable binary `Add` node.
 pub(crate) fn add_into(
     arena: &mut (impl ArenaAccess + ?Sized),
     lhs: ExprId,
     rhs: ExprId,
 ) -> ExprId {
-    if let (Some(lt), Some(rt)) = (as_linear(arena, lhs, false), as_linear(arena, rhs, false)) {
+    let mut left = SmallLinear::new();
+    if left.operand(arena, lhs) {
+        let merged = if matches!(arena.get(rhs), ExprNode::Add(_)) {
+            let mut right = SmallLinear::new();
+            if right.operand(arena, rhs) {
+                left.constant += right.constant;
+                right.coeffs.into_iter().all(|(var, coefficient)| left.add(var, coefficient))
+            } else {
+                false
+            }
+        } else {
+            left.terminal(arena.get(rhs))
+        };
+        if merged {
+            return left.push(arena);
+        }
+    }
+    if small_affine(arena, &[lhs, rhs])
+        && let (Some(lt), Some(rt)) = (as_linear(arena, lhs, false), as_linear(arena, rhs, false))
+    {
         let constant = lt.constant + rt.constant;
         let mut acc = CoeffAccum::with_capacity(lt.coeffs.len() + rt.coeffs.len());
         acc.extend_from_slice(&lt.coeffs);
@@ -419,14 +736,15 @@ pub(crate) fn sub_into(
     add_into(arena, lhs, neg)
 }
 
-/// Build `lhs * rhs`. If either side is constant and the other is linear, we
-/// stay on the linear fast-path. Otherwise produce a generic n-ary `Mul`.
+/// Build `lhs * rhs`. A constant times a small numeric affine operand uses
+/// the eager fast path. Large or symbolic operands retain a binary `Mul`.
 pub(crate) fn mul_into(
     arena: &mut (impl ArenaAccess + ?Sized),
     lhs: ExprId,
     rhs: ExprId,
 ) -> ExprId {
     if let ExprNode::Const(c) = *arena.get(lhs)
+        && small_affine(arena, &[rhs])
         && let Some(t) = as_linear(arena, rhs, false)
     {
         let constant = t.constant * c;
@@ -437,6 +755,7 @@ pub(crate) fn mul_into(
         return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
     if let ExprNode::Const(c) = *arena.get(rhs)
+        && small_affine(arena, &[lhs])
         && let Some(t) = as_linear(arena, lhs, false)
     {
         let constant = t.constant * c;
@@ -446,7 +765,229 @@ pub(crate) fn mul_into(
         }
         return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
+    // Normalize at the boundary from affine arithmetic to a product of
+    // expressions.
+    if !scalar_leaf(arena.get(lhs))
+        && !scalar_leaf(arena.get(rhs))
+        && !small_scalar(arena, lhs)
+        && !small_scalar(arena, rhs)
+    {
+        let left = compact_numeric_into(arena, lhs);
+        let right = if lhs == rhs { left } else { compact_numeric_into(arena, rhs) };
+        if left != lhs || right != rhs {
+            if let (Some(lt), Some(rt)) =
+                (as_linear(arena, left, false), as_linear(arena, right, false))
+                && let Some(terms) = multiply_linear(lt, rt)
+            {
+                let terms = terms.into_owned();
+                return push_linear(arena, terms);
+            }
+            return mul_into(arena, left, right);
+        }
+    }
     arena.push(ExprNode::Mul(smallvec![lhs, rhs]))
+}
+
+fn small_scalar(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
+    match arena.get(id) {
+        ExprNode::Const(_) | ExprNode::Param(_) => true,
+        ExprNode::Var(_) => false,
+        ExprNode::Linear { coeffs, .. } => coeffs.is_empty(),
+        _ => crate::classify::is_constant_access(arena, id),
+    }
+}
+
+fn scalar_leaf(node: &ExprNode) -> bool {
+    matches!(node, ExprNode::Const(_) | ExprNode::Param(_))
+}
+
+/// Compact only numeric affine operands, keeping parameters symbolic.
+pub(crate) fn compact_numeric_into(arena: &mut (impl ArenaAccess + ?Sized), id: ExprId) -> ExprId {
+    if matches!(
+        arena.get(id),
+        ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
+    ) {
+        return id;
+    }
+    // A cached structural degree of a growing product makes this rejection
+    // bounded.
+    if crate::classify::classify_access(arena, id) != crate::ExprClass::Linear {
+        return id;
+    }
+    let parameter_child = match arena.get(id) {
+        ExprNode::Add(children) | ExprNode::Mul(children) => {
+            children.iter().any(|child| matches!(arena.get(*child), ExprNode::Param(_)))
+        }
+        ExprNode::Unary(UnaryOp::Neg, child) => matches!(arena.get(*child), ExprNode::Param(_)),
+        _ => false,
+    };
+    // A direct parameter makes numeric extraction certain to fail.
+    if parameter_child && let Some(replacement) = compact_parameter_parent(arena, id) {
+        return replacement;
+    }
+    if !parameter_child && let Some(terms) = as_linear(arena, id, false) {
+        let terms = terms.into_owned();
+        return push_linear(arena, terms);
+    }
+    compact_symbolic_numeric_children(arena, id)
+}
+
+/// When parameters and numeric children under one parent, extract each numeric
+/// child once, without scanning its descendants to build parameter metadata first.
+fn compact_parameter_parent(arena: &mut (impl ArenaAccess + ?Sized), id: ExprId) -> Option<ExprId> {
+    let mut node = arena.get(id).clone();
+    let mut children = FxHashMap::default();
+    let mut extract = |child: ExprId| -> Option<()> {
+        if matches!(
+            arena.get(child),
+            ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
+        ) {
+            return Some(());
+        }
+        if let std::collections::hash_map::Entry::Vacant(entry) = children.entry(child) {
+            entry.insert(as_linear(arena, child, false)?.into_owned());
+        }
+        Some(())
+    };
+    match &node {
+        ExprNode::Add(ids) | ExprNode::Mul(ids) => {
+            for &child in ids {
+                extract(child)?;
+            }
+        }
+        ExprNode::Unary(UnaryOp::Neg, child) => extract(*child)?,
+        _ => return None,
+    }
+    if children.is_empty() {
+        return Some(id);
+    }
+    let replacements: FxHashMap<_, _> =
+        children.into_iter().map(|(child, terms)| (child, push_linear(arena, terms))).collect();
+    let rewrite = |child: &mut ExprId| {
+        if let Some(&replacement) = replacements.get(child) {
+            *child = replacement;
+        }
+    };
+    match &mut node {
+        ExprNode::Add(ids) | ExprNode::Mul(ids) => ids.iter_mut().for_each(rewrite),
+        ExprNode::Unary(UnaryOp::Neg, child) => rewrite(child),
+        _ => unreachable!("only affine arithmetic reaches this point"),
+    }
+    Some(arena.push(node))
+}
+
+/// Rewrite maximal numeric regions under a symbolic affine root. Parameters
+/// are never evaluated, and shared regions are compacted at most once. Numeric
+/// prefixes stay deferred until a symbolic parent needs their normalized form.
+fn compact_symbolic_numeric_children(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    root: ExprId,
+) -> ExprId {
+    let mut numeric = FxHashMap::<ExprId, bool>::default();
+    let mut pending = vec![(root, false)];
+    while let Some((id, finish)) = pending.pop() {
+        if numeric.contains_key(&id) {
+            continue;
+        }
+        if !finish {
+            pending.push((id, true));
+            match arena.get(id) {
+                ExprNode::Add(children) | ExprNode::Mul(children) => {
+                    pending.extend(children.iter().rev().map(|&child| (child, false)));
+                }
+                ExprNode::Unary(UnaryOp::Neg, child) => pending.push((*child, false)),
+                ExprNode::Pow(base, exponent) => {
+                    pending.extend([(*exponent, false), (*base, false)]);
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let value = match arena.get(id) {
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                children.iter().all(|child| numeric[child])
+            }
+            ExprNode::Unary(UnaryOp::Neg, child) => numeric[child],
+            ExprNode::Pow(base, exponent) => numeric[base] && numeric[exponent],
+            ExprNode::Param(_) => false,
+            _ => true,
+        };
+        numeric.insert(id, value);
+    }
+
+    // Only rewrite the symbolic spine.
+	// Maximal numeric regions are extracted directly.
+    let mut rewritten = FxHashMap::<ExprId, ExprId>::default();
+    pending.push((root, false));
+    while let Some((id, finish)) = pending.pop() {
+        if rewritten.contains_key(&id) {
+            continue;
+        }
+        if matches!(
+            arena.get(id),
+            ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
+        ) {
+            rewritten.insert(id, id);
+            continue;
+        }
+        if numeric[&id] {
+            let terms = as_linear(arena, id, false).map(LinearTerms::into_owned);
+            let replacement = terms.map_or(id, |terms| push_linear(arena, terms));
+            rewritten.insert(id, replacement);
+            continue;
+        }
+        if !finish {
+            pending.push((id, true));
+            match arena.get(id) {
+                ExprNode::Add(children) | ExprNode::Mul(children) => {
+                    pending.extend(children.iter().rev().map(|&child| (child, false)));
+                }
+                ExprNode::Unary(UnaryOp::Neg, child) => pending.push((*child, false)),
+                ExprNode::Pow(base, exponent) => {
+                    pending.extend([(*exponent, false), (*base, false)]);
+                }
+                _ => unreachable!("only affine arithmetic reaches this point"),
+            }
+            continue;
+        }
+        let mut node = arena.get(id).clone();
+        let mut changed = false;
+        let mut rewrite_child = |child: &mut ExprId| {
+            let replacement = rewritten[child];
+            changed |= replacement != *child;
+            *child = replacement;
+        };
+        match &mut node {
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                for child in children {
+                    rewrite_child(child);
+                }
+            }
+            ExprNode::Unary(UnaryOp::Neg, child) => rewrite_child(child),
+            ExprNode::Pow(base, exponent) => {
+                rewrite_child(base);
+                rewrite_child(exponent);
+            }
+            _ => unreachable!("only affine arithmetic reaches this point"),
+        }
+        let replacement = if changed { arena.push(node) } else { id };
+        rewritten.insert(id, replacement);
+    }
+    rewritten[&root]
+}
+
+pub(crate) fn pow_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    base: ExprId,
+    exponent: ExprId,
+) -> ExprId {
+    let base = if matches!(arena.get(exponent), ExprNode::Const(e) if e.is_finite() && *e >= 2.0 && (*e - e.round()).abs() < f64::EPSILON)
+    {
+        compact_numeric_into(arena, base)
+    } else {
+        base
+    };
+    arena.push(ExprNode::Pow(base, exponent))
 }
 
 /// Build `num / den`. If `den` is a nonzero constant `c`, fold to `num * (1/c)`
@@ -460,7 +1001,9 @@ pub(crate) fn div_into(
     if let ExprNode::Const(c) = *arena.get(den)
         && c != 0.0
     {
-        if let Some(t) = as_linear(arena, num, false) {
+        if small_affine(arena, &[num])
+            && let Some(t) = as_linear(arena, num, false)
+        {
             let inv = 1.0 / c;
             let constant = t.constant * inv;
             let mut coeffs = t.coeffs.into_owned();
@@ -475,9 +1018,11 @@ pub(crate) fn div_into(
     arena.push(ExprNode::Div(num, den))
 }
 
-/// Build `-rhs`, preserving linearity.
+/// Build `-rhs`, eagerly merging small numeric affine operands.
 pub(crate) fn neg_into(arena: &mut (impl ArenaAccess + ?Sized), rhs: ExprId) -> ExprId {
-    if let Some(t) = as_linear(arena, rhs, false) {
+    if small_affine(arena, &[rhs])
+        && let Some(t) = as_linear(arena, rhs, false)
+    {
         let constant = -t.constant;
         let mut coeffs = t.coeffs.into_owned();
         for (_, c) in &mut coeffs {
@@ -513,6 +1058,39 @@ pub struct SignedExpr {
     pub neg: bool,
 }
 
+// Classify additive regions once, rather than retrying extraction at every
+// prefix of a mixed sum.
+fn additive_affinity(arena: &ExprArena, root: ExprId) -> FxHashMap<ExprId, bool> {
+    let mut affine = FxHashMap::default();
+    let mut pending = vec![(root, false)];
+    while let Some((id, finish)) = pending.pop() {
+        if affine.contains_key(&id) {
+            continue;
+        }
+        let value = match arena.get(id) {
+            ExprNode::Add(children) if finish => children.iter().all(|child| affine[child]),
+            ExprNode::Unary(UnaryOp::Neg, child) if finish => affine[child],
+            ExprNode::Add(children) => {
+                pending.push((id, true));
+                pending.extend(children.iter().rev().map(|&child| (child, false)));
+                continue;
+            }
+            ExprNode::Unary(UnaryOp::Neg, child) => {
+                pending.push((id, true));
+                pending.push((*child, false));
+                continue;
+            }
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. } => true,
+            _ => as_linear(arena, id, true).is_some(),
+        };
+        affine.insert(id, value);
+    }
+    affine
+}
+
 /// Split an expression into its linear part and a nonlinear residual. The
 /// returned `(LinearTerms, Vec<SignedExpr>)` satisfies
 ///
@@ -527,15 +1105,36 @@ pub struct SignedExpr {
 ///
 /// As with [`extract_linear`], call [`LinearTerms::into_owned`] before retaining
 /// the linear terms independently of `arena`.
+///
+/// # Panics
+/// Panics if `id` or a reachable child is not a valid ID in `arena`.
 pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, Vec<SignedExpr>) {
     if let Some(lt) = as_linear(arena, id, true) {
         return (lt, Vec::new());
     }
+    // Non-additive nonlinear roots are already a single residual.
+    if !matches!(arena.get(id), ExprNode::Add(_) | ExprNode::Unary(UnaryOp::Neg, _)) {
+        return (LinearTerms::borrowed(&[], 0.0), vec![SignedExpr { id, neg: false }]);
+    }
     let mut lin = CoeffAccum::with_capacity(0);
     let mut constant = 0.0;
     let mut residual: Vec<SignedExpr> = Vec::new();
+    let affine = additive_affinity(arena, id);
+    let mut extracted = FxHashMap::default();
     let mut sign_stack: smallvec::SmallVec<[(ExprId, f64); 8]> = smallvec![(id, 1.0)];
     while let Some((cur, sign)) = sign_stack.pop() {
+        if affine[&cur] {
+            // Consume a maximal affine subtree as one term.
+			// Extraction's fold memoizes its shared descendants.
+            let t = extracted.entry(cur).or_insert_with(|| {
+                as_linear(arena, cur, true).expect("classified additive affine region")
+            });
+            for &(v, c) in t.coeffs.iter() {
+                lin.add(v, c * sign);
+            }
+            constant += t.constant * sign;
+            continue;
+        }
         match arena.get(cur) {
             ExprNode::Add(children) => {
                 for c in children.iter().copied() {
@@ -543,16 +1142,7 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
                 }
             }
             ExprNode::Unary(UnaryOp::Neg, inner) => sign_stack.push((*inner, -sign)),
-            _ => {
-                if let Some(t) = as_linear(arena, cur, true) {
-                    for &(v, c) in t.coeffs.iter() {
-                        lin.add(v, c * sign);
-                    }
-                    constant += t.constant * sign;
-                } else {
-                    residual.push(SignedExpr { id: cur, neg: sign < 0.0 });
-                }
-            }
+            _ => residual.push(SignedExpr { id: cur, neg: sign < 0.0 }),
         }
     }
     let mut coeffs = lin.into_coeffs();
@@ -582,6 +1172,127 @@ pub fn describe_nonlinear_term(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growing_nonlinear_products_and_powers_use_bounded_work_per_step() {
+        use crate::arena::ParamId;
+        struct CountedArena {
+            arena: ExprArena,
+            reads: std::cell::Cell<usize>,
+        }
+        impl ArenaAccess for CountedArena {
+            fn get(&self, id: ExprId) -> &ExprNode {
+                self.reads.set(self.reads.get() + 1);
+                self.arena.get(id)
+            }
+            fn param_value(&self, id: ParamId) -> f64 {
+                self.arena.param_value(id)
+            }
+            fn push(&mut self, node: ExprNode) -> ExprId {
+                self.arena.push(node)
+            }
+            fn cached_degree(&self, id: ExprId) -> Option<crate::classify::Degree> {
+                self.arena.cached_degree(id)
+            }
+            fn cache_degree(&self, id: ExprId, degree: crate::classify::Degree) {
+                self.arena.cache_degree(id, degree);
+            }
+        }
+        for powers in [false, true] {
+            let mut arena =
+                CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
+            let x = arena.var(VarId(0));
+            let exponent = arena.constant(2.0);
+            let mut root = x;
+            for _ in 0..4_000 {
+                root = if powers {
+                    pow_into(&mut arena, root, exponent)
+                } else {
+                    mul_into(&mut arena, root, x)
+                };
+            }
+            assert!(
+                arena.reads.get() < 400_000,
+                "quadratic traversal: {} reads, powers={powers}",
+                arena.reads.get()
+            );
+            assert_eq!(crate::classify::classify_access(&arena, root), crate::ExprClass::Nonlinear);
+        }
+    }
+
+    #[test]
+    fn small_eager_merges_preserve_ieee_grouping_with_raw_duplicate_coefficients() {
+        let mut arena = ExprArena::new();
+        let v = VarId(0);
+        let mut ids = vec![arena.var(v)];
+        for value in [-0.0, 0.0, 1.0, 1e16, -1e16, f64::INFINITY, f64::NAN] {
+            ids.push(arena.constant(value));
+            ids.push(arena.linear(vec![(v, value)], value));
+        }
+        ids.push(arena.linear(vec![(v, 1.0), (v, 1e16), (v, -1e16)], -0.0));
+        ids.push(arena.push(ExprNode::Add(ids[..4].iter().copied().collect())));
+        let bits = |terms: LinearTerms<'_>| {
+            (
+                terms.coeffs.iter().map(|&(v, c)| (v, c.to_bits())).collect::<Vec<_>>(),
+                terms.constant.to_bits(),
+            )
+        };
+        for &lhs in &ids {
+            for &rhs in &ids {
+                let expected = {
+                    let lt = recursive_linear(&arena, lhs, false).unwrap();
+                    let rt = recursive_linear(&arena, rhs, false).unwrap();
+                    let mut acc = CoeffAccum::with_capacity(lt.coeffs.len() + rt.coeffs.len());
+                    acc.extend_from_slice(&lt.coeffs);
+                    acc.extend_from_slice(&rt.coeffs);
+                    let mut coeffs = acc.into_coeffs();
+                    coeffs.retain(|(_, c)| *c != 0.0);
+                    bits(LinearTerms::owned(coeffs, lt.constant + rt.constant))
+                };
+                let result = add_into(&mut arena, lhs, rhs);
+                assert_eq!(
+                    bits(as_linear(&arena, result, false).unwrap()),
+                    expected,
+                    "{lhs:?} + {rhs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn flat_weighted_sum_preserves_ieee_arithmetic_and_parameter_rebinding() {
+        let mut arena = ExprArena::new();
+        let var = arena.var(VarId(0));
+        let param = arena.new_param(0.0);
+        let p = arena.param(param);
+        for scalar in [-0.0, 0.0, 1.0, 1e308, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            arena.set_param_value(param, scalar);
+            let constant = arena.constant(scalar);
+            for factor in [constant, p] {
+                let left = arena.push(ExprNode::Mul(smallvec![factor, var]));
+                let right = arena.push(ExprNode::Mul(smallvec![var, factor]));
+                let sum = arena.push(ExprNode::Add(smallvec![left, right, var]));
+                for resolve in [false, true] {
+                    let bits = |t: LinearTerms<'_>| {
+                        (
+                            t.constant.to_bits(),
+                            t.coeffs.iter().map(|(v, c)| (*v, c.to_bits())).collect::<Vec<_>>(),
+                        )
+                    };
+                    assert_eq!(
+                        as_linear(&arena, sum, resolve).map(bits),
+                        recursive_linear(&arena, sum, resolve).map(bits)
+                    );
+                }
+            }
+        }
+        let term = arena.push(ExprNode::Mul(smallvec![p, var]));
+        let sum = arena.push(ExprNode::Add(smallvec![term, term]));
+        for value in [2.0, 3.0] {
+            arena.set_param_value(param, value);
+            assert_eq!(extract_linear(&arena, sum).unwrap().coeffs, vec![(VarId(0), 2.0 * value)]);
+        }
+    }
 
     #[test]
     fn iterative_linear_matches_recursive_arithmetic_and_order() {

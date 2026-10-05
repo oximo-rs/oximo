@@ -174,7 +174,47 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
     }
 }
 
-struct PolyFolder<'a>(&'a ExprArena);
+struct PolyFolder<'a> {
+    arena: &'a ExprArena,
+    root: ExprId,
+    flatten_sums: &'a std::cell::Cell<Option<bool>>,
+    sum_magnitude: &'a std::cell::Cell<f64>,
+}
+
+#[inline(never)]
+fn flat_poly(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
+    let terminal = |id| match arena.get(id) {
+        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) => true,
+        ExprNode::Linear { coeffs, .. } => coeffs.len() <= 1,
+        _ => false,
+    };
+    if children.first().is_some_and(|&id| !terminal(id))
+        || children.last().is_some_and(|&id| !terminal(id))
+    {
+        return None;
+    }
+    let mut acc = Poly::default();
+    for &child in children {
+        match arena.get(child) {
+            ExprNode::Var(var) => {
+                *acc.linear.entry(*var).or_insert(0.0) += 1.0;
+                acc.constant += 0.0;
+            }
+            ExprNode::Const(value) => acc.constant += value,
+            ExprNode::Param(param) => acc.constant += arena.param_value(*param),
+            ExprNode::Linear { coeffs, constant } if coeffs.len() <= 1 => {
+                for &(var, coefficient) in coeffs {
+                    // Poly's ordinary leaf path first adds the coefficient
+                    // to +0; preserve that IEEE sign behavior here too.
+                    *acc.linear.entry(var).or_insert(0.0) += 0.0 + coefficient;
+                }
+                acc.constant += constant;
+            }
+            _ => return None,
+        }
+    }
+    Some(acc)
+}
 enum PolyOp {
     Add,
     Mul,
@@ -184,6 +224,7 @@ enum PolyOp {
 }
 struct PolyState<'a> {
     rest: &'a [ExprId],
+    pending: crate::fold::SumFrames<'a>,
     value: Option<Poly>,
     op: PolyOp,
 }
@@ -194,9 +235,9 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
 
     fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Poly>, Self::State> {
         use std::ops::ControlFlow::{Break, Continue};
-        let (rest, op, value) = match self.0.get(id) {
+        let (rest, op, value) = match self.arena.get(id) {
             ExprNode::Const(c) => return Break(Some(Poly::constant(*c))),
-            ExprNode::Param(p) => return Break(Some(Poly::constant(self.0.param_value(*p)))),
+            ExprNode::Param(p) => return Break(Some(Poly::constant(self.arena.param_value(*p)))),
             ExprNode::Var(v) => return Break(Some(Poly::var(*v))),
             ExprNode::Linear { coeffs, constant } => {
                 let mut linear = FxHashMap::with_capacity_and_hasher(coeffs.len(), FxBuildHasher);
@@ -211,7 +252,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
                 (std::slice::from_ref(c), PolyOp::Neg, Poly::default())
             }
             ExprNode::Pow(base, exp) => {
-                let ExprNode::Const(e) = self.0.get(*exp) else { return Break(None) };
+                let ExprNode::Const(e) = self.arena.get(*exp) else { return Break(None) };
                 if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                     return Break(None);
                 }
@@ -225,7 +266,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
             }
             _ => return Break(None),
         };
-        Continue(PolyState { rest, op, value: Some(value) })
+        Continue(PolyState { rest, pending: None, op, value: Some(value) })
     }
 
     fn next(&self, state: &mut Self::State) -> std::ops::ControlFlow<Option<Poly>, ExprId> {
@@ -233,23 +274,38 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
         if state.value.is_none() {
             return Break(None);
         }
-        while let Some((&child, tail)) = state.rest.split_first() {
+        loop {
+            let Some((&child, tail)) = state.rest.split_first() else {
+                if let Some((next, previous_constant)) =
+                    state.pending.as_mut().and_then(|frames| frames.pop())
+                {
+                    let acc = state.value.as_mut().expect("checked above");
+                    acc.constant += previous_constant;
+                    state.rest = next;
+                    continue;
+                }
+                break;
+            };
             state.rest = tail;
             if matches!(state.op, PolyOp::Add) {
                 let acc = state.value.as_mut().expect("checked above");
                 // Avoid creating a one-entry hash table for every variable in a sum.
-                match self.0.get(child) {
+                match self.arena.get(child) {
                     ExprNode::Var(v) => {
                         acc.constant += 0.0;
                         *acc.linear.entry(*v).or_insert(0.0) += 1.0;
+                        crate::fold::record_sum_magnitude(self.sum_magnitude, 1.0);
                         continue;
                     }
                     ExprNode::Const(c) => {
                         acc.constant += c;
+                        crate::fold::record_sum_magnitude(self.sum_magnitude, *c);
                         continue;
                     }
                     ExprNode::Param(p) => {
-                        acc.constant += self.0.param_value(*p);
+                        let value = self.arena.param_value(*p);
+                        acc.constant += value;
+                        crate::fold::record_sum_magnitude(self.sum_magnitude, value);
                         continue;
                     }
                     _ => {}
@@ -261,13 +317,18 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
     }
 
     fn accept(&self, state: &mut Self::State, p: Poly) {
-        let mut acc =
-            state.value.take().expect("failed products terminate before requesting children");
+        if matches!(state.op, PolyOp::Add) {
+            crate::fold::record_sum_magnitude(
+                self.sum_magnitude,
+                p.constant.abs()
+                    + p.linear.values().chain(p.quad.values()).map(|c| c.abs()).sum::<f64>(),
+            );
+            state.value.as_mut().expect("successful sum").add_assign(p);
+            return;
+        }
+        let acc = state.value.take().expect("failed products terminate before requesting children");
         state.value = match state.op {
-            PolyOp::Add => {
-                acc.add_assign(p);
-                Some(acc)
-            }
+            PolyOp::Add => unreachable!("handled above"),
             PolyOp::Mul if acc.is_constant() => Some(p.scale(acc.constant)),
             PolyOp::Mul if p.is_constant() => Some(acc.scale(p.constant)),
             PolyOp::Mul if acc.is_linear() && p.is_linear() => Some(mul_linear(&acc, &p)),
@@ -277,6 +338,27 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
             PolyOp::Mul | PolyOp::Square => None,
         };
     }
+
+    fn inline(&self, state: &mut Self::State, child: ExprId) -> bool {
+        if matches!(state.op, PolyOp::Add)
+            && let ExprNode::Add(children) = self.arena.get(child)
+        {
+            let flatten = self.flatten_sums.get().unwrap_or_else(|| {
+                let flatten = !crate::linear::bounded_affine(self.arena, &[self.root], true);
+                self.flatten_sums.set(Some(flatten));
+                flatten
+            });
+            if !flatten {
+                return false;
+            }
+            let acc = state.value.as_mut().expect("successful sum");
+            state.pending.get_or_insert_with(Box::default).push((state.rest, acc.constant));
+            acc.constant = 0.0;
+            state.rest = children;
+            return true;
+        }
+        false
+    }
 }
 
 fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
@@ -285,9 +367,45 @@ fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
         id = *child;
         negations += 1;
     }
-    let mut value = crate::fold::fold(arena, id, PolyFolder(arena))?;
-    for _ in 0..negations {
-        value = value.neg();
+    if negations == 0
+        && let ExprNode::Add(children) = arena.get(id)
+        && let Some(poly) = flat_poly(arena, children)
+    {
+        return Some(poly);
+    }
+    let flatten_sums = std::cell::Cell::new(None);
+    let sum_magnitude = std::cell::Cell::new(0.0);
+    let mut value = crate::fold::fold(
+        arena,
+        id,
+        PolyFolder { arena, root: id, flatten_sums: &flatten_sums, sum_magnitude: &sum_magnitude },
+    )?;
+    if flatten_sums.get() == Some(true)
+        && (!sum_magnitude.get().is_finite()
+            || !value.constant.is_finite()
+            || value.linear.values().chain(value.quad.values()).any(|c| !c.is_finite()))
+        && crate::fold::finite_inputs(arena, id, true)
+    {
+        value = crate::fold::fold(
+            arena,
+            id,
+            PolyFolder {
+                arena,
+                root: id,
+                flatten_sums: &std::cell::Cell::new(Some(false)),
+                sum_magnitude: &std::cell::Cell::new(f64::INFINITY),
+            },
+        )?;
+    }
+    if negations != 0 {
+        for coefficient in value.linear.values_mut().chain(value.quad.values_mut()) {
+            for _ in 0..negations {
+                *coefficient *= -1.0;
+            }
+        }
+        for _ in 0..negations {
+            value.constant *= -1.0;
+        }
     }
     Some(value)
 }

@@ -3,13 +3,14 @@ use crate::fold::Folder;
 
 /// A small root cache. Most scalar nodes are cheaper to classify directly.
 /// Retaining only eight compound roots keeps per-arena memory bounded.
+/// Store exact degree so symbolic constants remain distinct from affine roots.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExprClassCache {
-    entries: smallvec::SmallVec<[(ExprId, ExprClass); 8]>,
+    entries: smallvec::SmallVec<[(ExprId, Degree); 8]>,
 }
 
 impl ExprClassCache {
-    pub(crate) fn get(&mut self, id: ExprId) -> Option<ExprClass> {
+    pub(crate) fn get(&mut self, id: ExprId) -> Option<Degree> {
         let position = self.entries.iter().rposition(|&(root, _)| root == id)?;
         let entry = self.entries[position];
         if position + 1 != self.entries.len() {
@@ -19,7 +20,7 @@ impl ExprClassCache {
         Some(entry.1)
     }
 
-    pub(crate) fn insert(&mut self, id: ExprId, class: ExprClass) {
+    pub(crate) fn insert(&mut self, id: ExprId, class: Degree) {
         if let Some(position) = self.entries.iter().position(|&(root, _)| root == id) {
             self.entries.remove(position);
         } else if self.entries.len() == 8 {
@@ -47,7 +48,7 @@ pub enum ExprClass {
 /// above quadratic". Both polynomial degree > 2 and transcendentals collapse
 /// into it, since neither fits a QP solver's quadratic API.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Degree {
+pub(crate) enum Degree {
     Zero,
     One,
     Two,
@@ -168,6 +169,16 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
 
     fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Degree>, Self::State> {
         use std::ops::ControlFlow::{Break, Continue};
+        if matches!(
+            self.0.get(id),
+            ExprNode::Add(_)
+                | ExprNode::Mul(_)
+                | ExprNode::Pow(_, _)
+                | ExprNode::Unary(UnaryOp::Neg, _)
+        ) && let Some(value) = self.0.cached_degree(id)
+        {
+            return Break(Some(value));
+        }
         let (rest, op) = match self.0.get(id) {
             ExprNode::Const(_) | ExprNode::Param(_) => return Break(Some(Degree::Zero)),
             ExprNode::Var(_) => return Break(Some(Degree::One)),
@@ -220,10 +231,26 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
 }
 
 fn degree(arena: &(impl ArenaAccess + ?Sized), mut id: ExprId) -> Degree {
+    let root = id;
     while let ExprNode::Unary(UnaryOp::Neg, child) = arena.get(id) {
         id = *child;
     }
-    crate::fold::fold(arena, id, DegreeFolder(arena)).expect("degree classification is total")
+    let value =
+        crate::fold::fold(arena, id, DegreeFolder(arena)).expect("degree classification is total");
+    if matches!(
+        arena.get(root),
+        ExprNode::Add(_)
+            | ExprNode::Mul(_)
+            | ExprNode::Pow(_, _)
+            | ExprNode::Unary(UnaryOp::Neg, _)
+    ) {
+        arena.cache_degree(root, value);
+    }
+    value
+}
+
+pub(crate) fn is_constant_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
+    degree(arena, id) == Degree::Zero
 }
 
 /// Classify an expression as Linear, Quadratic (polynomial degree <= 2 with at
@@ -234,8 +261,8 @@ pub fn classify(arena: &ExprArena, id: ExprId) -> ExprClass {
 }
 
 pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> ExprClass {
-    // Finish small, shallow expressions without cache locks or traversal
-    // metadata.
+    // Finish small, shallow expressions without traversal metadata.
+	// Remember compound results even when a cached child completes the shallow path.
     let small = match arena.get(id) {
         ExprNode::Add(children) | ExprNode::Mul(children) => children.len() <= 8,
         _ => true,
@@ -246,6 +273,7 @@ pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -
             std::ops::ControlFlow::Break(Some(value)) => return value.class(),
             std::ops::ControlFlow::Continue(mut state) => {
                 if let std::ops::ControlFlow::Break(Some(value)) = folder.next(&mut state) {
+                    arena.cache_degree(id, value);
                     return value.class();
                 }
             }
@@ -254,12 +282,10 @@ pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -
     }
     // Expensive roots are cached independently in canonical arenas, snapshots,
     // and worker forks.
-    if let Some(class) = arena.cached_class(id) {
-        return class;
+    if let Some(value) = arena.cached_degree(id) {
+        return value.class();
     }
-    let class = degree(arena, id).class();
-    arena.cache_class(id, class);
-    class
+    degree(arena, id).class()
 }
 
 #[cfg(test)]

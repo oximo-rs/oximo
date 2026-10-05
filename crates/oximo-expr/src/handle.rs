@@ -87,6 +87,29 @@ impl<'a, D: Degree> Expr<'a, D> {
         self.arena
     }
 
+    /// Compact affine arithmetic once before repeated evaluation or extraction.
+    /// Numeric input becomes a `Linear` node or a constant, while parameter-dependent
+    /// terms remain symbolic and observe later rebinding.
+    ///
+    /// Like [`crate::AffineBuilder`], compaction can regroup floating-point
+    /// coefficients. Call this after construction.
+    pub fn compact(self) -> Expr<'a, Affine>
+    where
+        D: crate::degree::AddDegree<Affine, Output = Affine>,
+    {
+        if self.arena.with_ref(|arena| {
+            matches!(
+                arena.get(self.id),
+                ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
+            )
+        }) {
+            return Expr::from_id(self.id, self.arena);
+        }
+        let mut builder = crate::AffineBuilder::new(self.arena);
+        builder.add_term(1.0, self);
+        builder.build()
+    }
+
     /// Square with a statically determined degree.
     pub fn square(self) -> Expr<'a, <D as MulDegree<D>>::Output>
     where
@@ -164,14 +187,14 @@ impl<'a, D: Degree> Expr<'a, D> {
 
     pub fn pow<E: Degree>(self, exponent: Expr<'a, E>) -> Expr<'a> {
         self.assert_same_arena(exponent);
-        let id = self.arena.with_mut(|arena| arena.push(ExprNode::Pow(self.id, exponent.id)));
+        let id = self.arena.with_mut(|arena| crate::linear::pow_into(arena, self.id, exponent.id));
         Expr::from_id(id, self.arena)
     }
 
     pub fn powi(self, n: i32) -> Expr<'a> {
         let id = self.arena.with_mut(|arena| {
             let exp_id = arena.constant(f64::from(n));
-            arena.push(ExprNode::Pow(self.id, exp_id))
+            crate::linear::pow_into(arena, self.id, exp_id)
         });
         Expr::from_id(id, self.arena)
     }
@@ -179,7 +202,7 @@ impl<'a, D: Degree> Expr<'a, D> {
     pub fn powf(self, n: f64) -> Expr<'a> {
         let id = self.arena.with_mut(|arena| {
             let exp_id = arena.constant(n);
-            arena.push(ExprNode::Pow(self.id, exp_id))
+            crate::linear::pow_into(arena, self.id, exp_id)
         });
         Expr::from_id(id, self.arena)
     }
