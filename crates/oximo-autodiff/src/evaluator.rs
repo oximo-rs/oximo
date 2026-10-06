@@ -1015,6 +1015,16 @@ mod tests {
     use oximo_core::Model;
     use oximo_core::prelude::*;
 
+    fn with_threads(threads: usize, run: impl FnOnce() + Send) {
+        #[cfg(not(target_arch = "wasm32"))]
+        rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(run);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = threads;
+            run();
+        }
+    }
+
     fn mixed_model() -> Model {
         let m = Model::new("equiv");
         variable!(m, -3.0 <= x <= 3.0);
@@ -1115,8 +1125,7 @@ mod tests {
         assert!(ev.constraints.iter().any(|s| s.support.is_empty()));
         assert_eq!(ev.num_hessian_seeds(), n);
         for threads in [1, 4, 2, 3, 4] {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-            pool.install(|| {
+            with_threads(threads, || {
                 // Capture the evaluator mutably.
                 let ev = &mut ev;
                 for step in [0.1, -0.3, 0.0] {
@@ -1193,19 +1202,17 @@ mod tests {
 
     #[test]
     fn work_estimates_distinguish_tape_cost_from_row_count() {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-        pool.install(|| {
+        with_threads(4, || {
             let cheap = WorkPlan::new((0..128).map(|_| (3, 1)));
             let expensive = WorkPlan::new((0..4).map(|_| (PAR_JACOBIAN_WORK, 1)));
             assert!(cheap.workers(PAR_JACOBIAN_WORK) < 2);
-            assert_eq!(expensive.workers(PAR_JACOBIAN_WORK), 4);
+            assert_eq!(expensive.workers(PAR_JACOBIAN_WORK), rayon::current_num_threads());
         });
     }
 
     #[test]
     fn skewed_work_chooses_the_better_adjacent_split() {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
-        pool.install(|| {
+        with_threads(2, || {
             let costs = [4_096_u16, 5_120, 1_024];
             let plan = WorkPlan::new(costs.iter().map(|&cost| (usize::from(cost), 1)));
             assert_eq!(plan.split(0, 3, 1, 1), 1);

@@ -575,9 +575,10 @@ fn parallel_hessian_matches_fd() {
 
 /// Expensive rows cross both work thresholds in an explicit multi-thread pool,
 /// testing public constraint-value and Jacobian dispatch against the chain rule.
+/// WebAssembly exercises the same rows using Rayon's single-thread fallback.
 #[test]
 fn parallel_constraints_and_jacobian_match_analytic() {
-    rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(|| {
+    let run = || {
         let n = 70usize;
         let depth = 128;
         let m = Model::new("par_con");
@@ -597,8 +598,13 @@ fn parallel_constraints_and_jacobian_match_analytic() {
         {
             let (value_workers, jacobian_workers) =
                 oximo_autodiff::benchmark_support::constraint_workers(&ev);
-            assert!(value_workers > 1, "constraint values must use public parallel dispatch");
-            assert!(jacobian_workers > 1, "Jacobian must use public parallel dispatch");
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                assert!(value_workers > 1, "constraint values must use public parallel dispatch");
+                assert!(jacobian_workers > 1, "Jacobian must use public parallel dispatch");
+            }
+            #[cfg(target_arch = "wasm32")]
+            assert_eq!((value_workers, jacobian_workers), (1, 1));
         }
 
         let point: Vec<f64> = (0..n).map(|i| 0.1 + 0.01 * i as f64).collect();
@@ -626,7 +632,11 @@ fn parallel_constraints_and_jacobian_match_analytic() {
             assert_eq!(row, col, "each constraint touches exactly its own variable");
             assert_close(value, expected[col].1, 1e-9, &format!("jac[{row},{col}]"));
         }
-    });
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
+    #[cfg(target_arch = "wasm32")]
+    run();
 }
 
 #[test]
