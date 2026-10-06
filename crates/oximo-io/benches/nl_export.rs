@@ -78,16 +78,22 @@ fn run_case(case: &str) {
 }
 
 fn main() {
-    println!("case,median_ns,min_ns,max_ns");
     if let Ok(case) = std::env::var("OXIMO_BENCH_CASE") {
         run_case(&case);
         return;
     }
+    println!("case,median_ns,min_ns,max_ns");
+    let executable = std::env::current_exe().expect("cannot locate benchmark executable");
     for size in [32, 512, 4096, 20_000] {
         for kind in
             ["nl_sum", "nl_export", "nl_export_unique", "nl_roundtrip", "nl_roundtrip_binary"]
         {
-            run_case(&format!("{kind}/{size}"));
+            let case = format!("{kind}/{size}");
+            match std::process::Command::new(&executable).env("OXIMO_BENCH_CASE", &case).status() {
+                Ok(status) if status.success() => {}
+                Ok(status) => eprintln!("{case}: benchmark process failed with {status}"),
+                Err(error) => eprintln!("{case}: could not launch benchmark process: {error}"),
+            }
         }
     }
 }
