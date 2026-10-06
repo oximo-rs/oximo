@@ -111,7 +111,10 @@ pub(crate) fn emit_expr<'a, W: Write>(
                 | ExprNode::Unary(UnaryOp::Neg, _)
         ) && affine.get(&id).is_none_or(Option::is_some)
         {
-            if let Some(terms) = cache.extract(arena, id) {
+            if let Some(terms) = cache.extract(arena, id)
+                && terms.constant.is_finite()
+                && terms.coeffs.iter().all(|(_, coefficient)| coefficient.is_finite())
+            {
                 emit_linear_inline(w, var_index, &terms.coeffs, terms.constant)?;
                 continue;
             }
@@ -344,6 +347,33 @@ fn emit_term<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonfinite_extracted_terms_keep_tree_encoding() {
+        let mut arena = ExprArena::new();
+        let var = arena.var(VarId(0));
+        let large = arena.constant(f64::MAX);
+        let scaled = arena.push(ExprNode::Mul(vec![large, var].into()));
+        let constant_overflow = arena.push(ExprNode::Add(vec![large, large].into()));
+        let coefficient_overflow = arena.push(ExprNode::Add(vec![scaled, scaled].into()));
+        let var_index = FxHashMap::from_iter([(VarId(0), 0)]);
+        let opts = super::super::options::WriteOptions::ascii_lean();
+        for (root, child) in [
+            (constant_overflow, format!("n{}\n", f64::MAX)),
+            (coefficient_overflow, format!("o2\nn{}\nv0\n", f64::MAX)),
+        ] {
+            let mut bytes = Vec::new();
+            emit_expr(
+                &mut Writer::new(&mut bytes, &opts),
+                &arena,
+                &var_index,
+                root,
+                &mut EmitCache::default(),
+            )
+            .expect("finite source terms must export despite extraction overflow");
+            assert_eq!(String::from_utf8(bytes).unwrap(), format!("o0\n{child}{child}"));
+        }
+    }
 
     #[test]
     fn export_cache_is_bounded_and_new_exports_observe_rebinding() {
