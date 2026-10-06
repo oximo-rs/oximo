@@ -10,7 +10,6 @@ use std::cell::RefCell;
 
 use oximo_core::Model;
 use oximo_expr::ExprId;
-use rayon::prelude::*;
 
 use crate::enzyme::{tape_gradient, tape_hvp};
 use crate::error::AutodiffError;
@@ -24,16 +23,17 @@ use crate::sparsity::{
 };
 use crate::tape::Tape;
 
-// Above these counts a derivative call fans its independent units of work out
-// across rayon's thread pool; below, it stays on the single reusable scratch
-// buffer (the zero-allocation fast path). Counts are a coarse proxy for work:
-// a Hessian seed is a whole forward-over-reverse tape pass, and a Jacobian row
-// / nonlinear constraint value is a reverse pass, so linear/quadratic slots
-// make the constraint thresholds conservative.
-// TODO: benchmark and tune these thresholds (ideally weighting by tape size and
-// the nonlinear-slot count rather than a raw element count).
-const PAR_SEED_THRESHOLD: usize = 16;
-const PAR_CONSTRAINT_THRESHOLD: usize = 64;
+// Minimum estimated work per task, calibrated with repeated native callback
+// measurements (Enzyme, fat LTO).
+const PAR_VALUE_WORK: usize = 2_048;
+const PAR_JACOBIAN_WORK: usize = 1_024;
+const PAR_HESSIAN_WORK: usize = 1_024;
+
+/// Affine subexpressions are packed into one instruction, whose coefficient
+/// loop still contributes work proportional to its number of terms.
+fn tape_work(tape: &Tape) -> usize {
+    tape.n_regs() + tape.parts().4.len()
+}
 
 /// Where each Lagrangian-tape multiplier slot takes its weight from.
 #[derive(Copy, Clone, Debug)]
@@ -53,10 +53,10 @@ struct Seed {
     fills: Vec<(usize, usize)>,
 }
 
-/// Per-worker-thread scratch for the parallel derivative paths, allocated once
-/// per rayon worker by `map_init`. The serial paths keep using the shared
-/// [`Scratch`] behind the `RefCell`. Only the above-threshold parallel branches
-/// allocate these, so we keep the zero-allocation fast path for small problems.
+/// Scratch owned by a parallel task, retained across calls.
+/// Task buffers are borrowed exclusively before entering Rayon,
+/// so work stealing needs neither thread-local state nor locks.
+#[derive(Debug, Default)]
 struct ParScratch {
     regs: Vec<f64>,
     dregs: Vec<f64>,
@@ -69,18 +69,166 @@ struct ParScratch {
 }
 
 impl ParScratch {
-    fn new(max_regs: usize, n_vars: usize) -> Self {
-        Self {
-            regs: vec![0.0; max_regs],
-            dregs: vec![0.0; max_regs],
-            regs_t: vec![0.0; max_regs],
-            dregs_t: vec![0.0; max_regs],
-            basis: vec![0.0; n_vars],
-            dir: vec![0.0; n_vars],
-            grad: vec![0.0; n_vars],
-            hv: vec![0.0; n_vars],
+    fn prepare(&mut self, n_regs: usize, n_vars: usize, gradient: bool, hessian: bool) {
+        grow(&mut self.regs, n_regs);
+        if gradient || hessian {
+            grow(&mut self.dregs, n_regs);
+            grow(&mut self.grad, n_vars);
+            #[cfg(target_arch = "wasm32")]
+            grow(&mut self.basis, n_vars);
+        }
+        if hessian {
+            grow(&mut self.regs_t, n_regs);
+            grow(&mut self.dregs_t, n_regs);
+            grow(&mut self.dir, n_vars);
+            grow(&mut self.hv, n_vars);
         }
     }
+}
+
+fn grow(buffer: &mut Vec<f64>, len: usize) {
+    if buffer.len() < len {
+        buffer.resize(len, 0.0);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParallelWorkspace {
+    workers: Vec<ParScratch>,
+    hessian_values: Vec<f64>,
+}
+
+impl ParallelWorkspace {
+    fn prepare(
+        &mut self,
+        count: usize,
+        n_regs: usize,
+        n_vars: usize,
+        gradient: bool,
+        hessian: bool,
+    ) {
+        self.workers.resize_with(self.workers.len().max(count), ParScratch::default);
+        for worker in &mut self.workers[..count] {
+            worker.prepare(n_regs, n_vars, gradient, hessian);
+        }
+    }
+}
+
+/// Prefix sums of estimated work and output widths.
+#[derive(Debug)]
+struct WorkPlan {
+    work: Vec<usize>,
+    offsets: Vec<usize>,
+}
+
+impl WorkPlan {
+    fn new(units: impl Iterator<Item = (usize, usize)>) -> Self {
+        let mut work = vec![0_usize];
+        let mut offsets = vec![0];
+        for (cost, width) in units {
+            work.push(work.last().unwrap().saturating_add(cost.max(1)));
+            offsets.push(offsets.last().unwrap() + width);
+        }
+        Self { work, offsets }
+    }
+
+    fn workers(&self, min_work: usize) -> usize {
+        rayon::current_num_threads()
+            .min(self.work.len() - 1)
+            .min(self.work.last().unwrap() / min_work)
+    }
+
+    fn parallel_workers(&self, min_work: usize) -> usize {
+        self.workers(min_work).max(2).min(rayon::current_num_threads()).min(self.work.len() - 1)
+    }
+
+    /// Choose between the valid boundaries bracketing the proportional target,
+    /// minimizing the larger estimated load per worker on either side.
+    fn split(&self, start: usize, end: usize, left_count: usize, right_count: usize) -> usize {
+        let total = (self.work[end] - self.work[start]) as u128;
+        let count = (left_count + right_count) as u128;
+        let target = total * left_count as u128;
+        let upper = self.work[start..end]
+            .partition_point(|&work| (work - self.work[start]) as u128 * count < target)
+            + start;
+        // Every leaf needs a unit, even when one tape dominates the work.
+        let first = start + left_count;
+        let last = end - right_count;
+        let upper = upper.clamp(first, last);
+        let lower = upper.saturating_sub(1).max(first);
+        // Multiplying by the common denominator to avoid floating-point rounding
+        // and usize overflow when comparing the two groups' work per worker.
+        let load = |mid| {
+            let left = (self.work[mid] - self.work[start]) as u128 * right_count as u128;
+            let right = (self.work[end] - self.work[mid]) as u128 * left_count as u128;
+            left.max(right)
+        };
+        if load(lower) <= load(upper) { lower } else { upper }
+    }
+}
+
+#[derive(Debug)]
+struct ConstraintWork {
+    values: WorkPlan,
+    jacobian: WorkPlan,
+    max_regs: usize,
+}
+
+impl ConstraintWork {
+    fn new(slots: &[FunctionSlot], n_vars: usize) -> Self {
+        let cost = |slot: &FunctionSlot| match &slot.kind {
+            SlotKind::Linear(t) => (t.coeffs.len() + 1, t.coeffs.len() + slot.support.len()),
+            SlotKind::Quadratic(q) => {
+                let terms = q.linear.len() + 2 * q.hessian.len();
+                (terms + 1, terms + 2 * slot.support.len())
+            }
+            SlotKind::Nonlinear(t) => {
+                let derivative_passes = if cfg!(target_arch = "wasm32") { n_vars } else { 2 };
+                (tape_work(t), derivative_passes * tape_work(t) + n_vars + slot.support.len())
+            }
+        };
+        Self {
+            values: WorkPlan::new(slots.iter().map(|s| (cost(s).0, 1))),
+            jacobian: WorkPlan::new(slots.iter().map(|s| (cost(s).1, s.support.len()))),
+            max_regs: slots
+                .iter()
+                .filter_map(|s| match &s.kind {
+                    SlotKind::Nonlinear(t) => Some(t.n_regs()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// Divide both scratch and caller-owned output before spawning work.
+fn parallel_units(
+    plan: &WorkPlan,
+    start: usize,
+    end: usize,
+    workers: &mut [ParScratch],
+    output: &mut [f64],
+    evaluate: &(impl Fn(usize, &mut ParScratch, &mut [f64]) + Sync),
+) {
+    if workers.len() == 1 {
+        let mut remaining = output;
+        for i in start..end {
+            let width = plan.offsets[i + 1] - plan.offsets[i];
+            let (out, tail) = remaining.split_at_mut(width);
+            evaluate(i, &mut workers[0], out);
+            remaining = tail;
+        }
+        return;
+    }
+    let left_count = workers.len() / 2;
+    let mid = plan.split(start, end, left_count, workers.len() - left_count);
+    let (left_workers, right_workers) = workers.split_at_mut(left_count);
+    let (left_output, right_output) = output.split_at_mut(plan.offsets[mid] - plan.offsets[start]);
+    rayon::join(
+        || parallel_units(plan, start, mid, left_workers, left_output, evaluate),
+        || parallel_units(plan, mid, end, right_workers, right_output, evaluate),
+    );
 }
 
 #[derive(Debug, Default)]
@@ -136,9 +284,10 @@ pub struct NlpEvaluator {
     con_hess_pos: Vec<Vec<usize>>,
     /// Compressed HVP seeds covering the nonlinear Hessian pattern.
     seeds: Vec<Seed>,
-    /// Largest tape register count, sizing both [`Scratch`] and [`ParScratch`].
-    max_regs: usize,
+    constraint_work: ConstraintWork,
+    hessian_work: WorkPlan,
     scratch: RefCell<Scratch>,
+    parallel: RefCell<ParallelWorkspace>,
 }
 
 impl NlpEvaluator {
@@ -170,11 +319,11 @@ impl NlpEvaluator {
         // Lagrangian tape over the nonlinear functions only.
         let mut nl_sources = Vec::new();
         let mut nl_exprs = Vec::new();
-        if let Some(e) = objective_expr {
-            if objective.is_nonlinear() {
-                nl_sources.push(NlSource::Objective);
-                nl_exprs.push(e);
-            }
+        if let Some(e) = objective_expr
+            && objective.is_nonlinear()
+        {
+            nl_sources.push(NlSource::Objective);
+            nl_exprs.push(e);
         }
         for (i, slot) in constraints.iter().enumerate() {
             if slot.is_nonlinear() {
@@ -207,6 +356,11 @@ impl NlpEvaluator {
             .max()
             .unwrap_or(0);
 
+        let constraint_work = ConstraintWork::new(&constraints, n_vars);
+        let hvp_passes = if cfg!(target_arch = "wasm32") { n_vars } else { 4 };
+        let hessian_work = WorkPlan::new(seeds.iter().map(|seed| {
+            (hvp_passes * tape_work(&lagrangian) + 4 * n_vars + seed.fills.len(), seed.fills.len())
+        }));
         let scratch = RefCell::new(Scratch {
             basis: vec![0.0; n_vars],
             grad: vec![0.0; n_vars],
@@ -233,8 +387,10 @@ impl NlpEvaluator {
             obj_hess_pos,
             con_hess_pos,
             seeds,
-            max_regs,
+            constraint_work,
+            hessian_work,
             scratch,
+            parallel: RefCell::default(),
         })
     }
 
@@ -245,9 +401,9 @@ impl NlpEvaluator {
     /// original pattern, so build the evaluator with representative parameter
     /// values.
     ///
-    /// Only the cached quadratic scatter positions are rebuilt, `jac_structure`,
-    /// `hess_structure`, and `seeds` are reused as-is. Nonlinear tapes (and
-    /// therefore the nonlinear Hessian pattern the seeds cover) are
+    /// The cached quadratic scatter positions and constraint work plans are rebuilt,
+    /// `jac_structure`, `hess_structure`, and `seeds` are reused as-is. Nonlinear
+    /// tapes (and therefore the nonlinear Hessian pattern the seeds cover) are
     /// parameter-independent, and the representative-parameter assumption
     /// keeps the linear/quadratic patterns fixed too. If that assumption is
     /// violated so a new quadratic entry appears outside the pattern, the
@@ -268,6 +424,7 @@ impl NlpEvaluator {
         // representative-parameter note above), so `hess_structure` still
         // contains every entry.
         self.rebuild_quad_scatter();
+        self.constraint_work = ConstraintWork::new(&self.constraints, self.n_vars);
     }
 
     /// Try to reuse this evaluator for `model` after a `set_param`/bound
@@ -318,6 +475,7 @@ impl NlpEvaluator {
         self.objective = objective;
         self.constraints = constraints;
         self.rebuild_quad_scatter();
+        self.constraint_work = ConstraintWork::new(&self.constraints, self.n_vars);
         true
     }
 
@@ -387,7 +545,7 @@ impl NlpEvaluator {
     pub fn eval_constraint(&self, x: &[f64], g: &mut [f64]) {
         assert_eq!(x.len(), self.n_vars, "point dimension");
         assert_eq!(g.len(), self.constraints.len(), "constraint dimension");
-        if self.constraints.len() < PAR_CONSTRAINT_THRESHOLD || rayon::current_num_threads() == 1 {
+        if self.constraint_work.values.workers(PAR_VALUE_WORK) < 2 {
             self.eval_constraint_serial(x, g);
         } else {
             self.eval_constraint_parallel(x, g);
@@ -402,15 +560,26 @@ impl NlpEvaluator {
         }
     }
 
-    /// Parallel constraint values.
+    /// Write constraint values directly into disjoint caller-owned slices.
     fn eval_constraint_parallel(&self, x: &[f64], g: &mut [f64]) {
-        let (params, max_regs) = (self.params.as_slice(), self.max_regs);
-        let values: Vec<f64> = self
-            .constraints
-            .par_iter()
-            .map_init(|| vec![0.0; max_regs], |regs, slot| slot_value(slot, x, params, regs))
-            .collect();
-        g.copy_from_slice(&values);
+        let plan = &self.constraint_work.values;
+        let count = plan.parallel_workers(PAR_VALUE_WORK);
+        if count == 0 {
+            return;
+        }
+        let workspace = &mut *self.parallel.borrow_mut();
+        workspace.prepare(count, self.constraint_work.max_regs, self.n_vars, false, false);
+        let (constraints, params) = (&self.constraints, self.params.as_slice());
+        parallel_units(
+            plan,
+            0,
+            constraints.len(),
+            &mut workspace.workers[..count],
+            g,
+            &|i, sc, out| {
+                out[0] = slot_value(&constraints[i], x, params, &mut sc.regs);
+            },
+        );
     }
 
     /// `(constraint, variable)` Jacobian pattern, row-major.
@@ -428,7 +597,7 @@ impl NlpEvaluator {
     pub fn eval_constraint_jacobian(&self, x: &[f64], vals: &mut [f64]) {
         assert_eq!(x.len(), self.n_vars, "point dimension");
         assert_eq!(vals.len(), self.jac_structure.len(), "jacobian nnz");
-        if self.constraints.len() < PAR_CONSTRAINT_THRESHOLD || rayon::current_num_threads() == 1 {
+        if self.constraint_work.jacobian.workers(PAR_JACOBIAN_WORK) < 2 {
             self.eval_constraint_jacobian_serial(x, vals);
         } else {
             self.eval_constraint_jacobian_parallel(x, vals);
@@ -462,42 +631,42 @@ impl NlpEvaluator {
         debug_assert_eq!(out, vals.len());
     }
 
-    // TODO: Can we write disjoint slices of `vals` from worker threads if we
-    // add unsafe?
-
-    /// Parallel Jacobian
-    /// Each row's gradient is independent. Compute each into a er-thread
-    /// scratch, collect the support values, then concatenate in row order.
+    /// Compute each row into retained scratch and gather directly into its
+    /// disjoint slice of the sparse Jacobian, in declaration/support order.
     fn eval_constraint_jacobian_parallel(&self, x: &[f64], vals: &mut [f64]) {
-        let (params, max_regs, n_vars) = (self.params.as_slice(), self.max_regs, self.n_vars);
-        let rows: Vec<Vec<f64>> = self
-            .constraints
-            .par_iter()
-            .map_init(
-                || ParScratch::new(max_regs, n_vars),
-                |sc, slot| {
-                    for &v in &slot.support {
-                        sc.grad[v as usize] = 0.0;
-                    }
-                    slot_gradient_into(
-                        slot,
-                        x,
-                        params,
-                        &mut sc.regs,
-                        &mut sc.dregs,
-                        &mut sc.basis,
-                        &mut sc.grad,
-                    );
-                    slot.support.iter().map(|&v| sc.grad[v as usize]).collect()
-                },
-            )
-            .collect();
-        let mut out = 0;
-        for row in &rows {
-            vals[out..out + row.len()].copy_from_slice(row);
-            out += row.len();
+        let plan = &self.constraint_work.jacobian;
+        let count = plan.parallel_workers(PAR_JACOBIAN_WORK);
+        if count == 0 {
+            return;
         }
-        debug_assert_eq!(out, vals.len());
+        let workspace = &mut *self.parallel.borrow_mut();
+        workspace.prepare(count, self.constraint_work.max_regs, self.n_vars, true, false);
+        let (constraints, params) = (&self.constraints, self.params.as_slice());
+        parallel_units(
+            plan,
+            0,
+            constraints.len(),
+            &mut workspace.workers[..count],
+            vals,
+            &|i, sc, out| {
+                let slot = &constraints[i];
+                for &v in &slot.support {
+                    sc.grad[v as usize] = 0.0;
+                }
+                slot_gradient_into(
+                    slot,
+                    x,
+                    params,
+                    &mut sc.regs,
+                    &mut sc.dregs,
+                    &mut sc.basis,
+                    &mut sc.grad,
+                );
+                for (value, &v) in out.iter_mut().zip(&slot.support) {
+                    *value = sc.grad[v as usize];
+                }
+            },
+        );
     }
 
     /// Lower-triangle (`row >= col`) Hessian-of-the-Lagrangian pattern,
@@ -546,7 +715,7 @@ impl NlpEvaluator {
             return;
         }
 
-        if self.seeds.len() < PAR_SEED_THRESHOLD || rayon::current_num_threads() == 1 {
+        if self.hessian_work.workers(PAR_HESSIAN_WORK) < 2 {
             self.hessian_seeds_serial(x, obj_factor, lambda, vals);
         } else {
             self.hessian_seeds_parallel(x, obj_factor, lambda, vals);
@@ -562,6 +731,7 @@ impl NlpEvaluator {
         for (k, source) in self.nl_sources.iter().enumerate() {
             scratch.mults[k] = mult_of(source, obj_factor, lambda);
         }
+        let n_regs = self.lagrangian.n_regs();
         for seed in &self.seeds {
             scratch.dir.fill(0.0);
             for &col in &seed.cols {
@@ -573,10 +743,10 @@ impl NlpEvaluator {
                 &scratch.dir,
                 &self.params,
                 &scratch.mults,
-                &mut scratch.regs,
-                &mut scratch.regs_t,
-                &mut scratch.dregs,
-                &mut scratch.dregs_t,
+                &mut scratch.regs[..n_regs],
+                &mut scratch.regs_t[..n_regs],
+                &mut scratch.dregs[..n_regs],
+                &mut scratch.dregs_t[..n_regs],
                 &mut scratch.basis,
                 &mut scratch.grad,
                 &mut scratch.hv,
@@ -587,49 +757,59 @@ impl NlpEvaluator {
         }
     }
 
-    /// Parallel nonlinear Hessian contributions.
-    /// Each seed is an independent forward-over-reverse HVP over the whole
-    /// Lagrangian tape, and seeds fill disjoint `vals` positions.
-    /// Run them on the pool with per-thread scratch, returning each seed's
-    /// `(pos, value)` contributions, then apply serially.
-    /// `vals` must already hold the closed-form quadratic contributions.
+    /// Seeds recover interleaved sparse positions, so retain their values in
+    /// seed/fill order and scatter serially after parallel HVPs.
     fn hessian_seeds_parallel(&self, x: &[f64], obj_factor: f64, lambda: &[f64], vals: &mut [f64]) {
-        let mults: Vec<f64> =
-            self.nl_sources.iter().map(|s| mult_of(s, obj_factor, lambda)).collect();
-        let (lagrangian, params) = (&self.lagrangian, self.params.as_slice());
-        let (max_regs, n_vars) = (self.max_regs, self.n_vars);
-        let contributions: Vec<Vec<(usize, f64)>> = self
-            .seeds
-            .par_iter()
-            .map_init(
-                || ParScratch::new(max_regs, n_vars),
-                |sc, seed| {
-                    sc.dir.fill(0.0);
-                    for &col in &seed.cols {
-                        sc.dir[col] = 1.0;
-                    }
-                    tape_hvp(
-                        lagrangian,
-                        x,
-                        &sc.dir,
-                        params,
-                        &mults,
-                        &mut sc.regs,
-                        &mut sc.regs_t,
-                        &mut sc.dregs,
-                        &mut sc.dregs_t,
-                        &mut sc.basis,
-                        &mut sc.grad,
-                        &mut sc.hv,
-                    );
-                    seed.fills.iter().map(|&(pos, row)| (pos, sc.hv[row])).collect()
-                },
-            )
-            .collect();
-        for contribution in &contributions {
-            for &(pos, v) in contribution {
-                vals[pos] += v;
-            }
+        let plan = &self.hessian_work;
+        let count = plan.parallel_workers(PAR_HESSIAN_WORK);
+        if count == 0 {
+            return;
+        }
+        let scratch = &mut *self.scratch.borrow_mut();
+        for (weight, source) in scratch.mults.iter_mut().zip(&self.nl_sources) {
+            *weight = mult_of(source, obj_factor, lambda);
+        }
+        let n_regs = self.lagrangian.n_regs();
+        let workspace = &mut *self.parallel.borrow_mut();
+        workspace.prepare(count, n_regs, self.n_vars, true, true);
+        grow(&mut workspace.hessian_values, *plan.offsets.last().unwrap());
+        let (lagrangian, params, seeds, mults) =
+            (&self.lagrangian, self.params.as_slice(), &self.seeds, scratch.mults.as_slice());
+        parallel_units(
+            plan,
+            0,
+            seeds.len(),
+            &mut workspace.workers[..count],
+            &mut workspace.hessian_values,
+            &|i, sc, out| {
+                let seed = &seeds[i];
+                sc.dir.fill(0.0);
+                for &col in &seed.cols {
+                    sc.dir[col] = 1.0;
+                }
+                tape_hvp(
+                    lagrangian,
+                    x,
+                    &sc.dir,
+                    params,
+                    mults,
+                    &mut sc.regs[..n_regs],
+                    &mut sc.regs_t[..n_regs],
+                    &mut sc.dregs[..n_regs],
+                    &mut sc.dregs_t[..n_regs],
+                    &mut sc.basis,
+                    &mut sc.grad,
+                    &mut sc.hv,
+                );
+                for (value, &(_, row)) in out.iter_mut().zip(&seed.fills) {
+                    *value = sc.hv[row];
+                }
+            },
+        );
+        for (&(pos, _), &value) in
+            seeds.iter().flat_map(|s| &s.fills).zip(&workspace.hessian_values)
+        {
+            vals[pos] += value;
         }
     }
 }
@@ -649,6 +829,8 @@ fn slot_value(slot: &FunctionSlot, x: &[f64], params: &[f64], regs: &mut [f64]) 
 /// Nonlinear overwrites the full dense buffer via `tape_gradient`.
 /// `regs`/`dregs` are the tape scratch, passed as separate slices to
 /// keep the caller's disjoint borrows of a `Scratch`/`ParScratch` valid.
+#[expect(clippy::inline_always, reason = "Sparse rows need inlined closed-form dispatch")]
+#[inline(always)]
 fn slot_gradient_into(
     slot: &FunctionSlot,
     x: &[f64],
@@ -662,7 +844,17 @@ fn slot_gradient_into(
         SlotKind::Linear(t) => linear_gradient_add(t, 1.0, grad),
         SlotKind::Quadratic(q) => quadratic_gradient_add(q, x, 1.0, grad),
         SlotKind::Nonlinear(tape) => {
-            tape_gradient(tape, x, params, &[], regs, dregs, basis, grad);
+            let n_regs = tape.n_regs();
+            tape_gradient(
+                tape,
+                x,
+                params,
+                &[],
+                &mut regs[..n_regs],
+                &mut dregs[..n_regs],
+                basis,
+                grad,
+            );
         }
     }
 }
@@ -719,11 +911,21 @@ fn build_seeds(nl_pattern: &[(usize, usize)], hess_structure: &[(usize, usize)])
 
 #[cfg(feature = "benchmark-support")]
 #[doc(hidden)]
-#[expect(clippy::cast_precision_loss, clippy::wildcard_imports)]
+#[expect(clippy::cast_precision_loss)]
 pub mod benchmark_support {
     use oximo_core::constraint::Relate;
+    use rayon::prelude::*;
 
-    use super::*;
+    use super::{ExprId, FunctionSlot, Model, NlpEvaluator, PAR_JACOBIAN_WORK, PAR_VALUE_WORK};
+
+    /// Worker counts selected by the public constraint callbacks in the current
+    /// Rayon pool. Counts below two select serial execution.
+    pub fn constraint_workers(evaluator: &NlpEvaluator) -> (usize, usize) {
+        (
+            evaluator.constraint_work.values.workers(PAR_VALUE_WORK),
+            evaluator.constraint_work.jacobian.workers(PAR_JACOBIAN_WORK),
+        )
+    }
 
     /// Crossover candidate used only to size the preprocessing benchmark cases.
     pub const THRESHOLD: usize = 1_024;
@@ -813,6 +1015,16 @@ mod tests {
     use oximo_core::Model;
     use oximo_core::prelude::*;
 
+    fn with_threads(threads: usize, run: impl FnOnce() + Send) {
+        #[cfg(not(target_arch = "wasm32"))]
+        rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(run);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = threads;
+            run();
+        }
+    }
+
     fn mixed_model() -> Model {
         let m = Model::new("equiv");
         variable!(m, -3.0 <= x <= 3.0);
@@ -859,6 +1071,192 @@ mod tests {
         ev.hessian_seeds_serial(&POINT, sigma, &lambda, &mut serial);
         ev.hessian_seeds_parallel(&POINT, sigma, &lambda, &mut parallel);
         assert_eq!(serial, parallel);
+    }
+
+    fn check_parallel_callbacks(ev: &NlpEvaluator, point: &[f64], sigma: f64, lambda: &[f64]) {
+        let mut serial = vec![0.0; ev.num_constraints()];
+        let mut parallel = serial.clone();
+        ev.eval_constraint_serial(point, &mut serial);
+        ev.eval_constraint_parallel(point, &mut parallel);
+        assert_eq!(serial, parallel);
+
+        serial.resize(ev.jacobian_structure().len(), 0.0);
+        parallel.resize(serial.len(), 0.0);
+        ev.eval_constraint_jacobian_serial(point, &mut serial);
+        ev.eval_constraint_jacobian_parallel(point, &mut parallel);
+        assert_eq!(serial, parallel);
+
+        // Simulate quadratic contributions.
+        serial = vec![2.0; ev.hessian_lagrangian_structure().len()];
+        parallel.clone_from(&serial);
+        ev.hessian_seeds_serial(point, sigma, lambda, &mut serial);
+        ev.hessian_seeds_parallel(point, sigma, lambda, &mut parallel);
+        assert_eq!(serial, parallel);
+    }
+
+    #[test]
+    fn retained_workers_handle_empty_rows_refresh_and_pool_changes() {
+        let m = Model::new("retained_workers");
+        let n = 24;
+        variable!(m, -2.0 <= x[i in 0..n] <= 2.0);
+        param!(m, weight = 0.7);
+        objective!(m, Min, sum!(x[i] for i in 0..n).sin());
+        for i in 0..96 {
+            match i % 4 {
+                0 => {
+                    m.__add_constraint_auto((0.0 * x[0]).le(1.0));
+                }
+                1 => {
+                    m.__add_constraint_auto((weight * x[i % n] + x[(i + 1) % n]).le(2.0));
+                }
+                2 => {
+                    m.__add_constraint_auto((weight * x[i % n].powi(2) + x[0] * x[1]).le(3.0));
+                }
+                _ => {
+                    let mut expr = (x[i % n] + x[(i + 1) % n]).sin();
+                    for _ in 0..(if i % 8 == 3 { 1 } else { 32 }) {
+                        expr = (0.2 * expr + x[(i + 2) % n]).sin();
+                    }
+                    m.__add_constraint_auto((weight * expr).le(3.0));
+                }
+            }
+        }
+        let mut ev = NlpEvaluator::new(&m).unwrap();
+        assert!(ev.constraints.iter().any(|s| s.support.is_empty()));
+        assert_eq!(ev.num_hessian_seeds(), n);
+        for threads in [1, 4, 2, 3, 4] {
+            with_threads(threads, || {
+                // Capture the evaluator mutably.
+                let ev = &mut ev;
+                for step in [0.1, -0.3, 0.0] {
+                    let point = vec![step; n];
+                    let lambda = vec![step; ev.num_constraints()];
+                    check_parallel_callbacks(ev, &point, 1.0 + step, &lambda);
+                    let workspace = ev.parallel.borrow();
+                    let capacities: Vec<_> = workspace
+                        .workers
+                        .iter()
+                        .map(|w| {
+                            [
+                                w.regs.capacity(),
+                                w.dregs.capacity(),
+                                w.regs_t.capacity(),
+                                w.dregs_t.capacity(),
+                                w.basis.capacity(),
+                                w.dir.capacity(),
+                                w.grad.capacity(),
+                                w.hv.capacity(),
+                            ]
+                        })
+                        .collect();
+                    let values_capacity = workspace.hessian_values.capacity();
+                    drop(workspace);
+                    check_parallel_callbacks(ev, &point, 0.0, &lambda);
+                    let workspace = ev.parallel.borrow();
+                    for (w, expected) in workspace.workers.iter().zip(capacities) {
+                        assert_eq!(
+                            [
+                                w.regs.capacity(),
+                                w.dregs.capacity(),
+                                w.regs_t.capacity(),
+                                w.dregs_t.capacity(),
+                                w.basis.capacity(),
+                                w.dir.capacity(),
+                                w.grad.capacity(),
+                                w.hv.capacity()
+                            ],
+                            expected
+                        );
+                    }
+                    assert_eq!(workspace.hessian_values.capacity(), values_capacity);
+                }
+            });
+            weight.set_param_value(1.3);
+            assert!(ev.try_refresh(&m));
+            let fresh = NlpEvaluator::new(&m).unwrap();
+            assert_eq!(ev.constraint_work.jacobian.offsets, fresh.constraint_work.jacobian.offsets);
+            assert_eq!(ev.constraint_work.jacobian.work, fresh.constraint_work.jacobian.work);
+            let point = vec![0.2; n];
+            let lambda = vec![0.4; ev.num_constraints()];
+            let mut refreshed = vec![0.0; ev.hess_structure.len()];
+            let mut rebuilt = refreshed.clone();
+            ev.eval_hessian_lagrangian(&point, 0.8, &lambda, &mut refreshed);
+            fresh.eval_hessian_lagrangian(&point, 0.8, &lambda, &mut rebuilt);
+            assert_eq!(refreshed, rebuilt);
+            weight.set_param_value(0.7);
+            ev.refresh_params(&m);
+        }
+    }
+
+    #[test]
+    fn empty_parallel_callbacks_and_single_seed_are_supported() {
+        let m = Model::new("empty_callbacks");
+        variable!(m, -2.0 <= x <= 2.0);
+        objective!(m, Min, x.sin());
+        let ev = NlpEvaluator::new(&m).unwrap();
+        check_parallel_callbacks(&ev, &[0.3], 1.0, &[]);
+        m.__minimize(x);
+        let linear = NlpEvaluator::new(&m).unwrap();
+        check_parallel_callbacks(&linear, &[0.3], 0.0, &[]);
+    }
+
+    #[test]
+    fn work_estimates_distinguish_tape_cost_from_row_count() {
+        with_threads(4, || {
+            let cheap = WorkPlan::new((0..128).map(|_| (3, 1)));
+            let expensive = WorkPlan::new((0..4).map(|_| (PAR_JACOBIAN_WORK, 1)));
+            assert!(cheap.workers(PAR_JACOBIAN_WORK) < 2);
+            assert_eq!(expensive.workers(PAR_JACOBIAN_WORK), rayon::current_num_threads());
+        });
+    }
+
+    #[test]
+    fn skewed_work_chooses_the_better_adjacent_split() {
+        with_threads(2, || {
+            let costs = [4_096_u16, 5_120, 1_024];
+            let plan = WorkPlan::new(costs.iter().map(|&cost| (usize::from(cost), 1)));
+            assert_eq!(plan.split(0, 3, 1, 1), 1);
+            let mut workers: Vec<_> =
+                (0..2).map(|_| ParScratch { grad: vec![0.0], ..ParScratch::default() }).collect();
+            let mut output = vec![0.0; costs.len()];
+            parallel_units(&plan, 0, costs.len(), &mut workers, &mut output, &|i, sc, out| {
+                out[0] = f64::from(costs[i]);
+                sc.grad[0] += out[0];
+            });
+            assert_eq!(output, costs.map(f64::from).to_vec());
+            assert_eq!(
+                workers.iter().map(|w| w.grad[0]).collect::<Vec<_>>(),
+                vec![4_096.0, 6_144.0]
+            );
+        });
+    }
+
+    #[test]
+    fn work_split_accounts_for_worker_counts_and_valid_boundaries() {
+        // Unequal groups need the smallest maximum work per worker.
+        let unequal = WorkPlan::new([3, 3, 3, 3, 2].into_iter().map(|cost| (cost, 1)));
+        assert_eq!(unequal.split(0, 5, 1, 2), 1);
+        let uniform = WorkPlan::new((0..7).map(|_| (1, 1)));
+        assert_eq!(uniform.split(0, 7, 2, 3), 3);
+
+        let offset = WorkPlan::new([1, 4_096, 5_120, 1_024, 1].into_iter().map(|cost| (cost, 1)));
+        assert_eq!(offset.split(1, 4, 1, 1), 2);
+        let left_heavy = WorkPlan::new([10_000, 1, 1, 1, 1].into_iter().map(|cost| (cost, 1)));
+        assert_eq!(left_heavy.split(0, 5, 2, 2), 2);
+        let right_heavy = WorkPlan::new([1, 1, 1, 1, 10_000].into_iter().map(|cost| (cost, 1)));
+        assert_eq!(right_heavy.split(0, 5, 2, 2), 3);
+        let tied = WorkPlan::new([2, 1, 2].into_iter().map(|cost| (cost, 1)));
+        assert_eq!(tied.split(0, 3, 1, 1), 1);
+    }
+
+    #[test]
+    fn work_estimates_include_packed_affine_terms() {
+        let mut arena = oximo_expr::ExprArena::new();
+        let linear = arena.linear((0..128).map(|i| (oximo_expr::VarId(i), 1.0)).collect(), 0.0);
+        let root = arena.push(oximo_expr::ExprNode::Unary(oximo_expr::UnaryOp::Sin, linear));
+        let tape = Tape::compile(&arena, root);
+        assert!(tape_work(&tape) >= 128);
+        assert!(tape.n_regs() < 128);
     }
 
     #[test]
