@@ -28,3 +28,7 @@ workspace = true
 [[bench]]
 name = "lp_import"
 harness = false
+
+[[bench]]
+name = "nl_export"
+harness = false

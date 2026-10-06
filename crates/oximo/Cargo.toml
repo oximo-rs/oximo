@@ -89,6 +89,11 @@ name = "preprocessing"
 harness = false
 required-features = ["_benchmark-support"]
 
+[[bench]]
+name = "backend_export"
+harness = false
+required-features = ["_benchmark-support"]
+
 [[example]]
 name = "baron_robot"
 required-features = ["baron"]
