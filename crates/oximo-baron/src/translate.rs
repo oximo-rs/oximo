@@ -705,7 +705,7 @@ fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(),
                         UnaryOp::Exp2 => ("(2 ^ (", "))"),
                         UnaryOp::Log10 => ("(0.4342944819032518 * log(", "))"),
                         // BARON doesn't have abs() intrinsic; rewrite (x^2)^(1/2)
-						// from its manual.
+                        // from its manual.
                         UnaryOp::Abs => ("(((", ") ^ 2) ^ 0.5)"),
                         _ => {
                             return Err(SolverError::UnsupportedNonlinearOperator {

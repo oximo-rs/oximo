@@ -57,7 +57,7 @@ impl SmallLinear {
     fn operand(&mut self, arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
         if let ExprNode::Add(children) = arena.get(id) {
             // We use wide flat numeric prefix because it is cheap if its
-			// merged support is small.
+            // merged support is small.
             let mut segment = Self::new();
             for &child in children {
                 if !segment.terminal(arena.get(child)) {
@@ -916,7 +916,7 @@ fn compact_symbolic_numeric_children(
     }
 
     // Only rewrite the symbolic spine.
-	// Maximal numeric regions are extracted directly.
+    // Maximal numeric regions are extracted directly.
     let mut rewritten = FxHashMap::<ExprId, ExprId>::default();
     pending.push((root, false));
     while let Some((id, finish)) = pending.pop() {
@@ -1125,7 +1125,7 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
     while let Some((cur, sign)) = sign_stack.pop() {
         if affine[&cur] {
             // Consume a maximal affine subtree as one term.
-			// Extraction's fold memoizes its shared descendants.
+            // Extraction's fold memoizes its shared descendants.
             let t = extracted.entry(cur).or_insert_with(|| {
                 as_linear(arena, cur, true).expect("classified additive affine region")
             });

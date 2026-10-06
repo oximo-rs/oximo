@@ -262,7 +262,7 @@ pub fn classify(arena: &ExprArena, id: ExprId) -> ExprClass {
 
 pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> ExprClass {
     // Finish small, shallow expressions without traversal metadata.
-	// Remember compound results even when a cached child completes the shallow path.
+    // Remember compound results even when a cached child completes the shallow path.
     let small = match arena.get(id) {
         ExprNode::Add(children) | ExprNode::Mul(children) => children.len() <= 8,
         _ => true,

@@ -1351,8 +1351,8 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
                 }
                 ExprNode::Pow(base, exponent) => {
                     // GAMS ** rejects negative bases.
-					// Integer power() accepts them so we cap the exponent
-					// to keep the existing conversion rule safe.
+                    // Integer power() accepts them so we cap the exponent
+                    // to keep the existing conversion rule safe.
                     if let ExprNode::Const(c) = arena.get(*exponent)
                         && (c - c.round()).abs() < f64::EPSILON
                         && c.abs() <= 1e9
