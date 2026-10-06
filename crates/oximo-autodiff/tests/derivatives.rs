@@ -3,7 +3,7 @@
 //!
 //! Run with:
 //! ```text
-//! RUSTFLAGS="-Zautodiff=Enable" cargo +nightly test -p oximo-autodiff --features enzyme --profile enzyme
+//! RUSTFLAGS="-Zautodiff=Enable" cargo +nightly test -p oximo-autodiff --features enzyme,benchmark-support --profile enzyme
 //! ```
 #![cfg(feature = "enzyme")]
 #![expect(clippy::cast_precision_loss)]
@@ -573,35 +573,60 @@ fn parallel_hessian_matches_fd() {
     }
 }
 
-/// Enough constraints to cross the parallel threshold, testing the rayon
-/// constraint-value and Jacobian paths against closed-form derivatives.
+/// Expensive rows cross both work thresholds in an explicit multi-thread pool,
+/// testing public constraint-value and Jacobian dispatch against the chain rule.
 #[test]
 fn parallel_constraints_and_jacobian_match_analytic() {
-    let n = 70usize;
-    let m = Model::new("par_con");
-    variable!(m, -2.0 <= x[i in 0..n] <= 2.0);
-    constraint!(m, c[i in 0..n], x[i].sin() <= 0.5);
-    objective!(m, Min, sum!(x[i] for i in 0..n));
+    rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(|| {
+        let n = 70usize;
+        let depth = 128;
+        let m = Model::new("par_con");
+        variable!(m, -2.0 <= x[i in 0..n] <= 2.0);
+        for i in 0..n {
+            let mut expr = x[i].sin();
+            for _ in 1..depth {
+                expr = expr.sin();
+            }
+            m.__add_constraint_auto(expr.le(0.5));
+        }
+        objective!(m, Min, sum!(x[i] for i in 0..n));
 
-    let ev = NlpEvaluator::new(&m).unwrap();
-    assert_eq!(ev.num_constraints(), n);
+        let ev = NlpEvaluator::new(&m).unwrap();
+        assert_eq!(ev.num_constraints(), n);
+        #[cfg(feature = "benchmark-support")]
+        {
+            let (value_workers, jacobian_workers) =
+                oximo_autodiff::benchmark_support::constraint_workers(&ev);
+            assert!(value_workers > 1, "constraint values must use public parallel dispatch");
+            assert!(jacobian_workers > 1, "Jacobian must use public parallel dispatch");
+        }
 
-    let point: Vec<f64> = (0..n).map(|i| 0.1 + 0.01 * i as f64).collect();
+        let point: Vec<f64> = (0..n).map(|i| 0.1 + 0.01 * i as f64).collect();
+        let expected: Vec<_> = point
+            .iter()
+            .map(|&xi| {
+                let (mut value, mut gradient) = (xi, 1.0);
+                for _ in 0..depth {
+                    gradient *= value.cos();
+                    value = value.sin();
+                }
+                (value, gradient)
+            })
+            .collect();
+        let mut g = vec![0.0; n];
+        ev.eval_constraint(&point, &mut g);
+        for (i, (&value, &(expected_value, _))) in g.iter().zip(&expected).enumerate() {
+            assert_close(value, expected_value, 1e-12, &format!("constraint[{i}] value"));
+        }
 
-    let mut g = vec![0.0; n];
-    ev.eval_constraint(&point, &mut g);
-    for i in 0..n {
-        assert_close(g[i], point[i].sin(), 1e-12, &format!("constraint[{i}] value"));
-    }
-
-    // Row i is sin(x_i), so its only Jacobian entry is at column i with value
-    // cos(x_i).
-    let mut jac = vec![0.0; ev.jacobian_structure().len()];
-    ev.eval_constraint_jacobian(&point, &mut jac);
-    for (&(row, col), &v) in ev.jacobian_structure().iter().zip(&jac) {
-        assert_eq!(row, col, "each constraint touches exactly its own variable");
-        assert_close(v, point[col].cos(), 1e-9, &format!("jac[{row},{col}]"));
-    }
+        // Each composed sine still depends on exactly its own variable.
+        let mut jac = vec![0.0; ev.jacobian_structure().len()];
+        ev.eval_constraint_jacobian(&point, &mut jac);
+        for (&(row, col), &value) in ev.jacobian_structure().iter().zip(&jac) {
+            assert_eq!(row, col, "each constraint touches exactly its own variable");
+            assert_close(value, expected[col].1, 1e-9, &format!("jac[{row},{col}]"));
+        }
+    });
 }
 
 #[test]
