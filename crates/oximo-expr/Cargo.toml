@@ -25,3 +25,7 @@ harness = false
 [[bench]]
 name = "eval"
 harness = false
+
+[[bench]]
+name = "construction"
+harness = false

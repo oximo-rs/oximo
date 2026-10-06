@@ -612,149 +612,158 @@ fn write_linear(bar: &mut String, t: &LinearTerms<'_>, include_constant: bool) {
     }
 }
 
-/// Recursive infix printer for a BARON-compatible expression.
-#[expect(clippy::too_many_lines)]
+/// Stack-safe infix printer for a BARON-compatible expression.
+#[expect(clippy::too_many_lines, reason = "exhaustive stack machine preserves BARON formatting")]
 fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(), SolverError> {
-    match arena.get(id) {
-        ExprNode::Const(c) => write!(bar, "{}", fmt(*c)).unwrap(),
-        ExprNode::Var(v) => write!(bar, "x{}", v.index()).unwrap(),
-        ExprNode::Param(p) => write!(bar, "{}", fmt(arena.param_value(*p))).unwrap(),
-        ExprNode::Linear { coeffs, constant } => {
-            let t = LinearTerms::borrowed(coeffs, *constant);
-            write!(bar, "(").unwrap();
-            write_linear(bar, &t, true);
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Neg, inner) => {
-            write!(bar, "(-").unwrap();
-            write_bar_expr(bar, arena, *inner)?;
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Add(children) => {
-            write!(bar, "(").unwrap();
-            for (i, c) in children.iter().enumerate() {
-                if i > 0 {
-                    write!(bar, " + ").unwrap();
+    enum Task {
+        Node(ExprId),
+        Text(&'static str),
+        BinaryRight(ExprId, bool),
+    }
+    let mut pending = vec![Task::Node(id)];
+    while let Some(task) = pending.pop() {
+        let mut id = match task {
+            Task::Text(text) => {
+                bar.push_str(text);
+                continue;
+            }
+            Task::BinaryRight(right, product) => {
+                bar.push_str(if product { " * " } else { " + " });
+                pending.push(Task::Text(")"));
+                right
+            }
+            Task::Node(id) => id,
+        };
+        loop {
+            match arena.get(id) {
+                ExprNode::Const(c) => write!(bar, "{}", fmt(*c)).unwrap(),
+                ExprNode::Var(v) => write!(bar, "x{}", v.index()).unwrap(),
+                ExprNode::Param(p) => write!(bar, "{}", fmt(arena.param_value(*p))).unwrap(),
+                ExprNode::Linear { coeffs, constant } => {
+                    bar.push('(');
+                    write_linear(bar, &LinearTerms::borrowed(coeffs, *constant), true);
+                    bar.push(')');
                 }
-                write_bar_expr(bar, arena, *c)?;
-            }
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Mul(children) => {
-            write!(bar, "(").unwrap();
-            for (i, c) in children.iter().enumerate() {
-                if i > 0 {
-                    write!(bar, " * ").unwrap();
+                ExprNode::Add(children) | ExprNode::Mul(children) => {
+                    let separator =
+                        if matches!(arena.get(id), ExprNode::Add(_)) { " + " } else { " * " };
+                    bar.push('(');
+                    if children.len() == 2 {
+                        pending.push(Task::BinaryRight(
+                            children[1],
+                            matches!(arena.get(id), ExprNode::Mul(_)),
+                        ));
+                        id = children[0];
+                        continue;
+                    }
+                    pending.push(Task::Text(")"));
+                    for (index, child) in children.iter().enumerate().rev() {
+                        pending.push(Task::Node(*child));
+                        if index > 0 {
+                            pending.push(Task::Text(separator));
+                        }
+                    }
                 }
-                write_bar_expr(bar, arena, *c)?;
+                ExprNode::Pow(base, exponent) => {
+                    // Native powers accept a constant base or exponent. Only a
+                    // variable-on-variable power needs exp(y * log(x)).
+                    if matches!(arena.get(*exponent), ExprNode::Const(_))
+                        || matches!(arena.get(*base), ExprNode::Const(_))
+                    {
+                        bar.push('(');
+                        pending.extend([
+                            Task::Text(")"),
+                            Task::Node(*exponent),
+                            Task::Text(" ^ "),
+                            Task::Node(*base),
+                        ]);
+                    } else {
+                        bar.push_str("exp((");
+                        pending.extend([
+                            Task::Text("))"),
+                            Task::Node(*base),
+                            Task::Text(") * log("),
+                            Task::Node(*exponent),
+                        ]);
+                    }
+                }
+                ExprNode::Div(num, den) => {
+                    bar.push('(');
+                    pending.extend([
+                        Task::Text(")"),
+                        Task::Node(*den),
+                        Task::Text(" / "),
+                        Task::Node(*num),
+                    ]);
+                }
+                ExprNode::Unary(op, child) => {
+                    let (prefix, suffix) = match op {
+                        UnaryOp::Neg => ("(-", ")"),
+                        UnaryOp::Exp => ("exp(", ")"),
+                        UnaryOp::Log => ("log(", ")"),
+                        UnaryOp::Sqrt => ("((", ") ^ 0.5)"),
+                        UnaryOp::Exp2 => ("(2 ^ (", "))"),
+                        UnaryOp::Log10 => ("(0.4342944819032518 * log(", "))"),
+                        // BARON doesn't have abs() intrinsic; rewrite (x^2)^(1/2)
+                        // from its manual.
+                        UnaryOp::Abs => ("(((", ") ^ 2) ^ 0.5)"),
+                        _ => {
+                            return Err(SolverError::UnsupportedNonlinearOperator {
+                                backend: "BARON",
+                                operator: op.name(),
+                            });
+                        }
+                    };
+                    bar.push_str(prefix);
+                    pending.extend([Task::Text(suffix), Task::Node(*child)]);
+                }
+                ExprNode::Atan2(_, _) | ExprNode::Min(_) | ExprNode::Max(_) => {
+                    let operator = match arena.get(id) {
+                        ExprNode::Atan2(_, _) => "atan2",
+                        ExprNode::Min(_) => "min",
+                        _ => "max",
+                    };
+                    return Err(SolverError::UnsupportedNonlinearOperator {
+                        backend: "BARON",
+                        operator,
+                    });
+                }
             }
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Pow(base, exp) => {
-            // BARON natively supports `x^a` for a constant exponent `a` and
-            // `b^x` for a constant base `b`. Only a variable-on-variable power
-            // needs the `exp(y*log(x))` rewrite.
-            let exp_is_const = matches!(arena.get(*exp), ExprNode::Const(_));
-            let base_is_const = matches!(arena.get(*base), ExprNode::Const(_));
-            if exp_is_const || base_is_const {
-                write!(bar, "(").unwrap();
-                write_bar_expr(bar, arena, *base)?;
-                write!(bar, " ^ ").unwrap();
-                write_bar_expr(bar, arena, *exp)?;
-                write!(bar, ")").unwrap();
-            } else {
-                write!(bar, "exp((").unwrap();
-                write_bar_expr(bar, arena, *exp)?;
-                write!(bar, ") * log(").unwrap();
-                write_bar_expr(bar, arena, *base)?;
-                write!(bar, "))").unwrap();
-            }
-        }
-        ExprNode::Div(num, den) => {
-            write!(bar, "(").unwrap();
-            write_bar_expr(bar, arena, *num)?;
-            write!(bar, " / ").unwrap();
-            write_bar_expr(bar, arena, *den)?;
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Exp, a) => {
-            write!(bar, "exp(").unwrap();
-            write_bar_expr(bar, arena, *a)?;
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Log, a) => {
-            write!(bar, "log(").unwrap();
-            write_bar_expr(bar, arena, *a)?;
-            write!(bar, ")").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Sqrt, a) => {
-            write!(bar, "((").unwrap();
-            write_bar_expr(bar, arena, *a)?;
-            write!(bar, ") ^ 0.5)").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Exp2, a) => {
-            write!(bar, "(2 ^ (").unwrap();
-            write_bar_expr(bar, arena, *a)?;
-            write!(bar, "))").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Log10, a) => {
-            write!(bar, "(0.4342944819032518 * log(").unwrap();
-            write_bar_expr(bar, arena, *a)?;
-            write!(bar, "))").unwrap();
-        }
-        ExprNode::Unary(UnaryOp::Abs, a) => {
-            // BARON has no abs() intrinsic.
-            // We reformulate: |x| = (x^2)^(1/2),
-            // As suggested by the BARON user manual.
-            write!(bar, "(((").unwrap();
-            write_bar_expr(bar, arena, *a)?;
-            write!(bar, ") ^ 2) ^ 0.5)").unwrap();
-        }
-        ExprNode::Unary(op, _) => {
-            return Err(SolverError::UnsupportedNonlinearOperator {
-                backend: "BARON",
-                operator: op.name(),
-            });
-        }
-        ExprNode::Atan2(_, _) => {
-            return Err(SolverError::UnsupportedNonlinearOperator {
-                backend: "BARON",
-                operator: "atan2",
-            });
-        }
-        ExprNode::Min(_) => {
-            return Err(SolverError::UnsupportedNonlinearOperator {
-                backend: "BARON",
-                operator: "min",
-            });
-        }
-        ExprNode::Max(_) => {
-            return Err(SolverError::UnsupportedNonlinearOperator {
-                backend: "BARON",
-                operator: "max",
-            });
+            break;
         }
     }
     Ok(())
 }
 
 /// Whether `id` references at least one variable (vs. evaluating to a constant).
-/// Used to enforce BARON's rule that every constraint must contain a non-constant
-/// expression.
+/// Used to enforce BARON's rule that every constraint contains a variable.
 fn expr_has_var(arena: &ExprArena, id: ExprId) -> bool {
-    match arena.get(id) {
-        ExprNode::Var(_) => true,
-        ExprNode::Const(_) | ExprNode::Param(_) => false,
-        ExprNode::Linear { coeffs, .. } => coeffs.iter().any(|(_, c)| *c != 0.0),
-        ExprNode::Unary(_, a) => expr_has_var(arena, *a),
-        ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => {
-            expr_has_var(arena, *a) || expr_has_var(arena, *b)
+    let mut pending = vec![id];
+    let mut seen = FxHashSet::default();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
         }
-        ExprNode::Add(children)
-        | ExprNode::Mul(children)
-        | ExprNode::Min(children)
-        | ExprNode::Max(children) => children.iter().any(|c| expr_has_var(arena, *c)),
+        match arena.get(id) {
+            ExprNode::Var(_) => return true,
+            ExprNode::Linear { coeffs, .. } => {
+                if coeffs.iter().any(|(_, c)| *c != 0.0) {
+                    return true;
+                }
+            }
+            ExprNode::Unary(_, child) => pending.push(*child),
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => {
+                pending.extend([*b, *a]);
+            }
+            ExprNode::Add(children)
+            | ExprNode::Mul(children)
+            | ExprNode::Min(children)
+            // Rightmost children of deferred sums are often variable leaves.
+            | ExprNode::Max(children) => pending.extend(children.iter().copied()),
+            ExprNode::Const(_) | ExprNode::Param(_) => {}
+        }
     }
+    false
 }
 
 /// Format an `f64` for use in a `.bar` file.
@@ -1436,6 +1445,50 @@ mod tests {
 
     fn render(model: &Model) -> String {
         build_bar(model, &BaronOptions::default()).expect("build_bar").0
+    }
+
+    #[test]
+    fn deferred_affine_sum_in_nonlinear_row_renders_without_stack_overflow() {
+        let m = Model::new("deep affine row");
+        variable!(m, x[i in 0..20_000]);
+        let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+        m.add_constraint("row", sum.exp().le(1.0));
+        objective!(m, Min, x[0]);
+        let output = render(&m);
+        assert!(output.contains("exp("));
+        assert!(output.contains("x19999"));
+    }
+
+    #[test]
+    fn deeply_nested_nonlinear_objective_and_row_render_without_stack_overflow() {
+        let m = Model::new("deep nonlinear row");
+        variable!(m, x);
+        let mut expression = x.exp();
+        for _ in 0..20_000 {
+            expression = expression.exp();
+        }
+        m.add_constraint("row", expression.le(1.0));
+        objective!(m, Min, expression);
+        let output = render(&m);
+        assert_eq!(output.matches("exp(").count(), 2 * 20_001);
+    }
+
+    #[test]
+    fn variable_detection_handles_deep_and_shared_constant_subtrees() {
+        let m = Model::new("deep constant");
+        variable!(m, x);
+        let mut constant = m.__constant(1.0).exp();
+        for _ in 0..20_000 {
+            constant = constant.exp();
+        }
+        for _ in 0..40 {
+            constant = constant + constant;
+        }
+        let arena = m.arena();
+        assert!(!expr_has_var(&arena, constant.id()));
+        drop(arena);
+        let expression = constant + x;
+        assert!(expr_has_var(&m.arena(), expression.id()));
     }
 
     #[test]

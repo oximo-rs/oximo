@@ -11,7 +11,7 @@ use oximo_expr::{ExprArena, VarId};
 use rustc_hash::FxHashMap;
 
 use super::analyze::{Analysis, Row};
-use super::emit_expr::emit_residual;
+use super::emit_expr::{EmitCache, emit_residual};
 use super::header::Stats;
 use super::options::{Complementarity, SuffixFlavour, WriteOptions};
 use super::permute::Permutation;
@@ -33,8 +33,9 @@ pub(crate) fn write_segments<W: Write>(
     write_f_segments(w, &opts.functions)?;
     write_s_segments(w, &opts.suffixes)?;
     write_v_segments(w, &opts.defined_vars)?;
-    write_c_segments(w, arena, perm, analysis)?;
-    write_o_segment(w, arena, perm, objective, analysis.obj.as_ref())?;
+    let mut cache = EmitCache::default();
+    write_c_segments(w, arena, perm, analysis, &mut cache)?;
+    write_o_segment(w, arena, perm, objective, analysis.obj.as_ref(), &mut cache)?;
     write_d_segment(w, &opts.dual_init)?;
     write_x_segment(w, vars, perm)?;
     write_r_segment(w, constraints, perm, analysis, &opts.complementarity)?;
@@ -117,11 +118,12 @@ fn write_v_segments<W: Write>(
     Ok(())
 }
 
-fn write_c_segments<W: Write>(
+fn write_c_segments<'a, W: Write>(
     w: &mut Writer<'_, W>,
-    arena: &ExprArena,
+    arena: &'a ExprArena,
     perm: &Permutation,
     analysis: &Analysis,
+    cache: &mut EmitCache<'a>,
 ) -> Result<(), IoError> {
     for (nl_idx, &orig_idx) in perm.con_order.iter().enumerate() {
         w.seg_header(b'C', &[i64::try_from(nl_idx).expect("Cidx")], None)?;
@@ -129,19 +131,20 @@ fn write_c_segments<W: Write>(
         if residual.is_empty() {
             w.num(0.0)?;
         } else {
-            emit_residual(w, arena, &perm.var_index, residual)?;
+            emit_residual(w, arena, &perm.var_index, residual, cache)?;
         }
     }
     Ok(())
 }
 
 /// Feasibility models declare zero objectives, so there is no `O` segment.
-fn write_o_segment<W: Write>(
+fn write_o_segment<'a, W: Write>(
     w: &mut Writer<'_, W>,
-    arena: &ExprArena,
+    arena: &'a ExprArena,
     perm: &Permutation,
     objective: Option<&Objective>,
     obj: Option<&Row>,
+    cache: &mut EmitCache<'a>,
 ) -> Result<(), IoError> {
     let (Some(objective), Some(obj)) = (objective, obj) else {
         return Ok(());
@@ -154,7 +157,7 @@ fn write_o_segment<W: Write>(
     if obj.residual.is_empty() {
         w.num(obj.linear.constant)?;
     } else {
-        emit_residual(w, arena, &perm.var_index, &obj.residual)?;
+        emit_residual(w, arena, &perm.var_index, &obj.residual, cache)?;
     }
     Ok(())
 }

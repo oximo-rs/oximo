@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(o.universal.verbose, Some(false));
         assert_eq!(o.mip_gap, Some(0.05));
         assert_eq!(o.presolve, Some(GurobiPresolve::Aggressive));
-        assert!(o.int_params.is_empty());
+        assert_eq!(o.int_params, Vec::new());
     }
 
     #[test]
@@ -386,9 +386,9 @@ mod tests {
     #[test]
     fn default_vecs_are_empty() {
         let o = GurobiOptions::default();
-        assert!(o.int_params.is_empty());
-        assert!(o.double_params.is_empty());
-        assert!(o.str_params.is_empty());
+        assert_eq!(o.int_params, Vec::new());
+        assert_eq!(o.double_params, Vec::new());
+        assert_eq!(o.str_params, Vec::new());
     }
 
     #[test]

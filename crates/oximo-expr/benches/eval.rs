@@ -1,6 +1,6 @@
 mod support;
 
-use oximo_expr::{ExprArena, ExprNode, UnaryOp, VarId, evaluate};
+use oximo_expr::{Expr, ExprArena, ExprArenaCell, ExprNode, UnaryOp, VarId, evaluate};
 use smallvec::smallvec;
 
 #[global_allocator]
@@ -76,5 +76,19 @@ fn main() {
         support::measure(&format!("eval_wide/{n}"), || {
             evaluate(&arena, wide, &wide_vars.as_slice()).unwrap()
         });
+    }
+    // Compare repeated tree walks with a one-time compaction, outside timing.
+    for n in [32, 4096] {
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let vars: Vec<_> = (0..n).map(|i| Expr::from_var(&cell, VarId(i))).collect();
+        let original = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+        let compact = original.compact();
+        let snapshot = cell.borrow();
+        let values = vec![1.0; usize::try_from(n).unwrap()];
+        for (name, expression) in [("evaluate_tree", original), ("evaluate_compact", compact)] {
+            support::measure(&format!("{name}/{n}"), || {
+                evaluate(&snapshot, expression.id(), &&values[..]).unwrap()
+            });
+        }
     }
 }

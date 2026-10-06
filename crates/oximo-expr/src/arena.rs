@@ -8,7 +8,7 @@ use parking_lot::{Mutex, MutexGuard};
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::classify::{ExprClass, ExprClassCache};
+use crate::classify::{Degree, ExprClassCache};
 
 static NEXT_MODEL_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -206,9 +206,10 @@ impl std::fmt::Display for UnaryOp {
     }
 }
 
-/// Here we use a linear fast-path: `sum(coeff * var) + constant`.
-/// Built by the operator overloads when all children are linear,
-/// so LP/MILP construction never walks an `Add(Mul(Const, Var), ...)` tree.
+/// Small numeric affine operations use a `Linear` fast path.
+/// Large operations retain immutable `Add`/`Mul` nodes to avoid copying
+/// coefficient prefixes.
+/// `AffineBuilder` can emit a single `Linear` node for a large numeric sum.
 
 #[derive(Clone, Debug)]
 pub enum ExprNode {
@@ -391,8 +392,8 @@ pub(crate) trait ArenaAccess {
     fn get(&self, id: ExprId) -> &ExprNode;
     fn param_value(&self, id: ParamId) -> f64;
     fn push(&mut self, node: ExprNode) -> ExprId;
-    fn cached_class(&self, id: ExprId) -> Option<ExprClass>;
-    fn cache_class(&self, id: ExprId, class: ExprClass);
+    fn cached_degree(&self, id: ExprId) -> Option<Degree>;
+    fn cache_degree(&self, id: ExprId, class: Degree);
 
     fn constant(&mut self, value: f64) -> ExprId {
         self.push(ExprNode::Const(value))
@@ -404,11 +405,11 @@ pub(crate) trait ArenaAccess {
 }
 
 impl ArenaAccess for ExprArena {
-    fn cached_class(&self, id: ExprId) -> Option<ExprClass> {
+    fn cached_degree(&self, id: ExprId) -> Option<Degree> {
         self.classifications.lock().as_deref_mut().and_then(|cache| cache.get(id))
     }
 
-    fn cache_class(&self, id: ExprId, class: ExprClass) {
+    fn cache_degree(&self, id: ExprId, class: Degree) {
         self.classifications.lock().get_or_insert_with(Box::default).insert(id, class);
     }
 
@@ -454,11 +455,11 @@ impl ForkedExprArena {
 }
 
 impl ArenaAccess for ForkedExprArena {
-    fn cached_class(&self, id: ExprId) -> Option<ExprClass> {
+    fn cached_degree(&self, id: ExprId) -> Option<Degree> {
         self.classifications.borrow_mut().get(id)
     }
 
-    fn cache_class(&self, id: ExprId, class: ExprClass) {
+    fn cache_degree(&self, id: ExprId, class: Degree) {
         self.classifications.borrow_mut().insert(id, class);
     }
 
@@ -992,6 +993,7 @@ fn remap_node(node: &mut ExprNode, remap: ExprIdRemap) {
 
 #[cfg(test)]
 mod tests {
+    use crate::ExprClass;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::*;

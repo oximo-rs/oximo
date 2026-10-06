@@ -15,7 +15,9 @@
 //! nonlinear residual.
 
 use oximo_core::{AlgebraicConstraint, Domain, Objective, Variable};
-use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, SignedExpr, VarId, split_linear};
+use oximo_expr::{
+    ExprArena, ExprId, ExprNode, LinearTerms, SignedExpr, VarId, Visitor, split_linear, walk_shared,
+};
 use rustc_hash::FxHashSet;
 
 use crate::error::IoError;
@@ -25,6 +27,31 @@ pub(crate) struct Row {
     pub(crate) linear: LinearTerms<'static>,
     /// Nonlinear summands of the body, empty when the row is purely linear.
     pub(crate) residual: Vec<SignedExpr>,
+}
+
+#[derive(Default)]
+struct ResidualCache {
+    entries: Vec<(ExprId, FxHashSet<VarId>)>,
+}
+
+impl ResidualCache {
+    fn variables(
+        &mut self,
+        arena: &ExprArena,
+        id: ExprId,
+        nonfinite_strings: bool,
+    ) -> Result<&FxHashSet<VarId>, IoError> {
+        if let Some(index) = self.entries.iter().position(|(root, _)| *root == id) {
+            return Ok(&self.entries[index].1);
+        }
+        let mut vars = FxHashSet::default();
+        analyze_residual(arena, id, nonfinite_strings, &mut vars)?;
+        if self.entries.len() == 8 {
+            self.entries.remove(0);
+        }
+        self.entries.push((id, vars));
+        Ok(&self.entries.last().expect("inserted residual").1)
+    }
 }
 
 impl Row {
@@ -80,6 +107,8 @@ impl Analysis {
         }
 
         let mut nl_vars_c: FxHashSet<VarId> = FxHashSet::default();
+        // Scratch lives only for this immutable arena snapshot and options.
+        let mut residual_cache = ResidualCache::default();
         let mut nl_vars_o: FxHashSet<VarId> = FxHashSet::default();
         let mut cons: Vec<Row> = Vec::with_capacity(constraints.len());
         let mut cons_vars = Vec::new();
@@ -93,14 +122,11 @@ impl Analysis {
                 all.insert(*v);
             }
             if !residual.is_empty() {
-                let mut nl_set: FxHashSet<VarId> = FxHashSet::default();
                 for r in &residual {
-                    validate(arena, r.id, nonfinite_strings)?;
-                    collect_vars(arena, r.id, &mut nl_set)?;
-                }
-                for v in &nl_set {
-                    nl_vars_c.insert(*v);
-                    all.insert(*v);
+                    for v in residual_cache.variables(arena, r.id, nonfinite_strings)? {
+                        nl_vars_c.insert(*v);
+                        all.insert(*v);
+                    }
                 }
             }
             cons.push(Row { linear: linear.into_owned(), residual });
@@ -118,14 +144,11 @@ impl Analysis {
                     obj_all.insert(*v);
                 }
                 if !obj_residual.is_empty() {
-                    let mut nl_set: FxHashSet<VarId> = FxHashSet::default();
                     for r in &obj_residual {
-                        validate(arena, r.id, nonfinite_strings)?;
-                        collect_vars(arena, r.id, &mut nl_set)?;
-                    }
-                    for v in &nl_set {
-                        nl_vars_o.insert(*v);
-                        obj_all.insert(*v);
+                        for v in residual_cache.variables(arena, r.id, nonfinite_strings)? {
+                            nl_vars_o.insert(*v);
+                            obj_all.insert(*v);
+                        }
                     }
                 }
                 Some(Row { linear: obj_linear.into_owned(), residual: obj_residual })
@@ -155,87 +178,46 @@ fn sorted(set: FxHashSet<VarId>) -> Vec<VarId> {
 /// constants are an error only when `nonfinite_strings` is off. When on, the
 /// writer emits them as `Infinity`/`NaN`, so they are allowed through this function
 /// to keep `WriteOptions::nonfinite_strings` effective for expression constants.
-fn validate(arena: &ExprArena, id: ExprId, nonfinite_strings: bool) -> Result<(), IoError> {
-    match arena.get(id) {
-        ExprNode::Const(c) => {
-            if !nonfinite_strings && !c.is_finite() {
-                return Err(IoError::InvalidNumber {
-                    value: *c,
-                    location: "an expression constant".into(),
-                });
+fn analyze_residual(
+    arena: &ExprArena,
+    id: ExprId,
+    nonfinite_strings: bool,
+    vars: &mut FxHashSet<VarId>,
+) -> Result<(), IoError> {
+    struct ResidualVisitor<'a> {
+        vars: &'a mut FxHashSet<VarId>,
+        nonfinite_strings: bool,
+        error: Option<IoError>,
+    }
+    impl Visitor for ResidualVisitor<'_> {
+        fn visit(&mut self, arena: &ExprArena, _id: ExprId, node: &ExprNode) {
+            if self.error.is_some() {
+                return;
             }
-            Ok(())
-        }
-        ExprNode::Var(_) => Ok(()),
-        ExprNode::Param(p) => {
-            let value = arena.param_value(*p);
-            if !nonfinite_strings && !value.is_finite() {
-                return Err(IoError::InvalidNumber { value, location: "a parameter".into() });
+            let number = match node {
+                ExprNode::Const(value) => Some((*value, "an expression constant")),
+                ExprNode::Param(p) => Some((arena.param_value(*p), "a parameter")),
+                ExprNode::Var(v) => {
+                    self.vars.insert(*v);
+                    None
+                }
+                ExprNode::Linear { coeffs, constant } => {
+                    self.vars.extend(coeffs.iter().map(|&(v, _)| v));
+                    Some((*constant, "a linear expression constant"))
+                }
+                _ => None,
+            };
+            if let Some((value, location)) = number
+                && !self.nonfinite_strings
+                && !value.is_finite()
+            {
+                self.error = Some(IoError::InvalidNumber { value, location: location.into() });
             }
-            Ok(())
-        }
-        ExprNode::Unary(_, x) => validate(arena, *x, nonfinite_strings),
-        ExprNode::Pow(b, e) | ExprNode::Atan2(b, e) => {
-            validate(arena, *b, nonfinite_strings)?;
-            validate(arena, *e, nonfinite_strings)
-        }
-        ExprNode::Add(children)
-        | ExprNode::Mul(children)
-        | ExprNode::Min(children)
-        | ExprNode::Max(children) => {
-            for c in children {
-                validate(arena, *c, nonfinite_strings)?;
-            }
-            Ok(())
-        }
-        ExprNode::Div(num, den) => {
-            validate(arena, *num, nonfinite_strings)?;
-            validate(arena, *den, nonfinite_strings)
-        }
-        ExprNode::Linear { coeffs: _, constant } => {
-            if !nonfinite_strings && !constant.is_finite() {
-                return Err(IoError::InvalidNumber {
-                    value: *constant,
-                    location: "a linear expression constant".into(),
-                });
-            }
-            Ok(())
         }
     }
-}
-
-fn collect_vars(arena: &ExprArena, id: ExprId, out: &mut FxHashSet<VarId>) -> Result<(), IoError> {
-    match arena.get(id) {
-        ExprNode::Const(_) | ExprNode::Param(_) => Ok(()),
-        ExprNode::Var(v) => {
-            out.insert(*v);
-            Ok(())
-        }
-        ExprNode::Unary(_, x) => collect_vars(arena, *x, out),
-        ExprNode::Pow(b, e) | ExprNode::Atan2(b, e) => {
-            collect_vars(arena, *b, out)?;
-            collect_vars(arena, *e, out)
-        }
-        ExprNode::Add(children)
-        | ExprNode::Mul(children)
-        | ExprNode::Min(children)
-        | ExprNode::Max(children) => {
-            for c in children {
-                collect_vars(arena, *c, out)?;
-            }
-            Ok(())
-        }
-        ExprNode::Div(num, den) => {
-            collect_vars(arena, *num, out)?;
-            collect_vars(arena, *den, out)
-        }
-        ExprNode::Linear { coeffs, .. } => {
-            for (v, _) in coeffs {
-                out.insert(*v);
-            }
-            Ok(())
-        }
-    }
+    let mut visitor = ResidualVisitor { vars, nonfinite_strings, error: None };
+    walk_shared(arena, id, &mut visitor);
+    visitor.error.map_or(Ok(()), Err)
 }
 
 #[cfg(feature = "benchmark-support")]
@@ -292,8 +274,7 @@ pub mod benchmark_support {
         let mut all: FxHashSet<VarId> = linear.coeffs.iter().map(|(v, _)| *v).collect();
         let mut nonlinear = FxHashSet::default();
         for r in &residual {
-            validate(arena, r.id, false)?;
-            collect_vars(arena, r.id, &mut nonlinear)?;
+            analyze_residual(arena, r.id, false, &mut nonlinear)?;
         }
         all.extend(nonlinear.iter().copied());
         Ok((Row { linear: linear.into_owned(), residual }, sorted(all), nonlinear))
@@ -334,8 +315,7 @@ pub mod benchmark_support {
         let mut obj_all: FxHashSet<VarId> = obj_linear.coeffs.iter().map(|(v, _)| *v).collect();
         let mut nl_vars_o = FxHashSet::default();
         for residual in &obj_residual {
-            validate(arena, residual.id, false)?;
-            collect_vars(arena, residual.id, &mut nl_vars_o)?;
+            analyze_residual(arena, residual.id, false, &mut nl_vars_o)?;
         }
         obj_all.extend(nl_vars_o.iter().copied());
         let obj = Some(Row { linear: obj_linear.into_owned(), residual: obj_residual });

@@ -8,12 +8,66 @@ use smallvec::SmallVec;
 
 use crate::arena::{ArenaAccess, ExprId, ExprNode};
 
+/// Lazily allocated sum frames.
+pub(crate) type SumFrames<'a> = Option<Box<Vec<(&'a [ExprId], f64)>>>;
+
+/// A conservative absolute-sum bound on contributions to additive folds.
+/// If this overflows, original grouping may have overflowed even when a
+/// regrouped result is finite.
+pub(crate) fn record_sum_magnitude(bound: &std::cell::Cell<f64>, contribution: f64) {
+    let previous = bound.get();
+    if previous.is_finite() {
+        bound.set(previous + contribution.abs());
+    }
+}
+
+/// Rare-path check before retrying a non-finite regrouped result.
+pub(crate) fn finite_inputs(
+    arena: &(impl ArenaAccess + ?Sized),
+    root: ExprId,
+    resolve_params: bool,
+) -> bool {
+    let mut seen = FxHashSet::default();
+    let mut stack = SmallVec::<[ExprId; 16]>::from_slice(&[root]);
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match arena.get(id) {
+            ExprNode::Const(c) if !c.is_finite() => return false,
+            ExprNode::Param(p) => {
+                if !resolve_params || !arena.param_value(*p).is_finite() {
+                    return false;
+                }
+            }
+            ExprNode::Linear { coeffs, constant } => {
+                if !constant.is_finite() || coeffs.iter().any(|(_, c)| !c.is_finite()) {
+                    return false;
+                }
+            }
+            ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::Min(c) | ExprNode::Max(c) => {
+                stack.extend_from_slice(c);
+            }
+            ExprNode::Unary(_, child) => stack.push(*child),
+            ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => {
+                stack.extend_from_slice(&[*a, *b]);
+            }
+            ExprNode::Const(_) | ExprNode::Var(_) => {}
+        }
+    }
+    true
+}
+
 pub(crate) trait Folder {
     type Value: Clone;
     type State;
     fn start(&self, id: ExprId) -> ControlFlow<Option<Self::Value>, Self::State>;
     fn next(&self, state: &mut Self::State) -> ControlFlow<Option<Self::Value>, ExprId>;
     fn accept(&self, state: &mut Self::State, value: Self::Value);
+    /// Inline an unshared child into the current accumulator, when compatible.
+    fn inline(&self, _state: &mut Self::State, _child: ExprId) -> bool {
+        false
+    }
 }
 
 fn is_compound(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
@@ -107,7 +161,8 @@ pub(crate) fn fold<F: Folder>(
         let (id, state) = stack.last_mut()?;
         match step {
             ControlFlow::Continue(child) => {
-                if let Some(value) = cache.get(&child) {
+                if !shared.contains(&child) && folder.inline(state, child) {
+                } else if let Some(value) = cache.get(&child) {
                     folder.accept(state, value.clone());
                 } else {
                     match folder.start(child) {

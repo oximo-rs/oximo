@@ -27,7 +27,8 @@ pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMem
 pub use crate::sum::SumDomain;
 pub use crate::var::{VarBuilder, Variable};
 pub use oximo_expr::{
-    Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId, UnaryOp, VarId, dot,
+    AffineBuilder, Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId, UnaryOp, VarId,
+    dot,
 };
 
 pub use oximo_macros::{

@@ -95,84 +95,166 @@ pub(crate) fn render_node(
     resolve: &impl Fn(VarId) -> String,
     parent_prec: u8,
 ) -> String {
-    let (text, prec) = match arena.get(id) {
-        ExprNode::Const(c) => (fmt_num(*c), PREC_UNARY),
-        ExprNode::Var(v) => (resolve(*v), PREC_UNARY),
-        ExprNode::Param(p) => (fmt_num(arena.param_value(*p)), PREC_UNARY),
-        ExprNode::Unary(UnaryOp::Neg, x) => {
-            (format!("-{}", render_node(arena, *x, resolve, PREC_UNARY)), PREC_UNARY)
-        }
-        ExprNode::Add(children) => {
-            let mut parts: Vec<Part> = Vec::with_capacity(children.len());
-            for c in children.iter().copied() {
-                match arena.get(c) {
-                    ExprNode::Unary(UnaryOp::Neg, inner) => {
-                        parts.push((true, render_node(arena, *inner, resolve, PREC_UNARY)));
-                    }
-                    ExprNode::Const(v) if *v < 0.0 => parts.push((true, fmt_num(-v))),
-                    ExprNode::Param(p) if arena.param_value(*p) < 0.0 => {
-                        parts.push((true, fmt_num(-arena.param_value(*p))));
-                    }
-                    ExprNode::Linear { coeffs, constant } => {
-                        parts.extend(linear_parts_from_slice(coeffs, *constant, resolve));
-                    }
-                    _ => parts.push((false, render_node(arena, c, resolve, PREC_ADD))),
-                }
+    let mut out = String::new();
+    let mut pending: RenderTasks<'_> = smallvec::smallvec![RenderTask::Node(id, parent_prec)];
+    while let Some(task) = pending.pop() {
+        let (id, parent_prec) = match task {
+            RenderTask::Text(text) => {
+                out.push_str(text);
+                continue;
             }
-            (join_parts(&parts), PREC_ADD)
-        }
-        ExprNode::Mul(children) => {
-            let parts: Vec<String> =
-                children.iter().map(|c| render_node(arena, *c, resolve, PREC_MUL)).collect();
-            (parts.join(" * "), PREC_MUL)
-        }
-        ExprNode::Pow(b, e) => {
-            let base = render_node(arena, *b, resolve, PREC_UNARY);
-            let exp = render_node(arena, *e, resolve, PREC_UNARY);
-            (format!("{base}^{exp}"), PREC_UNARY)
-        }
-        ExprNode::Div(num, den) => {
-            let n = render_node(arena, *num, resolve, PREC_MUL);
-            let d = render_node(arena, *den, resolve, PREC_MUL);
-            (format!("{n} / {d}"), PREC_MUL)
-        }
-        ExprNode::Unary(op, x) => (fmt_call(op.name(), arena, *x, resolve), PREC_UNARY),
-        ExprNode::Atan2(y, x) => {
-            let y = render_node(arena, *y, resolve, PREC_ADD);
-            let x = render_node(arena, *x, resolve, PREC_ADD);
-            (format!("atan2({y}, {x})"), PREC_UNARY)
-        }
-        ExprNode::Min(children) | ExprNode::Max(children) => {
-            let name = if matches!(arena.get(id), ExprNode::Min(_)) { "min" } else { "max" };
-            let args = children
-                .iter()
-                .map(|child| render_node(arena, *child, resolve, PREC_ADD))
-                .collect::<Vec<_>>()
-                .join(", ");
-            (format!("{name}({args})"), PREC_UNARY)
-        }
-        ExprNode::Linear { coeffs, constant } => {
+            RenderTask::Add(children, first) => {
+                render_add(arena, resolve, &mut out, &mut pending, children, first);
+                continue;
+            }
+            RenderTask::Node(id, parent_prec) => (id, parent_prec),
+        };
+        let node = arena.get(id);
+        if let ExprNode::Linear { coeffs, constant } = node {
             let parts = linear_parts_from_slice(coeffs, *constant, resolve);
-            // A multi-term or negative-leading sum needs parens inside a product.
             let prec = match parts.as_slice() {
                 [(false, _)] => PREC_MUL,
                 [] => PREC_UNARY,
                 _ => PREC_ADD,
             };
-            (join_parts(&parts), prec)
+            if prec < parent_prec {
+                out.push('(');
+            }
+            out.push_str(&join_parts(&parts));
+            if prec < parent_prec {
+                out.push(')');
+            }
+            continue;
         }
-    };
-    if prec < parent_prec { format!("({text})") } else { text }
+        let prec = match node {
+            ExprNode::Add(_) => PREC_ADD,
+            ExprNode::Mul(_) | ExprNode::Div(_, _) => PREC_MUL,
+            _ => PREC_UNARY,
+        };
+        if prec < parent_prec {
+            out.push('(');
+            pending.push(RenderTask::Text(")"));
+        }
+        match node {
+            ExprNode::Const(c) => out.push_str(&fmt_num(*c)),
+            ExprNode::Var(v) => out.push_str(&resolve(*v)),
+            ExprNode::Param(p) => out.push_str(&fmt_num(arena.param_value(*p))),
+            ExprNode::Add(children) => pending.push(RenderTask::Add(children, true)),
+            ExprNode::Mul(children) => render_children(&mut pending, children, PREC_MUL, " * "),
+            ExprNode::Unary(UnaryOp::Neg, child) => {
+                out.push('-');
+                pending.push(RenderTask::Node(*child, PREC_UNARY));
+            }
+            ExprNode::Pow(base, exponent) => {
+                pending.push(RenderTask::Node(*exponent, PREC_UNARY));
+                pending.push(RenderTask::Text("^"));
+                pending.push(RenderTask::Node(*base, PREC_UNARY));
+            }
+            ExprNode::Div(num, den) => {
+                pending.push(RenderTask::Node(*den, PREC_MUL));
+                pending.push(RenderTask::Text(" / "));
+                pending.push(RenderTask::Node(*num, PREC_MUL));
+            }
+            ExprNode::Unary(op, child) => {
+                out.push_str(op.name());
+                out.push('(');
+                pending.push(RenderTask::Text(")"));
+                pending.push(RenderTask::Node(*child, PREC_ADD));
+            }
+            ExprNode::Atan2(y, x) => {
+                out.push_str("atan2(");
+                pending.push(RenderTask::Text(")"));
+                pending.push(RenderTask::Node(*x, PREC_ADD));
+                pending.push(RenderTask::Text(", "));
+                pending.push(RenderTask::Node(*y, PREC_ADD));
+            }
+            ExprNode::Min(children) | ExprNode::Max(children) => {
+                out.push_str(if matches!(node, ExprNode::Min(_)) { "min(" } else { "max(" });
+                pending.push(RenderTask::Text(")"));
+                render_children(&mut pending, children, PREC_ADD, ", ");
+            }
+            ExprNode::Linear { .. } => unreachable!("handled above"),
+        }
+    }
+    out
 }
 
-/// Format a call-like node `name(arg)`.
-fn fmt_call(
-    name: &str,
+enum RenderTask<'a> {
+    Node(ExprId, u8),
+    Text(&'static str),
+    Add(&'a [ExprId], bool),
+}
+
+type RenderTasks<'a> = smallvec::SmallVec<[RenderTask<'a>; 16]>;
+
+fn render_add<'a>(
     arena: &ExprArena,
-    arg: ExprId,
     resolve: &impl Fn(VarId) -> String,
-) -> String {
-    format!("{name}({})", render_node(arena, arg, resolve, PREC_ADD))
+    out: &mut String,
+    pending: &mut RenderTasks<'a>,
+    children: &'a [ExprId],
+    mut first: bool,
+) {
+    let Some((&child, rest)) = children.split_first() else {
+        if first {
+            out.push('0');
+        }
+        return;
+    };
+    match arena.get(child) {
+        ExprNode::Linear { coeffs, constant } => {
+            for (negative, text) in linear_parts_from_slice(coeffs, *constant, resolve) {
+                part_prefix(out, negative, first);
+                out.push_str(&text);
+                first = false;
+            }
+            pending.push(RenderTask::Add(rest, first));
+        }
+        ExprNode::Const(value) if *value < 0.0 => {
+            part_prefix(out, true, first);
+            out.push_str(&fmt_num(-value));
+            pending.push(RenderTask::Add(rest, false));
+        }
+        ExprNode::Param(p) if arena.param_value(*p) < 0.0 => {
+            part_prefix(out, true, first);
+            out.push_str(&fmt_num(-arena.param_value(*p)));
+            pending.push(RenderTask::Add(rest, false));
+        }
+        node => {
+            let (negative, child, prec) = if let ExprNode::Unary(UnaryOp::Neg, inner) = node {
+                (true, *inner, PREC_UNARY)
+            } else {
+                (false, child, PREC_ADD)
+            };
+            part_prefix(out, negative, first);
+            pending.push(RenderTask::Add(rest, false));
+            pending.push(RenderTask::Node(child, prec));
+        }
+    }
+}
+
+fn part_prefix(out: &mut String, negative: bool, first: bool) {
+    if first {
+        if negative {
+            out.push('-');
+        }
+    } else {
+        out.push_str(if negative { " - " } else { " + " });
+    }
+}
+
+fn render_children<'a>(
+    pending: &mut RenderTasks<'a>,
+    children: &'a [ExprId],
+    prec: u8,
+    separator: &'static str,
+) {
+    for (i, &child) in children.iter().enumerate().rev() {
+        pending.push(RenderTask::Node(child, prec));
+        if i > 0 {
+            pending.push(RenderTask::Text(separator));
+        }
+    }
 }
 
 /// Render an `f64` compactly (shortest round-trip).

@@ -17,6 +17,41 @@ fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     assert!(((got - want) / denom).abs() < tol, "{what}: got {got}, want {want}");
 }
 
+#[test]
+fn deferred_and_builder_affine_expressions_compile_and_rebind() {
+    let cell = oximo_expr::ExprArenaCell::new(ExprArena::new());
+    let variables: Vec<_> = (0..128).map(|i| oximo_expr::Expr::from_var(&cell, VarId(i))).collect();
+    let param = cell.borrow_mut().new_param(2.0);
+    let parameter = oximo_expr::Expr::from_param(&cell, param);
+    let deferred =
+        variables.iter().copied().reduce(|a, b| a + b).unwrap() + parameter * variables[0];
+    let mut builder = oximo_expr::AffineBuilder::new(&cell);
+    for &variable in &variables {
+        builder.add_term(1.0, variable);
+    }
+    builder.add_term(1.0, parameter * variables[0]);
+    let compact = builder.build();
+    for expression in [deferred, compact] {
+        let snapshot = cell.borrow();
+        let tape = Tape::compile(&snapshot, expression.id());
+        let mut registers = vec![0.0; tape.n_regs()];
+        let values = vec![1.0; 128];
+        for value in [2.0, 5.0] {
+            parameter.set_param_value(value);
+            let result = tape.value(&values, &[value], &[], &mut registers);
+            assert_close(result, 128.0 + value, 1e-14, "affine parameter rebind");
+            let slot = FunctionSlot::classify(&cell.borrow(), expression.id());
+            let SlotKind::Linear(terms) = slot.kind else {
+                panic!("affine slot");
+            };
+            let mut gradient = vec![0.0; 128];
+            linear_gradient_add(&terms, 1.0, &mut gradient);
+            assert_close(gradient[0], 1.0 + value, 1e-14, "affine gradient rebind");
+            assert!(gradient[1..].iter().all(|&g| (g - 1.0).abs() < f64::EPSILON));
+        }
+    }
+}
+
 /// Tape and recursive evaluator must agree to within a couple of ULPs (the
 /// tape may associate sums differently, e.g. a Linear node's constant is
 /// added last instead of first).

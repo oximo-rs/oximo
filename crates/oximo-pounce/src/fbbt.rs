@@ -58,7 +58,38 @@ fn tape_for(
 ) -> FbbtTape {
     let mut ops = Vec::new();
     slots.clear();
-    emit(arena, root, &mut ops, slots);
+    let mut pending = vec![(root, false)];
+    while let Some((id, finish)) = pending.pop() {
+        if slots.contains_key(&id) {
+            continue;
+        }
+        if !finish {
+            pending.push((id, true));
+            match arena.get(id) {
+                ExprNode::Unary(
+                    UnaryOp::Neg
+                    | UnaryOp::Sin
+                    | UnaryOp::Cos
+                    | UnaryOp::Exp
+                    | UnaryOp::Log
+                    | UnaryOp::Abs
+                    | UnaryOp::Sqrt,
+                    child,
+                ) => {
+                    pending.push((*child, false));
+                }
+                ExprNode::Pow(base, _) => pending.push((*base, false)),
+                ExprNode::Div(left, right) => pending.extend([(*right, false), (*left, false)]),
+                ExprNode::Add(children) | ExprNode::Mul(children) => {
+                    pending.extend(children.iter().rev().map(|&child| (child, false)));
+                }
+                // Unsupported nodes deliberately hide their descendants.
+                _ => {}
+            }
+            continue;
+        }
+        emit(arena, id, &mut ops, slots);
+    }
     FbbtTape { ops }
 }
 
@@ -76,43 +107,43 @@ fn emit(
         ExprNode::Param(param) => push(ops, FbbtOp::Const(arena.param_value(*param))),
         ExprNode::Var(var) => push(ops, FbbtOp::Var(var.index())),
         ExprNode::Unary(UnaryOp::Neg, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Neg(a))
         }
         ExprNode::Unary(UnaryOp::Sin, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Sin(a))
         }
         ExprNode::Unary(UnaryOp::Cos, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Cos(a))
         }
         ExprNode::Unary(UnaryOp::Exp, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Exp(a))
         }
         ExprNode::Unary(UnaryOp::Log, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Ln(a))
         }
         ExprNode::Unary(UnaryOp::Abs, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Abs(a))
         }
         ExprNode::Unary(UnaryOp::Sqrt, child) => {
-            let a = emit(arena, *child, ops, slots);
+            let a = slots[child];
             push(ops, FbbtOp::Sqrt(a))
         }
         ExprNode::Unary(_, _) | ExprNode::Atan2(_, _) | ExprNode::Min(_) | ExprNode::Max(_) => {
             push(ops, FbbtOp::Opaque)
         }
         ExprNode::Div(lhs, rhs) => {
-            let a = emit(arena, *lhs, ops, slots);
-            let b = emit(arena, *rhs, ops, slots);
+            let a = slots[lhs];
+            let b = slots[rhs];
             push(ops, FbbtOp::Div(a, b))
         }
         ExprNode::Pow(base, exponent) => {
-            let a = emit(arena, *base, ops, slots);
+            let a = slots[base];
             match constant_value(arena, *exponent) {
                 Some(0.5) => push(ops, FbbtOp::Sqrt(a)),
                 Some(value)
@@ -126,8 +157,8 @@ fn emit(
                 _ => push(ops, FbbtOp::Opaque),
             }
         }
-        ExprNode::Add(children) => fold(arena, children.as_slice(), ops, slots, 0.0, true),
-        ExprNode::Mul(children) => fold(arena, children.as_slice(), ops, slots, 1.0, false),
+        ExprNode::Add(children) => fold(children.as_slice(), ops, slots, 0.0, true),
+        ExprNode::Mul(children) => fold(children.as_slice(), ops, slots, 1.0, false),
         ExprNode::Linear { coeffs, constant } => {
             let mut acc = push(ops, FbbtOp::Const(*constant));
             ops.reserve(coeffs.len().saturating_mul(4));
@@ -145,7 +176,6 @@ fn emit(
 }
 
 fn fold(
-    arena: &ExprArenaSnapshot<'_>,
     children: &[ExprId],
     ops: &mut Vec<FbbtOp>,
     slots: &mut FxHashMap<ExprId, usize>,
@@ -154,7 +184,7 @@ fn fold(
 ) -> usize {
     let mut acc = push(ops, FbbtOp::Const(identity));
     for &child in children {
-        let next = emit(arena, child, ops, slots);
+        let next = slots[&child];
         acc =
             if add { push(ops, FbbtOp::Add(acc, next)) } else { push(ops, FbbtOp::Mul(acc, next)) };
     }
@@ -189,6 +219,27 @@ fn push(ops: &mut Vec<FbbtOp>, op: FbbtOp) -> usize {
 mod tests {
     use super::*;
     use oximo_core::{Model, constraint, objective, param, variable};
+
+    #[test]
+    fn deep_affine_and_nonlinear_tapes_are_stack_safe_and_valid() {
+        let model = Model::new("deep_fbbt");
+        variable!(model, x[i in 0..20_000]);
+        let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+        constraint!(model, row, sum.exp() <= 1.0);
+        let mut nested = x[0].sin();
+        for _ in 0..20_000 {
+            nested = nested.sin();
+        }
+        constraint!(model, nested_row, nested <= 1.0);
+        let tapes = checked_constraint_tapes(&model).unwrap();
+        let first = tapes[0].as_ref().unwrap();
+        assert_eq!(first.ops.iter().filter(|op| matches!(op, FbbtOp::Var(_))).count(), 20_000);
+        assert!(matches!(first.ops.last(), Some(FbbtOp::Exp(_))));
+        assert_eq!(
+            tapes[1].as_ref().unwrap().ops.iter().filter(|op| matches!(op, FbbtOp::Sin(_))).count(),
+            20_001
+        );
+    }
 
     #[test]
     fn reused_scratch_keeps_tapes_independent_and_refreshes_parameters() {

@@ -1,0 +1,16 @@
+error[E0271]: type mismatch resolving `<Quadratic as AddDegree<Affine>>::Output == Affine`
+ --> tests/ui/fail/affine_builder_quadratic.rs:5:38
+  |
+5 |     m.affine_builder().add_term(1.0, x.square());
+  |                        --------      ^^^^^^^^^^ expected `Affine`, found `Quadratic`
+  |                        |
+  |                        required by a bound introduced by this call
+  |
+note: required by a bound in `AffineBuilder::<'a>::add_term`
+ --> $WORKSPACE/crates/oximo-expr/src/affine_builder.rs
+  |
+  |     pub fn add_term<D>(&mut self, coefficient: f64, expression: Expr<'a, D>) -> &mut Self
+  |            -------- required by a bound in this associated function
+  |     where
+  |         D: Degree + AddDegree<Affine, Output = Affine>,
+  |                                       ^^^^^^^^^^^^^^^ required by this bound in `AffineBuilder::<'a>::add_term`

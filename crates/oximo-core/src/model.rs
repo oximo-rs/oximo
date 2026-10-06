@@ -544,6 +544,19 @@ impl Model {
         self.arena.model_id()
     }
 
+    /// Accumulate affine terms incrementally without copying every prefix.
+    /// Call `build()` to emit an expression and reset the reusable builder.
+    pub fn affine_builder(&self) -> oximo_expr::AffineBuilder<'_> {
+        oximo_expr::AffineBuilder::new(&self.arena)
+    }
+
+    /// Accumulate original numeric affine terms with compensated summation.
+    /// This reduces cancellation error, but cannot prevent rounding already
+    /// present in a supplied expression or an overflowed partial sum.
+    pub fn compensated_affine_builder(&self) -> oximo_expr::AffineBuilder<'_> {
+        oximo_expr::AffineBuilder::new_compensated(&self.arena)
+    }
+
     // Variables
 
     /// Macro-facing entry point backing the `variable!` macro. Not part of the
@@ -924,7 +937,7 @@ impl Model {
             let handles = keys
                 .iter()
                 .map(|key| {
-                    let name: SmolStr = format_index_name(&base, key).into();
+                    let name = format_index_name_small(&base, key);
                     self.register_param(name, value(K::from_index_key(key)))
                 })
                 .collect();
@@ -932,7 +945,7 @@ impl Model {
             return IndexedFamily { storage, model_id: self.id(), _marker: PhantomData };
         }
         let prepare = |key: &IndexKey| PendingParam {
-            name: format_index_name(&base, key).into(),
+            name: format_index_name_small(&base, key),
             value: value(K::from_index_key(key)),
         };
         let prepared: Vec<_> = keys.par_iter().map(prepare).collect();
@@ -2959,7 +2972,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
             let handles = keys
                 .iter()
                 .map(|key| {
-                    let scalar_name: SmolStr = format_index_name(&base_name, key).into();
+                    let scalar_name = format_index_name_small(&base_name, key);
                     let lo = lb_by.as_ref().map_or(lb, |f| f(key));
                     let hi = ub_by.as_ref().map_or(ub, |f| f(key));
                     model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
@@ -2970,7 +2983,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
         }
 
         let prepare = |key: &IndexKey| PendingVar {
-            name: format_index_name(&base_name, key).into(),
+            name: format_index_name_small(&base_name, key),
             lb: lb_by.as_ref().map_or(lb, |f| f(key)),
             ub: ub_by.as_ref().map_or(ub, |f| f(key)),
         };
@@ -2997,15 +3010,24 @@ fn format_index_name(base: &str, key: &IndexKey) -> String {
     out
 }
 
-fn write_key_parts(out: &mut String, key: &IndexKey) {
-    use std::fmt::Write;
+// Indexed variable names usually fit SmolStr's inline storage.
+fn format_index_name_small(base: &str, key: &IndexKey) -> SmolStr {
+    let mut out = smol_str::SmolStrBuilder::new();
+    out.push_str(base);
+    out.push('[');
+    write_key_parts(&mut out, key);
+    out.push(']');
+    out.finish()
+}
+
+fn write_key_parts(out: &mut impl fmt::Write, key: &IndexKey) {
     match key {
         IndexKey::Int(i) => write!(out, "{i}").unwrap(),
-        IndexKey::Str(s) => out.push_str(s),
+        IndexKey::Str(s) => out.write_str(s).unwrap(),
         IndexKey::Tuple(parts) => {
             for (i, p) in parts.iter().enumerate() {
                 if i > 0 {
-                    out.push(',');
+                    out.write_char(',').unwrap();
                 }
                 write_key_parts(out, p);
             }
@@ -3148,6 +3170,23 @@ mod tests {
     use oximo_expr::extract_linear;
 
     use super::*;
+
+    #[test]
+    fn inline_indexed_variable_names_match_existing_rendering() {
+        let keys = [
+            IndexKey::Int(-123),
+            IndexKey::Str("áβ🙂".into()),
+            IndexKey::Tuple(vec![IndexKey::Int(7), IndexKey::Str("a,b".into())].into()),
+        ];
+        for base in ["x", "αβ", "very_long_indexed_variable_name_beyond_inline_capacity"] {
+            for key in &keys {
+                assert_eq!(
+                    format_index_name_small(base, key).as_str(),
+                    format_index_name(base, key)
+                );
+            }
+        }
+    }
     use crate::Set;
     use crate::constraint::Relate;
 
