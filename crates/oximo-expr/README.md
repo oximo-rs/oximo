@@ -2,7 +2,7 @@
 
 Arena-allocated expression tree for [oximo](https://github.com/oximo-rs/oximo).
 
-All expressions in oximo are nodes in a single `ExprArena` owned by the `Model` through an `ExprArenaCell`. User code holds lightweight `Expr` handles, an `(ExprId, &ExprArenaCell)` pair. Copying an `Expr` copies an ID, not a subtree. Operator overloads collapse linear combinations into a single `Linear` node so LP/MILP construction never traverses an `Add(Mul(Const, Var), ...)` tree.
+All expressions in oximo are nodes in a single `ExprArena` owned by the `Model` through an `ExprArenaCell`. User code holds lightweight `Expr` handles, an `(ExprId, &ExprArenaCell)` pair. Copying an `Expr` copies an ID, not a subtree. Operator overloads collapse small numeric affine combinations into a `Linear` node. Large combinations retain immutable expression nodes to avoid repeatedly copying coefficient prefixes.
 
 `ExprArenaCell` provides synchronized interior mutability, so expression handles can be shared by indexed-family callbacks. Large indexed builds use isolated worker-local arena forks and merge their nodes in set order before serial model registration. Ordinary scalar expression construction keeps the same arena-backed API.
 
@@ -24,6 +24,7 @@ This crate is the fundamental layer. End users depend on `oximo-core`, which re-
 | `VarId`         | Opaque variable index                                   |
 | `ParamId`       | Opaque parameter index                                  |
 | `LinearTerms`   | Extracted `Vec<(VarId, f64)>` + constant                |
+| `AffineBuilder` | Reusable accumulator for incremental affine expressions |
 
 ### `ExprNode` variants
 
@@ -41,11 +42,11 @@ Min(Children) / Max(Children)
 Linear { coeffs: Vec<(VarId, f64)>, constant: f64 } // LP fast-path
 ```
 
-`Linear` is produced automatically by operator overloads when all operands are linear. LP/MILP backends detect it and skip tree traversal entirely.
+`Linear` is produced automatically for small numeric affine operations, and by `AffineBuilder` for large numeric sums. LP/MILP backends detect it and skip tree traversal entirely. Large operator-built sums are extracted by accumulating unshared nested additions directly, with memoization for shared subexpressions.
 
 ## Operator overloads
 
-`Expr` implements `Add`, `Sub`, `Mul`, `Div`, `Neg` against other `Expr` values and against `f64`. All operations that stay linear produce a `Linear` node. For example:
+`Expr` implements `Add`, `Sub`, `Mul`, `Div`, `Neg` against other `Expr` values and against `f64`. Small numeric additions merge up to 32 distinct variables without a hash table. A flat numeric sum with small support can be scanned once and merged, even with many repeated terms. Other eager affine simplification visits at most 64 nodes and 32 coefficient entries, counting duplicates. Larger operands stay deferred, avoiding repeated prefix copies. Numeric operands are compacted when entering expression products or powers so cancellations do not falsely raise degree. Parameters stay symbolic. For example:
 
 ```rust,ignore
 // All of these produce a single Linear node, not an Add/Mul tree:
@@ -54,6 +55,30 @@ let e = x + y;
 let e = -x;
 let e = x / 2.0; // constant denominator: stays linear (x*0.5)
 ```
+
+### Incremental affine construction
+
+Use `model.affine_builder()` when terms arrive incrementally:
+
+```rust,ignore
+let mut builder = model.affine_builder();
+for (weight, expression) in terms {
+    builder.add_term(weight, expression);
+}
+builder.add_constant(5.0);
+let expression = builder.build();
+// build resets the builder and retains scratch capacity for the next expression.
+```
+
+`AffineBuilder::new(arena)` and `with_capacity(arena, capacity)` also work without
+a `Model`. Inputs must have static `Affine` or `Constant` degree. Use
+`try_affine()` to check a dynamic handle. Adding terms creates no arena nodes.
+Numeric-only input emits one `Linear` node, or a constant after cancellation.
+Parameter-dependent input preserves symbolic terms and ordered numeric segments
+under a flat sum.
+
+For repeated contributions to the same coefficient with large magnitude
+differences or cancellation, use `model.compensated_affine_builder()`.
 
 ## Nonlinear methods on `Expr`
 
