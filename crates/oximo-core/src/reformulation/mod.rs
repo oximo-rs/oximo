@@ -5,10 +5,13 @@
 //! on an independent clone. Both forms preserve existing variable and constraint
 //! IDs.
 
+mod error;
+pub(crate) mod helpers;
 mod indicator;
+mod model;
 mod sos;
 
+pub use error::ReformulationError;
 pub use indicator::{IndicatorReformulationArtifacts, IndicatorReformulationOptions};
-pub use sos::{
-    ReformulatedModel, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
-};
+pub use model::ReformulatedModel;
+pub use sos::{SosReformulationArtifacts, SosReformulationOptions};

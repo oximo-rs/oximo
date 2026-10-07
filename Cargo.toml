@@ -48,6 +48,7 @@ oximo-scip = { path = "crates/oximo-scip", version = "0.7.0", default-features =
 
 rayon            = "1.12"
 criterion        = "0.8"
+trybuild         = "1"
 syn              = { version = "3", features = ["full"] }
 quote            = "1"
 proc-macro2      = "1"
