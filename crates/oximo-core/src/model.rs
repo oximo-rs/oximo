@@ -805,10 +805,17 @@ impl Model {
     ///
     /// Panics if the variable belongs to an SOS or indicator constraint that
     /// has already been reformulated, because its bounds are embedded in rows.
+    /// Binary variables must keep ordered bounds inside `[0, 1]`.
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
         self.assert_reformulated_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
+        if v.domain == Domain::Binary {
+            assert!(
+                lb >= 0.0 && ub <= 1.0 && lb <= ub,
+                "binary variable bounds must remain ordered and inside [0, 1]"
+            );
+        }
         v.lb = lb;
         v.ub = ub;
         drop(vars);
