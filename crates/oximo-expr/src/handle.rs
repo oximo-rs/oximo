@@ -179,7 +179,8 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// arena.
     ///
     /// # Panics
-    /// Panics if this handle is not a bare parameter (see [`Self::param_id`]).
+    /// Panics if this handle is not a bare parameter (see [`Self::param_id`]),
+    /// or a reformulation has locked its value.
     pub fn set_param_value(self, value: f64) {
         let id = self.param_id().expect("set_param_value expects a bare parameter handle");
         self.arena.borrow_mut().set_param_value(id, value);

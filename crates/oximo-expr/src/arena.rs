@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use parking_lot::{Mutex, MutexGuard};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use thiserror::Error;
 
@@ -238,6 +239,7 @@ pub enum ExprNode {
 pub struct ExprArena {
     nodes: Arc<Vec<ExprNode>>,
     param_values: Arc<Vec<f64>>,
+    locked_parameters: Arc<FxHashSet<ParamId>>,
     classifications: Mutex<Option<Box<ExprClassCache>>>,
 }
 
@@ -250,6 +252,7 @@ impl Clone for ExprArena {
         Self {
             nodes: Arc::clone(&self.nodes),
             param_values: Arc::clone(&self.param_values),
+            locked_parameters: Arc::clone(&self.locked_parameters),
             classifications: Mutex::default(),
         }
     }
@@ -274,6 +277,7 @@ impl ExprArena {
         Self {
             nodes: Arc::new(nodes),
             param_values: Arc::new(self.param_values.as_ref().clone()),
+            locked_parameters: Arc::clone(&self.locked_parameters),
             classifications: Mutex::default(),
         }
     }
@@ -376,10 +380,21 @@ impl ExprArena {
     ///
     /// # Panics
     ///
-    /// Panics if `p` was not allocated by [`Self::new_param`] on this arena.
+    /// Panics if `p` was not allocated by [`Self::new_param`] on this arena,
+    /// or a reformulation has locked its value.
     #[inline]
     pub fn set_param_value(&mut self, p: ParamId, value: f64) {
+        assert!(
+            !self.locked_parameters.contains(&p),
+            "cannot change a parameter embedded in a reformulation; change the source model before reformulating"
+        );
         Arc::make_mut(&mut self.param_values)[p.index()] = value;
+    }
+
+    /// Preserve parameter values embedded in generated reformulation rows.
+    #[doc(hidden)]
+    pub fn __lock_parameters(&mut self, parameters: impl IntoIterator<Item = ParamId>) {
+        Arc::make_mut(&mut self.locked_parameters).extend(parameters);
     }
 
     pub fn linear(&mut self, coeffs: Vec<(VarId, f64)>, constant: f64) -> ExprId {
@@ -848,6 +863,11 @@ impl<'a> ExprArenaWriteGuard<'a> {
     }
 
     #[doc(hidden)]
+    pub fn __lock_parameters(&mut self, parameters: impl IntoIterator<Item = ParamId>) {
+        self.guard.__lock_parameters(parameters);
+    }
+
+    #[doc(hidden)]
     pub fn __reserve_nodes(&mut self, count: usize) {
         self.guard.__reserve_nodes(count);
     }
@@ -1000,6 +1020,26 @@ mod tests {
     use crate::{Expr, evaluate, extract_linear};
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn parameter_locks_survive_cloning_without_locking_the_source() {
+        let mut source = ExprArena::new();
+        let locked = source.new_param(1.0);
+        let unrelated = source.new_param(2.0);
+        let mut transformed = source.clone();
+        transformed.__lock_parameters([locked]);
+        source.set_param_value(locked, 100.0);
+        for mut copy in [transformed.clone(), transformed.__clone_with_additional_capacity(4)] {
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| copy.set_param_value(locked, 100.0))).is_err()
+            );
+            assert_eq!(copy.param_value(locked), 1.0);
+            copy.set_param_value(unrelated, 3.0);
+            assert_eq!(copy.param_value(unrelated), 3.0);
+        }
+        assert_eq!(source.param_value(locked), 100.0);
+        assert_eq!(transformed.param_value(unrelated), 2.0);
+    }
 
     #[test]
     fn expression_handles_are_send_and_sync() {
