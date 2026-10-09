@@ -857,15 +857,16 @@ impl Model {
     ///
     /// Panics if the variable belongs to an SOS or indicator constraint that
     /// has already been reformulated, or a GDP reformulation embeds its bounds.
-    /// Binary variables must keep ordered bounds inside `[0, 1]`.
+    /// Binary variables must keep ordered bounds with each endpoint exactly zero or one.
+    #[expect(clippy::float_cmp, reason = "binary bounds must be exactly zero or one")]
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
         self.assert_reformulated_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
         if v.domain == Domain::Binary {
             assert!(
-                lb >= 0.0 && ub <= 1.0 && lb <= ub,
-                "binary variable bounds must remain ordered and inside [0, 1]"
+                (lb == 0.0 || lb == 1.0) && (ub == 0.0 || ub == 1.0) && lb <= ub,
+                "binary variable bounds must remain ordered and each be exactly zero or one"
             );
         }
         v.lb = lb;

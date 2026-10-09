@@ -397,6 +397,9 @@ fn binary_unfix_rejects_invalid_bounds_before_mutation() {
         (-1.0, 1.0),
         (0.0, 2.0),
         (1.0, 0.0),
+        (0.5, 0.5),
+        (0.5, 1.0),
+        (0.0, 0.5),
         (f64::NAN, 1.0),
         (0.0, f64::NAN),
         (f64::NEG_INFINITY, 1.0),
@@ -407,6 +410,14 @@ fn binary_unfix_rejects_invalid_bounds_before_mutation() {
         assert_eq!(variables[id.index()].lb.to_bits(), 1.0_f64.to_bits());
         assert_eq!(variables[id.index()].ub.to_bits(), 1.0_f64.to_bits());
     }
+
+    for (lower, upper) in [(0.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+        model.unfix_var(id, lower, upper);
+        let variables = model.variables();
+        assert_eq!(variables[id.index()].lb.to_bits(), lower.to_bits());
+        assert_eq!(variables[id.index()].ub.to_bits(), upper.to_bits());
+    }
+
     model.unfix_var(id, 0.0, 1.0);
     model.fix(selected, 0.0).unwrap();
     model.unfix_var(id, 0.0, 1.0);
