@@ -11,6 +11,8 @@ pub mod display;
 pub mod domain;
 pub mod error;
 pub mod function_set;
+#[cfg(feature = "gdp")]
+pub mod gdp;
 pub mod indexed;
 pub mod indicator;
 pub mod matrix;
@@ -29,6 +31,11 @@ pub mod var;
 pub use constraint::{
     AlgebraicConstraint, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
     RangeConstraintIds, Relate, Sense,
+};
+#[cfg(feature = "gdp")]
+pub use display::{
+    BooleanDisplay, DisjunctConstraintDisplay, DisjunctionDisplay, GdpDisplay,
+    LogicalConstraintDisplay, LogicalExprDisplay,
 };
 pub use display::{
     ConstraintDisplay, ExprDisplay, IndicatorDisplay, ObjectiveDisplay, SocDisplay, SosDisplay,

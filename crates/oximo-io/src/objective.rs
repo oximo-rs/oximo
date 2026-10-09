@@ -22,6 +22,7 @@ pub(crate) fn export_terms(
     arena: &ExprArena,
     vars: &[Variable],
 ) -> Result<(ObjectiveSense, QuadraticTerms), IoError> {
+    model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;
     let Some(objective) = model.objective().clone() else {
         return Ok((ObjectiveSense::Minimize, QuadraticTerms::default()));

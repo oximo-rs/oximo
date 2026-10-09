@@ -5,6 +5,9 @@ use thiserror::Error;
 /// These are distinct from backend errors, which are opaque and translated into `SolverError`.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[cfg(feature = "gdp")]
+    #[error("model contains unresolved GDP; call reformulate_gdp before solving or exporting")]
+    UnreformulatedGdp,
     #[error("variable name {0:?} already registered")]
     DuplicateVar(SmolStr),
     #[error("variable {0:?} not found")]

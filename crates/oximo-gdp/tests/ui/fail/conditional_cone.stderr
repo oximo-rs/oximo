@@ -1,0 +1,7 @@
+error[E0599]: no method named `__add_soc_constraint_auto` found for reference `&DisjunctContext<'_>` in the current scope
+ --> tests/ui/fail/conditional_cone.rs:5:29
+  |
+5 |     disjunct!(m,branch,|d| {soc_constraint!(d,[x]<=t);});
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `soc_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)

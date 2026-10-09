@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum IoError {
+    #[error("model contains unresolved GDP; call reformulate_gdp before exporting")]
+    UnreformulatedGdp,
     #[error("model has no objective")]
     NoObjective,
     #[error(

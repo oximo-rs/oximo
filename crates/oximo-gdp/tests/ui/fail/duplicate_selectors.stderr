@@ -1,0 +1,29 @@
+error: duplicate disjunction selector
+ --> tests/ui/fail/duplicate_selectors.rs:6:45
+  |
+6 |     disjunction!(model, [a, b], ExactlyOne, ExactlyOne);
+  |                                             ^^^^^^^^^^
+
+error: duplicate disjunction selector
+ --> tests/ui/fail/duplicate_selectors.rs:7:53
+  |
+7 |     disjunction!(model, choice, [a, b], AtLeastOne, AtLeastOne);
+  |                                                     ^^^^^^^^^^
+
+error: conflicting disjunction selectors
+ --> tests/ui/fail/duplicate_selectors.rs:8:45
+  |
+8 |     disjunction!(model, [a, b], ExactlyOne, AtLeastOne);
+  |                                             ^^^^^^^^^^
+
+error: conflicting disjunction selectors
+ --> tests/ui/fail/duplicate_selectors.rs:9:53
+  |
+9 |     disjunction!(model, choice, [a, b], AtLeastOne, ExactlyOne);
+  |                                                     ^^^^^^^^^^
+
+error: duplicate parent option
+  --> tests/ui/fail/duplicate_selectors.rs:10:45
+   |
+10 |     disjunction!(model, [a, b], parent = a, parent = b);
+   |                                             ^^^^^^^^^^

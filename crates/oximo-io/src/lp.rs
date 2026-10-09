@@ -1163,6 +1163,7 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 /// [`IoError::NoObjective`] when the model declares no objective at all
 #[expect(clippy::too_many_lines)]
 pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
+    model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     if model.has_active_psd_constraints() {
         return Err(IoError::Conic);
     }

@@ -215,6 +215,7 @@ impl<'a> LoweringContext<'a> {
     /// # Errors
     /// Returns a core error if neither an objective nor feasibility was declared.
     pub fn new(model: &'a Model) -> Result<Self, SolverError> {
+        model.ensure_gdp_reformulated()?;
         model.ensure_objective_declared()?;
         Ok(Self {
             expressions: PreparedExpressions::new((*model.arena()).clone()),

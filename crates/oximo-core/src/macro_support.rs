@@ -8,6 +8,8 @@
 
 pub use crate::constraint::Relate;
 pub use crate::domain::Domain;
+#[cfg(feature = "gdp")]
+pub use crate::gdp::DisjunctionKind;
 pub use crate::set::{FromIndexKey, FromIndexKeyRef, IndexKeyRef, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;

@@ -10,6 +10,8 @@ use syn::Ident;
 mod bind;
 mod constraint;
 mod extrema;
+#[cfg(feature = "gdp")]
+mod gdp;
 mod index;
 mod indicator;
 mod objective;
@@ -42,6 +44,9 @@ fn oximo_root() -> TokenStream2 {
     if let Ok(found) = crate_name("oximo-core") {
         return to_path(&found, "oximo_core");
     }
+    if let Ok(found) = crate_name("oximo-gdp") {
+        return to_path(&found, "oximo_gdp");
+    }
     quote!(::oximo_core)
 }
 
@@ -69,6 +74,49 @@ pub fn constraint(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn indicator_constraint(input: TokenStream) -> TokenStream {
     indicator::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Declare a scalar or indexed logical decision and bind it locally.
+#[cfg(feature = "gdp")]
+#[proc_macro]
+pub fn boolean_variable(input: TokenStream) -> TokenStream {
+    gdp::expand(input.into(), gdp::Kind::Boolean)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Group conditional constraints: `disjunct!(model, name, |d| { ... })`.
+#[cfg(feature = "gdp")]
+#[proc_macro]
+pub fn disjunct(input: TokenStream) -> TokenStream {
+    gdp::expand(input.into(), gdp::Kind::Disjunct)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Attach a scalar or indexed conditional row to a logical decision.
+#[cfg(feature = "gdp")]
+#[proc_macro]
+pub fn disjunct_constraint(input: TokenStream) -> TokenStream {
+    gdp::conditional(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Register a disjunction, selecting exactly one branch by default.
+#[cfg(feature = "gdp")]
+#[proc_macro]
+pub fn disjunction(input: TokenStream) -> TokenStream {
+    gdp::expand(input.into(), gdp::Kind::Disjunction)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Assert a Boolean proposition or cardinality predicate.
+#[cfg(feature = "gdp")]
+#[proc_macro]
+pub fn logical_constraint(input: TokenStream) -> TokenStream {
+    gdp::expand(input.into(), gdp::Kind::Logic)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// `soc_constraint!(model, [name|name = expr|name[idx]], [terms] <= bound)`,

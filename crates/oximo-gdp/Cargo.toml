@@ -1,0 +1,32 @@
+[package]
+name = "oximo-gdp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generalized Disjunctive Programming (GDP) modeling and reformulation for oximo"
+readme = "README.md"
+
+[dependencies]
+oximo-core = { workspace = true, features = ["gdp"] }
+oximo-expr.workspace = true
+oximo-solver.workspace = true
+rustc-hash.workspace = true
+smol_str.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "reformulation"
+harness = false
+
+[[bench]]
+name = "hierarchy"
+harness = false

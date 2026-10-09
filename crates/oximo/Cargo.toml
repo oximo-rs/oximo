@@ -29,6 +29,7 @@ pounce = ["dep:oximo-pounce"]
 scip = ["dep:oximo-scip", "oximo-scip/bundled"]
 scip-system = ["dep:oximo-scip", "oximo-scip/system"]
 pounce-enzyme = ["pounce", "oximo-pounce/enzyme"]
+gdp = ["dep:oximo-gdp"]
 _benchmark-support = [
     "dep:criterion",
     "dep:rayon",
@@ -61,7 +62,7 @@ _benchmark-enzyme = [
 ]
 
 [package.metadata.docs.rs]
-features = ["highs", "gams", "baron", "clarabel", "clarabel-faer", "pounce"]
+features = ["gdp", "highs", "gams", "baron", "clarabel", "clarabel-faer", "pounce"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -78,6 +79,7 @@ oximo-pounce = { workspace = true, optional = true }
 oximo-scip = { workspace = true, optional = true }
 oximo-io = { workspace = true, optional = true }
 oximo-autodiff = { workspace = true, optional = true }
+oximo-gdp = { workspace = true, optional = true }
 criterion = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
@@ -137,3 +139,11 @@ name = "scip_minlp"
 [[test]]
 name = "solve"
 required-features = ["highs"]
+
+[[example]]
+name = "gdp_big_m"
+required-features = ["gdp", "highs"]
+
+[[example]]
+name = "gdp_nonlinear"
+required-features = ["gdp", "scip"]

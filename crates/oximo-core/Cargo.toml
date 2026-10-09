@@ -10,6 +10,7 @@ description = "Core modeling types (Variable, Set, Constraint, Model) for oximo"
 readme = "README.md"
 
 [features]
+gdp = ["oximo-macros/gdp"]
 benchmark-support = []
 
 [dependencies]

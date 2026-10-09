@@ -113,6 +113,7 @@ pub fn write_nl_with<W: Write>(
     // A feasibility model writes a header with zero objectives and no `O`
     // segment; only a model that declared no direction at all is an error.
     model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;
+    model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     let objective = model.objective().clone();
 
     let arena = model.arena();
@@ -173,6 +174,7 @@ pub fn to_nl_string_with(model: &Model, opts: &WriteOptions) -> Result<String, I
 ///
 /// Returns [`IoError`] on I/O failure or model-content errors.
 pub fn write_nl_files(model: &Model, stub: &Path, opts: &WriteOptions) -> Result<(), IoError> {
+    model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     let nl_path = stub.with_extension("nl");
     {
         let mut f = std::fs::File::create(&nl_path)?;
@@ -189,6 +191,7 @@ fn write_aux_files(model: &Model, stub: &Path, nonfinite_strings: bool) -> Resul
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;
+    model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     let objective = model.objective().clone();
 
     let arena = model.arena();

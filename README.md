@@ -78,6 +78,7 @@ The modeling layer supports a range of algebraic optimization problems. The avai
 | `pounce-enzyme`           | POUNCE with exact Enzyme derivatives (nightly)               | no      |
 | `scip`                    | SCIP (bundled)                                               | no      |
 | `scip-system`             | SCIP via a system installation (set `SCIPOPTDIR`)            | no      |
+| `gdp`                     | GDP modeling, logic, and reformulation                       | no      |
 
 ## Workspace layout
 
@@ -90,6 +91,7 @@ The modeling layer supports a range of algebraic optimization problems. The avai
 | `oximo-autodiff` | Gradients, sparse Jacobians/Hessians via Enzyme           |
 | `oximo-solver`   | `Solver` trait, `SolverResult`, `SolverOptions`           |
 | `oximo-io`       | MPS, LP and NL readers and writers                        |
+| `oximo-gdp`      | GDP modeling, logic, and reformulation                    |
 | `oximo-highs`    | HiGHS backend                                             |
 | `oximo-gurobi`   | Gurobi 13  backend                                        |
 | `oximo-mosek`    | MOSEK 11.2 backend                                        |

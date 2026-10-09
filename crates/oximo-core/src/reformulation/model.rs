@@ -44,3 +44,9 @@ impl AsRef<Model> for ReformulatedModel {
         &self.model
     }
 }
+
+impl std::fmt::Display for ReformulatedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.model, f)
+    }
+}

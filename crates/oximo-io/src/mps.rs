@@ -1329,6 +1329,7 @@ pub fn write_mps_with<W: Write>(
     out: &mut W,
     options: &MpsWriteOptions,
 ) -> Result<(), IoError> {
+    model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     if model.has_active_psd_constraints() {
         return Err(IoError::Conic);
     }
