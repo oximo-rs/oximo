@@ -2385,6 +2385,7 @@ dependencies = [
  "oximo-core",
  "oximo-expr",
  "oximo-gams",
+ "oximo-gdp",
  "oximo-gurobi",
  "oximo-highs",
  "oximo-io",
@@ -2468,6 +2469,19 @@ dependencies = [
  "rayon",
  "rustc-hash",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "oximo-gdp"
+version = "0.7.0"
+dependencies = [
+ "oximo-core",
+ "oximo-expr",
+ "oximo-solver",
+ "rustc-hash",
+ "smol_str",
+ "thiserror 2.0.18",
+ "trybuild",
 ]
 
 [[package]]

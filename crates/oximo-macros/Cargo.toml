@@ -12,6 +12,9 @@ readme = "README.md"
 [lib]
 proc-macro = true
 
+[features]
+gdp = []
+
 [dependencies]
 syn = { workspace = true, features = ["full", "visit-mut"] }
 quote.workspace = true

@@ -15,6 +15,7 @@ members = [
     "crates/oximo-autodiff",
     "crates/oximo-pounce",
     "crates/oximo-scip",
+    "crates/oximo-gdp",
     "crates/oximo",
 ]
 
@@ -45,9 +46,11 @@ oximo-clarabel = { path = "crates/oximo-clarabel", version = "0.7.0" }
 oximo-autodiff = { path = "crates/oximo-autodiff", version = "0.7.0" }
 oximo-pounce = { path = "crates/oximo-pounce", version = "0.7.0" }
 oximo-scip = { path = "crates/oximo-scip", version = "0.7.0", default-features = false }
+oximo-gdp = { path = "crates/oximo-gdp", version = "0.7.0" }
 
 rayon            = "1.12"
 criterion        = "0.8"
+trybuild         = "1"
 syn              = { version = "3", features = ["full"] }
 quote            = "1"
 proc-macro2      = "1"

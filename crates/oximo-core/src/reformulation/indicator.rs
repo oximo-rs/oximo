@@ -3,14 +3,12 @@
 use std::cell::Ref;
 
 use oximo_expr::{Expr, ExprId, ExprNode, extract_linear};
-use smol_str::SmolStr;
 
+use super::helpers::{raw_effective_bounds, unique_constraint_name};
+use super::{ReformulatedModel, ReformulationError};
 use crate::constraint::{ConstraintId, Relate};
-use crate::domain::Domain;
 use crate::indicator::{IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId};
 use crate::model::Model;
-use crate::reformulation::sos::{ReformulatedModel, ReformulationError};
-use crate::var::Variable;
 
 /// Settings for explicit indicator-to-MILP reformulation.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -138,7 +136,7 @@ fn plan_one(
         if coefficient == 0.0 {
             continue;
         }
-        let (lower, upper) = effective_bounds(&variables[variable.index()]);
+        let (lower, upper) = raw_effective_bounds(&variables[variable.index()]);
         let (lower, upper) =
             if variable == source.trigger { (inactive, inactive) } else { (lower, upper) };
         let (min_bound, max_bound) =
@@ -176,15 +174,6 @@ fn m_for_side(
         Ok(big_m)
     } else {
         Err(ReformulationError::MissingIndicatorBigM { constraint: source.name.clone(), side })
-    }
-}
-
-fn effective_bounds(variable: &Variable) -> (f64, f64) {
-    match variable.domain {
-        Domain::SemiContinuous { threshold } | Domain::SemiInteger { threshold } => {
-            (threshold.min(0.0), variable.ub.max(0.0))
-        }
-        Domain::Real | Domain::Integer | Domain::Binary => (variable.lb, variable.ub),
     }
 }
 
@@ -239,19 +228,6 @@ impl PlannedIndicator {
     }
 }
 
-fn unique_constraint_name(model: &Model, base: &str) -> SmolStr {
-    if model.constraint_id(base).is_none() {
-        return base.into();
-    }
-    for suffix in 1_u64.. {
-        let candidate = format!("{base}_{suffix}");
-        if model.constraint_id(&candidate).is_none() {
-            return candidate.into();
-        }
-    }
-    unreachable!("u64 name suffix space exhausted")
-}
-
 impl IndicatorConstraintHandle<'_> {
     /// Clone the model and replace this active indicator with Big-M rows.
     ///
@@ -289,7 +265,7 @@ impl Model {
         let plan = IndicatorPlan::one(self, id, options)?;
         let model = self.clone_preserving_ids_with_capacity(0, plan.0.len() * 2, plan.0.len() * 8);
         plan.apply(&model);
-        Ok(ReformulatedModel { model })
+        Ok(ReformulatedModel::__from_model(model))
     }
 
     /// Replace one indicator in place after validating its complete reformulation.
@@ -317,7 +293,7 @@ impl Model {
         let plan = IndicatorPlan::all(self, options)?;
         let model = self.clone_preserving_ids_with_capacity(0, plan.0.len() * 2, plan.0.len() * 8);
         plan.apply(&model);
-        Ok(ReformulatedModel { model })
+        Ok(ReformulatedModel::__from_model(model))
     }
 
     /// Replace every active indicator after validating the complete model plan.

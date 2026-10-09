@@ -29,7 +29,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [highs, clarabel, clarabel-faer]
+        include:
+          - backend: highs
+            features: oximo/highs,oximo/gdp
+          - backend: clarabel
+            features: oximo/clarabel
+          - backend: clarabel-faer
+            features: oximo/clarabel-faer
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,7 +44,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --exclude oximo-gurobi --exclude oximo-mosek --all-targets --features oximo/${{ matrix.backend }} -- -D warnings
+      - run: cargo clippy --workspace --exclude oximo-gurobi --exclude oximo-mosek --all-targets --features ${{ matrix.features }} -- -D warnings
 
   default-features:
     name: Cargo test (default features)
@@ -66,6 +72,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude oximo-gurobi --exclude oximo-mosek --features oximo/${{ matrix.backend }}
 
+  gdp:
+    name: Cargo test (GDP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p oximo --features gdp,highs --test gdp
+      - run: cargo check --manifest-path crates/oximo-gdp/tests/fixtures/renamed/Cargo.toml --target-dir target/gdp-renamed
+
   scip:
     name: Cargo test (SCIP bundled)
     runs-on: ubuntu-latest
@@ -77,6 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo +stable test -p oximo-scip --tests
       - run: cargo +stable run -p oximo --no-default-features --features scip --example scip_minlp
+      - run: cargo +stable test -p oximo --features gdp,scip --test gdp
 
   sdp:
     name: Cargo test (Clarabel SDP OpenBLAS)

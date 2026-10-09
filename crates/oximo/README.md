@@ -80,7 +80,7 @@ solved depends on the selected backend:
 - Second-order cone programming (SOCP/MISOCP)
 - Semidefinite programming (SDP)
 
-## Solver features
+## Feature flags
 
 | Feature                   | Backend / capability                                         | Default |
 | ------------------------- | ------------------------------------------------------------ | ------- |
@@ -100,6 +100,7 @@ solved depends on the selected backend:
 | `pounce-enzyme`           | POUNCE with exact Enzyme derivatives (nightly)               | no      |
 | `scip`                    | SCIP (bundled)                                               | no      |
 | `scip-system`             | SCIP via a system installation (set `SCIPOPTDIR`)            | no      |
+| `gdp`                     | GDP modeling, logic, and Big-M reformulation                 | no      |
 
 For example, use HiGHS for a bundled LP/MILP/QP solver:
 

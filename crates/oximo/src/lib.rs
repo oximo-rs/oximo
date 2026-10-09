@@ -36,6 +36,14 @@ pub use oximo_solver::{
     SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt, VarBoundKind,
 };
 
+#[cfg(feature = "gdp")]
+pub use oximo_gdp as gdp;
+#[cfg(feature = "gdp")]
+pub use oximo_gdp::{
+    BigM, BigMValues, BooleanValueError, GdpError, GdpMethod, GdpModelExt, GdpReformulationOptions,
+    GdpResultExt, GdpSolveError, GdpSolver, GdpSolverExt,
+};
+
 #[cfg(any(feature = "scip", feature = "scip-system"))]
 pub use oximo_scip::{ScipOptions, ScipPersistent, ScipSetting};
 
@@ -107,6 +115,11 @@ pub mod pounce {
 pub mod prelude {
     //! Glob-import target. Brings the modeling and solver surface into scope.
     pub use oximo_core::prelude::*;
+    #[cfg(feature = "gdp")]
+    pub use oximo_gdp::{
+        BigM, BigMValues, BooleanValueError, GdpError, GdpMethod, GdpModelExt,
+        GdpReformulationOptions, GdpResultExt, GdpSolveError, GdpSolver, GdpSolverExt,
+    };
     pub use oximo_solver::{
         ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,
         ModelReport, PersistentSolver, PrimalStatus, SocEvaluation, SolutionPoint, Solver,

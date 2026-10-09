@@ -10,6 +10,7 @@ description = "Core modeling types (Variable, Set, Constraint, Model) for oximo"
 readme = "README.md"
 
 [features]
+gdp = ["oximo-macros/gdp"]
 benchmark-support = []
 
 [dependencies]
@@ -25,7 +26,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 oximo-expr.workspace = true
-trybuild = "1"
+trybuild.workspace = true
 
 [lints]
 workspace = true

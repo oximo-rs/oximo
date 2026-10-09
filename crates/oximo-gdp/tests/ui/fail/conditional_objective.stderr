@@ -1,0 +1,7 @@
+error[E0599]: no method named `__minimize` found for reference `&DisjunctContext<'_>` in the current scope
+ --> tests/ui/fail/conditional_objective.rs:5:29
+  |
+5 |     disjunct!(m,branch,|d| {objective!(d,Min,x);});
+  |                             ^^^^^^^^^^^^^^^^^^^ method not found in `&DisjunctContext<'_>`
+  |
+  = note: this error originates in the macro `objective` (in Nightly builds, run with -Z macro-backtrace for more info)

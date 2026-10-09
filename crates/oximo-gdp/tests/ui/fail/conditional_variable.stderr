@@ -1,0 +1,7 @@
+error[E0599]: no method named `__var` found for struct `DisjunctContext<'a>` in the current scope
+ --> tests/ui/fail/conditional_variable.rs:4:29
+  |
+4 |     disjunct!(m,branch,|d| {variable!(d,x);});
+  |                             ^^^^^^^^^^^^^^ method not found in `DisjunctContext<'_>`
+  |
+  = note: this error originates in the macro `variable` (in Nightly builds, run with -Z macro-backtrace for more info)

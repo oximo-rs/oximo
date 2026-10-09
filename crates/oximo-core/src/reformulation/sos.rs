@@ -1,14 +1,13 @@
 //! SOS-to-MILP reformulation implementation.
 
 use std::cell::Ref;
-use std::ops::Deref;
 
 use oximo_expr::{Expr, VarId};
 use smol_str::SmolStr;
-use thiserror::Error;
 
+use super::helpers::{raw_effective_bounds, unique_constraint_name, unique_variable_name};
+use super::{ReformulatedModel, ReformulationError};
 use crate::constraint::{ConstraintId, Relate};
-use crate::domain::Domain;
 use crate::model::Model;
 use crate::sos::{SosConstraint, SosConstraintId, SosMember, SosType};
 use crate::var::Variable;
@@ -34,38 +33,6 @@ impl SosReformulationOptions {
     }
 }
 
-/// Why an explicit model reformulation could not be constructed.
-#[derive(Clone, Debug, Error, PartialEq)]
-pub enum ReformulationError {
-    #[error("SOS constraint #{0} does not exist on this model")]
-    UnknownSosConstraint(usize),
-    #[error("fallback Big-M must be finite and positive, got {0}")]
-    InvalidFallbackBigM(f64),
-    #[error(
-        "cannot reformulate SOS constraint {constraint:?}: variable {variable:?} has no finite \
-         {side} bound; provide SosReformulationOptions::with_fallback_big_m(...)"
-    )]
-    MissingFiniteBound { constraint: SmolStr, variable: SmolStr, side: &'static str },
-    #[error("indicator constraint #{0} does not exist on this model")]
-    UnknownIndicatorConstraint(usize),
-    #[error(
-        "cannot reformulate indicator constraint {constraint:?}: its body depends on a parameter"
-    )]
-    ParameterDependentIndicator { constraint: SmolStr },
-    #[error(
-        "cannot reformulate indicator constraint {constraint:?}: body is not a finite affine expression"
-    )]
-    InvalidIndicatorExpression { constraint: SmolStr },
-    #[error(
-        "cannot reformulate indicator constraint {constraint:?}: lower bound is +infinity or upper bound is -infinity"
-    )]
-    InvalidIndicatorBounds { constraint: SmolStr },
-    #[error(
-        "cannot derive finite Big-M for indicator constraint {constraint:?} {side} side; provide IndicatorReformulationOptions::with_fallback_big_m(...)"
-    )]
-    MissingIndicatorBigM { constraint: SmolStr, side: &'static str },
-}
-
 /// IDs appended while replacing one source SOS constraint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SosReformulationArtifacts {
@@ -74,44 +41,12 @@ pub struct SosReformulationArtifacts {
     pub constraints: Vec<ConstraintId>,
 }
 
-/// An independent transformed model plus source-to-generated provenance.
-#[derive(Debug)]
-pub struct ReformulatedModel {
-    pub(crate) model: Model,
-}
-
 impl ReformulatedModel {
-    #[must_use]
-    pub fn model(&self) -> &Model {
-        &self.model
-    }
-
     /// Complete SOS reformulation history carried by this transformed model.
     /// The returned guard dereferences to a slice of artifacts.
     #[must_use]
     pub fn sos_reformulations(&self) -> Ref<'_, [SosReformulationArtifacts]> {
-        // The history lives on the model so a later clone-and-reformulate
-        // operation maintains traceability from earlier transformations.
-        Ref::map(self.model.sos_reformulations.borrow(), Vec::as_slice)
-    }
-
-    #[must_use]
-    pub fn into_model(self) -> Model {
-        self.model
-    }
-}
-
-impl Deref for ReformulatedModel {
-    type Target = Model;
-
-    fn deref(&self) -> &Self::Target {
-        &self.model
-    }
-}
-
-impl AsRef<Model> for ReformulatedModel {
-    fn as_ref(&self) -> &Model {
-        &self.model
+        self.model().sos_reformulations()
     }
 }
 
@@ -171,7 +106,7 @@ impl Model {
             plan.additional_expr_nodes,
         );
         plan.apply(&model);
-        Ok(ReformulatedModel { model })
+        Ok(ReformulatedModel::__from_model(model))
     }
 
     /// Replace one active SOS constraint on this model without cloning it.
@@ -215,7 +150,7 @@ impl Model {
             plan.additional_expr_nodes,
         );
         plan.apply(&model);
-        Ok(ReformulatedModel { model })
+        Ok(ReformulatedModel::__from_model(model))
     }
 
     /// Replace every active SOS constraint on this model without cloning it.
@@ -555,15 +490,6 @@ fn effective_bounds(
     Ok((lower, upper))
 }
 
-fn raw_effective_bounds(variable: &Variable) -> (f64, f64) {
-    match variable.domain {
-        Domain::SemiContinuous { threshold } | Domain::SemiInteger { threshold } => {
-            (threshold.min(0.0), variable.ub.max(0.0))
-        }
-        Domain::Real | Domain::Integer | Domain::Binary => (variable.lb, variable.ub),
-    }
-}
-
 fn potential_nonzero_count(variables: &[Variable], members: &[SosMember]) -> usize {
     members
         .iter()
@@ -603,25 +529,4 @@ fn finite_or_fallback(
             side,
         })
     }
-}
-
-fn unique_variable_name(model: &Model, base: &str) -> SmolStr {
-    unique_name(base, |candidate| model.variable_id(candidate).is_some())
-}
-
-fn unique_constraint_name(model: &Model, base: &str) -> SmolStr {
-    unique_name(base, |candidate| model.constraint_id(candidate).is_some())
-}
-
-fn unique_name(base: &str, exists: impl Fn(&str) -> bool) -> SmolStr {
-    if !exists(base) {
-        return base.into();
-    }
-    for suffix in 1_u64.. {
-        let candidate = format!("{base}_{suffix}");
-        if !exists(&candidate) {
-            return candidate.into();
-        }
-    }
-    unreachable!("u64 name suffix space exhausted")
 }

@@ -40,9 +40,21 @@ pub trait Solver {
         false
     }
 
+    /// Additional backend-specific restrictions after the shared capability checks.
+    ///
+    /// Override this hook to restrict supported model structures while retaining
+    /// the default GDP, model-kind, PSD, SOS, and indicator checks.
+    fn supports_model_extra(&self, _model: &Model) -> bool {
+        true
+    }
+
     /// Whether this backend can consume all features present in `model`.
+    ///
+    /// Prefer overriding [`Solver::supports_model_extra`] for additional restrictions
+    /// so this method continues to apply the shared capability checks.
     fn supports_model(&self, model: &Model) -> bool {
-        self.supports(model.kind())
+        !model.has_unreformulated_gdp()
+            && self.supports(model.kind())
             && (!model.has_active_psd_constraints() || self.supports_psd())
             && model
                 .sos_constraints()
@@ -50,6 +62,7 @@ pub trait Solver {
                 .filter(|constraint| constraint.active)
                 .all(|constraint| self.supports_sos(constraint.sos_type))
             && (!model.has_active_indicator_constraints() || self.supports_indicators())
+            && self.supports_model_extra(model)
     }
 
     /// Solves the given `Model` using this solver.
@@ -62,6 +75,8 @@ pub trait Solver {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use oximo_core::{SosType, constraint, variable};
 
     use super::*;
@@ -130,5 +145,53 @@ mod tests {
             .unwrap();
         assert!(NoSos.supports_model(&transformed));
         assert!(NativeSos.supports_model(&transformed));
+    }
+
+    #[derive(Debug, Default)]
+    struct RestrictedModel {
+        checks: Cell<usize>,
+    }
+
+    impl Solver for RestrictedModel {
+        type Options = ();
+
+        fn name(&self) -> &str {
+            "restricted-model"
+        }
+
+        fn supports(&self, kind: ModelKind) -> bool {
+            matches!(kind, ModelKind::LP | ModelKind::MILP)
+        }
+
+        fn supports_model_extra(&self, model: &Model) -> bool {
+            self.checks.set(self.checks.get() + 1);
+            model.num_variables() <= 1
+        }
+
+        fn solve(&mut self, _model: &Model, _opts: &()) -> Result<SolverResult, SolverError> {
+            unreachable!("capability test solver is never solved")
+        }
+    }
+
+    #[test]
+    fn backend_hook_can_restrict_support_and_runs_after_shared_checks() {
+        let solver = RestrictedModel::default();
+        let model = Model::new("backend restriction");
+        variable!(model, _x);
+        assert!(solver.supports_model(&model));
+        assert_eq!(solver.checks.get(), 1);
+
+        variable!(model, _y);
+        assert!(!solver.supports_model(&model));
+        assert_eq!(solver.checks.get(), 2);
+
+        assert!(!solver.supports_model(&sos_model()));
+        assert_eq!(solver.checks.get(), 2);
+
+        let nonlinear = Model::new("unsupported kind");
+        variable!(nonlinear, z);
+        constraint!(nonlinear, z.exp() <= 2.0);
+        assert!(!solver.supports_model(&nonlinear));
+        assert_eq!(solver.checks.get(), 2);
     }
 }

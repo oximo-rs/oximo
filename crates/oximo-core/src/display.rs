@@ -16,6 +16,14 @@ use crate::soc::SocConstraintId;
 use crate::sos::SosConstraintId;
 use crate::var::{Variable, var_name};
 
+#[cfg(feature = "gdp")]
+mod gdp;
+#[cfg(feature = "gdp")]
+pub use gdp::{
+    BooleanDisplay, DisjunctConstraintDisplay, DisjunctionDisplay, GdpDisplay,
+    LogicalConstraintDisplay, LogicalExprDisplay,
+};
+
 /// Compact `f64` rendering (shortest round-trip).
 fn fmt_num(v: f64) -> String {
     if v == 0.0 { "0".to_string() } else { format!("{v}") }
@@ -260,9 +268,31 @@ impl Model {
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Model '{}' ({})", self.name, self.kind())?;
+        #[cfg(feature = "gdp")]
+        {
+            let data = self.gdp.borrow();
+            if !data.booleans.is_empty()
+                || !data.rows.is_empty()
+                || !data.disjunctions.is_empty()
+                || !data.logical_constraints.is_empty()
+            {
+                let pending = data.has_pending();
+                writeln!(
+                    f,
+                    "GDP: {} Boolean decisions, {} conditional rows, {} disjunctions, {} logical constraints ({})",
+                    data.booleans.len(),
+                    data.rows.len(),
+                    data.disjunctions.len(),
+                    data.logical_constraints.len(),
+                    if pending { "pending reformulation" } else { "reformulated" }
+                )?;
+            }
+        }
         if self.is_feasibility() || self.objective.borrow().is_some() {
             writeln!(f, "{}", self.display_objective())?;
         }
+        #[cfg(feature = "gdp")]
+        write!(f, "{}", self.display_gdp())?;
         let n_constraints = self.constraints.borrow().len();
         let n_socs = self.soc_constraints.borrow().len();
         let n_sos = self.sos_constraints.borrow().len();

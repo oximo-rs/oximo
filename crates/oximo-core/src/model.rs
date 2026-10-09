@@ -382,6 +382,8 @@ impl ModelConstraints<'_> {
 /// mutability and isolated worker forks while large indexed families are
 /// prepared in parallel.
 pub struct Model {
+    #[cfg(feature = "gdp")]
+    pub(crate) gdp: RefCell<crate::gdp::GdpData>,
     pub name: SmolStr,
     pub(crate) arena: ExprArenaCell,
     pub(crate) variables: RefCell<Vec<Variable>>,
@@ -409,6 +411,35 @@ pub struct Model {
 }
 
 impl Model {
+    /// Whether GDP components still need explicit reformulation.
+    #[inline]
+    pub fn has_unreformulated_gdp(&self) -> bool {
+        #[cfg(feature = "gdp")]
+        {
+            self.gdp.borrow().has_pending()
+        }
+        #[cfg(not(feature = "gdp"))]
+        {
+            false
+        }
+    }
+
+    /// Reject unresolved conditional modeling components before lowering.
+    ///
+    /// # Errors
+    #[cfg_attr(
+        feature = "gdp",
+        doc = "Returns [`Error::UnreformulatedGdp`] when a GDP component is pending."
+    )]
+    #[cfg_attr(not(feature = "gdp"), doc = "Always succeeds when GDP support is disabled.")]
+    pub fn ensure_gdp_reformulated(&self) -> Result<()> {
+        #[cfg(feature = "gdp")]
+        if self.has_unreformulated_gdp() {
+            return Err(Error::UnreformulatedGdp);
+        }
+        Ok(())
+    }
+
     fn assert_expr_belongs<'a, D: Degree>(&self, expr: Expr<'a, D>) {
         assert_expr_arena(expr, arena_key(&self.arena));
     }
@@ -459,8 +490,10 @@ impl Model {
         cloned_constraint_names
             .extend(constraint_names.iter().map(|(name, id)| (name.clone(), *id)));
 
-        Self {
+        let cloned = Self {
             name: self.name.clone(),
+            #[cfg(feature = "gdp")]
+            gdp: RefCell::new(self.gdp.borrow().clone()),
             arena: ExprArenaCell::new(
                 self.arena.borrow().__clone_with_additional_capacity(additional_expr_nodes),
             ),
@@ -484,13 +517,17 @@ impl Model {
             objective_declared: Cell::new(self.objective_declared.get()),
             cached_kind: Cell::new(self.cached_kind.get()),
             auto_seq: Cell::new(self.auto_seq.get()),
-        }
+        };
+        #[cfg(feature = "gdp")]
+        cloned.rebind_gdp_logic_identity();
+        cloned
     }
 }
 
 impl std::fmt::Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Model")
+        let mut debug = f.debug_struct("Model");
+        debug
             .field("name", &self.name)
             .field("vars", &self.variables.borrow().len())
             .field("params", &self.parameters.borrow().len())
@@ -500,8 +537,21 @@ impl std::fmt::Debug for Model {
             .field("sos_constraints", &self.sos_constraints.borrow().len())
             .field("indicator_constraints", &self.indicator_constraints.borrow().len())
             .field("has_objective", &self.objective.borrow().is_some())
-            .field("feasibility", &self.is_feasibility())
-            .finish()
+            .field("feasibility", &self.is_feasibility());
+
+        #[cfg(feature = "gdp")]
+        {
+            let data = self.gdp.borrow();
+
+            debug
+                .field("gdp_booleans", &data.booleans.len())
+                .field("gdp_rows", &data.rows.len())
+                .field("gdp_disjunctions", &data.disjunctions.len())
+                .field("gdp_logical_constraints", &data.logical_constraints.len())
+                .field("gdp_pending", &data.has_pending());
+        }
+
+        debug.finish()
     }
 }
 
@@ -513,6 +563,8 @@ impl Model {
     pub fn new(name: impl Into<SmolStr>) -> Self {
         Self {
             name: name.into(),
+            #[cfg(feature = "gdp")]
+            gdp: RefCell::new(crate::gdp::GdpData::default()),
             arena: ExprArenaCell::new(ExprArena::new()),
             variables: RefCell::new(Vec::new()),
             var_names: RefCell::new(FxHashMap::default()),
@@ -762,7 +814,7 @@ impl Model {
     /// Panics if `value` is not a feasible fixing for the variable (non-finite,
     /// fractional on an integer domain, outside its bounds, or inside a
     /// semicontinuity gap), or if its bounds are embedded in a previously
-    /// reformulated SOS or indicator row.
+    /// reformulated SOS, indicator, or GDP row.
     pub fn fix_var(&self, id: VarId, value: f64) {
         self.assert_reformulated_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
@@ -804,20 +856,33 @@ impl Model {
     /// # Panics
     ///
     /// Panics if the variable belongs to an SOS or indicator constraint that
-    /// has already been reformulated, because its bounds are embedded in rows.
+    /// has already been reformulated, or a GDP reformulation embeds its bounds.
+    /// Binary variables must keep ordered bounds with each endpoint exactly zero or one.
+    #[expect(clippy::float_cmp, reason = "binary bounds must be exactly zero or one")]
     pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
         self.assert_reformulated_bounds_mutable(id);
         let mut vars = self.variables.borrow_mut();
         let v = &mut vars[id.index()];
+        if v.domain == Domain::Binary {
+            assert!(
+                (lb == 0.0 || lb == 1.0) && (ub == 0.0 || ub == 1.0) && lb <= ub,
+                "binary variable bounds must remain ordered and each be exactly zero or one"
+            );
+        }
         v.lb = lb;
         v.ub = ub;
         drop(vars);
         self.cached_kind.set(None);
     }
 
-    /// SOS and indicator reformulations embed bounds in generated rows.
+    /// SOS, indicator, and GDP reformulations embed bounds in generated rows.
     /// Changing one of those bounds could make the rows stale.
     fn assert_reformulated_bounds_mutable(&self, id: VarId) {
+        #[cfg(feature = "gdp")]
+        assert!(
+            !self.gdp.borrow().locks_variable(id),
+            "cannot change bounds embedded in a GDP reformulation; change the source model before reformulating"
+        );
         if let Some(source) = self.sos_constraints.borrow().iter().find(|constraint| {
             !constraint.active && constraint.members.iter().any(|member| member.variable == id)
         }) {
@@ -1047,6 +1112,9 @@ impl Model {
     /// truth); extraction and evaluation read it from there.
     /// `ParamId` is a raw numeric index and carries no model provenance; prefer
     /// [`Self::set_param`] when an expression handle is available.
+    ///
+    /// # Panics
+    /// Panics if the ID is not registered, or a GDP reformulation embeds its value.
     pub fn set_param_id(&self, id: ParamId, value: f64) {
         self.arena.borrow_mut().set_param_value(id, value);
         self.cached_kind.set(None);
