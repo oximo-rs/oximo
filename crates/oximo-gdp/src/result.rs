@@ -1,6 +1,9 @@
-//! Read Boolean decisions from algebraic solver results.
+//! Read Boolean decisions and Hull activations from algebraic solver results.
 
-use oximo_core::{ModelMismatchError, gdp::BooleanHandle};
+use oximo_core::{
+    ModelMismatchError,
+    gdp::{BooleanHandle, GdpHullActivationHandle},
+};
 use oximo_solver::{SolutionPoint, SolverResult};
 use thiserror::Error;
 
@@ -16,8 +19,20 @@ pub enum BooleanValueError {
     NonBooleanValue { value: f64, tolerance: f64 },
 }
 
-/// Boolean value queries for [`SolverResult`] and individual [`SolutionPoint`]s.
+/// GDP value queries for [`SolverResult`] and individual [`SolutionPoint`]s.
 pub trait GdpResultExt {
+    /// Read a model-bound Hull activation, preserving fractional relaxation values.
+    /// Returns `Ok(None)` when a required variable or primal solution is absent.
+    /// Obtain the handle from the reformulated model's report.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign handle, even without a solution.
+    /// For [`SolverResult`], also checks the best solution's model identity.
+    fn hull_activation_value_of(
+        &self,
+        activation: GdpHullActivationHandle,
+    ) -> Result<Option<f64>, ModelMismatchError>;
+
     /// Read a Boolean decision using its associated binary variable.
     ///
     /// Values within an absolute tolerance of `1e-5` of zero or one become
@@ -37,6 +52,15 @@ pub trait GdpResultExt {
 }
 
 impl GdpResultExt for SolutionPoint {
+    fn hull_activation_value_of(
+        &self,
+        activation: GdpHullActivationHandle,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_activation_model(self.model_id(), activation)?;
+
+        Ok(activation.kind().value_with(|id| self.value(id)))
+    }
+
     fn boolean_value_of(
         &self,
         boolean: BooleanHandle<'_>,
@@ -46,6 +70,15 @@ impl GdpResultExt for SolutionPoint {
 }
 
 impl GdpResultExt for SolverResult {
+    fn hull_activation_value_of(
+        &self,
+        activation: GdpHullActivationHandle,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_activation_model(self.model_id(), activation)?;
+
+        self.solutions.first().map_or(Ok(None), |point| point.hull_activation_value_of(activation))
+    }
+
     fn boolean_value_of(
         &self,
         boolean: BooleanHandle<'_>,
@@ -69,4 +102,15 @@ fn boolean_value(value: Option<f64>) -> Result<Option<bool>, BooleanValueError> 
             }
         })
         .transpose()
+}
+
+fn ensure_activation_model(
+    expected: oximo_core::ModelId,
+    activation: GdpHullActivationHandle,
+) -> Result<(), ModelMismatchError> {
+    if activation.model_id() == expected {
+        Ok(())
+    } else {
+        Err(ModelMismatchError::new(expected, activation.model_id()))
+    }
 }

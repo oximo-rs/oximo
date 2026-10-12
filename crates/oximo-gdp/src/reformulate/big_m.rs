@@ -2,17 +2,15 @@
 
 use super::plan::{Linear, PlanBuilder};
 use super::{BigMValues, GdpError, GdpMethod, GdpReformulationOptions};
-use crate::bounds::{
-    BoundError, BoundScopes, Bounder, Bounds, ExpressionAnalysis, PropagationScratch,
-};
+use crate::bounds::{BoundError, BoundScopes, Bounder, Bounds, PropagationScratch};
 use oximo_core::gdp::{
     BigMOrigin, BigMSide, BooleanId, BooleanRecord, BoundSide, DisjunctConstraintId, DisjunctionId,
     DisjunctionKind, GdpBigMTerm, GdpDisjunctionArtifacts, GdpMethodKind, GdpRowArtifacts,
     GdpSnapshot,
 };
-use oximo_core::{ExprArena, ExprId, Model, VarId};
+use oximo_core::{ExprId, Model, VarId};
 use oximo_expr::{SignedExpr, split_linear};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 pub(super) fn validate_m(value: Option<f64>) -> Result<(), GdpError> {
@@ -28,6 +26,7 @@ pub(super) fn validate_m(value: Option<f64>) -> Result<(), GdpError> {
 pub(super) fn method_m(method: GdpMethod) -> Option<f64> {
     match method {
         GdpMethod::BigM(m) => m.fallback,
+        GdpMethod::Hull(_) => None,
     }
 }
 
@@ -83,7 +82,7 @@ fn checked_big_m_bound(
 /// Shift a normalized affine body and bound together, including any existing
 /// coefficient of the row's indicator. At indicator = 1, both shifts must cancel
 /// without changing the original coefficient or effective active bound.
-fn checked_big_m_row(
+pub(super) fn checked_big_m_row(
     mut body: Linear,
     indicator: VarId,
     bound: f64,
@@ -136,6 +135,7 @@ fn hierarchical_method(
         boolean.owner.and_then(|id| methods.get(&id)).copied().unwrap_or(options.default_method);
     match method {
         GdpMethod::BigM(settings) => options.bound_tightening && settings.hierarchical_tightening(),
+        GdpMethod::Hull(_) => false,
     }
 }
 
@@ -315,43 +315,31 @@ fn parent_scopes(
     }
 }
 
-fn row_m(
-    row: &oximo_core::gdp::DisjunctConstraintRecord,
+/// Shared M precedence and outward rounding for source and generated rows.
+/// Only the supplied numeric enclosure differs between the planning paths.
+pub(super) fn row_m(
+    interval: Bounds,
     body: Bounds,
+    name: &SmolStr,
     boolean: &BooleanRecord,
     options: &GdpReformulationOptions,
     methods: &FxHashMap<DisjunctionId, GdpMethod>,
     explicit: BigMValues,
-) -> Result<(Option<BigMSide>, Option<BigMSide>), GdpError> {
+) -> Result<[Option<BigMSide>; 2], GdpError> {
     let local = boolean.owner.and_then(|id| methods.get(&id).copied()).and_then(method_m);
     let global = options.fallback.or_else(|| method_m(options.default_method));
-    let lower_m = if row.lower.is_finite() {
-        Some(side_m(
-            round_up(row.lower - body.lower),
-            explicit.lower,
-            local,
-            global,
-            &row.name,
-            BoundSide::Lower,
-        )?)
-    } else {
-        None
-    };
+    let mut amounts = [None, None];
 
-    let upper_m = if row.upper.is_finite() {
-        Some(side_m(
-            round_up(body.upper - row.upper),
-            explicit.upper,
-            local,
-            global,
-            &row.name,
-            BoundSide::Upper,
-        )?)
-    } else {
-        None
-    };
+    for (slot, bound, required, asserted, side) in [
+        (0, interval.lower, interval.lower - body.lower, explicit.lower, BoundSide::Lower),
+        (1, interval.upper, body.upper - interval.upper, explicit.upper, BoundSide::Upper),
+    ] {
+        if bound.is_finite() {
+            amounts[slot] = Some(side_m(round_up(required), asserted, local, global, name, side)?);
+        }
+    }
 
-    Ok((lower_m, upper_m))
+    Ok(amounts)
 }
 
 fn estimate_contexts(
@@ -390,36 +378,53 @@ fn estimate_contexts(
     }
 }
 
-fn analyze_source(
-    bounder: &mut Bounder<'_>,
-    row: &oximo_core::gdp::DisjunctConstraintRecord,
-) -> Result<ExpressionAnalysis, GdpError> {
-    bounder.analyze(row.lhs).map_err(|error| match error {
-        BoundError::Domain(operation) => {
-            GdpError::UnsafeDomain { constraint: row.name.clone(), operation }
-        }
-        BoundError::InvalidNumber => GdpError::InvalidExpression(row.name.clone()),
-    })
+/// Domain validation, affine extraction and coefficient normalization are shared
+/// by pure Big-M forests and Big-M stages inside mixed Hull hierarchies.
+pub(super) struct BigMRowAnalysis {
+    pub(super) bounds: Bounds,
+    pub(super) affine: Linear,
+    pub(super) residual: Vec<SignedExpr>,
 }
 
-fn row_body(
-    arena: &ExprArena,
-    lhs: ExprId,
-    analysis: ExpressionAnalysis,
-    slots: &mut FxHashMap<VarId, usize>,
-) -> Result<(Bounds, Linear, Vec<SignedExpr>), GdpError> {
-    // The full source was domain-validated.
-    // Extract affine addends even when other summands are nonlinear,
-    // and merge repeated source variables before checking cancellation.
-    let (terms, residual) =
-        analysis.affine.map_or_else(|| split_linear(arena, lhs), |terms| (terms, Vec::new()));
-    let mut linear = Linear { constant: terms.constant, terms: terms.coeffs.into_owned() };
-    linear.normalize(slots)?;
+pub(super) fn analyze_big_m_affine(
+    bounder: &Bounder<'_>,
+    affine: &Linear,
+    name: &SmolStr,
+) -> Result<BigMRowAnalysis, GdpError> {
+    let bounds = bounder
+        .affine_box(affine.constant, &affine.terms)
+        .map_err(|_| GdpError::InvalidExpression(name.clone()))?;
 
-    Ok((analysis.bounds, linear, residual))
+    Ok(BigMRowAnalysis { bounds, affine: affine.clone(), residual: Vec::new() })
+}
+
+pub(super) fn analyze_big_m_row(
+    bounder: &mut Bounder<'_>,
+    root: ExprId,
+    name: &SmolStr,
+    slots: &mut FxHashMap<VarId, usize>,
+) -> Result<BigMRowAnalysis, GdpError> {
+    let analysis = bounder.analyze(root).map_err(|error| match error {
+        BoundError::Domain { operation, .. } => {
+            GdpError::UnsafeDomain { constraint: name.clone(), operation }
+        }
+        BoundError::InvalidNumber => GdpError::InvalidExpression(name.clone()),
+    })?;
+    // Bounds and affine coefficients belong to the same parameter snapshot.
+    let (terms, residual) = analysis
+        .affine
+        .map_or_else(|| split_linear(bounder.arena(), root), |terms| (terms, Vec::new()));
+    let mut affine = Linear { constant: terms.constant, terms: terms.coeffs.into_owned() };
+    affine.normalize(slots)?;
+    Ok(BigMRowAnalysis { bounds: analysis.bounds, affine, residual })
 }
 
 impl PlanBuilder {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "optional filtering preserves the existing Big-M engine in mixed forests"
+    )]
     pub(super) fn plan_big_m(
         &mut self,
         model: &Model,
@@ -428,6 +433,7 @@ impl PlanBuilder {
         row_start: usize,
         methods: &FxHashMap<DisjunctionId, GdpMethod>,
         overrides: &FxHashMap<DisjunctConstraintId, BigMValues>,
+        selected: Option<&FxHashSet<BooleanId>>,
     ) -> Result<(), GdpError> {
         if row_start == data.rows.len() {
             return Ok(());
@@ -457,17 +463,20 @@ impl PlanBuilder {
         let mut indicator_slots = Vec::new();
 
         for (index, row) in data.rows.iter().enumerate().skip(row_start) {
+            if selected.is_some_and(|s| !s.contains(&row.indicator)) {
+                continue;
+            }
             let source = DisjunctConstraintId(index.try_into().map_err(|_| GdpError::Capacity)?);
-            let analysis = analyze_source(&mut bounder, row)?;
-            let (body, mut body_linear, residual) =
-                row_body(&arena, row.lhs, analysis, &mut coefficient_slots)?;
+            let BigMRowAnalysis { bounds: body, affine: mut body_linear, residual } =
+                analyze_big_m_row(&mut bounder, row.lhs, &row.name, &mut coefficient_slots)?;
             let body_source = (!residual.is_empty()).then_some(residual.as_slice());
 
             // Cancel the source constant against the bound before applying M.
             let boolean = &data.booleans[row.indicator.index()];
-            let (lower_m, upper_m) = row_m(
-                row,
+            let [lower_m, upper_m] = row_m(
+                Bounds { lower: row.lower, upper: row.upper },
                 body,
+                &row.name,
                 boolean,
                 options,
                 methods,

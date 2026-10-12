@@ -529,6 +529,113 @@ impl std::fmt::Display for BoundSide {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GdpMethodKind {
     BigM,
+    Hull,
+}
+
+/// Semantic activation of a Hull copy.
+///
+/// Pattern weights describe the joint selection of branches.
+/// Branch sums combine unused alternatives. These weights are not
+/// any one branch's indicator.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GdpHullActivation {
+    Indicator {
+        indicator: BooleanId,
+        binary: VarId,
+    },
+    Complement {
+        indicator: BooleanId,
+        binary: VarId,
+    },
+    Pattern {
+        disjunction: DisjunctionId,
+        weight: VarId,
+    },
+    /// Sum of branches that do not use this coordinate in a flat exactly-one group.
+    BranchSum {
+        disjunction: DisjunctionId,
+        weight: VarId,
+    },
+}
+
+impl GdpHullActivation {
+    /// Evaluate this activation using variable values, without an expression arena.
+    /// Returns `None` for a missing value and preserves fractional relaxation values.
+    pub fn value_with(self, mut value: impl FnMut(VarId) -> Option<f64>) -> Option<f64> {
+        match self {
+            Self::Indicator { binary, .. } => value(binary),
+            Self::Complement { binary, .. } => value(binary).map(|v| 1.0 - v),
+            Self::Pattern { weight, .. } | Self::BranchSum { weight, .. } => value(weight),
+        }
+    }
+}
+
+/// A Hull activation bound to the model that owns its reformulation report.
+/// Obtain handles through [`GdpReformulationReport::hull_activation`] or
+/// [`GdpReformulationReport::hull_activations`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GdpHullActivationHandle {
+    model_id: ModelId,
+    kind: GdpHullActivation,
+}
+
+impl GdpHullActivationHandle {
+    pub const fn model_id(self) -> ModelId {
+        self.model_id
+    }
+
+    pub const fn kind(self) -> GdpHullActivation {
+        self.kind
+    }
+}
+
+/// One continuous copy introduced by Hull.
+///
+/// Copies of generated child variables also appear here when an
+/// inclusive ancestor enumerates activation patterns.
+/// The generated coordinate is `activation * (source - reference)`, where
+/// the reference is the effective shift in this copy's scope.
+#[derive(Clone, Debug)]
+pub struct GdpHullVariableMapping {
+    /// Source coordinate, which may be another generated child copy or pattern weight.
+    pub source: VarId,
+    pub generated: VarId,
+    pub disjunction: Option<DisjunctionId>,
+    /// Branch owning an indicator activation.
+    /// `None` for complements, patterns, and combined unused branches.
+    pub indicator: Option<BooleanId>,
+    /// Affine activation of the copy, including complementary on/off branches.
+    pub activation: ExprId,
+    /// Raw structural counterpart of `activation`.
+    pub activation_kind: GdpHullActivation,
+    /// Effective reference in this scope.
+    pub reference: f64,
+    /// Effective bounds on the unshifted source variable.
+    pub bounds: [f64; 2],
+    /// Bound artifacts constraining this copy, including their transformations
+    /// by enclosing Hull scopes.
+    pub constraints: Vec<ConstraintId>,
+}
+
+/// Activation shared by unused branches of a flat exactly-one group.
+/// `weight = 1 - sum(binary indicators in excluded)`, where excluded branches are
+/// those using the copied coordinate. Several coordinates can share one weight.
+#[derive(Clone, Debug)]
+pub struct GdpHullBranchSumMapping {
+    pub source: DisjunctionId,
+    pub excluded: Vec<BooleanId>,
+    pub weight: VarId,
+}
+
+/// A nonempty inclusive activation pattern.
+/// Weights are continuous.
+/// The original binary indicators determine the unique pattern at integer points.
+#[derive(Clone, Debug)]
+pub struct GdpHullPatternMapping {
+    pub source: DisjunctionId,
+    pub selected: Vec<BooleanId>,
+    pub weight: VarId,
 }
 
 /// Logical decision and its algebraic binary counterpart in a report.
@@ -538,7 +645,7 @@ pub struct GdpBooleanMapping {
     pub binary: VarId,
 }
 
-/// Generated selection rows and the method used for a source disjunction.
+/// Generated selection, aggregation and bound rows for a source disjunction.
 #[derive(Clone, Debug)]
 pub struct GdpDisjunctionArtifacts {
     pub source: DisjunctionId,
@@ -587,9 +694,21 @@ pub struct GdpRowArtifacts {
     pub hierarchical_m: Vec<GdpBigMTerm>,
 }
 
+/// Planning work across all pending groups, including nested expansion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GdpPlanningStatistics {
+    /// Row objects built or cloned during planning, including final planned rows.
+    pub row_expansions: usize,
+    /// Largest private expression arena, including cloned source nodes.
+    /// Zero when no private arena was needed. This is not a byte-memory bound.
+    pub private_expression_nodes: usize,
+}
+
 /// Source-to-generated provenance for a single successful transformation call.
+/// Reports returned by reformulation carry the target model's identity.
+/// Constructing a report from owned artifact data produces an unbound report.
 #[derive(Clone, Debug, Default)]
-pub struct GdpReformulationReport(Arc<GdpReformulationReportData>);
+pub struct GdpReformulationReport(Arc<GdpReformulationReportData>, Option<ModelId>);
 
 impl std::ops::Deref for GdpReformulationReport {
     type Target = GdpReformulationReportData;
@@ -607,11 +726,40 @@ impl std::ops::DerefMut for GdpReformulationReport {
 
 impl From<GdpReformulationReportData> for GdpReformulationReport {
     fn from(data: GdpReformulationReportData) -> Self {
-        Self(Arc::new(data))
+        Self(Arc::new(data), None)
     }
 }
 
 impl GdpReformulationReport {
+    /// Owning model, or `None` for manually constructed, unbound reports.
+    pub const fn model_id(&self) -> Option<ModelId> {
+        self.1
+    }
+
+    /// Checked activation handle for a copy at this index in `hull_variables`.
+    /// Returns `None` for an invalid index or an unbound report.
+    pub fn hull_activation(&self, index: usize) -> Option<GdpHullActivationHandle> {
+        Some(GdpHullActivationHandle {
+            model_id: self.1?,
+            kind: self.hull_variables.get(index)?.activation_kind,
+        })
+    }
+
+    /// Activation handles in copy order. Unbound reports yield no handles.
+    pub fn hull_activations(&self) -> impl Iterator<Item = GdpHullActivationHandle> + '_ {
+        self.1.into_iter().flat_map(|model_id| {
+            self.hull_variables
+                .iter()
+                .map(move |copy| GdpHullActivationHandle { model_id, kind: copy.activation_kind })
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn __with_model_id(mut self, model_id: ModelId) -> Self {
+        self.1 = Some(model_id);
+        self
+    }
+
     /// Consume the report into independently owned artifacts, moving the data
     /// when uniquely held or copying it when other reports still share it.
     pub fn into_owned(self) -> GdpReformulationReportData {
@@ -623,6 +771,7 @@ impl GdpReformulationReport {
 /// iteration work through the report. Use `into_owned` to move individual fields.
 #[derive(Clone, Debug, Default)]
 pub struct GdpReformulationReportData {
+    pub planning: GdpPlanningStatistics,
     /// All registered Boolean decisions, including previously transformed ones.
     pub booleans: Vec<GdpBooleanMapping>,
     /// Auxiliary variables created by this call. Boolean counterparts are in `booleans`.
@@ -631,6 +780,9 @@ pub struct GdpReformulationReportData {
     pub disjunctions: Vec<GdpDisjunctionArtifacts>,
     /// Rows newly emitted for each assertion.
     pub logical_constraints: Vec<GdpLogicalArtifacts>,
+    pub hull_variables: Vec<GdpHullVariableMapping>,
+    pub hull_patterns: Vec<GdpHullPatternMapping>,
+    pub hull_branch_sums: Vec<GdpHullBranchSumMapping>,
 }
 
 /// Owned copy of GDP source records. Later model changes do not affect it.
@@ -959,7 +1111,12 @@ impl Model {
     }
 
     pub(crate) fn rebind_gdp_logic_identity(&self) {
-        for record in &mut self.gdp.borrow_mut().snapshot.logical_constraints {
+        let mut gdp = self.gdp.borrow_mut();
+        // Rebind the small report wrappers while retaining shared artifact data.
+        for report in &mut gdp.reports {
+            report.1 = Some(self.id());
+        }
+        for record in &mut gdp.snapshot.logical_constraints {
             let mut stack = vec![&mut record.expression];
 
             while let Some(e) = stack.pop() {

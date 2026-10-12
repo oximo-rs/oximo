@@ -18,6 +18,7 @@ smol_str.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 trybuild.workspace = true
 
 [lints]
@@ -29,4 +30,8 @@ harness = false
 
 [[bench]]
 name = "hierarchy"
+harness = false
+
+[[bench]]
+name = "hull"
 harness = false

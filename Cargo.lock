@@ -2475,6 +2475,7 @@ dependencies = [
 name = "oximo-gdp"
 version = "0.7.0"
 dependencies = [
+ "criterion",
  "oximo-core",
  "oximo-expr",
  "oximo-solver",

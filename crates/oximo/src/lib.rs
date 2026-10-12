@@ -40,8 +40,9 @@ pub use oximo_solver::{
 pub use oximo_gdp as gdp;
 #[cfg(feature = "gdp")]
 pub use oximo_gdp::{
-    BigM, BigMValues, BooleanValueError, GdpError, GdpMethod, GdpModelExt, GdpReformulationOptions,
-    GdpResultExt, GdpSolveError, GdpSolver, GdpSolverExt,
+    BigM, BigMValues, BooleanValueError, GdpError, GdpHullDomainContext, GdpHullScope, GdpMethod,
+    GdpModelExt, GdpModelSize, GdpPlanningLimits, GdpPlanningSummary, GdpReformulationOptions,
+    GdpResultExt, GdpSizeLimits, GdpSolveError, GdpSolver, GdpSolverExt, Hull, HullInclusivePolicy,
 };
 
 #[cfg(any(feature = "scip", feature = "scip-system"))]
@@ -117,8 +118,10 @@ pub mod prelude {
     pub use oximo_core::prelude::*;
     #[cfg(feature = "gdp")]
     pub use oximo_gdp::{
-        BigM, BigMValues, BooleanValueError, GdpError, GdpMethod, GdpModelExt,
-        GdpReformulationOptions, GdpResultExt, GdpSolveError, GdpSolver, GdpSolverExt,
+        BigM, BigMValues, BooleanValueError, GdpError, GdpHullDomainContext, GdpHullScope,
+        GdpMethod, GdpModelExt, GdpModelSize, GdpPlanningLimits, GdpPlanningSummary,
+        GdpReformulationOptions, GdpResultExt, GdpSizeLimits, GdpSolveError, GdpSolver,
+        GdpSolverExt, Hull, HullInclusivePolicy,
     };
     pub use oximo_solver::{
         ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,

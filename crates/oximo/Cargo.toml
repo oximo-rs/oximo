@@ -147,3 +147,7 @@ required-features = ["gdp", "highs"]
 [[example]]
 name = "gdp_nonlinear"
 required-features = ["gdp", "scip"]
+
+[[example]]
+name = "gdp_hull_nonlinear"
+required-features = ["gdp", "scip"]
