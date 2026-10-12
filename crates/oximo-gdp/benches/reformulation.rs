@@ -1,10 +1,13 @@
 //! Run with `cargo bench -p oximo-gdp --bench reformulation`.
 
+use criterion::measurement::WallTime;
+use criterion::{
+    BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+};
 use oximo_expr::ExprNode;
 use oximo_gdp::prelude::*;
 use oximo_solver::prepare::PreparedExpressions;
 use std::hint::black_box;
-use std::time::Instant;
 
 fn selection(width: usize, nested: bool) -> Model {
     let model = Model::new("selection");
@@ -117,126 +120,128 @@ fn compound_logic(count: usize, kind: &str) -> Model {
     model
 }
 
-fn selected(case: &str) -> bool {
-    std::env::args()
-        .skip(1)
-        .find(|argument| argument != "--bench")
-        .is_none_or(|filter| case.contains(&filter))
-}
-
-fn measure(case: &str, size: usize, repetitions: usize, setup: impl Fn() -> Model) {
-    if !selected(case) {
-        return;
-    }
-    let mut samples = Vec::new();
-    let mut generated = (0, 0, 0);
-    for sample in 0..6 {
-        let model = setup();
-        let before = (model.num_variables(), model.num_constraints(), model.arena().len());
-        let start = Instant::now();
-        for _ in 0..repetitions {
-            black_box(model.reformulate_gdp(GdpReformulationOptions::default()).unwrap());
-        }
-        let elapsed = start.elapsed().as_nanos();
-        generated = (
-            model.num_variables() - before.0,
-            model.num_constraints() - before.1,
-            model.arena().len() - before.2,
+fn measure(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    case: &str,
+    size: usize,
+    repetitions: usize,
+    setup: impl Fn() -> Model,
+) {
+    group.throughput(Throughput::Elements(repetitions as u64));
+    group.bench_function(BenchmarkId::new(case, size), |bencher| {
+        bencher.iter_batched_ref(
+            &setup,
+            |model| {
+                for _ in 0..repetitions {
+                    black_box(model.reformulate_gdp(GdpReformulationOptions::default()).unwrap());
+                }
+            },
+            BatchSize::PerIteration,
         );
-        if sample > 0 {
-            samples.push(elapsed);
-        }
-        black_box(model);
-    }
-    samples.sort_unstable();
-    println!(
-        "{case},{size},{repetitions},{},{},{},{}",
-        samples[2], generated.0, generated.1, generated.2
-    );
+    });
 }
 
-fn measure_preparation(rows: usize, extraction: bool) {
+fn measure_preparation(group: &mut BenchmarkGroup<'_, WallTime>, rows: usize, extraction: bool) {
     let case = if extraction { "shared_preparation_extract" } else { "shared_preparation_kind" };
-    if !selected(case) {
-        return;
-    }
-    let mut samples = Vec::new();
-    for sample in 0..6 {
-        let model = shared(rows, 1000);
-        model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
-        let expressions = PreparedExpressions::new((*model.arena()).clone());
-        let constraints = model.constraints();
-        let start = Instant::now();
-        if extraction {
-            for row in constraints.algebraic() {
-                black_box(expressions.linear(row.lhs).unwrap());
-            }
-        } else {
-            black_box(model.kind());
-        }
-        if sample > 0 {
-            samples.push(start.elapsed().as_nanos());
-        }
-    }
-    samples.sort_unstable();
-    println!("{case},{rows},1,{},0,0,0", samples[2]);
+
+    group.throughput(Throughput::Elements(rows as u64));
+    group.bench_function(BenchmarkId::new(case, rows), |bencher| {
+        bencher.iter_batched_ref(
+            || {
+                let model = shared(rows, 1000);
+                model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
+                let expressions = PreparedExpressions::new((*model.arena()).clone());
+
+                (model, expressions)
+            },
+            |(model, expressions)| {
+                if extraction {
+                    for row in model.constraints().algebraic() {
+                        black_box(expressions.linear(row.lhs).unwrap());
+                    }
+                } else {
+                    black_box(model.kind());
+                }
+            },
+            BatchSize::PerIteration,
+        );
+    });
 }
 
-fn measure_incremental(history: usize) {
+fn measure_incremental(group: &mut BenchmarkGroup<'_, WallTime>, history: usize) {
     let case = "incremental_history";
-    if !selected(case) {
-        return;
-    }
-    let mut samples = Vec::new();
-    for sample in 0..6 {
-        let model = Model::new(case);
-        let b = model.add_boolean("b");
-        for _ in 0..history {
-            logical_constraint!(model, b);
-        }
-        model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
-        // We can exclude the one-time vector growth immediately after a large initial
-        // batch, so this measures steady incremental traversal rather than realloc.
-        logical_constraint!(model, b);
-        model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
-        let start = Instant::now();
-        for _ in 0..20 {
-            logical_constraint!(model, b);
-            black_box(model.reformulate_gdp(GdpReformulationOptions::default()).unwrap());
-        }
-        if sample > 0 {
-            samples.push(start.elapsed().as_nanos());
-        }
-    }
-    samples.sort_unstable();
-    println!("{case},{history},20,{},0,20,20", samples[2]);
+
+    group.throughput(Throughput::Elements(20));
+    group.bench_function(BenchmarkId::new(case, history), |bencher| {
+        bencher.iter_batched_ref(
+            || {
+                let model = Model::new(case);
+                let b = model.add_boolean("b");
+
+                for _ in 0..history {
+                    logical_constraint!(model, b);
+                }
+                model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
+
+                // Exclude the one-time vector growth after the initial batch.
+                logical_constraint!(model, b);
+                model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
+
+                let boolean = b.id();
+
+                (model, boolean)
+            },
+            |(model, boolean)| {
+                let b = model.boolean_handle(*boolean);
+
+                for _ in 0..20 {
+                    logical_constraint!(model, b);
+                    black_box(model.reformulate_gdp(GdpReformulationOptions::default()).unwrap());
+                }
+            },
+            BatchSize::PerIteration,
+        );
+    });
 }
 
-fn main() {
-    println!("case,size,repetitions,median_nanoseconds,new_variables,new_rows,new_nodes");
+fn reformulation(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("gdp/reformulation");
+
     for width in [1000, 16_000] {
-        measure("selection", width, 1, || selection(width, false));
-        measure("nested_selection", width, 1, || selection(width, true));
+        measure(&mut group, "selection", width, 1, || selection(width, false));
+        measure(&mut group, "nested_selection", width, 1, || selection(width, true));
     }
+
     for kind in ["exactly", "and", "or"] {
-        measure(kind, 1000, 1, || predicate(1000, kind));
+        measure(&mut group, kind, 1000, 1, || predicate(1000, kind));
     }
+
     for rows in [100, 1000] {
-        measure("shared_depth_1000", rows, 1, || shared(rows, 1000));
-        measure("shared_shifted_depth_1000", rows, 1, || shared_shifted(rows, 1000));
+        measure(&mut group, "shared_depth_1000", rows, 1, || shared(rows, 1000));
+        measure(&mut group, "shared_shifted_depth_1000", rows, 1, || shared_shifted(rows, 1000));
     }
-    measure("no_op_history", 10_000, 20, || history(10_000));
+
+    measure(&mut group, "no_op_history", 10_000, 20, || history(10_000));
+
     for kind in ["implies", "iff", "xor"] {
-        measure(kind, 1000, 1, || compound_logic(1000, kind));
+        measure(&mut group, kind, 1000, 1, || compound_logic(1000, kind));
     }
+
     for rows in [100, 1000] {
-        measure_preparation(rows, false);
-        measure_preparation(rows, true);
+        measure_preparation(&mut group, rows, false);
+        measure_preparation(&mut group, rows, true);
     }
+
     for unrelated in [0, 200_000, 1_000_000] {
-        measure("sparse_arena", unrelated, 1, || sparse_arena(unrelated));
+        measure(&mut group, "sparse_arena", unrelated, 1, || sparse_arena(unrelated));
     }
+
     for count in [1000, 100_000] {
-        measure_incremental(count);
+        measure_incremental(&mut group, count);
     }
+
+    group.finish();
 }
+
+criterion_group!(benches, reformulation);
+criterion_main!(benches);

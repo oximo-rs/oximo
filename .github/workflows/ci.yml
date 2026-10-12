@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p oximo --features gdp,highs --test gdp
+      - run: cargo test -p oximo --features gdp,highs --test gdp --test gdp_hull
       - run: cargo check --manifest-path crates/oximo-gdp/tests/fixtures/renamed/Cargo.toml --target-dir target/gdp-renamed
 
   scip:
@@ -95,7 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo +stable test -p oximo-scip --tests
       - run: cargo +stable run -p oximo --no-default-features --features scip --example scip_minlp
-      - run: cargo +stable test -p oximo --features gdp,scip --test gdp
+      - run: cargo +stable test -p oximo --features gdp,scip --test gdp --test gdp_hull_nonlinear
 
   sdp:
     name: Cargo test (Clarabel SDP OpenBLAS)

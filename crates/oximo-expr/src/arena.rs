@@ -282,6 +282,12 @@ impl ExprArena {
         }
     }
 
+    /// Consume a private arena without copying its expression nodes.
+    #[doc(hidden)]
+    pub fn __into_nodes(self) -> Vec<ExprNode> {
+        Arc::unwrap_or_clone(self.nodes)
+    }
+
     /// Reserve room for additional expression nodes without changing IDs.
     #[doc(hidden)]
     pub fn __reserve_nodes(&mut self, additional: usize) {

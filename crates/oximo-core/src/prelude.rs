@@ -15,10 +15,12 @@ pub use crate::gdp::{
     DisjunctConstraintHandle, DisjunctConstraintId, DisjunctConstraintRecord, DisjunctContext,
     DisjunctHandle, DisjunctState, DisjunctionHandle, DisjunctionId, DisjunctionKind,
     DisjunctionRecord, GdpBigMTerm, GdpBooleanMapping, GdpDisjunctionArtifacts, GdpFamily,
-    GdpLogicalArtifacts, GdpMethodKind, GdpRangeHandles, GdpReformulationReport,
-    GdpReformulationReportData, GdpRowArtifacts, GdpSnapshot, GdpView, LogicalConstraintHandle,
-    LogicalConstraintId, LogicalConstraintRecord, LogicalExpr, ReformulationState, at_least,
-    at_most, exactly, iff, implies, logical_and, logical_or,
+    GdpHullActivation, GdpHullActivationHandle, GdpHullBranchSumMapping, GdpHullPatternMapping,
+    GdpHullVariableMapping, GdpLogicalArtifacts, GdpMethodKind, GdpPlanningStatistics,
+    GdpRangeHandles, GdpReformulationReport, GdpReformulationReportData, GdpRowArtifacts,
+    GdpSnapshot, GdpView, LogicalConstraintHandle, LogicalConstraintId, LogicalConstraintRecord,
+    LogicalExpr, ReformulationState, at_least, at_most, exactly, iff, implies, logical_and,
+    logical_or,
 };
 pub use crate::indexed::{
     IndexedConstraint, IndexedIndicatorConstraint, IndexedParam, IndexedRangeConstraint,

@@ -16,13 +16,13 @@ pub(crate) struct Bounds {
 
 #[derive(Clone, Debug)]
 pub(crate) enum BoundError {
-    Domain(&'static str),
+    Domain { operation: &'static str, arguments: Vec<[f64; 2]> },
     InvalidNumber,
 }
 
 impl Bounds {
     const UNKNOWN: Self = Self { lower: f64::NEG_INFINITY, upper: f64::INFINITY };
-    fn point(x: f64) -> Self {
+    pub(crate) fn point(x: f64) -> Self {
         Self { lower: x, upper: x }
     }
 
@@ -128,8 +128,19 @@ fn libm_bounds(a: f64, b: f64) -> Bounds {
     )
 }
 
-fn require(condition: bool, op: &'static str) -> Result<(), BoundError> {
-    if condition { Ok(()) } else { Err(BoundError::Domain(op)) }
+fn require(
+    condition: bool,
+    operation: &'static str,
+    arguments: &[Bounds],
+) -> Result<(), BoundError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(BoundError::Domain {
+            operation,
+            arguments: arguments.iter().map(|b| [b.lower, b.upper]).collect(),
+        })
+    }
 }
 
 #[expect(clippy::float_cmp, reason = "only exactly equal endpoints represent a constant exponent")]
@@ -143,7 +154,7 @@ fn pow(base: Bounds, exponent: Bounds) -> Result<Bounds, BoundError> {
 
         if p.fract() == 0.0 {
             if p < 0.0 {
-                require(!base.contains_zero(), "negative power")?;
+                require(!base.contains_zero(), "negative power", &[base, exponent])?;
             }
 
             let a = base.lower.powf(p);
@@ -162,14 +173,18 @@ fn pow(base: Bounds, exponent: Bounds) -> Result<Bounds, BoundError> {
 
             return Ok(result);
         }
-        require(if p > 0.0 { base.lower >= 0.0 } else { base.lower > 0.0 }, "fractional power")?;
+        require(
+            if p > 0.0 { base.lower >= 0.0 } else { base.lower > 0.0 },
+            "fractional power",
+            &[base, exponent],
+        )?;
         let a = base.lower.powf(p);
         let b = base.upper.powf(p);
         let mut result = libm_bounds(a.min(b), a.max(b));
         result.lower = result.lower.max(0.0);
         return Ok(result);
     }
-    require(base.lower > 0.0, "variable exponent power")?;
+    require(base.lower > 0.0, "variable exponent power", &[base, exponent])?;
     unary(UnaryOp::Exp, unary(UnaryOp::Log, base)?.mul(exponent))
 }
 
@@ -183,7 +198,7 @@ fn unary(op: UnaryOp, b: Bounds) -> Result<Bounds, BoundError> {
             return Ok(Bounds::new(min, lo.abs().max(hi.abs())));
         }
         U::Sqrt => {
-            require(lo >= 0.0, "sqrt")?;
+            require(lo >= 0.0, "sqrt", &[b])?;
             libm_bounds(lo.sqrt(), hi.sqrt())
         }
         U::Cbrt => libm_bounds(lo.cbrt(), hi.cbrt()),
@@ -191,29 +206,33 @@ fn unary(op: UnaryOp, b: Bounds) -> Result<Bounds, BoundError> {
         U::Exp2 => libm_bounds(lo.exp2(), hi.exp2()),
         U::Expm1 => libm_bounds(lo.exp_m1(), hi.exp_m1()),
         U::Log | U::Log2 | U::Log10 => {
-            require(lo > 0.0, op.name())?;
+            require(lo > 0.0, op.name(), &[b])?;
             libm_bounds(op.apply(lo), op.apply(hi))
         }
         U::Log1p => {
-            require(lo > -1.0, "log1p")?;
+            require(lo > -1.0, "log1p", &[b])?;
             libm_bounds(lo.ln_1p(), hi.ln_1p())
         }
 
         // A full-period enclosure avoids relying on rounded critical-point tests.
         U::Sin | U::Cos => return Ok(Bounds::new(-1.0, 1.0)),
         U::Tan => {
-            require(lo.is_finite() && hi.is_finite() && lo.abs().max(hi.abs()) < 1e12, "tan")?;
+            require(
+                lo.is_finite() && hi.is_finite() && lo.abs().max(hi.abs()) < 1e12,
+                "tan",
+                &[b],
+            )?;
             let left = down(down(lo - FRAC_PI_2) / PI).ceil();
             let right = up(up(hi - FRAC_PI_2) / PI).floor();
-            require(left > right, "tan pole")?;
+            require(left > right, "tan pole", &[b])?;
             libm_bounds(lo.tan(), hi.tan())
         }
         U::Asin => {
-            require(lo >= -1.0 && hi <= 1.0, "asin")?;
+            require(lo >= -1.0 && hi <= 1.0, "asin", &[b])?;
             libm_bounds(lo.asin(), hi.asin())
         }
         U::Acos => {
-            require(lo >= -1.0 && hi <= 1.0, "acos")?;
+            require(lo >= -1.0 && hi <= 1.0, "acos", &[b])?;
             libm_bounds(hi.acos(), lo.acos())
         }
         U::Atan => libm_bounds(lo.atan(), hi.atan()),
@@ -225,11 +244,11 @@ fn unary(op: UnaryOp, b: Bounds) -> Result<Bounds, BoundError> {
         U::Tanh => libm_bounds(lo.tanh(), hi.tanh()),
         U::Asinh => libm_bounds(lo.asinh(), hi.asinh()),
         U::Acosh => {
-            require(lo >= 1.0, "acosh")?;
+            require(lo >= 1.0, "acosh", &[b])?;
             libm_bounds(lo.acosh(), hi.acosh())
         }
         U::Atanh => {
-            require(lo > -1.0 && hi < 1.0, "atanh")?;
+            require(lo > -1.0 && hi < 1.0, "atanh", &[b])?;
             libm_bounds(lo.atanh(), hi.atanh())
         }
     };
@@ -342,9 +361,39 @@ pub(crate) struct ExpressionAnalysis {
     pub affine: Option<LinearTerms<'static>>,
 }
 
+/// Interval sources have no artificial domains or variable metadata.
+/// Declared domains are enclosed on demand, while generated Hull coordinates
+/// supply boxes directly.
+#[derive(Clone, Copy)]
+enum VariableBounds<'a> {
+    Declared(&'a [Variable]),
+    Boxes(&'a [Bounds]),
+}
+
+impl VariableBounds<'_> {
+    fn get(self, id: oximo_expr::VarId) -> Result<Bounds, BoundError> {
+        let bounds = match self {
+            Self::Declared(variables) => {
+                let v = variables.get(id.index()).ok_or(BoundError::InvalidNumber)?;
+                match v.domain {
+                    Domain::SemiContinuous { threshold } | Domain::SemiInteger { threshold } => {
+                        Bounds { lower: threshold.min(0.0), upper: v.ub.max(0.0) }
+                    }
+                    _ => Bounds { lower: v.lb, upper: v.ub },
+                }
+            }
+            Self::Boxes(boxes) => *boxes.get(id.index()).ok_or(BoundError::InvalidNumber)?,
+        };
+        if bounds.lower.is_nan() || bounds.upper.is_nan() || bounds.lower > bounds.upper {
+            return Err(BoundError::InvalidNumber);
+        }
+        Ok(bounds)
+    }
+}
+
 pub(crate) struct Bounder<'a> {
     arena: &'a ExprArena,
-    variables: &'a [Variable],
+    variables: VariableBounds<'a>,
     cache: IntervalCache,
     // Forward intervals stay separate from final affine refinements so a
     // previously queried root does not change subsequent domain validation.
@@ -465,12 +514,17 @@ impl IntervalCache {
 
 impl<'a> Bounder<'a> {
     pub fn new(arena: &'a ExprArena, variables: &'a [Variable]) -> Self {
-        Self::with_scope(arena, variables, None)
+        Self::with_scope(arena, VariableBounds::Declared(variables), None)
+    }
+
+    /// Numeric boxes indexed by VarId, including generated coordinates.
+    pub fn from_boxes(arena: &'a ExprArena, boxes: &'a [Bounds]) -> Self {
+        Self::with_scope(arena, VariableBounds::Boxes(boxes), None)
     }
 
     fn with_scope(
         arena: &'a ExprArena,
-        variables: &'a [Variable],
+        variables: VariableBounds<'a>,
         scope: Option<(&'a BoundScopes, Option<BooleanId>)>,
     ) -> Self {
         Self {
@@ -543,7 +597,7 @@ impl<'a> Bounder<'a> {
         self.tightened
     }
 
-    fn variable(&self, id: oximo_expr::VarId) -> Result<Bounds, BoundError> {
+    pub(crate) fn variable(&self, id: oximo_expr::VarId) -> Result<Bounds, BoundError> {
         if let Some(&bounds) = self.tightened.get(&id) {
             return Ok(bounds);
         }
@@ -554,19 +608,7 @@ impl<'a> Bounder<'a> {
             return Ok(bounds);
         }
 
-        let v = self.variables.get(id.index()).ok_or(BoundError::InvalidNumber)?;
-        let (lo, hi) = match v.domain {
-            Domain::SemiContinuous { threshold } | Domain::SemiInteger { threshold } => {
-                (threshold.min(0.0), v.ub.max(0.0))
-            }
-            _ => (v.lb, v.ub),
-        };
-
-        if lo.is_nan() || hi.is_nan() || lo > hi {
-            return Err(BoundError::InvalidNumber);
-        }
-
-        Ok(Bounds::new(lo, hi))
+        self.variables.get(id)
     }
 
     /// A bounded affine propagation pass over active unconditional rows.
@@ -766,13 +808,14 @@ impl<'a> Bounder<'a> {
                 }
                 ExprNode::Div(a, b) => {
                     let denominator = child(*b);
-                    require(!denominator.contains_zero(), "division")?;
+                    require(!denominator.contains_zero(), "division", &[child(*a), denominator])?;
                     child(*a).mul(Bounds::widened(1.0 / denominator.upper, 1.0 / denominator.lower))
                 }
                 ExprNode::Atan2(a, b) => {
                     require(
                         !(child(*a).contains_zero() && child(*b).contains_zero()),
                         "atan2 origin",
+                        &[child(*a), child(*b)],
                     )?;
                     Bounds::new(down(-PI), up(PI))
                 }
@@ -970,7 +1013,7 @@ mod tests {
             (U::Tan, 1.0, 2.0),
             (U::Tan, -2.0, -1.0),
         ] {
-            assert!(matches!(unary(op, Bounds::new(lo, hi)), Err(BoundError::Domain(_))));
+            assert!(matches!(unary(op, Bounds::new(lo, hi)), Err(BoundError::Domain { .. })));
         }
         assert!(pow(Bounds::new(-1.0, 1.0), Bounds::point(-2.0)).is_err());
         assert!(pow(Bounds::new(-1.0, 1.0), Bounds::point(0.5)).is_err());
@@ -1070,10 +1113,10 @@ mod tests {
         let second = bounder.bound(cancelled.id).unwrap();
         assert_eq!(first.lower.to_bits(), second.lower.to_bits());
         assert_eq!(first.upper.to_bits(), second.upper.to_bits());
-        assert!(matches!(bounder.bound(log.id), Err(BoundError::Domain("log"))));
+        assert!(matches!(bounder.bound(log.id), Err(BoundError::Domain { operation: "log", .. })));
         assert!(matches!(
             Bounder::new(&arena, &variables).bound(log.id),
-            Err(BoundError::Domain("log"))
+            Err(BoundError::Domain { operation: "log", .. })
         ));
     }
 
