@@ -72,11 +72,11 @@ oximo supports the following algebraic problem classes. Which classes can be
 solved depends on the selected backend:
 
 - Linear programming (LP)
-- Quadratic programming and quadratically constrained programming (QP/QCP)
 - Nonlinear programming (NLP)
 - Mixed-integer linear programming (MILP)
-- Mixed-integer quadratic and quadratically constrained programming (MIQP/MIQCP)
 - Mixed-integer nonlinear programming (MINLP)
+- Quadratic programming and quadratically constrained programming (QP/QCP)
+- Mixed-integer quadratic and quadratically constrained programming (MIQP/MIQCP)
 - Second-order cone programming (SOCP/MISOCP)
 - Semidefinite programming (SDP)
 

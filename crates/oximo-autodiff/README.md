@@ -11,8 +11,7 @@ Linear and quadratic expressions never hit the AD engine, since they use the clo
 
 The crate is split into a value layer that builds on stable Rust and a derivative layer gated behind the nightly-only `enzyme` feature.
 
-**`Tape` (stable).** `Tape::compile` lowers an expression
-once into a flat SSA instruction tape, deduplicating shared subexpressions. `Tape::value` then evaluates it at any point in a tight loop over owned buffers, without borrowing the model. It is a compile-once, evaluate-many value oracle. Re-walking the expression arena at every point (as the general `oximo_expr::evaluate` does) re-discovers the sharing, re-dispatches per node, and re-borrows the model on each call; the tape pays that structural cost once at compile time and never again. It needs neither nightly nor the `enzyme` feature.
+**`Tape` (stable).** `Tape::compile` lowers an expression into instructions and deduplicates shared subexpressions. Subsequent evaluations use owned buffers without accessing the model. This value-only API works on stable Rust.
 
 **The derivative engine (`enzyme`, nightly).** Differentiates that same tape interpreter with `std::autodiff` for exact gradients, Jacobians, and Hessians. The stable value path is the primal it differentiates, so finite-difference and exact backends agree on exactly what "the function" is.
 

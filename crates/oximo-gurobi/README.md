@@ -39,15 +39,6 @@ Enable the `gurobi` feature on the umbrella `oximo` crate:
 oximo = { version = "0.7.0", features = ["gurobi"] }
 ```
 
-To use this crate directly:
-
-```toml
-[dependencies]
-oximo-gurobi = "0.7.0"
-oximo-core   = "0.7.0"
-oximo-solver = "0.7.0"
-```
-
 ## Quick example
 
 ```rust,ignore

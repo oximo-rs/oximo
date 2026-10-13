@@ -50,10 +50,10 @@ println!("objective = {:?}", result.objective());
 The modeling layer supports a range of algebraic optimization problems. The available problem types depend on the solver backend:
 
 - Linear programming (LP)
-- Quadratic programming and quadratically constrained programming (QP/QCP)
 - Nonlinear programming (NLP)
 - Mixed-integer linear programming (MILP)
 - Mixed-integer nonlinear programming (MINLP)
+- Quadratic programming and quadratically constrained programming (QP/QCP)
 - Mixed-integer quadratic and quadratically constrained programming (MIQP/MIQCP)
 - Second-order cone programming (SOCP/MISOCP)
 - Semidefinite programming (SDP)

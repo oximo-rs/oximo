@@ -13,18 +13,18 @@ This crate is the fundamental layer. End users depend on `oximo-core`, which re-
 
 ## Key types
 
-| Type            | Description                                             |
-|-----------------|---------------------------------------------------------|
-| `ExprArena`     | Contiguous backing store of `ExprNode` values           |
-| `ExprArenaCell` | Synchronized owner used by expression handles           |
-| `ExprId`        | Newtype `u32` index into an arena                       |
-| `ExprNode`      | Enum of all node kinds (see below)                      |
-| `UnaryOp`       | Public enum of unary scalar operations                  |
-| `Expr<'a>`      | Lightweight handle: `id` + borrow of the arena. `Copy`. |
-| `VarId`         | Opaque variable index                                   |
-| `ParamId`       | Opaque parameter index                                  |
-| `LinearTerms`   | Extracted `Vec<(VarId, f64)>` + constant                |
-| `AffineBuilder` | Reusable accumulator for incremental affine expressions |
+| Type              | Description                                                        |
+|-------------------|--------------------------------------------------------------------|
+| `ExprArena`       | Contiguous backing store of `ExprNode` values                      |
+| `ExprArenaCell`   | Synchronized owner used by expression handles                      |
+| `ExprId`          | Newtype `u32` index into an arena                                  |
+| `ExprNode`        | Enum of all node kinds (see below)                                 |
+| `UnaryOp`         | Public enum of unary scalar operations                             |
+| `Expr<'a>`        | Lightweight handle: `id` + borrow of the arena. `Copy`.            |
+| `VarId`           | Opaque variable index                                              |
+| `ParamId`         | Opaque parameter index                                             |
+| `LinearTerms<'a>` | Extracted `Cow<'a, [(VarId, f64)]>` (borrowed or owned) + constant |
+| `AffineBuilder`   | Reusable accumulator for incremental affine expressions            |
 
 ### `ExprNode` variants
 

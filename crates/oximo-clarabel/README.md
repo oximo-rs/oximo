@@ -16,15 +16,6 @@ Enable the `clarabel` feature on the umbrella `oximo` crate:
 oximo = { version = "0.7.0", features = ["clarabel"] }
 ```
 
-To use this crate directly:
-
-```toml
-[dependencies]
-oximo-clarabel = "0.7.0"
-oximo-core     = "0.7.0"
-oximo-solver   = "0.7.0"
-```
-
 The optional `faer` feature adds the [faer](https://crates.io/crates/faer)
 sparse LDL factorization as an alternative KKT backend.
 
@@ -72,16 +63,17 @@ constraint is not.
 
 ## Persistent handle (repeated solves)
 
-`Clarabel.solve` builds a fresh solver for each call. When you re-solve one model
-many times (parameter sweeps, sensitivity studies, column generation, rolling
-horizons, etc) build a resident handle with `Clarabel.persistent()` and call
-`solve` on it instead. `ClarabelPersistent` is a plain `Solver`. When the next
-model has the same dimensions, cone layout, and `P`/`A` sparsity pattern, only
-the numeric data (`P`, `q`, `A`, `b`) is overwritten in place via Clarabel's
-`update_data`, reusing the KKT symbolic factorization. Any structural change
-(added/removed rows or columns, a changed sparsity pattern, a new cone, or a
-flipped constraint sense that moves a row between cones) triggers a transparent
-rebuild, so results always match a cold solve.
+`Clarabel.solve` builds a fresh solver for each call. For repeated solves, use
+`Clarabel.persistent()`, which implements `Solver`. With unchanged dimensions,
+cone layout, and `P`/`A` sparsity patterns, accepted updates replace the numeric
+data (`P`, `q`, `A`, `b`) while retaining the resident solver, equilibration
+scaling, KKT symbolic factorization, and allocated buffers. Each solve starts
+from Clarabel's default initialization rather than the previous solution.
+
+Changes to dimensions, cone layout, or sparsity patterns trigger a rebuild.
+The handle also rebuilds if Clarabel rejects a settings or data update, including
+immutable setting changes or problem transformations from presolve, zero
+dropping, or SDP chordal decomposition.
 
 ## Convex quadratic objectives (QP)
 
