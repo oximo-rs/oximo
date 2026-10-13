@@ -12,12 +12,12 @@ error[E0277]: the trait bound `ScalarQuadraticFunction<'_>: IntoAffineFunction<'
             ScalarAffineFunction<'a>
             ScalarDynamicFunction<'a>
   = note: required for `Constraint<ScalarQuadraticFunction<'_>, LessThan>` to implement `IntoAffineConstraint<'_>`
-note: required by a bound in `oximo_core::Model::__add_indicator_constraint`
- --> src/model.rs
+note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_indicator_constraint`
+ --> src/model/constraints.rs
   |
   |     pub fn __add_indicator_constraint<'a>(
   |            -------------------------- required by a bound in this associated function
 ...
   |         consequent: impl IntoAffineConstraint<'a>,
-  |                          ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::__add_indicator_constraint`
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::constraints::<impl Model>::__add_indicator_constraint`
   = note: this error originates in the macro `indicator_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -20,12 +20,12 @@ help: the following other types implement trait `IntoAffineMatrixEntry<'a>`
   | expression_entries!(Constant, Affine, Dynamic);
   | ---------------------------------------------- in this macro invocation
   = note: required for `oximo_core::SymmetricMatrix<Expr<'_, oximo_core::Quadratic>>` to implement `IntoSymmetricAffineFunction<'_>`
-note: required by a bound in `oximo_core::Model::__add_psd_constraint_auto`
- --> src/model.rs
+note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_psd_constraint_auto`
+ --> src/model/constraints.rs
   |
   |     pub fn __add_psd_constraint_auto<'a>(
   |            ------------------------- required by a bound in this associated function
   |         &'a self,
   |         matrix: impl IntoSymmetricAffineFunction<'a>,
-  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::__add_psd_constraint_auto`
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::constraints::<impl Model>::__add_psd_constraint_auto`
   = note: this error originates in the macro `expression_entries` (in Nightly builds, run with -Z macro-backtrace for more info)

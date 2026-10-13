@@ -15,12 +15,12 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_>`
-note: required by a bound in `oximo_core::Model::__add_indicator_ranges_over`
- --> src/model.rs
+note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_indicator_ranges_over`
+ --> src/model/indexed.rs
   |
   |     pub fn __add_indicator_ranges_over<'a, K, B1, B2, F, D: Degree, E: Degree>(
   |            --------------------------- required by a bound in this associated function
 ...
   |         Expr<'a, E>: IntoAffineFunction<'a>,
-  |                      ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Model::__add_indicator_ranges_over`
+  |                      ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_indicator_ranges_over`
   = note: this error originates in the macro `indicator_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)
