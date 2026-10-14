@@ -58,7 +58,9 @@ pub fn solve(
         return Err(SolverError::UnsupportedIndicator);
     }
     let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
-    let (bar, var_order, con_order, soc_bounds) = build_bar(model, opts)?;
+    let prepared = LoweringContext::new(model)?;
+    let parameters = prepared.arena().parameter_snapshot();
+    let (bar, var_order, con_order, soc_bounds) = build_bar_prepared(model, &prepared, opts)?;
     let run = run_baron(&bar, opts, exec)?;
     Ok(parse_solution(
         &run.tim,
@@ -70,6 +72,7 @@ pub fn solve(
         &con_order,
         &soc_bounds,
         model.id(),
+        &parameters,
     ))
 }
 
@@ -237,6 +240,14 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
         return Err(SolverError::UnsupportedIndicator);
     }
     let prepared = LoweringContext::new(model)?;
+    build_bar_prepared(model, &prepared, opts)
+}
+
+fn build_bar_prepared(
+    model: &Model,
+    prepared: &LoweringContext<'_>,
+    opts: &BaronOptions,
+) -> Result<BarParts, SolverError> {
     let vars = prepared.variables();
     let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
@@ -261,8 +272,8 @@ fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let con_order = write_equations(&mut bar, &prepared, constraints, socs, &convex_equation_ids)?;
-    write_objective(&mut bar, &prepared, objective)?;
+    let con_order = write_equations(&mut bar, prepared, constraints, socs, &convex_equation_ids)?;
+    write_objective(&mut bar, prepared, objective)?;
     write_starting_point(&mut bar, vars);
     let soc_bounds = socs
         .iter()
@@ -805,6 +816,7 @@ fn parse_solution(
     con_order: &[ConstraintId],
     soc_bounds: &[LinearTerms<'_>],
     model_id: ModelId,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> SolverResult {
     let tokens: Vec<&str> = tim.split_whitespace().collect();
     let int_at = |i: usize| tokens.get(i).and_then(|s| s.parse::<i64>().ok());
@@ -831,7 +843,7 @@ fn parse_solution(
     };
 
     let mut solutions = if has_sol && nodeopt != Some(-3) {
-        parse_results(res, var_order, sense)
+        parse_results(res, var_order, sense, parameters)
     } else {
         Vec::new()
     };
@@ -840,7 +852,12 @@ fn parse_solution(
     // solution exists but no primal block was parsed do we fall back to the times
     // file so `result_count` still reflects that a solution exists.
     if has_sol && solutions.is_empty() {
-        solutions.push(SolutionPoint { model_id, primal: FxHashMap::default(), objective });
+        solutions.push(SolutionPoint {
+            model_id,
+            primal: FxHashMap::default(),
+            objective,
+            parameters: parameters.clone(),
+        });
     }
 
     let (dual, reduced_costs, soc_prices) = if has_sol {
@@ -903,6 +920,7 @@ fn parse_solution(
             raw_log,
             solver_name: Some(crate::NAME.into()),
             solver_version: baron_version(res),
+            parameters: parameters.clone(),
         },
         var_order.len(),
     )
@@ -1045,10 +1063,15 @@ fn model_status_termination(model_status: i64) -> TerminationStatus {
 /// [`parse_solution_pool`]). Each has its own objective, but in the order it
 /// found them. We need to sort the pool by objective per the
 /// optimization `sense`, so index `0` is the incumbent.
-fn parse_results(res: &str, var_order: &[VarId], sense: ObjectiveSense) -> Vec<SolutionPoint> {
-    let mut pool = parse_solution_pool(res, var_order);
+fn parse_results(
+    res: &str,
+    var_order: &[VarId],
+    sense: ObjectiveSense,
+    parameters: &oximo_solver::ParameterSnapshot,
+) -> Vec<SolutionPoint> {
+    let mut pool = parse_solution_pool(res, var_order, parameters);
     if pool.is_empty() {
-        return parse_best_table(res).into_iter().collect();
+        return parse_best_table(res, parameters).into_iter().collect();
     }
     pool.sort_by(|a, b| {
         let ord = match sense {
@@ -1076,7 +1099,11 @@ fn parse_results(res: &str, var_order: &[VarId], sense: ObjectiveSense) -> Vec<S
 /// `VarId` for "Variable no. `k`". Only the post-completion region is scanned.
 ///
 /// Returns empty when BARON printed no pool (e.g. a time-limited run).
-fn parse_solution_pool(res: &str, var_order: &[VarId]) -> Vec<SolutionPoint> {
+fn parse_solution_pool(
+    res: &str,
+    var_order: &[VarId],
+    parameters: &oximo_solver::ParameterSnapshot,
+) -> Vec<SolutionPoint> {
     let Some(pos) = res.find("Normal completion") else {
         return Vec::new();
     };
@@ -1120,6 +1147,7 @@ fn parse_solution_pool(res: &str, var_order: &[VarId]) -> Vec<SolutionPoint> {
                     model_id: ModelId::UNASSIGNED,
                     primal,
                     objective: last_obj,
+                    parameters: parameters.clone(),
                 });
             }
         }
@@ -1203,7 +1231,10 @@ fn parse_dual_solution(res: &str, var_order: &[VarId], con_order: &[ConstraintId
 /// `x{VarId} xlo xbest xup`, with the value in the third whitespace column and a
 /// trailing `"... objective value of: X"` line. Returns `None` when the banner
 /// is absent.
-fn parse_best_table(res: &str) -> Option<SolutionPoint> {
+fn parse_best_table(
+    res: &str,
+    parameters: &oximo_solver::ParameterSnapshot,
+) -> Option<SolutionPoint> {
     let pos = res.find("The best solution found")?;
     let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
     let mut objective = None;
@@ -1229,6 +1260,7 @@ fn parse_best_table(res: &str) -> Option<SolutionPoint> {
         model_id: ModelId::UNASSIGNED,
         primal,
         objective,
+        parameters: parameters.clone(),
     })
 }
 
@@ -1877,6 +1909,7 @@ mod tests {
                 &[],
                 &[],
                 ModelId::UNASSIGNED,
+                &oximo_solver::ParameterSnapshot::default(),
             );
             assert_eq!(result.termination, expected);
             assert_eq!(result.raw_status.as_deref(), Some(banner));
@@ -1897,6 +1930,7 @@ mod tests {
             &[],
             &[],
             ModelId::UNASSIGNED,
+            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.objective(), Some(9.5)); // upper bound for minimize
@@ -1913,12 +1947,17 @@ mod tests {
             &[],
             &[],
             ModelId::UNASSIGNED,
+            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.objective(), Some(1.5)); // lower bound for maximize
     }
 
     #[test]
     fn parse_res_extracts_primal() {
+        let mut arena = ExprArena::new();
+        let p = arena.new_param(2.0);
+        let parameters = arena.parameter_snapshot();
+        arena.set_param_value(p, 4.0);
         let res = "\
 junk line
 The best solution found is:
@@ -1929,14 +1968,21 @@ The best solution found is:
 
 The above solution has an objective value of:    0.0
 ";
-        let blocks = parse_results(res, &[VarId(0), VarId(1)], ObjectiveSense::Minimize);
+        let blocks =
+            parse_results(res, &[VarId(0), VarId(1)], ObjectiveSense::Minimize, &parameters);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].primal.get(&VarId(0)), Some(&1.25));
         assert_eq!(blocks[0].primal.get(&VarId(1)), Some(&3.5));
+        assert_eq!(blocks[0].parameters.value(p), Some(2.0));
+        assert_eq!(blocks[0].parameters.values().as_ptr(), parameters.values().as_ptr());
     }
 
     #[test]
     fn parse_res_extracts_multiple_solutions() {
+        let mut arena = ExprArena::new();
+        let p = arena.new_param(2.0);
+        let parameters = arena.parameter_snapshot();
+        arena.set_param_value(p, 4.0);
         let res = "\
                          *** Normal completion ***
 
@@ -1964,13 +2010,18 @@ The best solution found is:
 
 The above solution has an objective value of:  0.0000000000000000000000
 ";
-        let blocks = parse_results(res, &[VarId(0), VarId(1)], ObjectiveSense::Minimize);
+        let blocks =
+            parse_results(res, &[VarId(0), VarId(1)], ObjectiveSense::Minimize, &parameters);
         assert_eq!(blocks.len(), 2, "expected two solution blocks: {blocks:?}");
         assert!((blocks[0].primal[&VarId(0)] - 1.0).abs() < 1e-6);
         assert!((blocks[0].primal[&VarId(1)] - 1.0).abs() < 1e-6);
         assert!((blocks[1].primal[&VarId(0)] + 1.0).abs() < 1e-6);
         assert!((blocks[1].primal[&VarId(1)] - 1.0).abs() < 1e-6);
         assert_eq!(blocks[1].objective, Some(0.0));
+        for point in &blocks {
+            assert_eq!(point.parameters.value(p), Some(2.0));
+            assert_eq!(point.parameters.values().as_ptr(), parameters.values().as_ptr());
+        }
     }
 
     #[test]
@@ -2177,6 +2228,7 @@ The above solution has an objective value of:  0.0
             &[ConstraintId(0)],
             &[],
             ModelId::UNASSIGNED,
+            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.result_count(), 2);
         assert_eq!(r.reduced_costs.get(&VarId(1)), Some(&1.5));
@@ -2264,6 +2316,7 @@ The above solution has an objective value of:  0.0
             &[],
             &[],
             ModelId::UNASSIGNED,
+            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.result_count(), 0);
         assert_eq!(r.primal_status, PrimalStatus::NoSolution);

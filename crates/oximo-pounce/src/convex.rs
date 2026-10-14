@@ -385,7 +385,14 @@ pub(crate) fn solve(
         return solve_nlp_since_prepared(model, prepared, opts, started);
     }
     let outcome = outcome(&problem, opts, route, &sol);
-    Ok(assemble(problem.sign, outcome, started.elapsed(), model.id(), model.num_variables()))
+    Ok(assemble(
+        problem.sign,
+        outcome,
+        started.elapsed(),
+        model.id(),
+        prepared.arena().parameter_snapshot(),
+        model.num_variables(),
+    ))
 }
 
 /// Match POUNCE's automatic fallback policy.

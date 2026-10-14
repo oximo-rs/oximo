@@ -63,6 +63,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
         meta.num_constraints,
         meta.cols.len(),
         model.id(),
+        meta.parameters.clone(),
         elapsed,
     ))
 }
@@ -85,6 +86,7 @@ pub(crate) struct Prob {
 /// duals. The incremental fast path's snapshot/fingerprint lives in
 /// [`oximo_solver::snapshot`], shared across backends.
 pub(crate) struct Meta {
+    pub parameters: oximo_solver::ParameterSnapshot,
     pub cols: Vec<highs::Col>,
     pub obj_constant: f64,
     pub num_constraints: usize,
@@ -166,7 +168,13 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
 
     Ok((
         Prob { pb, sense, hessian_cols, has_hessian, has_initial, init_vals },
-        Meta { cols, obj_constant, num_constraints, mixed_integer },
+        Meta {
+            parameters: prepared.arena().parameter_snapshot(),
+            cols,
+            obj_constant,
+            num_constraints,
+            mixed_integer,
+        },
     ))
 }
 
@@ -202,6 +210,7 @@ pub(crate) fn make_live(prob: Prob, opts: &HighsOptions) -> Result<HighsModel, S
 
 /// Map a solved HiGHS model into the generic [`SolverResult`], adding `obj_constant`
 /// back onto HiGHS' objective value.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_result(
     solved: &highs::SolvedModel,
     mixed_integer: bool,
@@ -209,6 +218,7 @@ pub(crate) fn extract_result(
     num_constraints: usize,
     num_variables: usize,
     model_id: ModelId,
+    parameters: oximo_solver::ParameterSnapshot,
     elapsed: Duration,
 ) -> SolverResult {
     let native_status = solved.status();
@@ -230,7 +240,12 @@ pub(crate) fn extract_result(
     };
 
     let solutions = if has_point {
-        vec![SolutionPoint { model_id, primal, objective: objective_value }]
+        vec![SolutionPoint {
+            model_id,
+            primal,
+            objective: objective_value,
+            parameters: parameters.clone(),
+        }]
     } else {
         Vec::new()
     };
@@ -269,6 +284,7 @@ pub(crate) fn extract_result(
             raw_log: None,
             solver_name: Some(crate::NAME.into()),
             solver_version: None,
+            parameters,
         },
         num_variables,
     )
@@ -588,6 +604,7 @@ mod tests {
             meta.num_constraints,
             meta.cols.len(),
             model.id(),
+            meta.parameters.clone(),
             Duration::ZERO,
         );
         assert_eq!(result.gap, Some(native_gap));

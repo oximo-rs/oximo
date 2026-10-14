@@ -129,6 +129,7 @@ impl Indicator {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Snapshot {
+    pub parameters: oximo_solver::ParameterSnapshot,
     pub name: String,
     pub columns: Vec<Column>,
     pub rows: Vec<Row>,
@@ -227,6 +228,7 @@ impl Snapshot {
             .map(|c| Indicator::prepare(&p, c))
             .collect::<Result<_, SolverError>>()?;
         Ok(Self {
+            parameters: p.arena().parameter_snapshot(),
             name: model.name.to_string(),
             columns,
             rows,

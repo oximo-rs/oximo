@@ -236,6 +236,7 @@ fn typed_activations_query_fractional_values_without_an_expression_arena() {
         model_id: model.id(),
         primal: [(active.binary().var_id().unwrap(), 0.25)].into_iter().collect(),
         objective: None,
+        parameters: model.arena().parameter_snapshot(),
     };
 
     let result = SolverResult {
@@ -283,6 +284,7 @@ fn typed_activations_query_fractional_values_without_an_expression_arena() {
         model_id: inclusive.id(),
         primal: report.hull_patterns.iter().map(|pattern| (pattern.weight, 0.375)).collect(),
         objective: None,
+        parameters: inclusive.arena().parameter_snapshot(),
     };
     for (copy, activation) in report.hull_variables.iter().zip(report.hull_activations()) {
         assert_eq!(copy.indicator, None);
@@ -480,6 +482,7 @@ fn branch_sum_activations_query_fractional_weight_values() {
         model_id: model.id(),
         primal: [(sum.weight, 0.375)].into_iter().collect(),
         objective: None,
+        parameters: model.arena().parameter_snapshot(),
     };
     assert_eq!(point.hull_activation_value_of(activation), Ok(Some(0.375)));
     assert_eq!(

@@ -130,7 +130,14 @@ pub(crate) fn solve_nlp_since_prepared(
     let prep = setup_prepared(prepared, opts)?;
     let oracle = backend::build(model)?;
     let outcome = backend::run(model, &oracle, &prep, opts, None)?;
-    Ok(assemble(prep.sign, outcome, started.elapsed(), model.id(), model.num_variables()))
+    Ok(assemble(
+        prep.sign,
+        outcome,
+        started.elapsed(),
+        model.id(),
+        prepared.arena().parameter_snapshot(),
+        model.num_variables(),
+    ))
 }
 
 /// Apply local-infeasibility second opinions after a resident TNLP session.
@@ -423,6 +430,7 @@ pub(crate) fn assemble(
     o: Outcome,
     elapsed: Duration,
     model_id: oximo_core::ModelId,
+    parameters: oximo_solver::ParameterSnapshot,
     num_variables: usize,
 ) -> SolverResult {
     let has_point = o.has_point;
@@ -459,6 +467,7 @@ pub(crate) fn assemble(
             objective: o
                 .objective
                 .and_then(|f| ObjectiveTransform { sign, offset: 0.0 }.restore(f)),
+            parameters: parameters.clone(),
         });
     }
 
@@ -483,6 +492,7 @@ pub(crate) fn assemble(
             raw_log: o.raw_log,
             solver_name: Some("pounce".into()),
             solver_version: None,
+            parameters,
         },
         num_variables,
     )
@@ -794,6 +804,7 @@ mod retry_tests {
                 },
                 Duration::ZERO,
                 oximo_core::ModelId::UNASSIGNED,
+                oximo_solver::ParameterSnapshot::default(),
                 1,
             );
             assert_eq!(result.dual_status, DualStatus::Unknown, "{raw_status}");
@@ -817,6 +828,7 @@ mod retry_tests {
             },
             Duration::ZERO,
             oximo_core::ModelId::UNASSIGNED,
+            oximo_solver::ParameterSnapshot::default(),
             1,
         );
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);

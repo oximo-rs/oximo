@@ -9,6 +9,7 @@ fn point(values: &[(u32, f64)], objective: f64) -> SolutionPoint {
         model_id: oximo_core::ModelId::UNASSIGNED,
         primal: values.iter().map(|&(id, value)| (VarId(id), value)).collect(),
         objective: Some(objective),
+        parameters: oximo_solver::ParameterSnapshot::default(),
     }
 }
 

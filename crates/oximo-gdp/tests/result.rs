@@ -9,6 +9,7 @@ fn point(boolean: BooleanHandle<'_>, value: Option<f64>) -> SolutionPoint {
             .map(|value| (boolean.binary().var_id().unwrap(), value))
             .collect(),
         objective: None,
+        parameters: oximo_solver::ParameterSnapshot::default(),
     }
 }
 

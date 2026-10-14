@@ -19,6 +19,7 @@ use crate::MosekOptions;
 
 #[derive(Debug)]
 pub(crate) struct Meta {
+    pub parameters: oximo_solver::ParameterSnapshot,
     kind: ModelKind,
     row_by_constraint: Vec<Option<i32>>,
     explicit_accs: Vec<(SocConstraintId, i64, usize)>,
@@ -266,7 +267,13 @@ fn build_rows_and_cones(
 
     append_indicators(prepared, task, &mut next_afe, &mut scratch)?;
 
-    Ok(Meta { kind, row_by_constraint, explicit_accs, psd_accs })
+    Ok(Meta {
+        parameters: prepared.arena().parameter_snapshot(),
+        kind,
+        row_by_constraint,
+        explicit_accs,
+        psd_accs,
+    })
 }
 
 fn append_indicators(
@@ -464,7 +471,12 @@ fn extract_result(
         let primal = oximo_solver::reconstruct::project_dense_primal(&values, variables.len())
             .unwrap_or_default();
         let objective = task.get_primal_obj(solution_type).ok().filter(|value| value.is_finite());
-        solutions.push(SolutionPoint { model_id: model.id(), primal, objective });
+        solutions.push(SolutionPoint {
+            model_id: model.id(),
+            primal,
+            objective,
+            parameters: meta.parameters.clone(),
+        });
     }
     if has_dual {
         collect_continuous_duals(
@@ -534,6 +546,7 @@ fn extract_result(
             raw_log: None,
             solver_name: Some(crate::NAME.into()),
             solver_version,
+            parameters: meta.parameters.clone(),
         },
         variables.len(),
     ))

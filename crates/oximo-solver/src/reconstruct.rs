@@ -110,10 +110,31 @@ pub fn relative_gap(primal: Option<f64>, bound: Option<f64>) -> Option<f64> {
 /// An explicit `FeasiblePoint` status caps the point's quality even if native
 /// termination was `Optimal`. Invalid incumbents cause the same downgrade for
 /// surviving pool points. Normalizing an already normalized result is safe.
+/// Detached points with an unassigned model identity and empty parameters inherit
+/// the result's snapshot. Other points must already have the same parameter bits.
+/// Assigned point identities must match the result's model identity.
+///
+/// # Panics
+/// Panics if a point's model identity or captured parameters conflict with the result.
+/// Use [`SolverResult::for_model`] and [`SolverResult::add_solution`] to assemble
+/// points from a single captured parameter state.
 pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
+    for (index, point) in result.solutions.iter().enumerate() {
+        assert!(
+            point.model_id == oximo_core::ModelId::UNASSIGNED || point.model_id == result.model_id,
+            "model identity mismatch for solution {index}; assigned points must belong to the result's model"
+        );
+        let detached = point.model_id == oximo_core::ModelId::UNASSIGNED
+            && point.parameters.values().is_empty();
+        assert!(
+            detached || point.parameters.same_bits(&result.parameters),
+            "parameter snapshot mismatch for solution {index}; use SolverResult::for_model and add_solution to capture consistent parameters"
+        );
+    }
     let model_id = result.model_id;
     for point in &mut result.solutions {
         point.model_id = model_id;
+        point.parameters = result.parameters.clone();
     }
     let mut first = true;
     let mut lost_incumbent = false;

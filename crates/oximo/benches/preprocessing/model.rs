@@ -95,6 +95,7 @@ pub fn bench(criterion: &mut Criterion) {
             model_id: model.id(),
             primal: [(x.var_id().unwrap(), 1.0)].into_iter().collect(),
             objective: None,
+            parameters: oximo_solver::ParameterSnapshot::default(),
         };
         bencher.iter(|| std::hint::black_box(&point).value_of(std::hint::black_box(x)).unwrap());
     });
@@ -106,6 +107,7 @@ pub fn bench(criterion: &mut Criterion) {
             model_id: model.id(),
             primal: [(x.var_id().unwrap(), 1.0)].into_iter().collect(),
             objective: None,
+            parameters: oximo_solver::ParameterSnapshot::default(),
         };
         let result =
             SolverResult { model_id: model.id(), solutions: vec![point], ..Default::default() };

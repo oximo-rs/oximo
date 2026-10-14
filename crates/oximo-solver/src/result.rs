@@ -6,8 +6,10 @@ use oximo_core::{
     ConstraintHandle, ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, ModelId,
     ModelMismatchError, SocConstraintHandle, SocConstraintId, VarId,
 };
-use oximo_expr::{EvalContext, ExprArena, ExprId, ExprNode, ParamId, evaluate};
+use oximo_expr::{EvalContext, ExprArena, ExprId, ExprNode, ParamId, WithParameters, evaluate};
 use rustc_hash::FxHashMap;
+
+pub use oximo_expr::ParameterSnapshot;
 
 use crate::status::{PrimalStatus, TerminationStatus};
 
@@ -21,11 +23,18 @@ pub struct SolutionPoint {
     pub model_id: ModelId,
     pub primal: FxHashMap<VarId, f64>,
     pub objective: Option<f64>,
+    /// Parameters used by the solve that produced this point.
+    pub parameters: ParameterSnapshot,
 }
 
 impl Default for SolutionPoint {
     fn default() -> Self {
-        Self { model_id: ModelId::UNASSIGNED, primal: FxHashMap::default(), objective: None }
+        Self {
+            model_id: ModelId::UNASSIGNED,
+            primal: FxHashMap::default(),
+            objective: None,
+            parameters: ParameterSnapshot::default(),
+        }
     }
 }
 
@@ -36,12 +45,22 @@ impl EvalContext for PointContext<'_> {
         self.0.get(&id).copied()
     }
 
-    fn param(&self, _id: ParamId) -> Option<f64> {
+    fn param(&self, _: ParamId) -> Option<f64> {
         None
     }
 }
 
 impl SolutionPoint {
+    /// Capture model identity and parameters for a supplied primal point.
+    pub fn new(model: &Model, primal: FxHashMap<VarId, f64>, objective: Option<f64>) -> Self {
+        Self {
+            model_id: model.id(),
+            primal,
+            objective,
+            parameters: model.arena().parameter_snapshot(),
+        }
+    }
+
     /// Model that produced this point.
     #[must_use]
     pub const fn model_id(&self) -> ModelId {
@@ -49,10 +68,8 @@ impl SolutionPoint {
     }
 
     /// Evaluate ordinary entries of a symmetric matrix at this point.
-    /// Returns `Ok(None)` if any entry needs a missing primal variable.
-    /// Parameter values are read from each expression's model arena at query
-    /// time. Evaluate the matrix before rebinding parameters to retain its
-    /// solved values.
+    /// Uses solve-time parameters. Returns `Ok(None)` if any entry needs a
+    /// missing primal variable or a parameter absent from the snapshot.
     ///
     /// # Errors
     /// Returns a model ownership error for any foreign expression.
@@ -60,16 +77,35 @@ impl SolutionPoint {
         &self,
         matrix: &SymmetricMatrix<Expr<'_, D>>,
     ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
+        self.value_of_matrix_using_parameters(matrix, false)
+    }
+
+    /// Evaluate this point's matrix using current model parameters.
+    /// This scenario evaluation does not update the stored solver certificate.
+    ///
+    /// # Errors
+    /// Returns a model ownership error for any foreign expression.
+    pub fn value_of_matrix_with_current_parameters<D: oximo_expr::Degree>(
+        &self,
+        matrix: &SymmetricMatrix<Expr<'_, D>>,
+    ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
+        self.value_of_matrix_using_parameters(matrix, true)
+    }
+
+    fn value_of_matrix_using_parameters<D: oximo_expr::Degree>(
+        &self,
+        matrix: &SymmetricMatrix<Expr<'_, D>>,
+        current_parameters: bool,
+    ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
         // We validate every owner even if a previous entry has no primal value.
         for entry in matrix.upper_triangle() {
             ensure_model_id(self.model_id, entry.model_id())?;
         }
         let arena = matrix[(0, 0)].arena.borrow();
-        let context = PointContext(&self.primal);
         let entries = matrix
             .upper_triangle()
             .iter()
-            .map(|entry| evaluate(&arena, entry.id(), &context).ok())
+            .map(|entry| evaluate_at(&arena, entry.id(), self, current_parameters))
             .collect::<Option<Vec<_>>>();
         Ok(entries
             .map(|entries| SymmetricMatrix::from_upper_triangle(matrix.side_dimension(), entries)))
@@ -83,10 +119,9 @@ impl SolutionPoint {
 
     /// Evaluate an expression at this primal point.
     ///
-    /// Returns `Ok(None)` when any variable needed by the expression is absent
+    /// Returns `Ok(None)` when any variable or solve-time parameter is absent
     /// and [`ModelMismatchError`] when the expression belongs to another model.
-    /// Parameter values are read from the expression's model arena at query
-    /// time.
+    /// Parameter values come exclusively from the solve-time snapshot.
     ///
     /// # Errors
     ///
@@ -96,12 +131,34 @@ impl SolutionPoint {
         &self,
         expr: Expr<'_, D>,
     ) -> Result<Option<f64>, ModelMismatchError> {
+        self.value_of_using_parameters(expr, false)
+    }
+
+    /// Evaluate the saved primal point using current model parameters.
+    /// The stored objective and solver certificate are unchanged.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
+    #[inline]
+    pub fn value_of_with_current_parameters<D: oximo_expr::Degree>(
+        &self,
+        expr: Expr<'_, D>,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        self.value_of_using_parameters(expr, true)
+    }
+
+    #[inline]
+    fn value_of_using_parameters<D: oximo_expr::Degree>(
+        &self,
+        expr: Expr<'_, D>,
+        current_parameters: bool,
+    ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, expr.model_id())?;
         let arena = expr.arena.borrow();
         if let ExprNode::Var(id) = arena.get(expr.id) {
             return Ok(self.value(*id));
         }
-        Ok(evaluate(&arena, expr.id, &PointContext(&self.primal)).ok())
+        Ok(evaluate_at(&arena, expr.id, self, current_parameters))
     }
 
     /// Look up the primal value for a specific index of an [`IndexedVar`].
@@ -181,19 +238,30 @@ pub struct SocEvaluation {
     pub violation: f64,
 }
 
-fn evaluate_at(arena: &ExprArena, id: ExprId, point: &SolutionPoint) -> Option<f64> {
-    evaluate(arena, id, &PointContext(&point.primal)).ok()
+fn evaluate_at(
+    arena: &ExprArena,
+    id: ExprId,
+    point: &SolutionPoint,
+    current_parameters: bool,
+) -> Option<f64> {
+    let context = PointContext(&point.primal);
+    if current_parameters {
+        evaluate(arena, id, &context).ok()
+    } else {
+        evaluate(arena, id, &WithParameters::new(&context, &point.parameters)).ok()
+    }
 }
 
 fn evaluate_constraint_at(
     point: &SolutionPoint,
     model: &Model,
     id: ConstraintId,
+    current_parameters: bool,
 ) -> Option<ConstraintEvaluation> {
     let arena = model.arena();
     let constraints = model.constraints();
     let constraint = constraints.algebraic().get(id.index())?;
-    let activity = evaluate_at(&arena, constraint.lhs, point)?;
+    let activity = evaluate_at(&arena, constraint.lhs, point, current_parameters)?;
     let lower_slack = constraint.lower.is_finite().then_some(activity - constraint.lower);
     let upper_slack = constraint.upper.is_finite().then_some(constraint.upper - activity);
     let violation = lower_slack
@@ -208,15 +276,16 @@ fn evaluate_soc_at(
     point: &SolutionPoint,
     model: &Model,
     id: SocConstraintId,
+    current_parameters: bool,
 ) -> Option<SocEvaluation> {
     let arena = model.arena();
     let socs = model.soc_constraints();
     let constraint = socs.get(id.index())?;
     let squared_norm = constraint.terms.iter().try_fold(0.0, |sum, &term| {
-        evaluate_at(&arena, term, point).map(|value| sum + value * value)
+        evaluate_at(&arena, term, point, current_parameters).map(|value| sum + value * value)
     })?;
     let norm = squared_norm.sqrt();
-    let bound = evaluate_at(&arena, constraint.bound, point)?;
+    let bound = evaluate_at(&arena, constraint.bound, point, current_parameters)?;
     let slack = bound - norm;
     Some(SocEvaluation { norm, bound, slack, violation: (-slack).max(0.0) })
 }
@@ -254,6 +323,8 @@ pub struct SolverResult {
     pub raw_log: Option<String>,
     pub solver_name: Option<Cow<'static, str>>,
     pub solver_version: Option<Cow<'static, str>>,
+    /// Parameters used by this solve.
+    pub parameters: ParameterSnapshot,
 }
 
 impl Default for SolverResult {
@@ -277,11 +348,36 @@ impl Default for SolverResult {
             raw_log: None,
             solver_name: None,
             solver_version: None,
+            parameters: ParameterSnapshot::default(),
         }
     }
 }
 
 impl SolverResult {
+    /// Create an empty result bound to the model's current identity and parameters.
+    /// Capture this before solving or use the same arena snapshot as translation.
+    pub fn for_model(model: &Model) -> Self {
+        Self {
+            model_id: model.id(),
+            parameters: model.arena().parameter_snapshot(),
+            ..Self::default()
+        }
+    }
+
+    /// Append a point using this result's model identity and captured parameters.
+    /// Later parameter changes in the model do not affect the point.
+    /// Points must be added in best/incumbent-first order.
+    /// This does not update statuses or validate the primal point.
+    /// Adapters need to normalize afterward.
+    pub fn add_solution(&mut self, primal: FxHashMap<VarId, f64>, objective: Option<f64>) {
+        self.solutions.push(SolutionPoint {
+            model_id: self.model_id,
+            parameters: self.parameters.clone(),
+            primal,
+            objective,
+        });
+    }
+
     /// Model that produced this result.
     #[must_use]
     pub const fn model_id(&self) -> ModelId {
@@ -327,8 +423,8 @@ impl SolverResult {
         self.solutions.first().and_then(|s| s.value(id))
     }
 
-    /// Evaluate an expression at the best solution, rejecting expressions from
-    /// another model with [`ModelMismatchError`].
+    /// Evaluate an expression at the best solution using solve-time parameters.
+    /// Rejects expressions from another model with [`ModelMismatchError`].
     ///
     /// # Errors
     ///
@@ -342,11 +438,24 @@ impl SolverResult {
         self.solutions.first().map_or(Ok(None), |s| s.value_of(expr))
     }
 
+    /// Evaluate the best primal point using current model parameters.
+    /// Stored objective values and solver certificates are unchanged.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign expression or point.
+    #[inline]
+    pub fn value_of_with_current_parameters<D: oximo_expr::Degree>(
+        &self,
+        expr: Expr<'_, D>,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, expr.model_id())?;
+        self.best().map_or(Ok(None), |point| point.value_of_with_current_parameters(expr))
+    }
+
     /// Evaluate an algebraic constraint at the best solution.
     ///
-    /// The result and model must describe the same solve. Parameter values are
-    /// read from `model` at query time, so do not combine an old result with a
-    /// subsequently modified model.
+    /// Parameters use their solve-time values.
+    /// Constraint definitions and bounds come from `model`.
     ///
     /// # Errors
     ///
@@ -372,14 +481,50 @@ impl SolverResult {
         constraint: ConstraintHandle,
         solution_index: usize,
     ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
+        self.constraint_evaluation_using_parameters(model, constraint, solution_index, false)
+    }
+
+    /// Evaluate the best point's constraint using current model parameters.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
+    pub fn constraint_evaluation_with_current_parameters(
+        &self,
+        model: &Model,
+        constraint: ConstraintHandle,
+    ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
+        self.constraint_evaluation_at_with_current_parameters(model, constraint, 0)
+    }
+
+    /// Evaluate a selected point's constraint using current model parameters.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
+    pub fn constraint_evaluation_at_with_current_parameters(
+        &self,
+        model: &Model,
+        constraint: ConstraintHandle,
+        solution_index: usize,
+    ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
+        self.constraint_evaluation_using_parameters(model, constraint, solution_index, true)
+    }
+
+    fn constraint_evaluation_using_parameters(
+        &self,
+        model: &Model,
+        constraint: ConstraintHandle,
+        solution_index: usize,
+        current_parameters: bool,
+    ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
         ensure_model_id(self.model_id, model.id())?;
         ensure_model_id(self.model_id, constraint.model_id())?;
         let Some(point) = self.solution(solution_index) else { return Ok(None) };
         ensure_model_id(self.model_id, point.model_id)?;
-        Ok(evaluate_constraint_at(point, model, constraint.id()))
+        Ok(evaluate_constraint_at(point, model, constraint.id(), current_parameters))
     }
 
     /// Evaluate an explicit second-order-cone constraint at the best solution.
+    /// Parameters use their solve-time values; definitions come from `model`.
     ///
     /// # Errors
     ///
@@ -406,17 +551,51 @@ impl SolverResult {
         constraint: SocConstraintHandle,
         solution_index: usize,
     ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
+        self.soc_evaluation_using_parameters(model, constraint, solution_index, false)
+    }
+
+    /// Evaluate the best point's SOC using current model parameters.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
+    pub fn soc_evaluation_with_current_parameters(
+        &self,
+        model: &Model,
+        constraint: SocConstraintHandle,
+    ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
+        self.soc_evaluation_at_with_current_parameters(model, constraint, 0)
+    }
+
+    /// Evaluate a selected point's SOC using current model parameters.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
+    pub fn soc_evaluation_at_with_current_parameters(
+        &self,
+        model: &Model,
+        constraint: SocConstraintHandle,
+        solution_index: usize,
+    ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
+        self.soc_evaluation_using_parameters(model, constraint, solution_index, true)
+    }
+
+    fn soc_evaluation_using_parameters(
+        &self,
+        model: &Model,
+        constraint: SocConstraintHandle,
+        solution_index: usize,
+        current_parameters: bool,
+    ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
         ensure_model_id(self.model_id, model.id())?;
         ensure_model_id(self.model_id, constraint.model_id())?;
         let Some(point) = self.solution(solution_index) else { return Ok(None) };
         ensure_model_id(self.model_id, point.model_id)?;
-        Ok(evaluate_soc_at(point, model, constraint.id()))
+        Ok(evaluate_soc_at(point, model, constraint.id(), current_parameters))
     }
 
     /// Evaluate a symmetric expression matrix at the best solution.
-    /// Returns `Ok(None)` when there is no solution or an entry needs a missing
-    /// primal variable. Parameters use their current model values, so evaluate
-    /// before rebinding them if you need the matrix from this solve.
+    /// Uses solve-time parameters. Returns `Ok(None)` when there is no solution
+    /// or an entry needs a missing primal variable or uncaptured parameter.
     ///
     /// # Errors
     /// Returns a model ownership error for a foreign matrix.
@@ -428,6 +607,20 @@ impl SolverResult {
             ensure_model_id(self.model_id, entry.model_id())?;
         }
         self.best().map_or(Ok(None), |point| point.value_of_matrix(matrix))
+    }
+
+    /// Evaluate the best point's matrix using current model parameters.
+    ///
+    /// # Errors
+    /// Returns a model ownership error for any foreign expression or point.
+    pub fn value_of_matrix_with_current_parameters<D: oximo_expr::Degree>(
+        &self,
+        matrix: &SymmetricMatrix<Expr<'_, D>>,
+    ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
+        for entry in matrix.upper_triangle() {
+            ensure_model_id(self.model_id, entry.model_id())?;
+        }
+        self.best().map_or(Ok(None), |point| point.value_of_matrix_with_current_parameters(matrix))
     }
 
     /// Ordinary PSD multiplier matrix, or `None` when unavailable.
@@ -686,7 +879,12 @@ mod tests {
         let mut primal = FxHashMap::default();
         primal.insert(x.var_id().unwrap(), 3.0);
         primal.insert(y.var_id().unwrap(), 4.0);
-        let point = SolutionPoint { model_id: m.id(), primal, objective: None };
+        let point = SolutionPoint {
+            model_id: m.id(),
+            primal,
+            objective: None,
+            parameters: m.arena().parameter_snapshot(),
+        };
 
         assert_eq!(point.value_of(x), Ok(Some(3.0)));
         assert_eq!(point.value_of(2.0 * x + y - 1.0), Ok(Some(9.0)));
@@ -712,6 +910,7 @@ mod tests {
             model_id: source.id(),
             primal: [(x.var_id().unwrap(), 4.0)].into_iter().collect(),
             objective: None,
+            parameters: source.arena().parameter_snapshot(),
         };
         let result = SolverResult {
             model_id: source.id(),
@@ -776,7 +975,12 @@ mod tests {
         let point = |value| {
             let mut primal = FxHashMap::default();
             primal.insert(x.var_id().unwrap(), value);
-            SolutionPoint { model_id: m.id(), primal, objective: None }
+            SolutionPoint {
+                model_id: m.id(),
+                primal,
+                objective: None,
+                parameters: m.arena().parameter_snapshot(),
+            }
         };
         let result = SolverResult {
             model_id: m.id(),
@@ -831,7 +1035,12 @@ mod tests {
             primal.insert(x.var_id().unwrap(), x_value);
             primal.insert(y.var_id().unwrap(), y_value);
             primal.insert(t.var_id().unwrap(), t_value);
-            SolutionPoint { model_id: m.id(), primal, objective: None }
+            SolutionPoint {
+                model_id: m.id(),
+                primal,
+                objective: None,
+                parameters: m.arena().parameter_snapshot(),
+            }
         };
         let result = SolverResult {
             model_id: m.id(),
@@ -890,7 +1099,12 @@ mod tests {
             model_id: m.id(),
             termination: TerminationStatus::Optimal,
             primal_status: PrimalStatus::OptimalPoint,
-            solutions: vec![SolutionPoint { model_id: m.id(), primal, objective: Some(5.0) }],
+            solutions: vec![SolutionPoint {
+                model_id: m.id(),
+                primal,
+                objective: Some(5.0),
+                parameters: m.arena().parameter_snapshot(),
+            }],
             dual,
             solver_name: Some("TestSolver".into()),
             solver_version: Some("1.2.3".into()),
