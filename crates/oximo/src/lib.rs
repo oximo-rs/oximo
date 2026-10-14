@@ -32,8 +32,9 @@ pub use oximo_expr as expr;
 pub use oximo_solver as solver;
 pub use oximo_solver::{
     ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,
-    ModelReport, PersistentSolver, PrimalStatus, SocEvaluation, SolutionPoint, Solver, SolverError,
-    SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt, VarBoundKind,
+    ModelReport, ParameterSnapshot, PersistentSolver, PrimalStatus, SocEvaluation, SolutionPoint,
+    Solver, SolverError, SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt,
+    VarBoundKind,
 };
 
 #[cfg(feature = "gdp")]
@@ -125,9 +126,9 @@ pub mod prelude {
     };
     pub use oximo_solver::{
         ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,
-        ModelReport, PersistentSolver, PrimalStatus, SocEvaluation, SolutionPoint, Solver,
-        SolverError, SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt,
-        VarBoundKind,
+        ModelReport, ParameterSnapshot, PersistentSolver, PrimalStatus, SocEvaluation,
+        SolutionPoint, Solver, SolverError, SolverResult, TerminationStatus, UniversalOptions,
+        UniversalOptionsExt, VarBoundKind,
     };
 
     #[cfg(feature = "highs")]

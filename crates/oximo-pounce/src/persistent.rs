@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use oximo_core::{Model, ModelKind};
 use oximo_solver::prepare::LoweringContext;
-use oximo_solver::{Solver, SolverError, SolverResult};
+use oximo_solver::{ParameterSnapshot, Solver, SolverError, SolverResult};
 
 use crate::convex::{self, Route};
 use crate::options::{PounceAlgorithm, PounceOptions};
@@ -23,7 +23,7 @@ struct NlpState {
     oracle: backend::Oracle,
     warm: Option<WarmStart>,
     resident: Option<backend::Resident>,
-    params: Vec<u64>,
+    params: ParameterSnapshot,
 }
 
 struct ConvexState {
@@ -122,11 +122,11 @@ impl PouncePersistent {
         started: Instant,
     ) -> Result<SolverResult, SolverError> {
         let prep = setup_prepared(prepared, opts)?;
-        let params = parameter_snapshot(model);
+        let params = prepared.arena().parameter_snapshot();
         let mut params_changed = false;
         let state = match &mut self.state {
             Some(State::Nlp(state)) if backend::try_reuse(&state.oracle, model) => {
-                params_changed = state.params != params;
+                params_changed = !state.params.same_bits(&params);
                 state.params = params;
                 state
             }
@@ -170,7 +170,14 @@ impl PouncePersistent {
         };
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
-        Ok(assemble(prep.sign, outcome, elapsed, model.id(), model.num_variables()))
+        Ok(assemble(
+            prep.sign,
+            outcome,
+            elapsed,
+            model.id(),
+            prepared.arena().parameter_snapshot(),
+            model.num_variables(),
+        ))
     }
 
     fn solve_convex(
@@ -227,7 +234,14 @@ impl PouncePersistent {
             .then(|| convex::warm_from_solution(route, &state.problem, &solution));
         let sign = state.problem.sign();
         outcome.warm = None;
-        Ok(assemble(sign, outcome, elapsed, model.id(), model.num_variables()))
+        Ok(assemble(
+            sign,
+            outcome,
+            elapsed,
+            model.id(),
+            prepared.arena().parameter_snapshot(),
+            model.num_variables(),
+        ))
     }
 
     fn validate_convex_options(&mut self, opts: &PounceOptions) -> Result<(), SolverError> {
@@ -246,11 +260,6 @@ impl PouncePersistent {
         self.validation = Some(CachedValidation { options: opts.clone(), result: cached });
         result
     }
-}
-
-fn parameter_snapshot(model: &Model) -> Vec<u64> {
-    let arena = model.arena();
-    oximo_autodiff::params_snapshot(&arena).into_iter().map(f64::to_bits).collect()
 }
 
 impl Solver for PouncePersistent {
@@ -316,17 +325,23 @@ mod tests {
     fn convex_ipm_retains_and_rebuilds_presolve_by_numeric_fingerprint() {
         let model = Model::new("convex_presolve_session");
         param!(model, weight = 1.0);
+        param!(model, unused = 7.0);
         variable!(model, 0.0 <= x <= 5.0);
         constraint!(model, fix, x == 1.0);
         objective!(model, Min, x.powi(2) + weight * x);
 
         let opts = PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm);
         let mut solver = PouncePersistent::new();
-        assert!(solver.solve(&model, &opts).unwrap().has_solution());
+        let first = solver.solve(&model, &opts).unwrap();
+        assert!(first.has_solution());
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(!state.ipm.as_ref().unwrap().last_reused_transform());
 
-        assert!(solver.solve(&model, &opts).unwrap().has_solution());
+        unused.set_param_value(9.0);
+        let second = solver.solve(&model, &opts).unwrap();
+        assert!(second.has_solution());
+        assert_eq!(second.value_of(unused), Ok(Some(9.0)));
+        assert_eq!(first.value_of(unused), Ok(Some(7.0)));
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(state.ipm.as_ref().unwrap().last_reused_transform());
 
@@ -341,6 +356,7 @@ mod tests {
         let model = Model::new("nlp_presolve_session");
         param!(model, target = 2.0);
         param!(model, scale = 1.0);
+        param!(model, unused = 7.0);
         variable!(model, 0.0 <= x <= 5.0, initial = 1.0);
         variable!(model, 0.0 <= y <= 5.0, initial = 1.0);
         constraint!(model, balance, scale * x + y == 3.0);
@@ -349,9 +365,20 @@ mod tests {
         let opts =
             PounceOptions::default().solver_selection(PounceSolverSelection::Nlp).presolve(true);
         let mut solver = PouncePersistent::new();
-        assert!(solver.solve(&model, &opts).unwrap().has_solution());
+        let first = solver.solve(&model, &opts).unwrap();
+        assert!(first.has_solution());
         let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(false));
+        assert_eq!(state.params.values().as_ptr(), first.parameters.values().as_ptr());
+
+        unused.set_param_value(9.0);
+        let second = solver.solve(&model, &opts).unwrap();
+        assert!(second.has_solution());
+        assert_eq!(second.value_of(unused), Ok(Some(9.0)));
+        assert_eq!(first.value_of(unused), Ok(Some(7.0)));
+        let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+        assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(true));
+        assert_eq!(state.params.values().as_ptr(), second.parameters.values().as_ptr());
 
         target.set_param_value(1.5);
         assert!(solver.solve(&model, &opts).unwrap().has_solution());

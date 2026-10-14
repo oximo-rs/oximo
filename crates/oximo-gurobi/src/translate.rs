@@ -57,6 +57,7 @@ pub(crate) fn default_env() -> Result<Env, SolverError> {
 /// incremental re-solves.
 pub(crate) struct Built {
     pub model_id: ModelId,
+    pub parameters: oximo_solver::ParameterSnapshot,
     pub model: gurobi_rs::Model,
     pub vars: Vec<gurobi_rs::Var>,
     pub constrs: Vec<ConstraintHandle>,
@@ -140,6 +141,7 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
 
     Ok(Built {
         model_id: model.id(),
+        parameters: prepared.arena().parameter_snapshot(),
         model: gurobi_model,
         vars: gurobi_vars,
         constrs: gurobi_constrs,
@@ -220,6 +222,7 @@ fn collect_after_optimize(
         &built.constrs,
         &built.soc_rows,
         built.obj_constant,
+        &built.parameters,
     );
 
     let best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
@@ -254,6 +257,7 @@ fn collect_after_optimize(
             raw_log: None,
             solver_name: Some(crate::NAME.into()),
             solver_version: Some(format!("{major}.{minor}.{technical}").into()),
+            parameters: built.parameters.clone(),
         },
         built.vars.len(),
     ))
@@ -952,6 +956,7 @@ fn collect_solution(
     constrs: &[ConstraintHandle],
     soc_rows: &[SocHandle],
     obj_constant: f64,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> Collected {
     // A primal point exists only when Gurobi actually stored one. `SolCount` is
     // the number of available solutions and it stays `> 0` for an incumbent
@@ -967,7 +972,7 @@ fn collect_solution(
         );
     }
 
-    let solutions = collect_pool(model, vars, obj_constant, sol_count);
+    let solutions = collect_pool(model, vars, obj_constant, sol_count, parameters);
 
     // Skip retrieval of duals and reduced costs for integer model classes,
     // where Gurobi refuses the attributes.
@@ -1038,11 +1043,12 @@ fn collect_pool(
     vars: &[gurobi_rs::Var],
     obj_constant: f64,
     n: i32,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> Vec<SolutionPoint> {
     // Single point (and the only path for LP/continuous models):
     // read the incumbent directly via `X` / `ObjVal`.
     if n <= 1 {
-        return vec![collect_incumbent(model, vars, obj_constant)];
+        return vec![collect_incumbent(model, vars, obj_constant, parameters)];
     }
 
     // A MIP solution pool. Gurobi sorts it best-first.
@@ -1063,10 +1069,11 @@ fn collect_pool(
             model_id: ModelId::UNASSIGNED,
             primal: index_map(&vals),
             objective,
+            parameters: parameters.clone(),
         });
     }
     if out.is_empty() {
-        out.push(collect_incumbent(model, vars, obj_constant));
+        out.push(collect_incumbent(model, vars, obj_constant, parameters));
     }
     out
 }
@@ -1075,6 +1082,7 @@ fn collect_incumbent(
     model: &mut gurobi_rs::Model,
     vars: &[gurobi_rs::Var],
     obj_constant: f64,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> SolutionPoint {
     let primal = model
         .get_obj_attr_batch(attr::X, vars.iter().copied())
@@ -1084,7 +1092,12 @@ fn collect_incumbent(
         .get_attr(attr::ObjVal)
         .ok()
         .and_then(|v| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(v));
-    SolutionPoint { model_id: ModelId::UNASSIGNED, primal, objective }
+    SolutionPoint {
+        model_id: ModelId::UNASSIGNED,
+        primal,
+        objective,
+        parameters: parameters.clone(),
+    }
 }
 
 /// Map a dense per-variable value array (in `VarId` order) to a sparse map.
@@ -1121,6 +1134,33 @@ mod status_tests {
     use oximo_core::{SosConstraint, SosMember, VarId};
 
     use super::*;
+
+    #[test]
+    fn pooled_points_share_translation_parameters_before_normalization() {
+        use oximo_core::prelude::*;
+        let model = Model::new("pooled parameter snapshots");
+        param!(model, p = 2.0);
+        variable!(model, x, Binary);
+        variable!(model, y, Binary);
+        constraint!(model, limit, x + y <= 1.0);
+        objective!(model, Max, p * x + y);
+        let opts = GurobiOptions::default().pool_search_mode(2).pool_solutions(3);
+        let env = default_env().unwrap();
+        let mut built = build(&model, &opts, &env).unwrap();
+        model.set_param(p, 4.0).unwrap();
+        built.model.optimize().unwrap();
+        assert_eq!(built.model.get_attr(attr::SolCount).unwrap(), 3);
+        let points =
+            collect_pool(&mut built.model, &built.vars, built.obj_constant, 3, &built.parameters);
+        assert_eq!(points.len(), 3);
+        for mut point in points {
+            assert_eq!(point.parameters.values().as_ptr(), built.parameters.values().as_ptr());
+            // Readback establishes provenance later in common normalization.
+            point.model_id = model.id();
+            assert_eq!(point.value_of(p), Ok(Some(2.0)));
+            assert_eq!(point.value_of(p * x + y).unwrap(), point.objective);
+        }
+    }
 
     #[test]
     fn integer_incumbents_do_not_report_dual_status() {

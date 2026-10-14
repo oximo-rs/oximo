@@ -142,13 +142,24 @@ Returns `Some(LinearTerms)` if the subtree is affine, `None` if it contains nonl
 ### `evaluate`
 
 ```rust,ignore
-use oximo_expr::{evaluate, EvalContext};
-let mut ctx = EvalContext::new();
-ctx.set_var(var_id, 3.0);
-let val: f64 = evaluate(&arena, expr_id, &ctx)?;
+use oximo_expr::evaluate;
+let variables: &[f64] = &[3.0]; // indexed by VarId
+let val: f64 = evaluate(&arena, expr_id, &variables)?;
 ```
 
 Numerically evaluates an expression subtree given variable assignments.
+
+To preserve parameters across rebinding, capture `arena.parameter_snapshot()`
+and wrap the variable context with `WithParameters`:
+
+```rust,ignore
+let parameters = arena.parameter_snapshot();
+let saved = oximo_expr::WithParameters::new(&variables, &parameters);
+let val = evaluate(&arena, expr_id, &saved)?;
+```
+
+The wrapper takes all parameters from the snapshot and returns `UnboundParam`
+for parameters added after capture.
 
 ### `simplify`
 

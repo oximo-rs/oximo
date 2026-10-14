@@ -88,6 +88,16 @@ result.values_of(&flow)?                                    // Iterator<(&IndexK
 result.values_of(&flow)?.filter(|(_, v)| *v != 0.0)         // nonzero only
 ```
 
+Expression, matrix, algebraic-constraint, and SOC queries use the parameter
+values captured for the solve. Changing a model parameter does not change an
+old result's answers. Each result and pooled `SolutionPoint` stores its model
+identity and an immutable `ParameterSnapshot`, shared without retaining the
+expression arena.
+
+Snapshot queries return `Ok(None)` for missing primal variables or parameters
+added after the solve. Newly constructed expressions can use captured parameters.
+Constraint definitions and bounds still come from the supplied model.
+
 ## `TerminationStatus`
 
 Why the solve stopped (complementary to whether a point was returned).

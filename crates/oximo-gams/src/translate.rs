@@ -48,6 +48,7 @@ pub fn solve(
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
     let prepared = LoweringContext::new(model)?;
+    let parameters = prepared.arena().parameter_snapshot();
     let kind = prepared.kind();
     let nonsmooth = analyze_gams_expressions(&prepared)?;
     let solve_type = gams_solve_type_for(kind, nonsmooth);
@@ -207,13 +208,20 @@ pub fn solve(
                 | ModelKind::MISOCP
                 | ModelKind::MINLP
         );
-        let mut result =
-            parseoximo_solution(&content, &soc_bounds, mixed_integer, vars.len(), elapsed, raw_log);
+        let mut result = parseoximo_solution(
+            &content,
+            &soc_bounds,
+            mixed_integer,
+            vars.len(),
+            elapsed,
+            raw_log,
+            &parameters,
+        );
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
         if result.has_solution() {
-            let pool = read_solution_pool(&tmp_dir, gams_exec, sense);
+            let pool = read_solution_pool(&tmp_dir, gams_exec, sense, &parameters);
             if !pool.is_empty() {
                 result.solutions = pool;
             }
@@ -311,6 +319,7 @@ fn parseoximo_solution(
     num_variables: usize,
     elapsed: std::time::Duration,
     raw_log: Option<String>,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> SolverResult {
     let mut modelstat: Option<i32> = None;
     let mut solvestat: Option<i32> = None;
@@ -409,7 +418,12 @@ fn parseoximo_solution(
     // The PUT solution file holds only the incumbent. `solve` augments this with
     // a sub-solver solution pool (if one was written) read from the run dir's GDX.
     let solutions = if has_sol {
-        vec![SolutionPoint { model_id: ModelId::UNASSIGNED, primal, objective: obj_val }]
+        vec![SolutionPoint {
+            model_id: ModelId::UNASSIGNED,
+            primal,
+            objective: obj_val,
+            parameters: parameters.clone(),
+        }]
     } else {
         Vec::new()
     };
@@ -444,6 +458,7 @@ fn parseoximo_solution(
             raw_log,
             solver_name: Some(crate::NAME.into()),
             solver_version,
+            parameters: parameters.clone(),
         },
         num_variables,
     )
@@ -461,6 +476,7 @@ fn read_solution_pool(
     tmp_dir: &Path,
     gams_exec: &str,
     sense: ObjectiveSense,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> Vec<SolutionPoint> {
     let gdxdump = gdxdump_path(gams_exec);
     let Ok(entries) = fs::read_dir(tmp_dir) else {
@@ -479,7 +495,7 @@ fn read_solution_pool(
             continue;
         }
         let dump = String::from_utf8_lossy(&out.stdout);
-        if let Some(pt) = parse_pool_member(&dump) {
+        if let Some(pt) = parse_pool_member(&dump, parameters) {
             members.push(pt);
         }
     }
@@ -509,7 +525,10 @@ fn gdxdump_path(gams_exec: &str) -> PathBuf {
 /// empty record `/ /` for a default-zero level). The objective variable `v_obj`
 /// carries the point's objective. Returns `None` for a GDX with no `v{i}`
 /// symbols (e.g. the pool index file).
-fn parse_pool_member(dump: &str) -> Option<SolutionPoint> {
+fn parse_pool_member(
+    dump: &str,
+    parameters: &oximo_solver::ParameterSnapshot,
+) -> Option<SolutionPoint> {
     let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
     let mut objective: Option<f64> = None;
     for line in dump.lines() {
@@ -528,7 +547,12 @@ fn parse_pool_member(dump: &str) -> Option<SolutionPoint> {
     if primal.is_empty() {
         None
     } else {
-        Some(SolutionPoint { model_id: ModelId::UNASSIGNED, primal, objective })
+        Some(SolutionPoint {
+            model_id: ModelId::UNASSIGNED,
+            primal,
+            objective,
+            parameters: parameters.clone(),
+        })
     }
 }
 
@@ -1659,7 +1683,15 @@ mod tests {
     fn parses_iterations_from_put_file() {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], false, 1, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(
+            content,
+            &[],
+            false,
+            1,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.iterations, 42);
         assert_eq!(r.best_bound, Some(10.0));
@@ -1668,9 +1700,52 @@ mod tests {
     }
 
     #[test]
+    fn put_and_gdx_points_share_translation_parameters_before_normalization() {
+        let model = Model::new("parsed parameter snapshots");
+        param!(model, p = 2.0);
+        variable!(model, x);
+        let parameters = model.arena().parameter_snapshot();
+        model.set_param(p, 4.0).unwrap();
+        let mut result = parseoximo_solution(
+            "STATUS=1\nSOLVESTAT=1\nOBJVAL=6\n0=3\n",
+            &[],
+            false,
+            1,
+            std::time::Duration::ZERO,
+            None,
+            &parameters,
+        );
+        assert_eq!(result.parameters.values().as_ptr(), parameters.values().as_ptr());
+        assert_eq!(
+            result.best().unwrap().parameters.values().as_ptr(),
+            parameters.values().as_ptr()
+        );
+        let pool = parse_pool_member(
+            "positive Variable v0 /L 4 /;\nVariable v_obj /L 8 /;\n",
+            &parameters,
+        )
+        .unwrap();
+        assert_eq!(pool.parameters.values().as_ptr(), parameters.values().as_ptr());
+        result.solutions.push(pool);
+        result.model_id = model.id();
+        let result = normalize_result(result, 1);
+        assert_eq!(result.value_of(p * x), Ok(Some(6.0)));
+        assert_eq!(result.solution(1).unwrap().value_of(p * x), Ok(Some(8.0)));
+        assert_eq!(result.value_of_with_current_parameters(p * x), Ok(Some(12.0)));
+    }
+
+    #[test]
     fn parses_bound_nodes_marginals_and_solver_version() {
         let content = "STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\nNODUSD=17\nMARGINALS=1\nSOLVER_VERSION=13.0.1\n0=2.5\nD0=1.0\n";
-        let r = parseoximo_solution(content, &[], true, 1, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(
+            content,
+            &[],
+            true,
+            1,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
         assert_eq!(r.best_bound, Some(8.0));
         assert_eq!(r.gap, None);
@@ -1683,7 +1758,15 @@ mod tests {
     #[test]
     fn integer_solution_status_keeps_reported_gap() {
         let content = "STATUS=8\nSOLVESTAT=1\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], true, 1, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(
+            content,
+            &[],
+            true,
+            1,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
         assert_eq!(r.termination, TerminationStatus::Feasible);
         assert_eq!(r.best_bound, Some(8.0));
         assert_eq!(r.gap, None);
@@ -1693,8 +1776,15 @@ mod tests {
     fn feasible_model_statuses_do_not_synthesize_global_bounds() {
         for status in [7, 8, 15, 16, 17] {
             let content = format!("STATUS={status}\nSOLVESTAT=1\nOBJVAL=10\n0=2.5\n");
-            let result =
-                parseoximo_solution(&content, &[], false, 1, std::time::Duration::ZERO, None);
+            let result = parseoximo_solution(
+                &content,
+                &[],
+                false,
+                1,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            );
             assert_eq!(result.termination, TerminationStatus::Feasible);
             assert_eq!(result.primal_status, PrimalStatus::FeasiblePoint);
             assert_eq!(result.best_bound, None);
@@ -1707,6 +1797,7 @@ mod tests {
             1,
             std::time::Duration::ZERO,
             None,
+            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(result.termination, TerminationStatus::Other("gams_modelstat_6".into()));
         assert!(!result.has_solution());
@@ -1716,8 +1807,15 @@ mod tests {
     fn time_limit_uses_model_status_as_point_evidence() {
         for (status, has_point) in [(8, true), (14, false)] {
             let content = format!("STATUS={status}\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n");
-            let result =
-                parseoximo_solution(&content, &[], true, 1, std::time::Duration::ZERO, None);
+            let result = parseoximo_solution(
+                &content,
+                &[],
+                true,
+                1,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            );
             assert_eq!(result.termination, TerminationStatus::TimeLimit);
             assert_eq!(result.has_solution(), has_point);
             assert!(result.gap.is_none());
@@ -1730,7 +1828,15 @@ mod tests {
     fn extreme_objective_bound_gap_does_not_overflow() {
         let content =
             format!("STATUS=8\nSOLVESTAT=3\nOBJVAL={}\nOBJEST={}\n0=2.5\n", f64::MAX, -f64::MAX);
-        let r = parseoximo_solution(&content, &[], true, 1, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(
+            &content,
+            &[],
+            true,
+            1,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
         assert_eq!(r.best_bound, Some(-f64::MAX));
         assert_eq!(r.gap, None);
     }
@@ -1738,7 +1844,15 @@ mod tests {
     #[test]
     fn continuous_objest_is_not_treated_as_a_global_bound() {
         let content = "STATUS=7\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
-        let r = parseoximo_solution(content, &[], false, 1, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(
+            content,
+            &[],
+            false,
+            1,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
         assert_eq!(r.best_bound, None);
         assert_eq!(r.gap, None);
@@ -1749,7 +1863,15 @@ mod tests {
     fn missing_objest_tokens_remain_unset() {
         for token in ["NA", "UNDF"] {
             let content = format!("STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST={token}\n0=2.5\n");
-            let r = parseoximo_solution(&content, &[], false, 1, std::time::Duration::ZERO, None);
+            let r = parseoximo_solution(
+                &content,
+                &[],
+                false,
+                1,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            );
             assert_eq!(r.best_bound, None, "OBJEST={token}");
             assert_eq!(r.gap, None, "OBJEST={token}");
         }
@@ -1759,7 +1881,15 @@ mod tests {
     fn soc_marginal_is_rescaled_to_norm_form() {
         let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\n";
         let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 }];
-        let r = parseoximo_solution(content, &bounds, false, 2, std::time::Duration::ZERO, None);
+        let r = parseoximo_solution(
+            content,
+            &bounds,
+            false,
+            2,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
         let z0 = r.soc_dual.get(&SocConstraintId(0)).copied().expect("SOC dual missing");
         assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");
     }

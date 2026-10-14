@@ -66,6 +66,8 @@ pub trait Solver {
     }
 
     /// Solves the given `Model` using this solver.
+    /// Results and all solution points must carry the model identity and the
+    /// parameter snapshot used to translate or update the native problem.
     ///
     /// # Errors
     ///

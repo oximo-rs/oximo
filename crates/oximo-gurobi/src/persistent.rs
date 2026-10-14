@@ -35,6 +35,8 @@ pub struct GurobiPersistent {
     /// a structural change doesn't create a fresh Gurobi environment.
     env: Option<Env>,
     state: Option<State>,
+    #[cfg(test)]
+    updates: usize,
 }
 
 impl std::fmt::Debug for GurobiPersistent {
@@ -121,12 +123,17 @@ impl GurobiPersistent {
             if snap.fingerprint == base.fingerprint {
                 push_deltas(&mut st.built, base, &snap, opts)?;
                 st.built.model_id = model.id();
+                st.built.parameters = snap.parameters.clone();
                 st.snap = Some(snap);
                 updated = true;
             }
         }
         if !updated {
             self.rebuild(model, opts)?;
+        }
+        #[cfg(test)]
+        if updated {
+            self.updates += 1;
         }
 
         let st = self.state.as_mut().expect("state present before solve");
@@ -153,12 +160,17 @@ impl GurobiPersistent {
             if snap.fingerprint == base.fingerprint {
                 push_deltas(&mut st.built, base, &snap, opts)?;
                 st.built.model_id = model.id();
+                st.built.parameters = snap.parameters.clone();
                 st.snap = Some(snap);
                 updated = true;
             }
         }
         if !updated {
             self.rebuild(model, opts)?;
+        }
+        #[cfg(test)]
+        if updated {
+            self.updates += 1;
         }
         let st = self.state.as_mut().expect("state present before solve");
         crate::translate::run_and_collect_with_callback(&mut st.built, kind, callback, mask)
@@ -288,6 +300,46 @@ mod tests {
     use oximo_solver::{PersistentSolver, Solver};
 
     use crate::{Gurobi, GurobiOptions};
+
+    #[test]
+    fn persistent_parameter_snapshots_refresh_on_native_reuse() {
+        let model = Model::new("resident parameter snapshots");
+        param!(model, p = 2.0);
+        param!(model, unused = 7.0);
+        variable!(model, 0.0 <= x <= 3.0);
+        objective!(model, Max, p * x);
+        let opts = GurobiOptions::default();
+        let mut solver = crate::Gurobi.persistent();
+        let first = solver.solve(&model, &opts).unwrap();
+        assert!(first.has_solution());
+        assert_eq!(solver.updates, 0);
+
+        model.set_param(unused, 9.0).unwrap();
+        let second = solver.solve(&model, &opts).unwrap();
+        assert!(second.has_solution());
+        assert_eq!(solver.updates, 1, "unused-only change must reuse the native problem");
+        assert!((second.objective().unwrap() - first.objective().unwrap()).abs() < 1e-5);
+        assert_eq!(second.value_of(unused), Ok(Some(9.0)));
+        assert_eq!(first.value_of(unused), Ok(Some(7.0)));
+
+        model.set_param(p, 4.0).unwrap();
+        let third = solver.solve(&model, &opts).unwrap();
+        assert!(third.has_solution());
+        assert_eq!(solver.updates, 2, "objective coefficient change must update in place");
+        let x_value = third.value_of(x).unwrap().unwrap();
+        assert_eq!(third.value_of(p * x), Ok(Some(4.0 * x_value)));
+        assert_eq!(first.value_of(p), Ok(Some(2.0)));
+
+        param!(model, added = 11.0);
+        let fourth = solver.solve(&model, &opts).unwrap();
+        assert!(fourth.has_solution());
+        assert_eq!(solver.updates, 3, "adding an unused parameter must reuse the native problem");
+        assert_eq!(fourth.value_of(added), Ok(Some(11.0)));
+        assert_eq!(third.value_of(added), Ok(None));
+        for point in &fourth.solutions {
+            assert_eq!(point.parameters.values().as_ptr(), fourth.parameters.values().as_ptr());
+        }
+    }
 
     #[test]
     fn fast_path_retags_results_for_a_distinct_structurally_identical_model() {

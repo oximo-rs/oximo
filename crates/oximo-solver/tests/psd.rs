@@ -1,5 +1,5 @@
 use oximo_core::prelude::*;
-use oximo_solver::{DualStatus, SolutionPoint, Solver, SolverError, SolverResult, snapshot};
+use oximo_solver::{DualStatus, Solver, SolverError, SolverResult, snapshot};
 
 #[derive(Debug)]
 struct ScalarOnly;
@@ -56,15 +56,11 @@ fn matrix_readback_checks_ownership_missing_entries_and_dual_status() {
     let foreign = Model::new("foreign");
     symmetric_variable!(foreign, y[2]);
     let foreign_handle = psd_constraint!(foreign, &y);
-    let mut result = SolverResult { model_id: m.id(), ..SolverResult::default() };
+    let mut result = SolverResult::for_model(&m);
     assert!(result.value_of_matrix(&y).is_err());
     assert!(result.psd_dual_of(foreign_handle).is_err());
     assert!(result.value_of_matrix(&x).unwrap().is_none());
-    result.solutions.push(SolutionPoint {
-        model_id: m.id(),
-        primal: [(x[(0, 0)].var_id().unwrap(), 1.0)].into_iter().collect(),
-        objective: None,
-    });
+    result.add_solution([(x[(0, 0)].var_id().unwrap(), 1.0)].into_iter().collect(), None);
     assert!(result.value_of_matrix(&x).unwrap().is_none());
     result.solutions[0].primal = x
         .upper_triangle()
@@ -84,30 +80,37 @@ fn matrix_readback_checks_ownership_missing_entries_and_dual_status() {
 }
 
 #[test]
-fn matrix_readback_uses_live_parameters_and_validates_all_owners_before_missing_values() {
+fn matrix_readback_distinguishes_saved_and_current_parameters_and_checks_all_owners() {
     let m = Model::new("readback");
     variable!(m, x);
     variable!(m, missing);
     param!(m, p = 2.0);
-    let point = SolutionPoint {
-        model_id: m.id(),
-        primal: [(x.var_id().unwrap(), 3.0)].into_iter().collect(),
-        objective: None,
-    };
+    let mut result = SolverResult::for_model(&m);
+    result.add_solution([(x.var_id().unwrap(), 3.0)].into_iter().collect(), None);
+    let point = result.best().unwrap();
     let matrix = SymmetricMatrix::from_upper_triangle(2, [p * x + 1.0, p * x, x]);
     assert_eq!(point.value_of_matrix(&matrix).unwrap().unwrap().upper_triangle(), &[7.0, 6.0, 3.0]);
     m.set_param(p, 4.0).unwrap();
+    assert_eq!(point.value_of_matrix(&matrix).unwrap().unwrap().upper_triangle(), &[7.0, 6.0, 3.0]);
     assert_eq!(
-        point.value_of_matrix(&matrix).unwrap().unwrap().upper_triangle(),
+        point.value_of_matrix_with_current_parameters(&matrix).unwrap().unwrap().upper_triangle(),
         &[13.0, 12.0, 3.0]
     );
     let other = Model::new("other");
     variable!(other, foreign);
     let mixed = SymmetricMatrix::from_upper_triangle(2, [missing, x, foreign]);
     assert!(point.value_of_matrix(&mixed).is_err());
-    let result =
-        SolverResult { model_id: m.id(), solutions: vec![point], ..SolverResult::default() };
+    assert!(point.value_of_matrix_with_current_parameters(&mixed).is_err());
     assert!(result.value_of_matrix(&mixed).is_err());
+    assert!(result.value_of_matrix_with_current_parameters(&mixed).is_err());
+    assert_eq!(
+        result.value_of_matrix(&matrix).unwrap().unwrap().upper_triangle(),
+        &[7.0, 6.0, 3.0]
+    );
+    assert_eq!(
+        result.value_of_matrix_with_current_parameters(&matrix).unwrap().unwrap().upper_triangle(),
+        &[13.0, 12.0, 3.0]
+    );
     assert!(
         result
             .value_of_matrix(&SymmetricMatrix::from_upper_triangle(1, [missing]))

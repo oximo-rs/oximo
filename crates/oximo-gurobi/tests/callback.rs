@@ -5,7 +5,7 @@ use oximo_gurobi::{
     Callback, CallbackLocation, CallbackMask, CbResult, Gurobi, GurobiOptions, GurobiPresolve,
     Where,
 };
-use oximo_solver::{PersistentSolver, Solver};
+use oximo_solver::{PersistentSolver, Solver, UniversalOptionsExt};
 
 #[derive(Default)]
 struct Locations(Vec<CallbackLocation>);
@@ -57,6 +57,49 @@ fn callback_solve_uses_common_result_collection() {
 }
 
 struct FailingCallback;
+
+struct RebindParameter<'a> {
+    model: &'a Model,
+    parameter: Expr<'a, oximo_expr::Constant>,
+    value: f64,
+    calls: usize,
+}
+
+impl Callback for RebindParameter<'_> {
+    fn callback(&mut self, _: Where) -> CbResult {
+        self.model.set_param(self.parameter, self.value)?;
+        self.calls += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn callback_parameter_rebinding_does_not_change_solved_snapshot() {
+    let model = Model::new("callback parameters");
+    param!(model, p = 2.0);
+    variable!(model, 0.0 <= x <= 3.0);
+    objective!(model, Max, p * x);
+    let opts = GurobiOptions::default().presolve(GurobiPresolve::Off).threads(1);
+    let mut callback = RebindParameter { model: &model, parameter: p, value: 4.0, calls: 0 };
+    let first = Gurobi.solve_with_callback(&model, &opts, &mut callback).unwrap();
+    assert!(callback.calls > 0);
+    let value = first.value_of(x).unwrap().unwrap();
+    assert_eq!(first.value_of(p * x), Ok(Some(2.0 * value)));
+    assert_eq!(first.value_of_with_current_parameters(p * x), Ok(Some(4.0 * value)));
+
+    let mut resident = Gurobi.persistent();
+    let second = resident.solve(&model, &opts).unwrap();
+    model.set_param(p, 6.0).unwrap();
+    callback.value = 8.0;
+    callback.calls = 0;
+    let third = resident.solve_with_callback(&model, &opts, &mut callback).unwrap();
+    assert!(callback.calls > 0);
+    let value = third.value_of(x).unwrap().unwrap();
+    assert_eq!(third.value_of(p * x), Ok(Some(6.0 * value)));
+    assert_eq!(third.value_of_with_current_parameters(p * x), Ok(Some(8.0 * value)));
+    assert_eq!(second.parameters.values(), &[4.0]);
+    assert_eq!(first.parameters.values(), &[2.0]);
+}
 
 impl Callback for FailingCallback {
     fn callback(&mut self, _where: Where) -> CbResult {

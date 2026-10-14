@@ -117,6 +117,7 @@ pub(crate) struct Meta {
     /// Count of leading SOC blocks that are explicit cones (duals reported).
     n_explicit: usize,
     psd_blocks: Vec<(PsdConstraintId, usize, usize)>,
+    parameters: oximo_solver::ParameterSnapshot,
 }
 
 /// A translated Clarabel problem, conic data plus the [`Meta`] to read its
@@ -266,6 +267,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
             soc_block_starts,
             n_explicit,
             psd_blocks,
+            parameters: prepared.arena().parameter_snapshot(),
         },
     })
 }
@@ -540,7 +542,12 @@ pub(crate) fn read_result(
                 .unwrap_or_default();
         let objective = ObjectiveTransform { sign: meta.sign, offset: meta.obj_constant }
             .restore(solver.solution.obj_val);
-        solutions.push(SolutionPoint { model_id, primal, objective });
+        solutions.push(SolutionPoint {
+            model_id,
+            primal,
+            objective,
+            parameters: meta.parameters.clone(),
+        });
 
         for (r, &z) in solver.solution.z.iter().enumerate() {
             if let Some(Some(projection)) = meta.row_duals.get(r) {
@@ -593,6 +600,7 @@ pub(crate) fn read_result(
             raw_log: None,
             solver_name: Some(crate::NAME.into()),
             solver_version: None,
+            parameters: meta.parameters.clone(),
         },
         meta.num_variables,
     )
@@ -860,6 +868,7 @@ mod tests {
             soc_block_starts: Vec::new(),
             psd_blocks: Vec::new(),
             n_explicit: 0,
+            parameters: oximo_solver::ParameterSnapshot::default(),
         };
 
         let bound = mapped_objective_bound(&meta, -10.0, -8.0);
@@ -876,6 +885,7 @@ mod tests {
             soc_block_starts: Vec::new(),
             psd_blocks: Vec::new(),
             n_explicit: 0,
+            parameters: oximo_solver::ParameterSnapshot::default(),
         };
 
         for (primal, dual) in

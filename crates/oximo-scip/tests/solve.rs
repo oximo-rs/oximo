@@ -282,12 +282,18 @@ fn feasibility_infeasible_unbounded_and_limits() {
 fn persistence_reuses_and_rebuilds_without_stale_parameters() {
     let m = Model::new("resident");
     param!(m, p = 2.0);
+    param!(m, unused = 7.0);
     variable!(m,0.0<=x<=5.0);
     objective!(m, Max, p * x + 3.0);
     let opts = ScipOptions::default();
     let mut solver = Scip::new().persistent();
-    close(solver.solve(&m, &opts).unwrap().objective().unwrap(), 13.0);
-    solver.solve(&m, &opts).unwrap();
+    let first = solver.solve(&m, &opts).unwrap();
+    close(first.objective().unwrap(), 13.0);
+    unused.set_param_value(9.0);
+    let second = solver.solve(&m, &opts).unwrap();
+    close(second.objective().unwrap(), 13.0);
+    assert_eq!(first.value_of(unused), Ok(Some(7.0)));
+    assert_eq!(second.value_of(unused), Ok(Some(9.0)));
     assert_eq!(solver.build_count(), 1);
     assert_eq!(solver.reuse_count(), 1);
     variable!(m,0.0<=y<=1.0);

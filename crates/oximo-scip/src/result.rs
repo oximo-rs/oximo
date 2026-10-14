@@ -4,7 +4,7 @@ use crate::{
     translate::{Body, Snapshot},
 };
 use oximo_core::{Model, ModelKind, ObjectiveSense, VarId};
-use oximo_expr::{EvalContext, ParamId, evaluate};
+use oximo_expr::{EvalContext, ParamId, WithParameters, evaluate};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -50,6 +50,20 @@ impl EvalContext for Values<'_> {
     }
 }
 
+fn objective_at(
+    model: &Model,
+    primal: &FxHashMap<VarId, f64>,
+    parameters: &oximo_solver::ParameterSnapshot,
+) -> Result<f64, SolverError> {
+    model
+        .objective()
+        .as_ref()
+        .map_or(Ok(0.0), |o| {
+            evaluate(&model.arena(), o.expr, &WithParameters::new(&Values(primal), parameters))
+        })
+        .map_err(crate::backend)
+}
+
 pub(crate) fn collect(
     native: &Native<Solved>,
     mapping: &ScipMapping,
@@ -57,6 +71,7 @@ pub(crate) fn collect(
     model: &Model,
     shared: &SharedState,
 ) -> Result<ScipSolveOutput, SolverError> {
+    let parameters = &snapshot.parameters;
     let shared = shared.borrow();
     let status = termination(native.status());
     let infinity = native.real_param("numerics/infinity");
@@ -89,17 +104,17 @@ pub(crate) fn collect(
             generated.insert(ScipGeneratedVarId(i), value);
             extra += g.objective * value;
         }
-        let objective = model
-            .objective()
-            .as_ref()
-            .map_or(Ok(0.0), |o| evaluate(&model.arena(), o.expr, &Values(&primal)))
-            .map_err(crate::backend)?
-            + extra;
+        let objective = objective_at(model, &primal, parameters)? + extra;
         if !objective.is_finite() {
             return Err(crate::backend("non-finite reconstructed objective"));
         }
         points.push((
-            SolutionPoint { model_id: model.id(), primal, objective: Some(objective) },
+            SolutionPoint {
+                model_id: model.id(),
+                primal,
+                objective: Some(objective),
+                parameters: parameters.clone(),
+            },
             generated,
         ));
     }
@@ -131,6 +146,7 @@ pub(crate) fn collect(
         node_count: Some(native.n_nodes() as u64),
         raw_status: Some(format!("{:?}", native.status()).into()),
         solver_name: Some("SCIP".into()),
+        parameters: parameters.clone(),
         ..Default::default()
     };
     // Require a complete valid original LP certificate. A presolved-away row

@@ -17,7 +17,8 @@ pub use infeasibility::{Iis, IisReport, InfeasibilityDiagnosis, VarBoundKind, is
 pub use options::{HasUniversal, UniversalOptions, UniversalOptionsExt};
 pub use persistent::PersistentSolver;
 pub use result::{
-    ConstraintEvaluation, DualStatus, ModelReport, SocEvaluation, SolutionPoint, SolverResult,
+    ConstraintEvaluation, DualStatus, ModelReport, ParameterSnapshot, SocEvaluation, SolutionPoint,
+    SolverResult,
 };
 pub use solver::Solver;
 pub use status::{PrimalStatus, SolverError, TerminationStatus};

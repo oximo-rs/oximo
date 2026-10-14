@@ -31,6 +31,8 @@ pub struct Snapshot {
     pub ub: Vec<f64>,
     /// Hash of the structural parts that the fast path cannot push.
     pub fingerprint: u64,
+    /// Parameters used to extract this snapshot's native coefficients.
+    pub parameters: oximo_expr::ParameterSnapshot,
 }
 
 /// Compute the incremental [`Snapshot`] of a linear model (`LP`/`MILP`).
@@ -130,7 +132,14 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
         );
     }
 
-    Ok(Snapshot { obj_costs, obj_constant, lb, ub, fingerprint: hasher.finish() })
+    Ok(Snapshot {
+        parameters: prepared.arena().parameter_snapshot(),
+        obj_costs,
+        obj_constant,
+        lb,
+        ub,
+        fingerprint: hasher.finish(),
+    })
 }
 
 /// Hash the parts that decide column count, integrality, and objective sense.
