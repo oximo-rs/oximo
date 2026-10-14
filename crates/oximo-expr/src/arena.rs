@@ -13,6 +13,37 @@ use crate::classify::{Degree, ExprClassCache};
 
 static NEXT_MODEL_ID: AtomicU32 = AtomicU32::new(1);
 
+/// Immutable parameter values captured from an expression arena.
+#[derive(Clone, Debug, Default)]
+pub struct ParameterSnapshot(Arc<Vec<f64>>);
+
+impl PartialEq for ParameterSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_bits(other)
+    }
+}
+
+impl Eq for ParameterSnapshot {}
+
+impl ParameterSnapshot {
+    /// Saved value, or `None` when the parameter was absent at capture time.
+    pub fn value(&self, id: ParamId) -> Option<f64> {
+        self.0.get(id.index()).copied()
+    }
+
+    /// Saved values in parameter-ID order.
+    pub fn values(&self) -> &[f64] {
+        &self.0
+    }
+
+    /// Compare exact parameter representations, including signed zero and NaN payloads.
+    pub fn same_bits(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+            || (self.0.len() == other.0.len()
+                && self.0.iter().zip(other.0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()))
+    }
+}
+
 /// Stable identity shared by a model, its expression handles, and its results.
 ///
 /// IDs are unique within a process. A transformed or cloned model receives a new
@@ -365,6 +396,11 @@ impl ExprArena {
         self.param_values.len()
     }
 
+    /// Capture parameter values without retaining the expression arena.
+    pub fn parameter_snapshot(&self) -> ParameterSnapshot {
+        ParameterSnapshot(Arc::clone(&self.param_values))
+    }
+
     /// Current value bound to parameter `p`.
     ///
     /// # Panics
@@ -394,6 +430,9 @@ impl ExprArena {
             !self.locked_parameters.contains(&p),
             "cannot change a parameter embedded in a reformulation; change the source model before reformulating"
         );
+        if self.param_values[p.index()].to_bits() == value.to_bits() {
+            return;
+        }
         Arc::make_mut(&mut self.param_values)[p.index()] = value;
     }
 

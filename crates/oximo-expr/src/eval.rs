@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use thiserror::Error;
 
-use crate::arena::{ExprArena, ExprId, ExprNode, ParamId, VarId};
+use crate::arena::{ExprArena, ExprId, ExprNode, ParamId, ParameterSnapshot, VarId};
 
 #[derive(Debug, Error)]
 pub enum EvalError {
@@ -16,6 +16,53 @@ pub enum EvalError {
 pub trait EvalContext {
     fn var(&self, v: VarId) -> Option<f64>;
     fn param(&self, p: ParamId) -> Option<f64>;
+
+    /// Resolve a parameter, falling back to the arena by default.
+    /// Use [`WithParameters`] to evaluate strictly against a parameter snapshot.
+    fn resolve_param(&self, id: ParamId, arena: &ExprArena) -> Option<f64> {
+        self.param(id).or_else(|| arena.try_param_value(id))
+    }
+}
+
+/// An evaluation context that takes variables from another context and parameters
+/// exclusively from a snapshot. Missing parameters never fall back to the arena
+/// or the wrapped context.
+///
+/// ```
+/// use oximo_expr::{ExprArena, WithParameters, evaluate};
+/// let mut arena = ExprArena::new();
+/// let p = arena.new_param(2.0);
+/// let expr = arena.param(p);
+/// let parameters = arena.parameter_snapshot();
+/// arena.set_param_value(p, 4.0);
+/// let variables: &[f64] = &[];
+/// let context = WithParameters::new(&variables, &parameters);
+/// assert_eq!(evaluate(&arena, expr, &context).unwrap(), 2.0);
+/// ```
+#[derive(Debug)]
+pub struct WithParameters<'a, C: ?Sized> {
+    context: &'a C,
+    parameters: &'a ParameterSnapshot,
+}
+
+impl<'a, C: EvalContext + ?Sized> WithParameters<'a, C> {
+    pub fn new(context: &'a C, parameters: &'a ParameterSnapshot) -> Self {
+        Self { context, parameters }
+    }
+}
+
+impl<C: EvalContext + ?Sized> EvalContext for WithParameters<'_, C> {
+    fn var(&self, id: VarId) -> Option<f64> {
+        self.context.var(id)
+    }
+
+    fn param(&self, id: ParamId) -> Option<f64> {
+        self.parameters.value(id)
+    }
+
+    fn resolve_param(&self, id: ParamId, _: &ExprArena) -> Option<f64> {
+        self.param(id)
+    }
 }
 
 impl EvalContext for &[f64] {
@@ -41,9 +88,7 @@ pub fn evaluate<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Resul
     match arena.get(id) {
         ExprNode::Const(c) => Ok(*c),
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v)),
-        ExprNode::Param(p) => {
-            ctx.param(*p).or_else(|| arena.try_param_value(*p)).ok_or(EvalError::UnboundParam(*p))
-        }
+        ExprNode::Param(p) => ctx.resolve_param(*p, arena).ok_or(EvalError::UnboundParam(*p)),
         ExprNode::Linear { coeffs, constant } => eval_linear(coeffs, *constant, ctx),
         _ => eval_compound(arena, id, ctx),
     }
@@ -70,9 +115,7 @@ fn eval_leaf<C: EvalContext>(
     Some(match node {
         ExprNode::Const(c) => Ok(*c),
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v)),
-        ExprNode::Param(p) => {
-            ctx.param(*p).or_else(|| arena.try_param_value(*p)).ok_or(EvalError::UnboundParam(*p))
-        }
+        ExprNode::Param(p) => ctx.resolve_param(*p, arena).ok_or(EvalError::UnboundParam(*p)),
         ExprNode::Linear { coeffs, constant } => eval_linear(coeffs, *constant, ctx),
         _ => return None,
     })
@@ -229,10 +272,7 @@ fn eval_node_array<C: EvalContext>(
     Ok(match arena.get(cur) {
         ExprNode::Const(c) => *c,
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v))?,
-        ExprNode::Param(p) => ctx
-            .param(*p)
-            .or_else(|| arena.try_param_value(*p))
-            .ok_or(EvalError::UnboundParam(*p))?,
+        ExprNode::Param(p) => ctx.resolve_param(*p, arena).ok_or(EvalError::UnboundParam(*p))?,
         ExprNode::Add(children) => {
             let mut acc = 0.0;
             for c in children {
@@ -301,10 +341,9 @@ fn eval_hashed<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Result
         let value = match arena.get(cur) {
             ExprNode::Const(c) => *c,
             ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v))?,
-            ExprNode::Param(p) => ctx
-                .param(*p)
-                .or_else(|| arena.try_param_value(*p))
-                .ok_or(EvalError::UnboundParam(*p))?,
+            ExprNode::Param(p) => {
+                ctx.resolve_param(*p, arena).ok_or(EvalError::UnboundParam(*p))?
+            }
             ExprNode::Add(children) => {
                 let mut acc = 0.0;
                 for c in children {
