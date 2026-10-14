@@ -44,7 +44,7 @@ fn bench(c: &mut Criterion) {
             model_id: model.id(),
             primal: x.upper_triangle().iter().map(|entry| (entry.var_id().unwrap(), 3.0)).collect(),
             objective: None,
-            parameters: oximo_solver::ParameterSnapshot::default(),
+            parameters: model.arena().parameter_snapshot(),
         };
         for (name, matrix) in [("variables", &x), ("affine", &affine)] {
             readback.bench_function(BenchmarkId::new(name, n), |b| {
