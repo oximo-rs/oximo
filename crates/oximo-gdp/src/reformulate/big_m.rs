@@ -455,6 +455,7 @@ impl PlanBuilder {
         for &root in bounder.supporting_roots() {
             self.dependencies(&arena, root);
         }
+        self.locked_constraints.extend(bounder.supporting_constraints());
 
         let scopes = parent_scopes(self, &bounder, data, options, methods, row_start);
         let mut local_bounder = scopes.as_ref().map(|scopes| bounder.scoped(scopes, None));

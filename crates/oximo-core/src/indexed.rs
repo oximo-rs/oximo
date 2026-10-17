@@ -22,8 +22,12 @@ enum ConstraintFamilyLookup {
 }
 
 impl<T: Copy> ConstraintFamilyStorage<T> {
-    fn new(keys: Vec<IndexKey>, axes: Option<&[Axis]>, values: Vec<T>) -> Self {
-        assert_eq!(keys.len(), values.len(), "constraint family key/value length mismatch");
+    fn new(
+        keys: Vec<IndexKey>,
+        axes: Option<&[Axis]>,
+        values: impl IntoIterator<Item = T>,
+    ) -> Self {
+        let mut values = values.into_iter();
         let lookup = axes.map_or_else(
             || {
                 ConstraintFamilyLookup::Sparse(
@@ -32,7 +36,15 @@ impl<T: Copy> ConstraintFamilyStorage<T> {
             },
             |axes| ConstraintFamilyLookup::Dense(axes.into()),
         );
-        Self { entries: keys.into_iter().zip(values).collect(), lookup }
+        let entries = keys
+            .into_iter()
+            .map(|key| {
+                let value = values.next().expect("constraint family value missing");
+                (key, value)
+            })
+            .collect();
+        assert!(values.next().is_none(), "too many constraint family values");
+        Self { entries, lookup }
     }
 
     fn get(&self, key: &IndexKey) -> Option<T> {
@@ -65,7 +77,7 @@ macro_rules! constraint_family {
         }
 
         impl<K> $name<K> {
-            pub(crate) fn new(keys: Vec<IndexKey>, axes: Option<&[Axis]>, values: Vec<$value>) -> Self {
+            pub(crate) fn new(keys: Vec<IndexKey>, axes: Option<&[Axis]>, values: impl IntoIterator<Item = $value>) -> Self {
                 Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
             }
 
@@ -93,26 +105,65 @@ macro_rules! constraint_family {
     };
 }
 
-constraint_family!(
-    /// Owned handle returned by an indexed single-relation `constraint!` declaration.
-    ///
-    /// IDs refer to rows of the originating model.
-    /// `get` supports integer, string, and tuple keys, including sparse domains.
-    IndexedConstraint, ConstraintHandle
-);
-
-/// Owned handles returned by an indexed single-relation indicator declaration.
-#[derive(Clone, Debug)]
-pub struct IndexedIndicatorConstraint<'a, K = IndexKey> {
-    storage: ConstraintFamilyStorage<IndicatorConstraintHandle<'a>>,
+/// Indexed typed constraints in domain order.
+pub struct IndexedConstraint<K = IndexKey, F = crate::semantic::Erased, S = crate::semantic::Erased>
+{
+    storage: ConstraintFamilyStorage<ConstraintHandle<F, S>>,
     _marker: PhantomData<fn() -> K>,
 }
 
-impl<'a, K> IndexedIndicatorConstraint<'a, K> {
+impl<K, F, S> Clone for IndexedConstraint<K, F, S> {
+    fn clone(&self) -> Self {
+        Self { storage: self.storage.clone(), _marker: PhantomData }
+    }
+}
+
+impl<K, F, S> std::fmt::Debug for IndexedConstraint<K, F, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexedConstraint").field("entries", &self.storage.entries).finish()
+    }
+}
+
+impl<K, F, S> IndexedConstraint<K, F, S> {
     pub(crate) fn new(
         keys: Vec<IndexKey>,
         axes: Option<&[Axis]>,
-        values: Vec<IndicatorConstraintHandle<'a>>,
+        values: impl IntoIterator<Item = ConstraintHandle<F, S>>,
+    ) -> Self {
+        Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
+    }
+
+    pub fn len(&self) -> usize {
+        self.storage.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.storage.entries.is_empty()
+    }
+
+    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<ConstraintHandle<F, S>> {
+        self.storage.get(&key.into())
+    }
+}
+
+impl<K: FromIndexKey, F, S> IndexedConstraint<K, F, S> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, ConstraintHandle<F, S>)> + '_ {
+        self.storage.entries.iter().map(|(key, value)| (K::from_index_key(key), *value))
+    }
+}
+
+/// Owned handles returned by an indexed single-relation indicator declaration.
+#[derive(Clone, Debug)]
+pub struct IndexedIndicatorConstraint<K = IndexKey> {
+    storage: ConstraintFamilyStorage<IndicatorConstraintHandle>,
+    _marker: PhantomData<fn() -> K>,
+}
+
+impl<K> IndexedIndicatorConstraint<K> {
+    pub(crate) fn new(
+        keys: Vec<IndexKey>,
+        axes: Option<&[Axis]>,
+        values: Vec<IndicatorConstraintHandle>,
     ) -> Self {
         Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
     }
@@ -122,29 +173,30 @@ impl<'a, K> IndexedIndicatorConstraint<'a, K> {
     pub fn is_empty(&self) -> bool {
         self.storage.entries.is_empty()
     }
-    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<IndicatorConstraintHandle<'a>> {
+
+    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<IndicatorConstraintHandle> {
         self.storage.get(&key.into())
     }
 }
 
-impl<'a, K: FromIndexKey> IndexedIndicatorConstraint<'a, K> {
-    pub fn iter(&self) -> impl Iterator<Item = (K, IndicatorConstraintHandle<'a>)> + '_ {
+impl<K: FromIndexKey> IndexedIndicatorConstraint<K> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, IndicatorConstraintHandle)> + '_ {
         self.storage.entries.iter().map(|(key, value)| (K::from_index_key(key), *value))
     }
 }
 
 /// Owned handles returned by an indexed two-sided indicator declaration.
 #[derive(Clone, Debug)]
-pub struct IndexedRangeIndicatorConstraint<'a, K = IndexKey> {
-    storage: ConstraintFamilyStorage<RangeIndicatorConstraintHandles<'a>>,
+pub struct IndexedRangeIndicatorConstraint<K = IndexKey> {
+    storage: ConstraintFamilyStorage<RangeIndicatorConstraintHandles>,
     _marker: PhantomData<fn() -> K>,
 }
 
-impl<'a, K> IndexedRangeIndicatorConstraint<'a, K> {
+impl<K> IndexedRangeIndicatorConstraint<K> {
     pub(crate) fn new(
         keys: Vec<IndexKey>,
         axes: Option<&[Axis]>,
-        values: Vec<RangeIndicatorConstraintHandles<'a>>,
+        values: Vec<RangeIndicatorConstraintHandles>,
     ) -> Self {
         Self { storage: ConstraintFamilyStorage::new(keys, axes, values), _marker: PhantomData }
     }
@@ -154,13 +206,14 @@ impl<'a, K> IndexedRangeIndicatorConstraint<'a, K> {
     pub fn is_empty(&self) -> bool {
         self.storage.entries.is_empty()
     }
-    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<RangeIndicatorConstraintHandles<'a>> {
+
+    pub fn get<Q: Into<IndexKey>>(&self, key: Q) -> Option<RangeIndicatorConstraintHandles> {
         self.storage.get(&key.into())
     }
 }
 
-impl<'a, K: FromIndexKey> IndexedRangeIndicatorConstraint<'a, K> {
-    pub fn iter(&self) -> impl Iterator<Item = (K, RangeIndicatorConstraintHandles<'a>)> + '_ {
+impl<K: FromIndexKey> IndexedRangeIndicatorConstraint<K> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, RangeIndicatorConstraintHandles)> + '_ {
         self.storage.entries.iter().map(|(key, value)| (K::from_index_key(key), *value))
     }
 }

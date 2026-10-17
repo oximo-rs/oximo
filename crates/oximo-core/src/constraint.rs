@@ -24,53 +24,165 @@ impl fmt::Display for Sense {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConstraintId(pub u32);
 
-/// A model-bound handle to an algebraic constraint.
-///
-/// Constraint declaration macros return this type.
-/// Use [`Self::id`] when a backend-facing raw numeric ID
-/// is explicitly required.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ConstraintHandle {
-    id: ConstraintId,
+/// A typed reference to a semantic constraint.
+pub struct ConstraintHandle<F = crate::semantic::Erased, S = crate::semantic::Erased> {
+    id: crate::semantic::SemanticConstraintId,
     model_id: ModelId,
+    marker: std::marker::PhantomData<fn() -> (F, S)>,
 }
 
-impl ConstraintHandle {
-    pub(crate) const fn new(id: ConstraintId, model_id: ModelId) -> Self {
-        Self { id, model_id }
+impl<F, S> Copy for ConstraintHandle<F, S> {}
+impl<F, S> Clone for ConstraintHandle<F, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F, S> fmt::Debug for ConstraintHandle<F, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConstraintHandle")
+            .field("id", &self.id)
+            .field("model_id", &self.model_id)
+            .finish()
+    }
+}
+
+impl<F, S, G, T> PartialEq<ConstraintHandle<G, T>> for ConstraintHandle<F, S> {
+    fn eq(&self, other: &ConstraintHandle<G, T>) -> bool {
+        self.id == other.id && self.model_id == other.model_id
+    }
+}
+
+impl<F, S> Eq for ConstraintHandle<F, S> {}
+impl<F, S> std::hash::Hash for ConstraintHandle<F, S> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.model_id.hash(state);
+    }
+}
+
+impl<F, S> ConstraintHandle<F, S> {
+    /// Create a typed handle from a semantic constraint ID and its model ID.
+    pub(crate) fn new(
+        id: impl Into<crate::semantic::SemanticConstraintId>,
+        model_id: ModelId,
+    ) -> Self {
+        Self { id: id.into(), model_id, marker: std::marker::PhantomData }
     }
 
-    #[must_use]
-    pub const fn id(self) -> ConstraintId {
+    /// Return the semantic constraint ID, including its registry kind.
+    pub const fn id(self) -> crate::semantic::SemanticConstraintId {
         self.id
     }
 
-    #[must_use]
+    /// Return the ID of the model that owns this constraint.
     pub const fn model_id(self) -> ModelId {
         self.model_id
     }
 
-    #[must_use]
+    /// Return the constraint's zero-based index within its registry.
     pub fn index(self) -> usize {
         self.id.index()
     }
-}
 
-impl From<ConstraintHandle> for ConstraintId {
-    fn from(value: ConstraintHandle) -> Self {
-        value.id
+    /// Remove the function/set type markers while preserving the constraint and model IDs.
+    pub fn erase(self) -> ConstraintHandle {
+        ConstraintHandle::new(self.id, self.model_id)
     }
-}
 
-impl PartialEq<ConstraintId> for ConstraintHandle {
-    fn eq(&self, other: &ConstraintId) -> bool {
-        self.id == *other
+    /// Return the algebraic row ID, or `None` if this constraint has no algebraic view.
+    pub const fn try_row_id(self) -> Option<ConstraintId> {
+        match self.id {
+            crate::semantic::SemanticConstraintId::Algebraic(id) => Some(id),
+            _ => None,
+        }
     }
-}
 
-impl PartialEq<ConstraintHandle> for ConstraintId {
-    fn eq(&self, other: &ConstraintHandle) -> bool {
-        *self == other.id
+    /// Return the explicit SOC ID, or `None` if this constraint has no SOC view.
+    pub const fn try_soc_id(self) -> Option<crate::SocConstraintId> {
+        match self.id {
+            crate::semantic::SemanticConstraintId::SecondOrderCone(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Return the PSD ID, or `None` if this constraint has no PSD view.
+    pub const fn try_psd_id(self) -> Option<crate::PsdConstraintId> {
+        match self.id {
+            crate::semantic::SemanticConstraintId::PositiveSemidefinite(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Return the SOS ID, or `None` if this constraint has no SOS view.
+    pub const fn try_sos_id(self) -> Option<crate::SosConstraintId> {
+        match self.id {
+            crate::semantic::SemanticConstraintId::SpecialOrderedSet(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Return the indicator ID, or `None` if this constraint has no indicator view.
+    pub const fn try_indicator_id(self) -> Option<crate::IndicatorConstraintId> {
+        match self.id {
+            crate::semantic::SemanticConstraintId::Indicator(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Return the ID of the algebraic row backing this constraint.
+    ///
+    /// # Panics
+    /// Panics when the constraint has no algebraic row.
+    pub const fn row_id(self) -> ConstraintId {
+        match self.id {
+            crate::semantic::SemanticConstraintId::Algebraic(id) => id,
+            _ => panic!("constraint has no algebraic row"),
+        }
+    }
+
+    /// Return the ID of this constraint in the explicit SOC registry.
+    ///
+    /// # Panics
+    /// Panics when the constraint has no SOC view.
+    pub const fn soc_id(self) -> crate::SocConstraintId {
+        match self.id {
+            crate::semantic::SemanticConstraintId::SecondOrderCone(id) => id,
+            _ => panic!("constraint has no SOC view"),
+        }
+    }
+
+    /// Return the ID of this constraint in the SOS registry.
+    ///
+    /// # Panics
+    /// Panics when the constraint has no SOS view.
+    pub const fn sos_id(self) -> crate::SosConstraintId {
+        match self.id {
+            crate::semantic::SemanticConstraintId::SpecialOrderedSet(id) => id,
+            _ => panic!("constraint has no SOS view"),
+        }
+    }
+
+    /// Return the ID of this constraint in the indicator registry.
+    ///
+    /// # Panics
+    /// Panics when the constraint has no indicator view.
+    pub const fn indicator_id(self) -> crate::IndicatorConstraintId {
+        match self.id {
+            crate::semantic::SemanticConstraintId::Indicator(id) => id,
+            _ => panic!("constraint has no indicator view"),
+        }
+    }
+
+    /// Return the ID of this constraint in the PSD registry.
+    ///
+    /// # Panics
+    /// Panics when the constraint has no PSD view.
+    pub const fn psd_id(self) -> crate::PsdConstraintId {
+        match self.id {
+            crate::semantic::SemanticConstraintId::PositiveSemidefinite(id) => id,
+            _ => panic!("constraint has no PSD view"),
+        }
     }
 }
 
@@ -92,12 +204,13 @@ pub enum RangeConstraintHandles {
 }
 
 impl RangeConstraintHandles {
+    /// Return the underlying row IDs for an interval or split range constraint.
     #[must_use]
     pub const fn ids(self) -> RangeConstraintIds {
         match self {
-            Self::Interval(handle) => RangeConstraintIds::Interval(handle.id()),
+            Self::Interval(handle) => RangeConstraintIds::Interval(handle.row_id()),
             Self::Split { lower, upper } => {
-                RangeConstraintIds::Split { lower: lower.id(), upper: upper.id() }
+                RangeConstraintIds::Split { lower: lower.row_id(), upper: upper.row_id() }
             }
         }
     }
@@ -122,6 +235,7 @@ impl PartialEq<RangeConstraintHandles> for RangeConstraintIds {
 }
 
 impl ConstraintId {
+    /// Return the row's zero-based index in the algebraic constraint registry.
     #[inline]
     pub fn index(self) -> usize {
         self.0 as usize
@@ -144,6 +258,7 @@ pub struct AlgebraicConstraint {
     pub lower: f64,
     pub upper: f64,
     pub active: bool,
+    pub(crate) signature: Option<crate::semantic::scalar::ScalarSignature>,
 }
 
 impl AlgebraicConstraint {

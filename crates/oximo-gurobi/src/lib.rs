@@ -63,6 +63,10 @@ impl Solver for Gurobi {
         supported(kind)
     }
 
+    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Capability::Native
+    }
+
     fn supports_sos(&self, _sos_type: SosType) -> bool {
         true
     }

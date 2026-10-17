@@ -13,7 +13,7 @@ pub(super) const PAR_KIND_THRESHOLD: usize = 256;
 /// This is inferred from the variables and expressions in the model, not set
 /// explicitly by the user. See [`Model::kind`] for the exact decision ladder.
 ///
-/// The `MI*` variant of each class is picked when any variable has an integer
+/// The `MI*` variant of each class is picked when any variable has an integer or semicontinuous
 /// domain. The continuous classes are, from most to least general:
 ///
 /// - `NLP`: some expression is nonlinear (degree > 2, transcendental, division)
@@ -70,7 +70,7 @@ impl Model {
     /// Result is cached and invalidated whenever variables, constraints, or the
     /// objective change.
     ///
-    /// The decision ladder, top-down (any integer variable picks the `MI*`
+    /// The decision ladder, top-down (any discrete variable domain picks the `MI*`
     /// column):
     ///
     /// 1. any nonlinear expression (objective or constraint) -> `NLP`
@@ -108,7 +108,7 @@ impl Model {
     fn infer_kind_impl(&self, parallel: Option<bool>) -> ModelKind {
         let arena = self.arena.borrow();
         let vars = self.variables.borrow();
-        let has_int = vars.iter().any(|v| v.domain.is_integer())
+        let has_int = vars.iter().any(|v| v.domain.requires_discrete_choice())
             || self.sos_constraints.borrow().iter().any(|constraint| constraint.active);
         let obj_class = self
             .objective
@@ -124,7 +124,7 @@ impl Model {
             let arena_ref = &*arena;
             let vars_ref = &*vars;
             let mut quadratic = Vec::new();
-            for c in constraints.iter() {
+            for c in constraints.iter().filter(|c| c.active) {
                 match classify(arena_ref, c.lhs) {
                     ExprClass::Linear => {}
                     ExprClass::Quadratic => quadratic.push(c),
@@ -162,7 +162,7 @@ impl Model {
                 }
             }
         }
-        let has_soc = detected_soc || !self.soc_constraints.borrow().is_empty();
+        let has_soc = detected_soc || self.has_active_soc_constraints();
 
         let pick = |cont, int| if has_int { int } else { cont };
         if any_nonlinear {

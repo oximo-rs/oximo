@@ -50,6 +50,14 @@ impl Solver for Clarabel {
         supported(kind)
     }
 
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        use oximo_core::Domain;
+        match domain {
+            Domain::Real => oximo_solver::Capability::Native,
+            _ => oximo_solver::Capability::Unsupported,
+        }
+    }
+
     fn supports_psd(&self) -> bool {
         cfg!(feature = "sdp")
     }
@@ -68,5 +76,28 @@ impl PersistentSolver for Clarabel {
 
     fn persistent(&self) -> ClarabelPersistent {
         ClarabelPersistent::new()
+    }
+}
+
+impl<S: oximo_solver::translation::ScalarBoundSet>
+    oximo_solver::TypedConstraintTranslator<oximo_core::ScalarFunctionData<oximo_core::Affine>, S>
+    for Clarabel
+where
+    oximo_core::ScalarFunctionData<oximo_core::Affine>: oximo_core::FunctionInSet<S>,
+{
+    type Output = oximo_solver::translation::AffineRow;
+
+    fn translate(
+        &self,
+        function: &oximo_core::ScalarFunctionData<oximo_core::Affine>,
+        set: &S,
+        context: &oximo_solver::TranslationContext,
+    ) -> Result<Self::Output, oximo_solver::SolverError> {
+        oximo_solver::TypedConstraintTranslator::translate(
+            &oximo_solver::AffineRowTranslator,
+            function,
+            set,
+            context,
+        )
     }
 }

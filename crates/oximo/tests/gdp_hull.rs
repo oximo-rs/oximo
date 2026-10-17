@@ -359,7 +359,7 @@ fn inactive_three_level_group_remains_feasible_with_a_descendant_reference() {
             Hull::default()
                 .with_inclusive_policy(HullInclusivePolicy::Enumerate { max_patterns: 3 }),
         )
-        .with_hull_reference_point(grandchild.binary(), reference);
+        .with_hull_reference_coordinate(grandchild.binary(), reference);
 
         let result = Highs.with_gdp(options).solve(&model, &HighsOptions::default()).unwrap();
 

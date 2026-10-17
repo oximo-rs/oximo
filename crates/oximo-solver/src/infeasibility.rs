@@ -187,11 +187,11 @@ mod tests {
         let hi = constraint!(m, ceil, x <= 1.0);
         let sos = {
             variable!(m, y);
-            m.add_sos_constraint("choice", SosType::Sos1, [(y, 1.0)]).id()
+            m.add_sos_constraint("choice", SosType::Sos1, [(y, 1.0)]).sos_id()
         };
 
         let iis = Iis {
-            constraints: vec![lo.id(), hi.id()],
+            constraints: vec![lo.row_id(), hi.row_id()],
             soc_constraints: Vec::new(),
             sos_constraints: vec![sos],
             indicator_constraints: Vec::new(),

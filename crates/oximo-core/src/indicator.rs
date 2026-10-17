@@ -1,7 +1,5 @@
-use oximo_expr::{ExprId, ModelId, VarId};
+use oximo_expr::{ExprId, VarId};
 use smol_str::SmolStr;
-
-use crate::model::Model;
 
 /// Stable identifier for a native indicator constraint.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -48,39 +46,9 @@ impl IndicatorConstraint {
     }
 }
 
-/// Model-bound handle returned by a scalar indicator declaration.
-#[derive(Copy, Clone)]
-pub struct IndicatorConstraintHandle<'a> {
-    pub(crate) model: &'a Model,
-    pub(crate) id: IndicatorConstraintId,
-}
-
-impl std::fmt::Debug for IndicatorConstraintHandle<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IndicatorConstraintHandle").field("id", &self.id).finish()
-    }
-}
-
-impl IndicatorConstraintHandle<'_> {
-    #[must_use]
-    pub const fn id(self) -> IndicatorConstraintId {
-        self.id
-    }
-    #[must_use]
-    pub fn index(self) -> usize {
-        self.id.index()
-    }
-    #[must_use]
-    pub fn model_id(self) -> ModelId {
-        self.model.id()
-    }
-}
-
-impl From<IndicatorConstraintHandle<'_>> for IndicatorConstraintId {
-    fn from(value: IndicatorConstraintHandle<'_>) -> Self {
-        value.id
-    }
-}
+/// Typed semantic reference to a binary-triggered affine function in an indicator set.
+pub type IndicatorConstraintHandle =
+    crate::ConstraintHandle<crate::IndicatorFunctionData, crate::IndicatorSet>;
 
 /// IDs produced by a two-sided indicator declaration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -91,19 +59,20 @@ pub enum RangeIndicatorConstraintIds {
 
 /// Model-bound handles produced by a two-sided indicator declaration.
 #[derive(Copy, Clone, Debug)]
-pub enum RangeIndicatorConstraintHandles<'a> {
-    Interval(IndicatorConstraintHandle<'a>),
-    Split { lower: IndicatorConstraintHandle<'a>, upper: IndicatorConstraintHandle<'a> },
+pub enum RangeIndicatorConstraintHandles {
+    Interval(IndicatorConstraintHandle),
+    Split { lower: IndicatorConstraintHandle, upper: IndicatorConstraintHandle },
 }
 
-impl RangeIndicatorConstraintHandles<'_> {
+impl RangeIndicatorConstraintHandles {
     #[must_use]
     pub const fn ids(self) -> RangeIndicatorConstraintIds {
         match self {
-            Self::Interval(h) => RangeIndicatorConstraintIds::Interval(h.id()),
-            Self::Split { lower, upper } => {
-                RangeIndicatorConstraintIds::Split { lower: lower.id(), upper: upper.id() }
-            }
+            Self::Interval(h) => RangeIndicatorConstraintIds::Interval(h.indicator_id()),
+            Self::Split { lower, upper } => RangeIndicatorConstraintIds::Split {
+                lower: lower.indicator_id(),
+                upper: upper.indicator_id(),
+            },
         }
     }
 }

@@ -48,6 +48,14 @@ impl Solver for Mosek {
         supported(kind)
     }
 
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        use oximo_core::Domain;
+        match domain {
+            Domain::Real | Domain::Integer | Domain::Binary => oximo_solver::Capability::Native,
+            _ => oximo_solver::Capability::Unsupported,
+        }
+    }
+
     fn supports_psd(&self) -> bool {
         true
     }

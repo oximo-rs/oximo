@@ -71,3 +71,10 @@ pub use crate::psd::{
     IntoAffineMatrixEntry, IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint,
     PsdConstraintHandle, PsdConstraintId, PsdConstraintIr, SymmetricAffineFunction,
 };
+
+pub use crate::semantic::{
+    ConstraintOrigin, FunctionKind, FunctionRepresentationRef, ScalarFunctionData,
+    SemanticConstraintId, SemanticFunction, SemanticType, VariableVectorRef,
+};
+
+pub use crate::objective::{ObjectiveFunction, SemanticObjective};

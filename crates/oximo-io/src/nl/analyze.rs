@@ -117,22 +117,27 @@ impl Analysis {
 
         for c in constraints {
             let (linear, residual) = split_linear(arena, c.lhs);
-            let mut all = FxHashSet::default();
-            for (v, _) in linear.coeffs.iter() {
-                all.insert(*v);
-            }
-            if !residual.is_empty() {
+
+            if residual.is_empty()
+                && linear.coeffs.windows(2).all(|pair| pair[0].0.index() < pair[1].0.index())
+            {
+                cons_vars.extend(linear.coeffs.iter().map(|(var, _)| *var));
+            } else {
+                let mut all: FxHashSet<_> = linear.coeffs.iter().map(|(var, _)| *var).collect();
+
                 for r in &residual {
                     for v in residual_cache.variables(arena, r.id, nonfinite_strings)? {
                         nl_vars_c.insert(*v);
                         all.insert(*v);
                     }
                 }
+
+                let start = cons_vars.len();
+                cons_vars.extend(all);
+                cons_vars[start..].sort_by_key(|v| v.0);
             }
+
             cons.push(Row { linear: linear.into_owned(), residual });
-            let start = cons_vars.len();
-            cons_vars.extend(all);
-            cons_vars[start..].sort_by_key(|v| v.0);
             cons_var_offsets.push(cons_vars.len());
         }
 
@@ -218,6 +223,46 @@ fn analyze_residual(
     let mut visitor = ResidualVisitor { vars, nonfinite_strings, error: None };
     walk_shared(arena, id, &mut visitor);
     visitor.error.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use oximo_core::{Model, constraint::Relate};
+    use oximo_expr::Expr;
+
+    use super::*;
+
+    #[test]
+    fn affine_supports_preserve_zeros_and_normalize_noncanonical_rows() {
+        let model = Model::new("supports");
+        let x = model.__var("x").build();
+        let y = model.__var("y").build();
+        let z = model.__var("z").build();
+        let [vx, vy, vz] = [x, y, z].map(|expr| expr.var_id().unwrap());
+
+        for coefficients in [
+            vec![(vx, 0.0), (vy, 2.0), (vz, 3.0)],
+            vec![(vz, 3.0), (vx, 1.0), (vx, -1.0)],
+            Vec::new(),
+        ] {
+            let id = x.arena.borrow_mut().linear(coefficients, 1.0);
+            model.__add_constraint_auto(Expr::new(id, x.arena).le(5.0));
+        }
+        model.__add_constraint_auto((x + y * z).le(5.0));
+
+        let arena = model.arena();
+        let variables = model.variables();
+        let constraints = model.constraints();
+        let analysis = Analysis::build(&arena, &variables, constraints.algebraic(), None, false)
+            .expect("supported rows");
+
+        assert_eq!(analysis.constraint_vars(0), &[vx, vy, vz]);
+        assert_eq!(analysis.constraint_vars(1), &[vx, vz]);
+        assert_eq!(analysis.constraint_vars(2), &[]);
+        assert_eq!(analysis.constraint_vars(3), &[vx, vy, vz]);
+        assert_eq!(analysis.jacobian_nnz(), 8);
+        assert_eq!(analysis.nl_vars_c, FxHashSet::from_iter([vy, vz]));
+    }
 }
 
 #[cfg(feature = "benchmark-support")]

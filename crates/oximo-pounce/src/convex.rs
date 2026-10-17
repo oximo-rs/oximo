@@ -38,16 +38,51 @@ enum Class {
     General,
 }
 
-/// Resolve automatic/forced routing, including the safe time-limit policy.
+/// Choose the solve route, checking convexity when it affects that choice.
 pub(crate) fn route(
     model: &LoweringContext<'_>,
     opts: &PounceOptions,
 ) -> Result<Route, SolverError> {
     let selection = selected_solver(opts)?;
     let algorithm = selected_algorithm(opts)?;
-    let class = classify(model);
-    let has_explicit_soc = !model.constraints().second_order_cones().is_empty();
+    let has_explicit_soc = model.constraints().second_order_cones().iter().any(|c| c.active);
 
+    select_route(model.kind(), selection, algorithm, has_explicit_soc, || Ok(classify(model)))
+}
+
+/// Check route compatibility without classifying models that have an NLP fallback.
+pub(crate) fn validate_route(model: &Model, opts: &PounceOptions) -> Result<(), SolverError> {
+    let kind = model.kind();
+    let algorithm = crate::translate::validate_algorithm(kind, opts)?;
+    model.ensure_gdp_reformulated()?;
+    model.ensure_objective_declared()?;
+
+    let selection = selected_solver(opts)?;
+    let has_explicit_soc = model.has_active_soc_constraints();
+
+    if selection == PounceSolverSelection::Auto && !has_explicit_soc {
+        return Ok(());
+    }
+
+    select_route(kind, selection, algorithm, has_explicit_soc, || match kind {
+        ModelKind::LP => Ok(Class::Lp),
+        ModelKind::QP | ModelKind::SOCP => {
+            let prepared = LoweringContext::new(model)?;
+            Ok(classify(&prepared))
+        }
+        _ => Ok(Class::General),
+    })
+    .map(|_| ())
+}
+
+/// Apply shared route restrictions and request numerical classification only as needed.
+fn select_route(
+    kind: ModelKind,
+    selection: PounceSolverSelection,
+    algorithm: PounceAlgorithm,
+    has_explicit_soc: bool,
+    classify: impl FnOnce() -> Result<Class, SolverError>,
+) -> Result<Route, SolverError> {
     if selection == PounceSolverSelection::Auto && algorithm == PounceAlgorithm::ActiveSetSqp {
         return if has_explicit_soc {
             Err(incompatible("active-set-sqp", "a model with explicit SOC constraints"))
@@ -57,7 +92,7 @@ pub(crate) fn route(
     }
 
     match selection {
-        PounceSolverSelection::Auto => match class {
+        PounceSolverSelection::Auto => match classify()? {
             Class::Lp | Class::ConvexQp => Ok(Route::QpIpm),
             Class::Socp => Ok(Route::Socp),
             Class::General => {
@@ -76,28 +111,28 @@ pub(crate) fn route(
             }
         }
         PounceSolverSelection::LpIpm => {
-            if class == Class::Lp {
+            if kind == ModelKind::LP {
                 Ok(Route::QpIpm)
             } else {
                 Err(incompatible("lp-ipm", "anything other than an LP"))
             }
         }
         PounceSolverSelection::QpIpm => {
-            if matches!(class, Class::Lp | Class::ConvexQp) {
+            if matches!(classify()?, Class::Lp | Class::ConvexQp) {
                 Ok(Route::QpIpm)
             } else {
                 Err(incompatible("qp-ipm", "a model that is not an LP or proven-convex QP"))
             }
         }
         PounceSolverSelection::QpActiveSet => {
-            if matches!(class, Class::Lp | Class::ConvexQp) {
+            if matches!(classify()?, Class::Lp | Class::ConvexQp) {
                 Ok(Route::QpActiveSet)
             } else {
                 Err(incompatible("qp-active-set", "a model that is not an LP or proven-convex QP"))
             }
         }
         PounceSolverSelection::Socp => {
-            if matches!(class, Class::Lp | Class::ConvexQp | Class::Socp) {
+            if matches!(classify()?, Class::Lp | Class::ConvexQp | Class::Socp) {
                 Ok(Route::Socp)
             } else {
                 Err(incompatible("socp", "a model outside the convex LP/QP/SOCP family"))
@@ -171,7 +206,7 @@ pub(crate) struct Problem {
     pub qp: QpProblem,
     pub cones: Vec<ConeSpec>,
     maps: Vec<ConstraintMap>,
-    explicit_soc_starts: Vec<usize>,
+    explicit_soc_starts: Vec<Option<usize>>,
     sign: f64,
     objective_constant: f64,
 }
@@ -285,13 +320,7 @@ pub(crate) fn build_problem(
     if linear_ineq > 0 {
         cones.push(ConeSpec::Nonneg(linear_ineq));
     }
-    let mut explicit_soc_starts = Vec::new();
-    for soc in model_constraints.second_order_cones() {
-        let form = prepared.explicit_soc(soc)?;
-        explicit_soc_starts.push(h.len());
-        append_soc(&mut g, &mut h, &form);
-        cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
-    }
+    let explicit_soc_starts = append_explicit_socs(prepared, &mut g, &mut h, &mut cones)?;
     for (index, form) in detected {
         maps[index] = ConstraintMap::None;
         append_soc(&mut g, &mut h, &form);
@@ -360,6 +389,26 @@ fn relaxed_row_upper(bound: f64, opts: &PounceOptions) -> f64 {
     if bound.is_finite() { bound + row_relaxation_delta(bound, opts) } else { bound }
 }
 
+fn append_explicit_socs(
+    prepared: &LoweringContext<'_>,
+    g: &mut Vec<Triplet>,
+    h: &mut Vec<f64>,
+    cones: &mut Vec<ConeSpec>,
+) -> Result<Vec<Option<usize>>, SolverError> {
+    let mut starts = Vec::new();
+    for soc in prepared.constraints().second_order_cones() {
+        if !soc.active {
+            starts.push(None);
+            continue;
+        }
+        let form = prepared.explicit_soc(soc)?;
+        starts.push(Some(h.len()));
+        append_soc(g, h, &form);
+        cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
+    }
+    Ok(starts)
+}
+
 fn append_soc(g: &mut Vec<Triplet>, h: &mut Vec<f64>, form: &SocForm) {
     let row = h.len();
     push_row(g, row, &form.bound, -1.0);
@@ -389,9 +438,8 @@ pub(crate) fn solve(
         problem.sign,
         outcome,
         started.elapsed(),
-        model.id(),
+        model,
         prepared.arena().parameter_snapshot(),
-        model.num_variables(),
     ))
 }
 
@@ -407,8 +455,7 @@ pub(crate) fn should_fallback_to_nlp(
     Ok(selected_solver(opts)? == PounceSolverSelection::Auto
         && sol.status == QpStatus::NumericalFailure
         && (model.kind() == ModelKind::LP
-            || (model.kind() == ModelKind::SOCP
-                && model.constraints().second_order_cones().is_empty())))
+            || (model.kind() == ModelKind::SOCP && !model.has_active_soc_constraints())))
 }
 
 pub(crate) fn validate_options(opts: &PounceOptions) -> Result<(), SolverError> {
@@ -576,7 +623,7 @@ pub(crate) fn outcome(
     let soc_dual = problem
         .explicit_soc_starts
         .iter()
-        .map(|&row| sol.z.get(row).copied().unwrap_or(f64::NAN))
+        .map(|&row| row.and_then(|row| sol.z.get(row).copied()).unwrap_or(f64::NAN))
         .collect();
     let reduced = Some(sol.z_lb.iter().zip(&sol.z_ub).map(|(l, u)| l - u).collect());
     Outcome {
@@ -860,6 +907,26 @@ impl ActivePersistent {
 mod tests {
     use super::*;
     use oximo_core::{Model, constraint, objective, variable};
+
+    #[test]
+    fn structural_routes_do_not_request_convexity_classification() {
+        use PounceAlgorithm::{ActiveSetSqp, InteriorPoint};
+        use PounceSolverSelection::{Auto, LpIpm, Nlp};
+
+        for (kind, selection, algorithm, has_soc, expected) in [
+            (ModelKind::QP, Nlp, InteriorPoint, false, Some(Route::Nlp)),
+            (ModelKind::SOCP, Nlp, InteriorPoint, true, None),
+            (ModelKind::QP, Auto, ActiveSetSqp, false, Some(Route::Nlp)),
+            (ModelKind::SOCP, Auto, ActiveSetSqp, true, None),
+            (ModelKind::LP, LpIpm, InteriorPoint, false, Some(Route::QpIpm)),
+            (ModelKind::QP, LpIpm, InteriorPoint, false, None),
+        ] {
+            let result = select_route(kind, selection, algorithm, has_soc, || {
+                panic!("structural route should not classify the Hessian")
+            });
+            assert_eq!(result.ok(), expected);
+        }
+    }
 
     #[test]
     fn relaxation_uses_distinct_variable_and_scale_relative_row_formulas() {

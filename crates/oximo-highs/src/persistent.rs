@@ -129,16 +129,7 @@ impl HighsPersistent {
             .try_solve()
             .map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
         let elapsed = started.elapsed();
-        let result = extract_result(
-            &solved,
-            st.meta.mixed_integer,
-            st.meta.obj_constant,
-            st.meta.num_constraints,
-            st.meta.cols.len(),
-            model.id(),
-            st.meta.parameters.clone(),
-            elapsed,
-        );
+        let result = extract_result(&solved, &st.meta, model, elapsed);
         st.live = Some(HighsModel::from(solved));
         Ok(result)
     }
@@ -153,6 +144,10 @@ impl Solver for HighsPersistent {
 
     fn supports(&self, kind: ModelKind) -> bool {
         crate::supported(kind)
+    }
+
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Solver::domain_support(&crate::Highs, domain)
     }
 
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {

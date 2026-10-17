@@ -90,8 +90,8 @@ impl IndicatorPlan {
         }
         if !artifacts.is_empty() {
             model.invalidate_kind();
+            model.indicator_reformulations.borrow_mut().extend(artifacts.iter().cloned());
         }
-        model.indicator_reformulations.borrow_mut().extend(artifacts.iter().cloned());
         artifacts
     }
 }
@@ -212,32 +212,45 @@ impl PlannedIndicator {
                 model,
                 &format!("__oximo_indicator{}_lower", self.source.index()),
             );
-            generated
-                .push(model.__add_constraint(name, lhs.ge(source.lower - big_m * inactive)).id());
+            generated.push(
+                model.__add_constraint(name, lhs.ge(source.lower - big_m * inactive)).row_id(),
+            );
         }
         if let Some(big_m) = self.upper_m {
             let name = unique_constraint_name(
                 model,
                 &format!("__oximo_indicator{}_upper", self.source.index()),
             );
-            generated
-                .push(model.__add_constraint(name, lhs.le(source.upper + big_m * inactive)).id());
+            generated.push(
+                model.__add_constraint(name, lhs.le(source.upper + big_m * inactive)).row_id(),
+            );
+        }
+        for &row in &generated {
+            model.set_constraint_origin(
+                row.into(),
+                crate::ConstraintOrigin::Generated {
+                    sources: vec![crate::SemanticConstraintId::Indicator(self.source)],
+                    transformation: "indicator_big_m".into(),
+                },
+            );
         }
         model.indicator_constraints.borrow_mut()[self.source.index()].active = false;
         IndicatorReformulationArtifacts { source: self.source, constraints: generated }
     }
 }
 
-impl IndicatorConstraintHandle<'_> {
+impl IndicatorConstraintHandle {
     /// Clone the model and replace this active indicator with Big-M rows.
     ///
     /// # Errors
     /// Returns a reformulation error if the body, bounds, or options are invalid.
     pub fn to_reformulated_model(
         self,
+        model: &Model,
         options: IndicatorReformulationOptions,
     ) -> Result<ReformulatedModel, ReformulationError> {
-        self.model.to_reformulated_indicator_constraint_model(self.id, options)
+        model.ensure_model_id(self.model_id())?;
+        model.to_reformulated_indicator_constraint_model(self.indicator_id(), options)
     }
 
     /// Replace this indicator in place. Returns `None` when it is already inactive.
@@ -246,9 +259,11 @@ impl IndicatorConstraintHandle<'_> {
     /// Returns an error before mutation if the selected indicator is invalid.
     pub fn reformulate(
         self,
+        model: &Model,
         options: IndicatorReformulationOptions,
     ) -> Result<Option<IndicatorReformulationArtifacts>, ReformulationError> {
-        self.model.reformulate_indicator_constraint(self.id, options)
+        model.ensure_model_id(self.model_id())?;
+        model.reformulate_indicator_constraint(self.indicator_id(), options)
     }
 }
 

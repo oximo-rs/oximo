@@ -21,21 +21,20 @@
 // TODO: Add convex-QCP-to-SOC reformulation?
 
 use oximo_core::PsdConstraintId;
-use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::prepare::{AffineTerms, LoweringContext, PreparedExpressions};
 #[cfg(feature = "sdp")]
 use oximo_solver::psd::svec_coordinates;
 use oximo_solver::psd::{PsdTriangleOrder, unpack_svec};
-use oximo_solver::reconstruct::{DualProjection, ObjectiveTransform, normalize_result};
+use oximo_solver::reconstruct::{DualProjection, ObjectiveTransform, finalize_result};
 
 use std::time::{Duration, Instant};
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use oximo_core::{
-    ConstraintId, Model, ModelId, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable,
-    var_name,
+    ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, var_name,
 };
-use oximo_expr::{LinearTerms, describe_nonlinear_term};
+use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -48,8 +47,8 @@ const PAR_ROW_THRESHOLD: usize = 256;
 
 /// The linear-or-conic view of one algebraic constraint.
 #[derive(Debug)]
-enum Row {
-    Lin(LinearTerms<'static>),
+enum Row<'a> {
+    Lin(AffineTerms<'a>),
     Soc(SocForm),
 }
 
@@ -116,6 +115,7 @@ pub(crate) struct Meta {
     soc_block_starts: Vec<usize>,
     /// Count of leading SOC blocks that are explicit cones (duals reported).
     n_explicit: usize,
+    explicit_soc_ids: Vec<SocConstraintId>,
     psd_blocks: Vec<(PsdConstraintId, usize, usize)>,
     parameters: oximo_solver::ParameterSnapshot,
 }
@@ -176,7 +176,7 @@ pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, Solv
     let started = Instant::now();
     solver.solve();
     let elapsed = started.elapsed();
-    Ok(read_result(&solver, &problem.meta, model.id(), elapsed))
+    Ok(read_result(&solver, &problem.meta, model, elapsed))
 }
 
 /// Translate `model` into Clarabel's conic form without solving.
@@ -219,13 +219,26 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     let (sign, p_trip, q, obj_constant) = objective_data(&prepared, n)?;
     let rows = classify_rows(&prepared, parallel)?;
     let socs = prepared.constraints().second_order_cones();
-    let explicit_forms = explicit_soc_forms(&prepared, socs, parallel)?;
-    let (row_capacity, nonzero_capacity, soc_capacity) =
+    let direct = parallel.is_none().then(|| direct_soc_capacity(prepared.arena(), socs)).flatten();
+    let explicit_forms =
+        if direct.is_some() { Vec::new() } else { explicit_soc_forms(&prepared, socs, parallel)? };
+    let (mut row_capacity, mut nonzero_capacity, mut soc_capacity) =
         translation_capacities(model, &rows, &explicit_forms);
+    if let Some((row_count, nonzeros, cones)) = direct {
+        row_capacity += row_count;
+        nonzero_capacity += nonzeros;
+        soc_capacity += cones;
+    }
+
     let acc = Rows::with_capacity(row_capacity, nonzero_capacity);
     let (mut acc, m_zero, m_nonneg) = linear_rows(model, &rows, acc);
-    let (soc_sizes, soc_block_starts, n_explicit) =
-        soc_blocks(&rows, &explicit_forms, &mut acc, soc_capacity);
+    let (soc_sizes, soc_block_starts, n_explicit) = soc_blocks(
+        &rows,
+        &explicit_forms,
+        &mut acc,
+        soc_capacity,
+        direct.map(|_| (prepared.arena(), socs)),
+    );
 
     #[cfg_attr(not(feature = "sdp"), allow(unused_mut))]
     let mut cones = build_cones(m_zero, m_nonneg, &soc_sizes);
@@ -253,7 +266,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     let m = b.len();
     let a_mat = csc_from_triplets(m, n, a_trip);
     let p_mat = csc_from_triplets(n, n, p_trip);
-    Ok(Problem {
+    let problem = Problem {
         p_mat,
         q,
         a_mat,
@@ -266,10 +279,17 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
             row_duals,
             soc_block_starts,
             n_explicit,
+            explicit_soc_ids: socs
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.active)
+                .map(|(i, _)| SocConstraintId(u32::try_from(i).expect("SOC count overflow")))
+                .collect(),
             psd_blocks,
             parameters: prepared.arena().parameter_snapshot(),
         },
-    })
+    };
+    Ok(problem)
 }
 
 /// The objective in Clarabel form: `sign` (`-1` maximize, else `+1`. It negates
@@ -306,14 +326,15 @@ fn objective_data(
 /// guarantees a quadratic constraint detects as SOC, so a miss here is a
 /// genuine nonlinear.
 #[cfg(any(test, feature = "benchmark-support"))]
-fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<Vec<Row>, SolverError> {
-    classify_rows(&LoweringContext::new(model)?, parallel)
+fn classify_rows_with(model: &Model, parallel: Option<bool>) -> Result<usize, SolverError> {
+    let prepared = LoweringContext::new(model)?;
+    classify_rows(&prepared, parallel).map(|rows| rows.len())
 }
 
-fn classify_rows(
-    prepared: &LoweringContext<'_>,
+fn classify_rows<'a>(
+    prepared: &'a LoweringContext<'_>,
     parallel: Option<bool>,
-) -> Result<Vec<Row>, SolverError> {
+) -> Result<Vec<Row<'a>>, SolverError> {
     let arena = prepared.arena();
     let vars = prepared.variables();
     let model_constraints = prepared.constraints();
@@ -332,10 +353,11 @@ fn classify_rows(
     // Preserve the very cheap LP fast path by extracting affine rows serially
     // and then fan out only a large set of quadratic/SOC candidates.
     // This means LP rows never take the Rayon path.
-    let mut rows: Vec<Option<Row>> = (0..constraints.len()).map(|_| None).collect();
+    let mut rows: Vec<Option<Row<'_>>> = (0..constraints.len()).map(|_| None).collect();
     let mut pending = Vec::new();
+
     for (index, constraint) in constraints.iter().enumerate() {
-        match prepared.linear(constraint.lhs).map(oximo_solver::prepare::AffineTerms::into_owned) {
+        match prepared.linear(constraint.lhs) {
             Some(terms) => rows[index] = Some(Row::Lin(terms)),
             None => pending.push((index, constraint)),
         }
@@ -343,7 +365,7 @@ fn classify_rows(
     let use_parallel =
         parallel.unwrap_or(pending.len() >= PAR_ROW_THRESHOLD && rayon::current_num_threads() > 1);
     if use_parallel {
-        let detected: Vec<Result<Row, SolverError>> =
+        let detected: Vec<Result<Row<'_>, SolverError>> =
             pending.par_iter().map(|(_, c)| classify_non_linear(c)).collect();
         for ((index, _), result) in pending.into_iter().zip(detected) {
             rows[index] = Some(result?);
@@ -359,7 +381,7 @@ fn classify_rows(
 /// Exact capacities for the final Clarabel row vectors and SOC metadata.
 fn translation_capacities(
     model: &Model,
-    rows: &[Row],
+    rows: &[Row<'_>],
     explicit_forms: &[SocForm],
 ) -> (usize, usize, usize) {
     let vars = model.variables();
@@ -404,7 +426,7 @@ fn translation_capacities(
 /// `ZeroCone` block (equalities, then fixed variables) followed by the
 /// `NonnegativeCone` block (inequalities/ranges, then finite bounds). Returns
 /// the accumulated [`Rows`] and the two block sizes.
-fn linear_rows(model: &Model, rows: &[Row], mut acc: Rows) -> (Rows, usize, usize) {
+fn linear_rows(model: &Model, rows: &[Row<'_>], mut acc: Rows) -> (Rows, usize, usize) {
     let vars = model.variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
@@ -467,19 +489,33 @@ fn linear_rows(model: &Model, rows: &[Row], mut acc: Rows) -> (Rows, usize, usiz
 /// back to the constraint, whereas `SocForm` normalizes away a detected cone's
 /// original quadratic scaling, so its `z0` cannot be mapped back.
 fn soc_blocks(
-    rows: &[Row],
+    rows: &[Row<'_>],
     explicit_forms: &[SocForm],
     acc: &mut Rows,
     soc_capacity: usize,
+    direct: Option<(&ExprArena, &[oximo_core::SocConstraint])>,
 ) -> (Vec<usize>, Vec<usize>, usize) {
     let detected_forms = rows.iter().filter_map(|r| match r {
         Row::Soc(f) => Some(f),
         Row::Lin(_) => None,
     });
 
-    let n_explicit = explicit_forms.len();
+    let mut n_explicit = explicit_forms.len();
     let mut soc_sizes: Vec<usize> = Vec::with_capacity(soc_capacity);
     let mut soc_block_starts: Vec<usize> = Vec::with_capacity(soc_capacity);
+
+    if let Some((arena, socs)) = direct {
+        for soc in socs.iter().filter(|soc| soc.active) {
+            soc_block_starts.push(acc.b.len());
+
+            for root in std::iter::once(soc.bound).chain(soc.terms.iter().copied()) {
+                push_direct_soc_row(acc, arena, root);
+            }
+            soc_sizes.push(1 + soc.terms.len());
+            n_explicit += 1;
+        }
+    }
+
     for form in explicit_forms.iter().chain(detected_forms) {
         soc_block_starts.push(acc.b.len());
         acc.push(&form.bound, -1.0, form.bound.constant);
@@ -491,6 +527,57 @@ fn soc_blocks(
     (soc_sizes, soc_block_starts, n_explicit)
 }
 
+/// Estimate row, matrix nonzero, and cone counts for active explicit SOC constraints
+/// whose components can be written directly from their stored arena nodes.
+///
+/// Returns `None` for an empty registry or when an active component needs expression
+/// extraction, so the caller uses the general SOC translation path.
+fn direct_soc_capacity(
+    arena: &ExprArena,
+    socs: &[oximo_core::SocConstraint],
+) -> Option<(usize, usize, usize)> {
+    if socs.is_empty() {
+        return None;
+    }
+
+    let (mut rows, mut nonzeros, mut cones) = (0, 0, 0);
+
+    for soc in socs.iter().filter(|soc| soc.active) {
+        cones += 1;
+
+        for root in std::iter::once(soc.bound).chain(soc.terms.iter().copied()) {
+            nonzeros += match arena.get(root) {
+                ExprNode::Var(_) => 1,
+                ExprNode::Const(_) => 0,
+                ExprNode::Param(id) if arena.try_param_value(*id).is_some() => 0,
+                ExprNode::Linear { coeffs, .. } => coeffs.len(),
+                _ => return None,
+            };
+            rows += 1;
+        }
+    }
+
+    Some((rows, nonzeros, cones))
+}
+
+fn push_direct_soc_row(rows: &mut Rows, arena: &ExprArena, root: ExprId) {
+    match arena.get(root) {
+        ExprNode::Var(variable) => rows.push_bound(variable.index(), -1.0, 0.0),
+        ExprNode::Linear { coeffs, constant } => {
+            rows.push(&LinearTerms::borrowed(coeffs, *constant), -1.0, *constant);
+        }
+        ExprNode::Const(value) => {
+            rows.b.push(*value);
+            rows.row_duals.push(None);
+        }
+        ExprNode::Param(parameter) => {
+            rows.b.push(arena.try_param_value(*parameter).expect("checked parameter"));
+            rows.row_duals.push(None);
+        }
+        _ => unreachable!("direct SOC storage checked against the same immutable arena"),
+    }
+}
+
 fn explicit_soc_forms(
     prepared: &PreparedExpressions,
     socs: &[oximo_core::SocConstraint],
@@ -499,9 +586,9 @@ fn explicit_soc_forms(
     let extract = |s: &oximo_core::SocConstraint| prepared.explicit_soc(s);
     let use_parallel = parallel.unwrap_or(false);
     let explicit_results: Vec<Result<SocForm, SolverError>> = if use_parallel {
-        socs.par_iter().map(extract).collect()
+        socs.par_iter().filter(|s| s.active).map(extract).collect()
     } else {
-        socs.iter().map(extract).collect()
+        socs.iter().filter(|s| s.active).map(extract).collect()
     };
     explicit_results.into_iter().collect()
 }
@@ -525,9 +612,10 @@ fn build_cones(m_zero: usize, m_nonneg: usize, soc_sizes: &[usize]) -> Vec<Suppo
 pub(crate) fn read_result(
     solver: &DefaultSolver<f64>,
     meta: &Meta,
-    model_id: ModelId,
+    model: &Model,
     elapsed: Duration,
 ) -> SolverResult {
+    let model_id = model.id();
     let native_status = solver.solution.status;
     let termination = map_status(native_status);
     let has_point = status_has_point(native_status);
@@ -554,11 +642,15 @@ pub(crate) fn read_result(
                 projection.accumulate(&mut dual, z, meta.sign);
             }
         }
-        for (k, &start) in meta.soc_block_starts.iter().take(meta.n_explicit).enumerate() {
+
+        for (&id, &start) in
+            meta.explicit_soc_ids.iter().zip(&meta.soc_block_starts).take(meta.n_explicit)
+        {
             if let Some(&z0) = solver.solution.z.get(start) {
-                soc_dual.insert(SocConstraintId(u32::try_from(k).expect("SOC count overflow")), z0);
+                soc_dual.insert(id, z0);
             }
         }
+
         for &(id, start, n) in &meta.psd_blocks {
             if let Some(values) = solver.solution.z.get(start..start + oximo_core::triangle_len(n))
                 && let Some(matrix) = unpack_svec(n, values, PsdTriangleOrder::UpperColumn)
@@ -574,8 +666,9 @@ pub(crate) fn read_result(
         None
     };
 
-    normalize_result(
+    finalize_result(
         SolverResult {
+            semantic_dual: FxHashMap::default(),
             model_id,
             termination,
             primal_status,
@@ -602,6 +695,7 @@ pub(crate) fn read_result(
             solver_version: None,
             parameters: meta.parameters.clone(),
         },
+        model,
         meta.num_variables,
     )
 }
@@ -811,7 +905,7 @@ pub mod benchmark_support {
     }
 
     pub fn classify(model: &Model, parallel: bool) -> Result<usize, SolverError> {
-        classify_rows_with(model, Some(parallel)).map(|rows| rows.len())
+        classify_rows_with(model, Some(parallel))
     }
 
     pub fn explicit_socs(model: &Model, parallel: bool) -> Result<usize, SolverError> {
@@ -868,6 +962,7 @@ mod tests {
             soc_block_starts: Vec::new(),
             psd_blocks: Vec::new(),
             n_explicit: 0,
+            explicit_soc_ids: Vec::new(),
             parameters: oximo_solver::ParameterSnapshot::default(),
         };
 
@@ -885,6 +980,7 @@ mod tests {
             soc_block_starts: Vec::new(),
             psd_blocks: Vec::new(),
             n_explicit: 0,
+            explicit_soc_ids: Vec::new(),
             parameters: oximo_solver::ParameterSnapshot::default(),
         };
 
@@ -963,6 +1059,55 @@ mod tests {
         assert_eq!(automatic.a_mat.nzval, parallel.a_mat.nzval);
         assert_eq!(automatic.b, parallel.b);
         assert_eq!(automatic.cones, parallel.cones);
+    }
+
+    #[test]
+    fn direct_soc_emission_matches_extraction_with_parameters_and_inactive_ids() {
+        let model = Model::new("direct SOC reference");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        param!(model, p = 2.0);
+        objective!(model, Max, -t);
+        constraint!(model, detected, x.square() - t.square() <= 0.0);
+        let disabled = model.add_soc_constraint("disabled", [x], t);
+        model.set_constraint_active(disabled, false).unwrap();
+        model.add_soc_constraint(
+            "direct",
+            [
+                x,
+                (x + 2.0),
+                model.__constant(-0.0).into_affine_function().expression(),
+                p.into_affine_function().expression(),
+            ],
+            2.0 * t + 3.0,
+        );
+
+        let compare = || {
+            let direct = build_problem(&model).unwrap();
+            let extracted = build_problem_with(&model, Some(false)).unwrap();
+            assert_eq!(direct.a_mat.colptr, extracted.a_mat.colptr);
+            assert_eq!(direct.a_mat.rowval, extracted.a_mat.rowval);
+            assert_eq!(direct.a_mat.nzval, extracted.a_mat.nzval);
+            assert_eq!(
+                direct.b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                extracted.b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(direct.q, extracted.q);
+            assert_eq!(direct.cones, extracted.cones);
+            assert_eq!(direct.meta.row_duals, extracted.meta.row_duals);
+            assert_eq!(direct.meta.soc_block_starts, extracted.meta.soc_block_starts);
+            assert_eq!(direct.meta.explicit_soc_ids, extracted.meta.explicit_soc_ids);
+            assert_eq!(direct.meta.n_explicit, extracted.meta.n_explicit);
+        };
+
+        for value in [0.0, 2.0, 5.0] {
+            model.set_param(p, value).unwrap();
+            assert!(direct_soc_capacity(&model.arena(), &model.soc_constraints()).is_some());
+            compare();
+        }
+        model.add_soc_constraint("compound", [p * x], t + 1.0);
+        assert!(direct_soc_capacity(&model.arena(), &model.soc_constraints()).is_none());
+        compare();
     }
 
     #[test]
@@ -1140,7 +1285,7 @@ mod tests {
         variable!(m, s <= 10.0, SemiCont(2.0));
         objective!(m, Min, s);
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::Backend(_)));
+        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
     }
 
     #[test]

@@ -334,16 +334,6 @@ impl GdpReformulationOptions {
         self
     }
 
-    /// Compatibility alias for [`Self::with_hull_reference_coordinate`].
-    #[must_use]
-    pub fn with_hull_reference_point<D: oximo_expr::Degree>(
-        self,
-        variable: Expr<'_, D>,
-        value: f64,
-    ) -> Self {
-        self.with_hull_reference_coordinate(variable, value)
-    }
-
     /// Limit total variables, constraints, and expression nodes in the final model.
     /// A limit failure leaves the source model unchanged.
     #[must_use]

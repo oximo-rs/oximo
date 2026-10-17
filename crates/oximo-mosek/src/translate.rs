@@ -1,7 +1,7 @@
 use oximo_core::PsdConstraintId;
 use oximo_solver::prepare::{LoweringContext, PolynomialTerms};
 use oximo_solver::psd::{PsdTriangleOrder, svec_coordinates, unpack_svec};
-use oximo_solver::reconstruct::normalize_result;
+use oximo_solver::reconstruct::finalize_result;
 use std::time::{Duration, Instant};
 
 use mosek::{
@@ -211,7 +211,7 @@ fn build_rows_and_cones(
     let mut explicit_accs = Vec::with_capacity(socs.len());
     let mut next_afe = 0_i64;
     let mut next_acc = 0_i64;
-    for (id, soc) in socs.iter().enumerate() {
+    for (id, soc) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         let form = prepared.explicit_soc(soc)?;
         let dim = append_soc(task, &form, &mut next_afe, &mut scratch)?;
         task.put_acc_name(next_acc, &soc.name).map_err(backend)?;
@@ -517,14 +517,13 @@ fn extract_result(
         .flatten()
         .and_then(|count| u64::try_from(count).ok());
     let dual_status = if has_dual { DualStatus::FeasiblePoint } else { DualStatus::NoSolution };
-    let mut major = 0;
-    let mut minor = 0;
-    let mut revision = 0;
+    let (mut major, mut minor, mut revision) = (0, 0, 0);
     let solver_version = mosek::get_version(&mut major, &mut minor, &mut revision)
         .ok()
         .map(|()| format!("{major}.{minor}.{revision}").into());
-    Ok(normalize_result(
+    Ok(finalize_result(
         SolverResult {
+            semantic_dual: FxHashMap::default(),
             model_id: model.id(),
             termination,
             primal_status: PrimalStatus::NoSolution,
@@ -548,6 +547,7 @@ fn extract_result(
             solver_version,
             parameters: meta.parameters.clone(),
         },
+        model,
         variables.len(),
     ))
 }

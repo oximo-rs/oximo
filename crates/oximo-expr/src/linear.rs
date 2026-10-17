@@ -1181,6 +1181,10 @@ mod tests {
             reads: std::cell::Cell<usize>,
         }
         impl ArenaAccess for CountedArena {
+            fn len(&self) -> usize {
+                self.arena.len()
+            }
+
             fn get(&self, id: ExprId) -> &ExprNode {
                 self.reads.set(self.reads.get() + 1);
                 self.arena.get(id)

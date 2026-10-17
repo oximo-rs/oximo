@@ -4,7 +4,7 @@
 //! stable hybrid path ([`crate::stable`]).
 
 use oximo_solver::prepare::LoweringContext;
-use oximo_solver::reconstruct::{ObjectiveTransform, normalize_result};
+use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 
 use std::time::{Duration, Instant};
 
@@ -134,9 +134,8 @@ pub(crate) fn solve_nlp_since_prepared(
         prep.sign,
         outcome,
         started.elapsed(),
-        model.id(),
+        model,
         prepared.arena().parameter_snapshot(),
-        model.num_variables(),
     ))
 }
 
@@ -307,7 +306,7 @@ pub(crate) fn setup_prepared(
     }
 
     let model_constraints = prepared.constraints();
-    if !model_constraints.second_order_cones().is_empty() {
+    if model_constraints.second_order_cones().iter().any(|c| c.active) {
         return Err(SolverError::UnsupportedKind(ModelKind::SOCP));
     }
     let constraints = model_constraints.algebraic();
@@ -429,10 +428,11 @@ pub(crate) fn assemble(
     sign: f64,
     o: Outcome,
     elapsed: Duration,
-    model_id: oximo_core::ModelId,
+    model: &Model,
     parameters: oximo_solver::ParameterSnapshot,
-    num_variables: usize,
 ) -> SolverResult {
+    let model_id = model.id();
+    let num_variables = model.num_variables();
     let has_point = o.has_point;
 
     let mut solutions = Vec::new();
@@ -472,8 +472,9 @@ pub(crate) fn assemble(
     }
 
     let primal_status = PrimalStatus::infer(&o.termination, has_point);
-    normalize_result(
+    finalize_result(
         SolverResult {
+            semantic_dual: FxHashMap::default(),
             model_id,
             termination: o.termination,
             primal_status,
@@ -494,6 +495,7 @@ pub(crate) fn assemble(
             solver_version: None,
             parameters,
         },
+        model,
         num_variables,
     )
 }
@@ -781,6 +783,8 @@ mod retry_tests {
 
     #[test]
     fn assemble_preserves_explicit_dual_status_for_partial_and_limit_points() {
+        let model = Model::new("result assembly");
+        model.__var("value").build();
         for (termination, raw_status) in [
             (TerminationStatus::Feasible, "OptimalInaccurate"),
             (TerminationStatus::IterationLimit, "MaximumIterationsExceeded"),
@@ -803,9 +807,8 @@ mod retry_tests {
                     raw_log: None,
                 },
                 Duration::ZERO,
-                oximo_core::ModelId::UNASSIGNED,
+                &model,
                 oximo_solver::ParameterSnapshot::default(),
-                1,
             );
             assert_eq!(result.dual_status, DualStatus::Unknown, "{raw_status}");
         }
@@ -827,9 +830,8 @@ mod retry_tests {
                 raw_log: None,
             },
             Duration::ZERO,
-            oximo_core::ModelId::UNASSIGNED,
+            &model,
             oximo_solver::ParameterSnapshot::default(),
-            1,
         );
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
     }

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/typed_set_update.rs:6:29
+  |
+6 |     m.set_constraint_set(c, GreaterThan(0.0)).unwrap();
+  |       ------------------    ^^^^^^^^^^^^^^^^ expected `LessThan`, found `GreaterThan<{float}>`
+  |       |
+  |       arguments to this method are incorrect
+  |
+  = note: expected struct `LessThan`
+             found struct `oximo_core::GreaterThan<{float}>`
+note: method defined here
+ --> src/model/semantic.rs
+  |
+  |     pub fn set_constraint_set<F: crate::SemanticFunction, S: crate::function_set::Set>(
+  |            ^^^^^^^^^^^^^^^^^^

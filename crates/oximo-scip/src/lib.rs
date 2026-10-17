@@ -108,12 +108,39 @@ impl Solver for Scip {
                 | ModelKind::MINLP
         )
     }
+
+    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Capability::Native
+    }
+
     fn supports_sos(&self, kind: SosType) -> bool {
         matches!(kind, SosType::Sos1 | SosType::Sos2)
     }
+
+    fn supports_indicators(&self) -> bool {
+        true
+    }
+
     fn supports_model(&self, model: &Model) -> bool {
         translate::Snapshot::prepare(model).is_ok()
     }
+
+    fn validate_model_extra(
+        &self,
+        model: &Model,
+        _opts: &Self::Options,
+    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        translate::Snapshot::prepare(model)
+            .err()
+            .map(|error| oximo_solver::CapabilityDiagnostic {
+                constraint: None,
+                location: "SCIP translation".into(),
+                reason: error.to_string(),
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn solve(&mut self, model: &Model, opts: &ScipOptions) -> Result<SolverResult, SolverError> {
         Ok(self.solve_detailed(model, opts)?.result)
     }

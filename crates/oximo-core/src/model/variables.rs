@@ -6,6 +6,7 @@ use crate::domain::Domain;
 use crate::param::Parameter;
 use crate::var::{VarBuilder, Variable};
 use oximo_expr::{Affine, Constant, Expr, ModelMismatchError, ParamId, VarId, extract_linear};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use smol_str::SmolStr;
 use std::cell::Ref;
 
@@ -20,6 +21,35 @@ pub(super) struct PendingVar {
 pub(super) struct PendingParam {
     pub(super) name: SmolStr,
     pub(super) value: f64,
+}
+
+/// Reuse the validation table as the registry when this is its first family.
+fn prepare_batch_names<'a, I: Copy>(
+    existing: &FxHashMap<SmolStr, I>,
+    items: impl ExactSizeIterator<Item = (&'a SmolStr, I)>,
+    kind: &str,
+) -> Option<FxHashMap<SmolStr, I>> {
+    if !existing.is_empty() {
+        let count = items.len();
+        validate_batch_names(
+            |name| existing.contains_key(name),
+            items.map(|(name, _)| name),
+            kind,
+            count,
+        );
+        return None;
+    }
+
+    let mut names = FxHashMap::with_capacity_and_hasher(items.len(), FxBuildHasher);
+
+    for (name, id) in items {
+        let std::collections::hash_map::Entry::Vacant(entry) = names.entry(name.clone()) else {
+            panic!("{kind} name {name:?} occurs more than once");
+        };
+        entry.insert(id);
+    }
+
+    Some(names)
 }
 
 impl Model {
@@ -41,24 +71,25 @@ impl Model {
 
     /// Called by [`VarBuilder::build`]. Pushes the var into the registry and
     /// returns its `Expr` handle.
+    #[inline]
     pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a, Affine> {
         let mut names = self.var_names.borrow_mut();
-        assert!(
-            !names.contains_key(&b.name),
-            "variable name {:?} is already registered on this model",
-            b.name
-        );
+        let std::collections::hash_map::Entry::Vacant(name_entry) = names.entry(b.name.clone())
+        else {
+            panic!("variable name {:?} is already registered on this model", b.name);
+        };
+
         let mut vars = self.variables.borrow_mut();
         let id = VarId(u32::try_from(vars.len()).expect("variable count overflow"));
         vars.push(Variable {
             id,
-            name: b.name.clone(),
+            name: b.name,
             domain: b.domain,
             lb: b.lb,
             ub: b.ub,
             initial: b.initial,
         });
-        names.insert(b.name, id);
+        name_entry.insert(id);
         drop(vars);
         drop(names);
         self.cached_kind.set(None);
@@ -70,20 +101,33 @@ impl Model {
         items: &[PendingVar],
         domain: Domain,
     ) -> Vec<Expr<'a, Affine>> {
-        let mut names = self.var_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| &item.name), "variable", items.len());
-        let mut vars = self.variables.borrow_mut();
-        let final_count = vars.len().checked_add(items.len()).expect("variable count overflow");
-        if final_count > 0 {
-            u32::try_from(final_count - 1).expect("variable count overflow");
+        if items.is_empty() {
+            return Vec::new();
         }
+
+        let mut names = self.var_names.borrow_mut();
+        let mut vars = self.variables.borrow_mut();
+        let first = vars.len();
+        let final_count = first.checked_add(items.len()).expect("variable count overflow");
+        u32::try_from(final_count - 1).expect("variable count overflow");
+        let prepared_names = prepare_batch_names(
+            &names,
+            items.iter().enumerate().map(|(offset, item)| {
+                (&item.name, VarId(u32::try_from(first + offset).expect("checked variable count")))
+            }),
+            "variable",
+        );
         vars.reserve(items.len());
-        names.reserve(items.len());
+
+        if prepared_names.is_none() {
+            names.reserve(items.len());
+        }
 
         let mut arena = self.arena.borrow_mut();
-        arena.__reserve_nodes(items.len());
+        let expressions = arena.__extend_vars(first..final_count);
         let mut handles = Vec::with_capacity(items.len());
-        for item in items {
+
+        for (item, expression) in items.iter().zip(expressions) {
             let id = VarId(u32::try_from(vars.len()).expect("variable count overflow"));
             vars.push(Variable {
                 id,
@@ -93,10 +137,17 @@ impl Model {
                 ub: item.ub,
                 initial: None,
             });
-            names.insert(item.name.clone(), id);
-            let handle = arena.var_expr(id);
-            handles.push(handle);
+
+            if prepared_names.is_none() {
+                names.insert(item.name.clone(), id);
+            }
+            handles.push(expression);
         }
+
+        if let Some(prepared_names) = prepared_names {
+            *names = prepared_names;
+        }
+
         self.cached_kind.set(None);
         handles
     }
@@ -232,29 +283,39 @@ impl Model {
             !self.gdp.borrow().locks_variable(id),
             "cannot change bounds embedded in a GDP reformulation; change the source model before reformulating"
         );
-        if let Some(source) = self.sos_constraints.borrow().iter().find(|constraint| {
-            !constraint.active && constraint.members.iter().any(|member| member.variable == id)
-        }) {
+        let sos_source = {
+            let sources = self.sos_constraints.borrow();
+            self.sos_reformulations
+                .borrow()
+                .iter()
+                .map(|artifact| &sources[artifact.source.index()])
+                .find(|source| source.members.iter().any(|member| member.variable == id))
+                .map(|source| source.name.clone())
+        };
+
+        if let Some(source) = sos_source {
             panic!(
                 "cannot change bounds of variable {:?} after SOS constraint {:?} was reformulated; \
                  change bounds before reformulating or create a new reformulated model",
                 self.variables.borrow()[id.index()].name,
-                source.name,
+                source,
             );
         }
+
         let indicator_source = {
             let sources = self.indicator_constraints.borrow();
             let arena = self.arena.borrow();
-            sources
+            self.indicator_reformulations
+                .borrow()
                 .iter()
+                .map(|artifact| &sources[artifact.source.index()])
                 .find(|source| {
-                    !source.active
-                        && extract_linear(&arena, source.lhs).is_some_and(|terms| {
-                            id != source.trigger
-                                && terms.coeffs.iter().any(|(variable, coefficient)| {
-                                    *variable == id && *coefficient != 0.0
-                                })
-                        })
+                    extract_linear(&arena, source.lhs).is_some_and(|terms| {
+                        id != source.trigger
+                            && terms.coeffs.iter().any(|(variable, coefficient)| {
+                                *variable == id && *coefficient != 0.0
+                            })
+                    })
                 })
                 .map(|source| source.name.clone())
         };
@@ -295,17 +356,18 @@ impl Model {
     ///
     /// Panics if a parameter with the same name is already registered.
     pub(super) fn register_param(&self, name: SmolStr, value: f64) -> Expr<'_, Constant> {
-        assert!(
-            !self.param_names.borrow().contains_key(&name),
-            "parameter name {name:?} is already registered on this model"
-        );
+        let mut names = self.param_names.borrow_mut();
+        let std::collections::hash_map::Entry::Vacant(entry) = names.entry(name.clone()) else {
+            panic!("parameter name {name:?} is already registered on this model");
+        };
+
         let (id, handle) = {
             let mut a = self.arena.borrow_mut();
             let id = a.new_param(value);
             (id, a.param_expr(id))
         };
-        self.parameters.borrow_mut().push(Parameter { id, name: name.clone() });
-        self.param_names.borrow_mut().insert(name, id);
+        self.parameters.borrow_mut().push(Parameter { id, name });
+        entry.insert(id);
         self.cached_kind.set(None);
         handle
     }
@@ -314,25 +376,47 @@ impl Model {
         &'a self,
         items: &[PendingParam],
     ) -> Vec<Expr<'a, Constant>> {
+        if items.is_empty() {
+            return Vec::new();
+        }
+
         let mut names = self.param_names.borrow_mut();
-        validate_batch_names(&names, items.iter().map(|item| &item.name), "parameter", items.len());
         let mut params = self.parameters.borrow_mut();
         let mut arena = self.arena.borrow_mut();
-        let final_count = params.len().checked_add(items.len()).expect("parameter count overflow");
-        if final_count > 0 {
-            u32::try_from(final_count - 1).expect("parameter count overflow");
-        }
+        let first = arena.num_params();
+        let final_count = first.checked_add(items.len()).expect("parameter count overflow");
+        u32::try_from(final_count - 1).expect("parameter count overflow");
+        let prepared_names = prepare_batch_names(
+            &names,
+            items.iter().enumerate().map(|(offset, item)| {
+                (
+                    &item.name,
+                    ParamId(u32::try_from(first + offset).expect("checked parameter count")),
+                )
+            }),
+            "parameter",
+        );
         params.reserve(items.len());
-        names.reserve(items.len());
-        arena.__reserve_nodes(items.len());
+
+        if prepared_names.is_none() {
+            names.reserve(items.len());
+        }
+
+        let parameters = arena.__extend_params(items.iter().map(|item| item.value));
 
         let mut handles = Vec::with_capacity(items.len());
-        for item in items {
-            let id = arena.new_param(item.value);
-            let handle = arena.param_expr(id);
+
+        for (item, (id, expression)) in items.iter().zip(parameters) {
             params.push(Parameter { id, name: item.name.clone() });
-            names.insert(item.name.clone(), id);
-            handles.push(handle);
+
+            if prepared_names.is_none() {
+                names.insert(item.name.clone(), id);
+            }
+            handles.push(expression);
+        }
+
+        if let Some(prepared_names) = prepared_names {
+            *names = prepared_names;
         }
         handles
     }

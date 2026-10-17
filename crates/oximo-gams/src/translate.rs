@@ -1,5 +1,5 @@
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
-use oximo_solver::reconstruct::normalize_result;
+use oximo_solver::reconstruct::finalize_result;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
@@ -95,36 +95,7 @@ pub fn solve(
         .map_err(|e| SolverError::Backend(format!("cannot create temp dir: {e}")))?;
 
     let sol_path = tmp_dir.join("solution.txt");
-    writeln!(gms, "File oximo_sol / 'solution.txt' /;").unwrap();
-    writeln!(gms, "Put oximo_sol;").unwrap();
-    writeln!(gms, "Put 'STATUS=' oximo_m.modelstat:0:0 /;").unwrap();
-    writeln!(gms, "Put 'SOLVESTAT=' oximo_m.solvestat:0:0 /;").unwrap();
-    writeln!(gms, "Put 'ITER=' oximo_m.iterusd:0:0 /;").unwrap();
-    writeln!(gms, "Put 'OBJVAL=' v_obj.l:0:15 /;").unwrap();
-    writeln!(gms, "Put 'OBJEST=' oximo_m.objest:0:15 /;").unwrap();
-    writeln!(gms, "Put 'NODUSD=' oximo_m.nodusd:0:0 /;").unwrap();
-    writeln!(gms, "Put 'MARGINALS=' oximo_m.marginals:0:0 /;").unwrap();
-    writeln!(gms, "Put 'SOLVER_VERSION=' oximo_m.sysVer:0:15 /;").unwrap();
-    for i in 0..vars.len() {
-        writeln!(gms, "Put '{i}=' v{i}.l:0:15 /;").unwrap();
-    }
-
-    // Marginals are emitted for every model kind and GAMS decides
-    // which ones to populate based on the solve type and solver capabilities.
-    for i in 0..vars.len() {
-        writeln!(gms, "Put 'R{i}=' v{i}.m:0:15 /;").unwrap();
-    }
-    // A two-sided range is emitted as two equations (`_lo`/`_hi`), summing their
-    // marginals into one `D{i}` keeps the dual keyed by the single `ConstraintId`.
-    for (i, c) in constraints.iter().enumerate() {
-        if c.is_range() {
-            writeln!(gms, "Put 'D{i}=' (eq_c{i}_lo.m + eq_c{i}_hi.m):0:15 /;").unwrap();
-        } else {
-            writeln!(gms, "Put 'D{i}=' eq_c{i}.m:0:15 /;").unwrap();
-        }
-    }
-    write_soc_marginal_puts(&mut gms, socs.len());
-    writeln!(gms, "Putclose oximo_sol;").unwrap();
+    write_solution_puts(&mut gms, vars.len(), constraints, socs);
 
     // The affine bound side of each explicit SOC constraint, kept to rescale
     // the squared-form `eq_soc{i}` marginal back to the norm form after the
@@ -212,7 +183,6 @@ pub fn solve(
             &content,
             &soc_bounds,
             mixed_integer,
-            vars.len(),
             elapsed,
             raw_log,
             &parameters,
@@ -220,8 +190,16 @@ pub fn solve(
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
-        if result.has_solution() {
+        if result.solutions.first().is_some_and(|point| {
+            point
+                .primal
+                .iter()
+                .filter(|(id, value)| id.index() < vars.len() && value.is_finite())
+                .count()
+                == vars.len()
+        }) {
             let pool = read_solution_pool(&tmp_dir, gams_exec, sense, &parameters);
+
             if !pool.is_empty() {
                 result.solutions = pool;
             }
@@ -244,7 +222,7 @@ pub fn solve(
     let _ = fs::remove_dir_all(&tmp_dir);
     result.solver_name = Some(gams_solver_label(opts));
     result.model_id = model.id();
-    Ok(normalize_result(result, vars.len()))
+    Ok(finalize_result(result, model, vars.len()))
 }
 
 /// Backend label for the result: `GAMS/<sub-solver>` when a sub-solver is
@@ -299,10 +277,49 @@ fn summarize_listing(listing: &str) -> String {
     out.join("\n")
 }
 
+fn write_solution_puts(
+    gms: &mut String,
+    n_variables: usize,
+    constraints: &[AlgebraicConstraint],
+    socs: &[SocConstraint],
+) {
+    writeln!(gms, "File oximo_sol / 'solution.txt' /;").unwrap();
+    writeln!(gms, "Put oximo_sol;").unwrap();
+    writeln!(gms, "Put 'STATUS=' oximo_m.modelstat:0:0 /;").unwrap();
+    writeln!(gms, "Put 'SOLVESTAT=' oximo_m.solvestat:0:0 /;").unwrap();
+    writeln!(gms, "Put 'ITER=' oximo_m.iterusd:0:0 /;").unwrap();
+    writeln!(gms, "Put 'OBJVAL=' v_obj.l:0:15 /;").unwrap();
+    writeln!(gms, "Put 'OBJEST=' oximo_m.objest:0:15 /;").unwrap();
+    writeln!(gms, "Put 'NODUSD=' oximo_m.nodusd:0:0 /;").unwrap();
+    writeln!(gms, "Put 'MARGINALS=' oximo_m.marginals:0:0 /;").unwrap();
+    writeln!(gms, "Put 'SOLVER_VERSION=' oximo_m.sysVer:0:15 /;").unwrap();
+
+    for i in 0..n_variables {
+        writeln!(gms, "Put '{i}=' v{i}.l:0:15 /;").unwrap();
+    }
+
+    // Marginals are emitted for every model kind and GAMS decides
+    // which ones to populate based on the solve type and solver capabilities.
+    for i in 0..n_variables {
+        writeln!(gms, "Put 'R{i}=' v{i}.m:0:15 /;").unwrap();
+    }
+    // A two-sided range is emitted as two equations (`_lo`/`_hi`), summing their
+    // marginals into one `D{i}` keeps the dual keyed by the single `ConstraintId`.
+    for (i, c) in constraints.iter().enumerate() {
+        if c.is_range() {
+            writeln!(gms, "Put 'D{i}=' (eq_c{i}_lo.m + eq_c{i}_hi.m):0:15 /;").unwrap();
+        } else {
+            writeln!(gms, "Put 'D{i}=' eq_c{i}.m:0:15 /;").unwrap();
+        }
+    }
+    write_soc_marginal_puts(gms, socs);
+    writeln!(gms, "Putclose oximo_sol;").unwrap();
+}
+
 /// Emit `Z{i}=` PUT lines reading each lowered SOC row's marginal, mirroring
 /// the `D{i}` constraint-dual lines.
-fn write_soc_marginal_puts(gms: &mut String, n: usize) {
-    for i in 0..n {
+fn write_soc_marginal_puts(gms: &mut String, socs: &[SocConstraint]) {
+    for (i, _) in socs.iter().enumerate().filter(|(_, soc)| soc.active) {
         writeln!(gms, "Put 'Z{i}=' eq_soc{i}.m:0:15 /;").unwrap();
     }
 }
@@ -316,7 +333,6 @@ fn parseoximo_solution(
     content: &str,
     soc_bounds: &[LinearTerms<'_>],
     mixed_integer: bool,
-    num_variables: usize,
     elapsed: std::time::Duration,
     raw_log: Option<String>,
     parameters: &oximo_solver::ParameterSnapshot,
@@ -427,41 +443,39 @@ fn parseoximo_solution(
     } else {
         Vec::new()
     };
-    normalize_result(
-        SolverResult {
-            model_id: ModelId::UNASSIGNED,
-            solutions,
-            dual: if has_sol { dual } else { FxHashMap::default() },
-            soc_dual,
-            psd_dual: FxHashMap::default(),
-            reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
-            termination,
-            primal_status: PrimalStatus::NoSolution,
-            dual_status: match marginals {
-                Some(true) if has_sol => DualStatus::FeasiblePoint,
-                Some(_) => DualStatus::NoSolution,
-                None => DualStatus::Unknown,
-            },
-            best_bound,
-            gap: None,
-            solve_time: elapsed,
-            iterations,
-            node_count: mixed_integer.then_some(node_count).flatten(),
-            raw_status: Some(
-                format!(
-                    "modelstat={modelstat} ({}), solvestat={solvestat} ({})",
-                    model_status_label(modelstat),
-                    solve_status_label(solvestat)
-                )
-                .into(),
-            ),
-            raw_log,
-            solver_name: Some(crate::NAME.into()),
-            solver_version,
-            parameters: parameters.clone(),
+    SolverResult {
+        model_id: ModelId::UNASSIGNED,
+        solutions,
+        semantic_dual: FxHashMap::default(),
+        dual: if has_sol { dual } else { FxHashMap::default() },
+        soc_dual,
+        psd_dual: FxHashMap::default(),
+        reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
+        termination,
+        primal_status: PrimalStatus::NoSolution,
+        dual_status: match marginals {
+            Some(true) if has_sol => DualStatus::FeasiblePoint,
+            Some(_) => DualStatus::NoSolution,
+            None => DualStatus::Unknown,
         },
-        num_variables,
-    )
+        best_bound,
+        gap: None,
+        solve_time: elapsed,
+        iterations,
+        node_count: mixed_integer.then_some(node_count).flatten(),
+        raw_status: Some(
+            format!(
+                "modelstat={modelstat} ({}), solvestat={solvestat} ({})",
+                model_status_label(modelstat),
+                solve_status_label(solvestat)
+            )
+            .into(),
+        ),
+        raw_log,
+        solver_name: Some(crate::NAME.into()),
+        solver_version,
+        parameters: parameters.clone(),
+    }
 }
 
 /// Read a sub-solver solution pool from the GAMS run directory.
@@ -744,7 +758,7 @@ fn gams_solve_type_for(kind: ModelKind, nonsmooth: bool) -> &'static str {
 /// Reject an explicitly selected sub-solver that cannot handle `kind` before
 /// invoking GAMS, so the caller gets a clear error naming the solver and model
 /// type instead of a downstream GAMS compilation failure.
-fn validate_solver_type(
+pub(crate) fn validate_solver_type(
     opts: &GamsOptions,
     kind: ModelKind,
     solve_type: &str,
@@ -761,7 +775,10 @@ fn validate_solver_type(
     Ok(())
 }
 
-fn validate_indicator_solver(model: &Model, opts: &GamsOptions) -> Result<(), SolverError> {
+pub(crate) fn validate_indicator_solver(
+    model: &Model,
+    opts: &GamsOptions,
+) -> Result<(), SolverError> {
     if !model.has_active_indicator_constraints() {
         return Ok(());
     }
@@ -1078,9 +1095,11 @@ fn write_equations(
             write!(gms, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
         }
     }
-    for i in 0..socs.len() {
+
+    for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         write!(gms, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
     }
+
     for (sos_id, constraint) in active_sos_constraints(sos_constraints) {
         for member_index in 0..constraint.members.len() {
             write!(gms, ", eq_sos{sos_id}_m{member_index}").unwrap();
@@ -1214,8 +1233,9 @@ fn ordered_sos_members(constraint: &SosConstraint) -> Vec<&SosMember> {
 /// row `sqr(term_1) + ... =l= sqr(bound)` plus the sign row `bound =g= 0`
 /// (squaring loses the sign of the bound side).
 fn write_soc_equations(gms: &mut String, prepared: &PreparedExpressions, socs: &[SocConstraint]) {
-    for (i, s) in socs.iter().enumerate() {
+    for (i, s) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         write!(gms, "eq_soc{i}.. ").unwrap();
+
         for (k, &term) in s.terms.iter().enumerate() {
             if k > 0 {
                 write!(gms, " +").unwrap();
@@ -1551,7 +1571,8 @@ pub mod benchmark_support {
                 write!(out, ", eq_c{i}_lo, eq_c{i}_hi").unwrap();
             }
         }
-        for i in 0..socs.len() {
+
+        for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
             write!(out, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
         }
         writeln!(out, ";\n").unwrap();
@@ -1620,6 +1641,18 @@ mod tests {
     use super::*;
     use oximo_core::prelude::*;
 
+    fn finalize_parsed(mut result: SolverResult, num_variables: usize) -> SolverResult {
+        assert_eq!(result.model_id, ModelId::UNASSIGNED);
+        let model = Model::new("parsed result fixture");
+        for index in 0..num_variables {
+            model.__var(format!("x{index}")).build();
+        }
+        for (index, &value) in result.parameters.values().iter().enumerate() {
+            model.__param(format!("p{index}"), value);
+        }
+        result.model_id = model.id();
+        finalize_result(result, &model, num_variables)
+    }
     fn render(model: &Model, opts: &GamsOptions) -> String {
         let _arena = model.arena();
         let vars = model.variables();
@@ -1650,7 +1683,66 @@ mod tests {
             sense_kw,
             opts,
         );
+        write_solution_puts(&mut gms, vars.len(), constraints, &socs);
         gms
+    }
+
+    #[test]
+    #[ignore = "requires an installed GAMS executable on PATH"]
+    fn gams_compiles_complete_script_with_an_inactive_soc() {
+        let model = Model::new("GAMS cone activity compilation");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        let inactive = model.add_soc_constraint("inactive", [x], t);
+        model.add_soc_constraint("active", [x], t);
+        model.set_constraint_active(inactive, false).unwrap();
+        objective!(model, Min, t);
+
+        let script = render(&model, &GamsOptions::default());
+        let dir = std::env::temp_dir().join(format!(
+            "oximo_gams_activity_{}_{}",
+            std::process::id(),
+            SOLVE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("activity.gms"), script).unwrap();
+        let output = std::process::Command::new("gams")
+            .current_dir(&dir)
+            .args(["activity.gms", "action=c", "lo=0"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "GAMS compilation failed: {:?}\n{}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(dir.join("activity.lst")).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn complete_script_omits_inactive_soc_declarations_bodies_and_marginals() {
+        let model = Model::new("disabled SOC");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        let disabled = model.add_soc_constraint("disabled", [x], t);
+        model.add_soc_constraint("active", [x], t);
+        model.set_constraint_active(disabled, false).unwrap();
+        objective!(model, Min, t);
+        let output = render(&model, &GamsOptions::default());
+        assert!(!output.contains("soc0"), "{output}");
+        assert!(output.contains("eq_soc1.."), "{output}");
+        assert!(!output.contains("Put 'Z0='"), "{output}");
+        assert!(output.contains("Put 'Z1=' eq_soc1.m:0:15 /;"), "{output}");
+        assert!(output.contains("Putclose oximo_sol;"), "{output}");
+
+        let retained = model.constraint_handle("active").unwrap();
+        model.set_constraint_active(retained, false).unwrap();
+        let output = render(&model, &GamsOptions::default());
+        assert!(!output.contains("eq_soc"), "{output}");
+        assert!(!output.contains("Put 'Z"), "{output}");
+        assert!(output.contains("Putclose oximo_sol;"), "{output}");
     }
 
     #[test]
@@ -1683,14 +1775,16 @@ mod tests {
     fn parses_iterations_from_put_file() {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
-        let r = parseoximo_solution(
-            content,
-            &[],
-            false,
+        let r = finalize_parsed(
+            parseoximo_solution(
+                content,
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
             1,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.iterations, 42);
@@ -1710,7 +1804,6 @@ mod tests {
             "STATUS=1\nSOLVESTAT=1\nOBJVAL=6\n0=3\n",
             &[],
             false,
-            1,
             std::time::Duration::ZERO,
             None,
             &parameters,
@@ -1728,7 +1821,7 @@ mod tests {
         assert_eq!(pool.parameters.values().as_ptr(), parameters.values().as_ptr());
         result.solutions.push(pool);
         result.model_id = model.id();
-        let result = normalize_result(result, 1);
+        let result = finalize_result(result, &model, 1);
         assert_eq!(result.value_of(p * x), Ok(Some(6.0)));
         assert_eq!(result.solution(1).unwrap().value_of(p * x), Ok(Some(8.0)));
         assert_eq!(result.value_of_with_current_parameters(p * x), Ok(Some(12.0)));
@@ -1737,14 +1830,16 @@ mod tests {
     #[test]
     fn parses_bound_nodes_marginals_and_solver_version() {
         let content = "STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\nNODUSD=17\nMARGINALS=1\nSOLVER_VERSION=13.0.1\n0=2.5\nD0=1.0\n";
-        let r = parseoximo_solution(
-            content,
-            &[],
-            true,
+        let r = finalize_parsed(
+            parseoximo_solution(
+                content,
+                &[],
+                true,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
             1,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
         assert_eq!(r.best_bound, Some(8.0));
@@ -1758,14 +1853,16 @@ mod tests {
     #[test]
     fn integer_solution_status_keeps_reported_gap() {
         let content = "STATUS=8\nSOLVESTAT=1\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
-        let r = parseoximo_solution(
-            content,
-            &[],
-            true,
+        let r = finalize_parsed(
+            parseoximo_solution(
+                content,
+                &[],
+                true,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
             1,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.termination, TerminationStatus::Feasible);
         assert_eq!(r.best_bound, Some(8.0));
@@ -1776,28 +1873,33 @@ mod tests {
     fn feasible_model_statuses_do_not_synthesize_global_bounds() {
         for status in [7, 8, 15, 16, 17] {
             let content = format!("STATUS={status}\nSOLVESTAT=1\nOBJVAL=10\n0=2.5\n");
-            let result = parseoximo_solution(
-                &content,
-                &[],
-                false,
+            let result = finalize_parsed(
+                parseoximo_solution(
+                    &content,
+                    &[],
+                    false,
+                    std::time::Duration::ZERO,
+                    None,
+                    &oximo_solver::ParameterSnapshot::default(),
+                ),
                 1,
-                std::time::Duration::ZERO,
-                None,
-                &oximo_solver::ParameterSnapshot::default(),
             );
             assert_eq!(result.termination, TerminationStatus::Feasible);
             assert_eq!(result.primal_status, PrimalStatus::FeasiblePoint);
             assert_eq!(result.best_bound, None);
             assert_eq!(result.gap, None);
         }
-        let result = parseoximo_solution(
-            "STATUS=6\nSOLVESTAT=1\nOBJVAL=10\n0=2.5\n",
-            &[],
-            false,
+
+        let result = finalize_parsed(
+            parseoximo_solution(
+                "STATUS=6\nSOLVESTAT=1\nOBJVAL=10\n0=2.5\n",
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
             1,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(result.termination, TerminationStatus::Other("gams_modelstat_6".into()));
         assert!(!result.has_solution());
@@ -1807,14 +1909,16 @@ mod tests {
     fn time_limit_uses_model_status_as_point_evidence() {
         for (status, has_point) in [(8, true), (14, false)] {
             let content = format!("STATUS={status}\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n");
-            let result = parseoximo_solution(
-                &content,
-                &[],
-                true,
+            let result = finalize_parsed(
+                parseoximo_solution(
+                    &content,
+                    &[],
+                    true,
+                    std::time::Duration::ZERO,
+                    None,
+                    &oximo_solver::ParameterSnapshot::default(),
+                ),
                 1,
-                std::time::Duration::ZERO,
-                None,
-                &oximo_solver::ParameterSnapshot::default(),
             );
             assert_eq!(result.termination, TerminationStatus::TimeLimit);
             assert_eq!(result.has_solution(), has_point);
@@ -1828,14 +1932,16 @@ mod tests {
     fn extreme_objective_bound_gap_does_not_overflow() {
         let content =
             format!("STATUS=8\nSOLVESTAT=3\nOBJVAL={}\nOBJEST={}\n0=2.5\n", f64::MAX, -f64::MAX);
-        let r = parseoximo_solution(
-            &content,
-            &[],
-            true,
+        let r = finalize_parsed(
+            parseoximo_solution(
+                &content,
+                &[],
+                true,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
             1,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.best_bound, Some(-f64::MAX));
         assert_eq!(r.gap, None);
@@ -1844,14 +1950,16 @@ mod tests {
     #[test]
     fn continuous_objest_is_not_treated_as_a_global_bound() {
         let content = "STATUS=7\nSOLVESTAT=3\nOBJVAL=10\nOBJEST=8\n0=2.5\n";
-        let r = parseoximo_solution(
-            content,
-            &[],
-            false,
+        let r = finalize_parsed(
+            parseoximo_solution(
+                content,
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
             1,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
         );
         assert_eq!(r.termination, TerminationStatus::TimeLimit);
         assert_eq!(r.best_bound, None);
@@ -1863,14 +1971,16 @@ mod tests {
     fn missing_objest_tokens_remain_unset() {
         for token in ["NA", "UNDF"] {
             let content = format!("STATUS=8\nSOLVESTAT=3\nOBJVAL=10\nOBJEST={token}\n0=2.5\n");
-            let r = parseoximo_solution(
-                &content,
-                &[],
-                false,
+            let r = finalize_parsed(
+                parseoximo_solution(
+                    &content,
+                    &[],
+                    false,
+                    std::time::Duration::ZERO,
+                    None,
+                    &oximo_solver::ParameterSnapshot::default(),
+                ),
                 1,
-                std::time::Duration::ZERO,
-                None,
-                &oximo_solver::ParameterSnapshot::default(),
             );
             assert_eq!(r.best_bound, None, "OBJEST={token}");
             assert_eq!(r.gap, None, "OBJEST={token}");
@@ -1880,24 +1990,38 @@ mod tests {
     #[test]
     fn soc_marginal_is_rescaled_to_norm_form() {
         let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\n";
-        let bounds = vec![LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 }];
-        let r = parseoximo_solution(
-            content,
-            &bounds,
-            false,
-            2,
-            std::time::Duration::ZERO,
-            None,
-            &oximo_solver::ParameterSnapshot::default(),
-        );
-        let z0 = r.soc_dual.get(&SocConstraintId(0)).copied().expect("SOC dual missing");
-        assert!((z0 - 3.0).abs() < 1e-9, "z0 = {z0}");
+        let bound = LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 };
+
+        for index in [0_usize, 1] {
+            let content = content.replace("Z0=", &format!("Z{index}="));
+            let bounds = vec![bound.clone(); index + 1];
+            let result = finalize_parsed(
+                parseoximo_solution(
+                    &content,
+                    &bounds,
+                    false,
+                    std::time::Duration::ZERO,
+                    None,
+                    &oximo_solver::ParameterSnapshot::default(),
+                ),
+                2,
+            );
+            let id = SocConstraintId(u32::try_from(index).unwrap());
+            assert_eq!(result.soc_dual.len(), 1);
+            let multiplier = result.soc_dual.get(&id).copied().expect("SOC dual missing");
+            assert!((multiplier - 3.0).abs() < 1e-9, "{id:?}: {multiplier}");
+        }
     }
 
     #[test]
     fn put_section_reads_soc_marginals() {
         let mut gms = String::new();
-        write_soc_marginal_puts(&mut gms, 2);
+        let model = Model::new("SOC puts");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        model.add_soc_constraint("first", [x], t);
+        model.add_soc_constraint("second", [x], t);
+        write_soc_marginal_puts(&mut gms, &model.soc_constraints());
         assert!(gms.contains("Put 'Z0=' eq_soc0.m:0:15 /;"), "{gms}");
         assert!(gms.contains("Put 'Z1=' eq_soc1.m:0:15 /;"), "{gms}");
     }

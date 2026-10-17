@@ -1,5 +1,5 @@
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
-use oximo_solver::reconstruct::normalize_result;
+use oximo_solver::reconstruct::finalize_result;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::process::Stdio;
@@ -62,7 +62,7 @@ pub fn solve(
     let parameters = prepared.arena().parameter_snapshot();
     let (bar, var_order, con_order, soc_bounds) = build_bar_prepared(model, &prepared, opts)?;
     let run = run_baron(&bar, opts, exec)?;
-    Ok(parse_solution(
+    let result = parse_solution(
         &run.tim,
         &run.res,
         sense,
@@ -73,7 +73,9 @@ pub fn solve(
         &soc_bounds,
         model.id(),
         &parameters,
-    ))
+    );
+
+    Ok(finalize_result(result, model, var_order.len()))
 }
 
 /// Build `model`, run BARON with IIS search enabled, and when BARON reports the
@@ -263,7 +265,11 @@ fn build_bar_prepared(
         .iter()
         .map(|handle| {
             if handle.model_id() == model.id() {
-                Ok(handle.id())
+                handle.try_row_id().ok_or_else(|| {
+                    SolverError::Backend(
+                        "BARON convex-equation assertion requires an algebraic row".into(),
+                    )
+                })
             } else {
                 let mismatch = ModelMismatchError::new(model.id(), handle.model_id());
                 Err(SolverError::Backend(format!(
@@ -442,7 +448,8 @@ fn write_equations(
             write_constraint_body(&mut bodies, prepared, c.lhs, op, rhs)?;
         }
     }
-    for i in 0..socs.len() {
+
+    for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         names.push(format!("soc{i}"));
         names.push(format!("soc{i}_sign"));
     }
@@ -505,8 +512,9 @@ fn convex_equation_names(
 /// row `(term_1)^2 + ... - (bound)^2 <= 0` plus the sign row `bound >= 0`
 /// (squaring loses the sign of the bound side).
 fn write_soc_rows(bar: &mut String, prepared: &PreparedExpressions, socs: &[SocConstraint]) {
-    for (i, s) in socs.iter().enumerate() {
+    for (i, s) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         write!(bar, "soc{i}: ").unwrap();
+
         for (k, &term) in s.terms.iter().enumerate() {
             if k > 0 {
                 write!(bar, " + ").unwrap();
@@ -894,36 +902,34 @@ fn parse_solution(
     let dual_available =
         has_sol && res.to_ascii_lowercase().contains("corresponding dual solution");
 
-    normalize_result(
-        SolverResult {
-            model_id,
-            solutions,
-            dual,
-            soc_dual,
-            psd_dual: FxHashMap::default(),
-            reduced_costs,
-            termination,
-            primal_status: PrimalStatus::NoSolution,
-            dual_status: if dual_available {
-                DualStatus::FeasiblePoint
-            } else if has_sol {
-                DualStatus::Unknown
-            } else {
-                DualStatus::NoSolution
-            },
-            best_bound,
-            gap: None,
-            solve_time: elapsed,
-            iterations,
-            node_count,
-            raw_status: Some(raw_status.into()),
-            raw_log,
-            solver_name: Some(crate::NAME.into()),
-            solver_version: baron_version(res),
-            parameters: parameters.clone(),
+    SolverResult {
+        semantic_dual: FxHashMap::default(),
+        model_id,
+        solutions,
+        dual,
+        soc_dual,
+        psd_dual: FxHashMap::default(),
+        reduced_costs,
+        termination,
+        primal_status: PrimalStatus::NoSolution,
+        dual_status: if dual_available {
+            DualStatus::FeasiblePoint
+        } else if has_sol {
+            DualStatus::Unknown
+        } else {
+            DualStatus::NoSolution
         },
-        var_order.len(),
-    )
+        best_bound,
+        gap: None,
+        solve_time: elapsed,
+        iterations,
+        node_count,
+        raw_status: Some(raw_status.into()),
+        raw_log,
+        solver_name: Some(crate::NAME.into()),
+        solver_version: baron_version(res),
+        parameters: parameters.clone(),
+    }
 }
 
 enum BaronBanner {
@@ -1432,7 +1438,8 @@ pub mod benchmark_support {
                 emit_map.push(id);
             }
         }
-        for i in 0..socs.len() {
+
+        for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
             names.extend([format!("soc{i}"), format!("soc{i}_sign")]);
         }
         writeln!(out, "EQUATIONS {};", names.join(", ")).unwrap();
@@ -1475,8 +1482,34 @@ mod tests {
 
     use super::*;
 
+    fn finalize_parsed(mut result: SolverResult, num_variables: usize) -> SolverResult {
+        assert_eq!(result.model_id, ModelId::UNASSIGNED);
+        let model = Model::new("parsed result fixture");
+        for index in 0..num_variables {
+            model.__var(format!("x{index}")).build();
+        }
+        for (index, &value) in result.parameters.values().iter().enumerate() {
+            model.__param(format!("p{index}"), value);
+        }
+        result.model_id = model.id();
+        finalize_result(result, &model, num_variables)
+    }
     fn render(model: &Model) -> String {
         build_bar(model, &BaronOptions::default()).expect("build_bar").0
+    }
+
+    #[test]
+    fn inactive_soc_is_absent_from_equation_declarations_and_bodies() {
+        let model = Model::new("disabled SOC");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        let disabled = model.add_soc_constraint("disabled", [x], t);
+        model.add_soc_constraint("active", [x], t);
+        model.set_constraint_active(disabled, false).unwrap();
+        objective!(model, Min, t);
+        let output = build_bar(&model, &BaronOptions::default()).unwrap().0;
+        assert!(!output.contains("soc0"), "{output}");
+        assert!(output.contains("soc1"), "{output}");
     }
 
     #[test]
@@ -1582,7 +1615,7 @@ mod tests {
         let error =
             build_bar(&target, &BaronOptions::default().convex_equation(foreign_row)).unwrap_err();
         assert!(error.to_string().contains("model mismatch"), "{error}");
-        assert_eq!(foreign_row.id(), ConstraintId(0));
+        assert_eq!(foreign_row.row_id(), ConstraintId(0));
     }
 
     #[test]
@@ -1899,17 +1932,20 @@ mod tests {
             assert_eq!(termination_banner(banner), Some(banner));
 
             let tim = format!("m 0 0 0 0 0 0 1 {model_status} 0 0 0 0 0 0.0");
-            let result = parse_solution(
-                &tim,
-                banner,
-                ObjectiveSense::Minimize,
-                std::time::Duration::ZERO,
-                None,
-                &[],
-                &[],
-                &[],
-                ModelId::UNASSIGNED,
-                &oximo_solver::ParameterSnapshot::default(),
+            let result = finalize_parsed(
+                parse_solution(
+                    &tim,
+                    banner,
+                    ObjectiveSense::Minimize,
+                    std::time::Duration::ZERO,
+                    None,
+                    &[],
+                    &[],
+                    &[],
+                    ModelId::UNASSIGNED,
+                    &oximo_solver::ParameterSnapshot::default(),
+                ),
+                0,
             );
             assert_eq!(result.termination, expected);
             assert_eq!(result.raw_status.as_deref(), Some(banner));
@@ -1920,34 +1956,40 @@ mod tests {
     fn parse_tim_picks_objective_by_sense() {
         // name ncon nvar a b lower upper solver model c iters nodeopt ... wall
         let tim = "m 1 2 0 0 1.5 9.5 1 1 0 42 7 0 0 0.42";
-        let r = parse_solution(
-            tim,
-            "",
-            ObjectiveSense::Minimize,
-            std::time::Duration::ZERO,
-            None,
-            &[],
-            &[],
-            &[],
-            ModelId::UNASSIGNED,
-            &oximo_solver::ParameterSnapshot::default(),
+        let r = finalize_parsed(
+            parse_solution(
+                tim,
+                "",
+                ObjectiveSense::Minimize,
+                std::time::Duration::ZERO,
+                None,
+                &[],
+                &[],
+                &[],
+                ModelId::UNASSIGNED,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
+            0,
         );
         assert_eq!(r.termination, TerminationStatus::Optimal);
         assert_eq!(r.objective(), Some(9.5)); // upper bound for minimize
         assert_eq!(r.iterations, 42); // branch-and-reduce iterations from tim[10]
         assert_eq!(r.node_count, Some(42));
         assert!(r.raw_status.as_deref().unwrap().contains("model_status=1"));
-        let r = parse_solution(
-            tim,
-            "",
-            ObjectiveSense::Maximize,
-            std::time::Duration::ZERO,
-            None,
-            &[],
-            &[],
-            &[],
-            ModelId::UNASSIGNED,
-            &oximo_solver::ParameterSnapshot::default(),
+        let r = finalize_parsed(
+            parse_solution(
+                tim,
+                "",
+                ObjectiveSense::Maximize,
+                std::time::Duration::ZERO,
+                None,
+                &[],
+                &[],
+                &[],
+                ModelId::UNASSIGNED,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
+            0,
         );
         assert_eq!(r.objective(), Some(1.5)); // lower bound for maximize
     }
@@ -2218,17 +2260,20 @@ The best solution found is:
 
 The above solution has an objective value of:  0.0
 ";
-        let r = parse_solution(
-            tim,
-            res,
-            ObjectiveSense::Minimize,
-            std::time::Duration::ZERO,
-            None,
-            &[VarId(0), VarId(1)],
-            &[ConstraintId(0)],
-            &[],
-            ModelId::UNASSIGNED,
-            &oximo_solver::ParameterSnapshot::default(),
+        let r = finalize_parsed(
+            parse_solution(
+                tim,
+                res,
+                ObjectiveSense::Minimize,
+                std::time::Duration::ZERO,
+                None,
+                &[VarId(0), VarId(1)],
+                &[ConstraintId(0)],
+                &[],
+                ModelId::UNASSIGNED,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
+            2,
         );
         assert_eq!(r.result_count(), 2);
         assert_eq!(r.reduced_costs.get(&VarId(1)), Some(&1.5));
@@ -2306,17 +2351,20 @@ The above solution has an objective value of:  0.0
         // so it must NOT count as a usable solution.
         let tim = "m 1 1 0 0 0 0 1 1 0 0 -3 0 0 0.01";
         let res = "The best solution found is:\n\n\n  x0  0  9.9\n";
-        let r = parse_solution(
-            tim,
-            res,
-            ObjectiveSense::Minimize,
-            std::time::Duration::ZERO,
-            None,
-            &[VarId(0)],
-            &[],
-            &[],
-            ModelId::UNASSIGNED,
-            &oximo_solver::ParameterSnapshot::default(),
+        let r = finalize_parsed(
+            parse_solution(
+                tim,
+                res,
+                ObjectiveSense::Minimize,
+                std::time::Duration::ZERO,
+                None,
+                &[VarId(0)],
+                &[],
+                &[],
+                ModelId::UNASSIGNED,
+                &oximo_solver::ParameterSnapshot::default(),
+            ),
+            1,
         );
         assert_eq!(r.result_count(), 0);
         assert_eq!(r.primal_status, PrimalStatus::NoSolution);

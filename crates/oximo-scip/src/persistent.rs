@@ -135,15 +135,35 @@ impl Solver for ScipPersistent {
     fn name(&self) -> &str {
         "SCIP"
     }
+
     fn supports(&self, kind: ModelKind) -> bool {
         self.solver.supports(kind)
     }
+
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        self.solver.domain_support(domain)
+    }
+
     fn supports_sos(&self, kind: SosType) -> bool {
         self.solver.supports_sos(kind)
     }
+
+    fn supports_indicators(&self) -> bool {
+        self.solver.supports_indicators()
+    }
+
     fn supports_model(&self, model: &Model) -> bool {
         self.solver.supports_model(model)
     }
+
+    fn validate_model_extra(
+        &self,
+        model: &Model,
+        opts: &Self::Options,
+    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        self.solver.validate_model_extra(model, opts)
+    }
+
     fn solve(&mut self, model: &Model, opts: &ScipOptions) -> Result<SolverResult, SolverError> {
         Ok(self.solve_detailed(model, opts)?.result)
     }

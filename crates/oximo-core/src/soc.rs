@@ -1,6 +1,4 @@
-use oximo_expr::{
-    ExprArena, ExprId, LinearTerms, ModelId, QuadraticTerms, VarId, extract_quadratic,
-};
+use oximo_expr::{ExprArena, ExprId, LinearTerms, QuadraticTerms, VarId, extract_quadratic};
 use smol_str::SmolStr;
 
 use crate::constraint::{AlgebraicConstraint, Sense};
@@ -9,51 +7,9 @@ use crate::var::Variable;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SocConstraintId(pub u32);
 
-/// A model-bound handle to an explicit second-order-cone constraint.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SocConstraintHandle {
-    id: SocConstraintId,
-    model_id: ModelId,
-}
-
-impl SocConstraintHandle {
-    pub(crate) const fn new(id: SocConstraintId, model_id: ModelId) -> Self {
-        Self { id, model_id }
-    }
-
-    #[must_use]
-    pub const fn id(self) -> SocConstraintId {
-        self.id
-    }
-
-    #[must_use]
-    pub const fn model_id(self) -> ModelId {
-        self.model_id
-    }
-
-    #[must_use]
-    pub fn index(self) -> usize {
-        self.id.index()
-    }
-}
-
-impl From<SocConstraintHandle> for SocConstraintId {
-    fn from(value: SocConstraintHandle) -> Self {
-        value.id
-    }
-}
-
-impl PartialEq<SocConstraintId> for SocConstraintHandle {
-    fn eq(&self, other: &SocConstraintId) -> bool {
-        self.id == *other
-    }
-}
-
-impl PartialEq<SocConstraintHandle> for SocConstraintId {
-    fn eq(&self, other: &SocConstraintHandle) -> bool {
-        *self == other.id
-    }
-}
+/// Typed reference to a vector-affine function in a second-order cone.
+pub type SocConstraintHandle =
+    crate::ConstraintHandle<crate::semantic::VectorAffineData, crate::SecondOrderCone>;
 
 impl SocConstraintId {
     #[inline]
@@ -72,7 +28,7 @@ impl SocConstraintId {
 #[derive(Clone, Debug)]
 pub struct SocConstraint {
     pub name: SmolStr,
-    pub terms: Vec<ExprId>,
+    pub terms: crate::SharedSlice<ExprId>,
     pub bound: ExprId,
     pub active: bool,
 }

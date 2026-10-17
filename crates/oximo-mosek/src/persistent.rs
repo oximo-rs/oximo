@@ -110,6 +110,10 @@ impl Solver for MosekPersistent {
         crate::supported(kind)
     }
 
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Solver::domain_support(&crate::Mosek, domain)
+    }
+
     fn supports_psd(&self) -> bool {
         true
     }

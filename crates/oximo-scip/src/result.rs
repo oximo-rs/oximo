@@ -168,7 +168,7 @@ pub(crate) fn collect(
         }
     }
     Ok(ScipSolveOutput {
-        result,
+        result: result.with_semantic_dual_defaults(model),
         generated_solutions,
         generated_names,
         statistics_json: native.stats_json(),

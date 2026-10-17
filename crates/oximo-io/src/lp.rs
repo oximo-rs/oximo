@@ -1164,10 +1164,12 @@ fn parse_bound(line: &str, line_no: usize, p: &mut ParsedLp) -> Result<(), IoErr
 #[expect(clippy::too_many_lines)]
 pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
+
     if model.has_active_psd_constraints() {
         return Err(IoError::Conic);
     }
-    if model.num_soc_constraints() > 0
+
+    if model.has_active_soc_constraints()
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
     {
         return Err(IoError::Conic);
@@ -1197,13 +1199,21 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     // export time. Those derived labels can clash with another constraint named
     // literally `{name}_lo`, so disambiguate against every registered name.
     let indicators = model.indicator_constraints();
-    let mut used_labels: FxHashSet<String> = constraints
-        .iter()
-        .map(|c| c.name.to_string())
-        .chain(indicators.iter().map(|c| c.name.to_string()))
-        .collect();
+    let mut used_labels: FxHashSet<String> =
+        if constraints.iter().any(oximo_core::AlgebraicConstraint::is_range)
+            || indicators.iter().any(|c| c.active && c.is_range())
+        {
+            constraints
+                .iter()
+                .map(|c| c.name.to_string())
+                .chain(indicators.iter().map(|c| c.name.to_string()))
+                .collect()
+        } else {
+            FxHashSet::default()
+        };
 
     writeln!(out, "Subject To")?;
+
     for c in constraints {
         let t = extract_quadratic(&arena, c.lhs).ok_or_else(|| IoError::Nonlinear {
             location: format!("constraint {:?}", c.name),
@@ -1469,24 +1479,28 @@ fn write_signed_term<W: Write>(
     if coefficient == 0.0 {
         return Ok(());
     }
+
     let negative = coefficient < 0.0;
     let magnitude = coefficient.abs();
-    let coefficient_text = if (magnitude - 1.0).abs() < f64::EPSILON {
-        String::new()
-    } else {
-        format!("{magnitude} ")
-    };
+
     if *first {
         if negative {
-            write!(out, " - {coefficient_text}{body}")?;
+            write!(out, " - ")?;
         } else {
-            write!(out, " {coefficient_text}{body}")?;
+            write!(out, " ")?;
         }
         *first = false;
     } else if negative {
-        write!(out, " - {coefficient_text}{body}")?;
+        write!(out, " - ")?;
     } else {
-        write!(out, " + {coefficient_text}{body}")?;
+        write!(out, " + ")?;
     }
+
+    let unit_magnitude = (magnitude - 1.0).abs() < f64::EPSILON;
+
+    if !unit_magnitude {
+        write!(out, "{magnitude} ")?;
+    }
+    write!(out, "{body}")?;
     Ok(())
 }

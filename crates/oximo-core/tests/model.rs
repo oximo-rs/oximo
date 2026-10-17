@@ -467,7 +467,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
     variable!(m, t >= 0.0);
     constraint!(m, shared, x <= 1.0);
     let soc_id = m.add_soc_constraint("shared", [x], t);
-    let sos_id = m.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]).id();
+    let sos_id = m.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]).sos_id();
 
     assert_eq!(m.num_constraints(), 3);
     assert_eq!(m.constraints().algebraic().len(), 1);
@@ -497,7 +497,7 @@ fn unified_constraints_preserve_typed_views_ids_and_order() {
     }
     match iter.next().expect("SOC constraint") {
         ConstraintRef::SecondOrderCone { id, constraint } => {
-            assert_eq!(id, soc_id.id());
+            assert_eq!(id, soc_id.soc_id());
             assert_eq!(constraint.name, "shared");
         }
         ConstraintRef::PositiveSemidefinite { .. } => panic!("unexpected PSD constraint"),

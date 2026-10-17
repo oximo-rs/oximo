@@ -48,7 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     disjunction!(model, [active, low]);
     objective!(model, Max, flow);
 
-    let hull = GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(flow, 1.0);
+    let hull =
+        GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(flow, 1.0);
     let result = Scip::default().with_gdp(hull).solve(&model, &ScipOptions::default())?;
 
     println!(

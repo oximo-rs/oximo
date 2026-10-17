@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use oximo_core::{
-    ConstraintHandle, ConstraintId, ConstraintRef, Expr, IndexKey, IndexedVar, Model, ModelId,
-    ModelMismatchError, SocConstraintHandle, SocConstraintId, VarId,
+    ConstraintHandle, ConstraintId, Expr, IndexKey, IndexedVar, Model, ModelId, ModelMismatchError,
+    SocConstraintHandle, SocConstraintId, VarId,
 };
 use oximo_expr::{EvalContext, ExprArena, ExprId, ExprNode, ParamId, WithParameters, evaluate};
 use rustc_hash::FxHashMap;
@@ -255,15 +255,15 @@ fn evaluate_at(
 fn evaluate_constraint_at(
     point: &SolutionPoint,
     model: &Model,
-    id: ConstraintId,
+    handle: ConstraintHandle,
     current_parameters: bool,
 ) -> Option<ConstraintEvaluation> {
     let arena = model.arena();
-    let constraints = model.constraints();
-    let constraint = constraints.algebraic().get(id.index())?;
-    let activity = evaluate_at(&arena, constraint.lhs, point, current_parameters)?;
-    let lower_slack = constraint.lower.is_finite().then_some(activity - constraint.lower);
-    let upper_slack = constraint.upper.is_finite().then_some(constraint.upper - activity);
+    let view = model.scalar_constraint_view(handle).ok()??;
+    let oximo_core::ScalarConstraintView { lhs, lower, upper } = view;
+    let activity = evaluate_at(&arena, lhs, point, current_parameters)?;
+    let lower_slack = lower.is_finite().then_some(activity - lower);
+    let upper_slack = upper.is_finite().then_some(upper - activity);
     let violation = lower_slack
         .into_iter()
         .chain(upper_slack)
@@ -306,6 +306,12 @@ pub struct SolverResult {
     pub primal_status: PrimalStatus,
     pub dual_status: DualStatus,
     pub solutions: Vec<SolutionPoint>,
+    /// Multipliers in semantic coordinates.
+    /// An explicit `None` prevents falling back to a stored row multiplier
+    /// when its coordinate mapping is unknown.
+    pub semantic_dual: FxHashMap<oximo_core::SemanticConstraintId, Option<f64>>,
+    /// Multipliers of stored algebraic rows, in those rows' coordinates.
+    /// Prefer [`Self::dual_of`] for semantic constraint handles.
     pub dual: FxHashMap<ConstraintId, f64>,
     pub soc_dual: FxHashMap<SocConstraintId, f64>,
     pub psd_dual: FxHashMap<PsdConstraintId, SymmetricMatrix<f64>>,
@@ -329,12 +335,19 @@ pub struct SolverResult {
 
 impl Default for SolverResult {
     fn default() -> Self {
+        Self::empty(ModelId::UNASSIGNED, ParameterSnapshot::default())
+    }
+}
+
+impl SolverResult {
+    fn empty(model_id: ModelId, parameters: ParameterSnapshot) -> Self {
         Self {
-            model_id: ModelId::UNASSIGNED,
+            model_id,
             termination: TerminationStatus::NotSolved,
             primal_status: PrimalStatus::NoSolution,
             dual_status: DualStatus::NoSolution,
             solutions: Vec::new(),
+            semantic_dual: FxHashMap::default(),
             dual: FxHashMap::default(),
             soc_dual: FxHashMap::default(),
             psd_dual: FxHashMap::default(),
@@ -348,7 +361,7 @@ impl Default for SolverResult {
             raw_log: None,
             solver_name: None,
             solver_version: None,
-            parameters: ParameterSnapshot::default(),
+            parameters,
         }
     }
 }
@@ -356,12 +369,26 @@ impl Default for SolverResult {
 impl SolverResult {
     /// Create an empty result bound to the model's current identity and parameters.
     /// Capture this before solving or use the same arena snapshot as translation.
+    #[inline]
     pub fn for_model(model: &Model) -> Self {
-        Self {
-            model_id: model.id(),
-            parameters: model.arena().parameter_snapshot(),
-            ..Self::default()
-        }
+        Self::empty(model.id(), model.arena().parameter_snapshot())
+            .with_semantic_dual_defaults(model)
+    }
+
+    /// Capture unavailable semantic multipliers for alternative scalar lowerings.
+    /// Preserves explicit mappings already supplied in [`Self::semantic_dual`].
+    ///
+    /// # Panics
+    /// Panics if `model` does not own this result.
+    #[inline]
+    pub fn with_semantic_dual_defaults(mut self, model: &Model) -> Self {
+        assert_eq!(self.model_id, model.id(), "dual provenance belongs to a different model");
+
+        model.visit_alternative_lowerings(|id| {
+            self.semantic_dual.entry(id).or_insert(None);
+        });
+
+        self
     }
 
     /// Append a point using this result's model identity and captured parameters.
@@ -452,19 +479,20 @@ impl SolverResult {
         self.best().map_or(Ok(None), |point| point.value_of_with_current_parameters(expr))
     }
 
-    /// Evaluate an algebraic constraint at the best solution.
+    /// Evaluate a semantic scalar constraint at the best solution.
     ///
     /// Parameters use their solve-time values.
     /// Constraint definitions and bounds come from `model`.
+    /// Returns `None` if the semantic expression or scalar bounds are unavailable.
     ///
     /// # Errors
     ///
     /// Returns [`ModelMismatchError`] if `model` or the selected solution point
     /// does not belong to this result's model.
-    pub fn constraint_evaluation(
+    pub fn constraint_evaluation<F, S>(
         &self,
         model: &Model,
-        constraint: ConstraintHandle,
+        constraint: ConstraintHandle<F, S>,
     ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
         self.constraint_evaluation_at(model, constraint, 0)
     }
@@ -475,10 +503,10 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `model` or the selected solution point
     /// does not belong to this result's model.
-    pub fn constraint_evaluation_at(
+    pub fn constraint_evaluation_at<F, S>(
         &self,
         model: &Model,
-        constraint: ConstraintHandle,
+        constraint: ConstraintHandle<F, S>,
         solution_index: usize,
     ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
         self.constraint_evaluation_using_parameters(model, constraint, solution_index, false)
@@ -488,10 +516,10 @@ impl SolverResult {
     ///
     /// # Errors
     /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
-    pub fn constraint_evaluation_with_current_parameters(
+    pub fn constraint_evaluation_with_current_parameters<F, S>(
         &self,
         model: &Model,
-        constraint: ConstraintHandle,
+        constraint: ConstraintHandle<F, S>,
     ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
         self.constraint_evaluation_at_with_current_parameters(model, constraint, 0)
     }
@@ -500,19 +528,19 @@ impl SolverResult {
     ///
     /// # Errors
     /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
-    pub fn constraint_evaluation_at_with_current_parameters(
+    pub fn constraint_evaluation_at_with_current_parameters<F, S>(
         &self,
         model: &Model,
-        constraint: ConstraintHandle,
+        constraint: ConstraintHandle<F, S>,
         solution_index: usize,
     ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
         self.constraint_evaluation_using_parameters(model, constraint, solution_index, true)
     }
 
-    fn constraint_evaluation_using_parameters(
+    fn constraint_evaluation_using_parameters<F, S>(
         &self,
         model: &Model,
-        constraint: ConstraintHandle,
+        constraint: ConstraintHandle<F, S>,
         solution_index: usize,
         current_parameters: bool,
     ) -> Result<Option<ConstraintEvaluation>, ModelMismatchError> {
@@ -520,7 +548,12 @@ impl SolverResult {
         ensure_model_id(self.model_id, constraint.model_id())?;
         let Some(point) = self.solution(solution_index) else { return Ok(None) };
         ensure_model_id(self.model_id, point.model_id)?;
-        Ok(evaluate_constraint_at(point, model, constraint.id(), current_parameters))
+        Ok(match constraint.id() {
+            oximo_core::SemanticConstraintId::Algebraic(_) => {
+                evaluate_constraint_at(point, model, constraint.erase(), current_parameters)
+            }
+            _ => None,
+        })
     }
 
     /// Evaluate an explicit second-order-cone constraint at the best solution.
@@ -590,7 +623,7 @@ impl SolverResult {
         ensure_model_id(self.model_id, constraint.model_id())?;
         let Some(point) = self.solution(solution_index) else { return Ok(None) };
         ensure_model_id(self.model_id, point.model_id)?;
-        Ok(evaluate_soc_at(point, model, constraint.id(), current_parameters))
+        Ok(evaluate_soc_at(point, model, constraint.soc_id(), current_parameters))
     }
 
     /// Evaluate a symmetric expression matrix at the best solution.
@@ -635,18 +668,47 @@ impl SolverResult {
         constraint: PsdConstraintHandle,
     ) -> Result<Option<&SymmetricMatrix<f64>>, ModelMismatchError> {
         ensure_model_id(self.model_id, constraint.model_id())?;
-        Ok(self.psd_dual.get(&constraint.id()))
+        Ok(self.psd_dual.get(&constraint.psd_id()))
     }
 
-    /// Look up an algebraic constraint multiplier, rejecting a handle from a
-    /// different model.
+    /// Look up a multiplier in the semantic constraint's coordinates, rejecting
+    /// a handle from a different model.
+    /// Returns `None` for an alternative lowering without an explicit dual mapping.
     ///
     /// # Errors
     ///
     /// Returns [`ModelMismatchError`] if `constraint` belongs to another model.
-    pub fn dual_of(&self, constraint: ConstraintHandle) -> Result<Option<f64>, ModelMismatchError> {
+    #[inline]
+    pub fn dual_of<F, S>(
+        &self,
+        constraint: ConstraintHandle<F, S>,
+    ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, constraint.model_id())?;
-        Ok(self.dual.get(&constraint.id()).copied())
+        Ok(self.semantic_multiplier(constraint.id()))
+    }
+
+    #[inline]
+    pub(crate) fn semantic_multiplier(&self, id: oximo_core::SemanticConstraintId) -> Option<f64> {
+        if self.semantic_dual.is_empty() {
+            return self.row_multiplier(id);
+        }
+        self.mapped_semantic_multiplier(id)
+    }
+
+    #[cold]
+    fn mapped_semantic_multiplier(&self, id: oximo_core::SemanticConstraintId) -> Option<f64> {
+        if let Some(value) = self.semantic_dual.get(&id) {
+            return *value;
+        }
+        self.row_multiplier(id)
+    }
+
+    #[inline]
+    fn row_multiplier(&self, id: oximo_core::SemanticConstraintId) -> Option<f64> {
+        match id {
+            oximo_core::SemanticConstraintId::Algebraic(id) => self.dual.get(&id).copied(),
+            _ => None,
+        }
     }
 
     /// The norm-form bound multiplier of an explicit SOC constraint,
@@ -660,7 +722,7 @@ impl SolverResult {
         constraint: SocConstraintHandle,
     ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, constraint.model_id())?;
-        Ok(self.soc_dual.get(&constraint.id()).copied())
+        Ok(self.soc_dual.get(&constraint.soc_id()).copied())
     }
 
     /// Look up the best solution's primal value for a specific index of an
@@ -747,7 +809,8 @@ impl std::fmt::Display for ModelReport<'_> {
             (None, _) => "(unknown)".to_owned(),
         };
         writeln!(f, "  solver     : {solver}")?;
-        let objective = m.objective();
+        let objective = m.semantic_objective();
+
         if let Some(objective) = objective.as_ref() {
             writeln!(f, "  model      : {}  ({}, {})", m.name, m.kind(), objective.sense)?;
         } else {
@@ -795,26 +858,7 @@ impl std::fmt::Display for ModelReport<'_> {
             writeln!(f, "  (no primal solution)")?;
         }
 
-        // Constraint duals, only when the solver returned any
-        if !r.dual.is_empty() {
-            let model_constraints = m.constraints();
-            let cons: Vec<_> = model_constraints
-                .iter()
-                .filter_map(|constraint| match constraint {
-                    ConstraintRef::Algebraic { id, constraint } => Some((id, constraint)),
-                    ConstraintRef::PositiveSemidefinite { .. }
-                    | ConstraintRef::SecondOrderCone { .. }
-                    | ConstraintRef::SpecialOrderedSet { .. }
-                    | ConstraintRef::Indicator { .. } => None,
-                })
-                .collect();
-            writeln!(f, "\nconstraints ({})", cons.len())?;
-            let width = cons.iter().map(|(_, c)| c.name.len()).max().unwrap_or(0);
-            for (id, c) in cons {
-                let d = r.dual.get(&id).copied().map_or_else(|| "n/a".to_owned(), num);
-                writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
-            }
-        }
+        write_constraint_duals(f, m, r)?;
 
         if !m.psd_constraints().is_empty() {
             writeln!(f, "\npsd constraints ({})", m.num_psd_constraints())?;
@@ -847,6 +891,33 @@ impl std::fmt::Display for ModelReport<'_> {
 
         Ok(())
     }
+}
+
+fn write_constraint_duals(
+    f: &mut std::fmt::Formatter<'_>,
+    m: &Model,
+    r: &SolverResult,
+) -> std::fmt::Result {
+    if !r.dual.is_empty() || !r.semantic_dual.is_empty() {
+        let semantic = m.semantic_constraints_ref();
+        let cons: Vec<_> = semantic
+            .iter()
+            .filter(|c| {
+                matches!(c.id, oximo_core::SemanticConstraintId::Algebraic(_))
+                    || r.semantic_dual.contains_key(&c.id)
+            })
+            .collect();
+        writeln!(f, "\nconstraints ({})", cons.len())?;
+        let width = cons.iter().map(|c| c.name.len()).max().unwrap_or(0);
+
+        for c in cons {
+            let value = r.semantic_multiplier(c.id);
+            let d = value.map_or_else(|| "n/a".to_owned(), num);
+            writeln!(f, "  {:<width$}  dual = {d}", c.name)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -941,15 +1012,16 @@ mod tests {
         variable!(foreign, u);
         let foreign_row = constraint!(foreign, row, y <= 2.0);
         let foreign_cone = soc_constraint!(foreign, cone, [y] <= u);
-        assert_eq!(source_row.id(), foreign_row.id());
-        assert_eq!(source_cone.id(), foreign_cone.id());
+        assert_eq!(source_row.row_id(), foreign_row.row_id());
+        assert_eq!(source_cone.soc_id(), foreign_cone.soc_id());
 
         let result = SolverResult {
             model_id: source.id(),
-            dual: [(source_row.id(), 3.0)].into_iter().collect(),
-            soc_dual: [(source_cone.id(), 4.0)].into_iter().collect(),
+            dual: [(source_row.row_id(), 3.0)].into_iter().collect(),
+            soc_dual: [(source_cone.soc_id(), 4.0)].into_iter().collect(),
             ..Default::default()
         };
+
         let mismatch = ModelMismatchError::new(source.id(), foreign.id());
 
         assert_eq!(result.dual_of(foreign_row), Err(mismatch));
@@ -1093,7 +1165,7 @@ mod tests {
         let mut primal = FxHashMap::default();
         primal.insert(x.var_id().unwrap(), 5.0);
         let mut dual = FxHashMap::default();
-        dual.insert(c.id(), 1.0);
+        dual.insert(c.row_id(), 1.0);
 
         let r = SolverResult {
             model_id: m.id(),
@@ -1140,8 +1212,8 @@ mod tests {
         objective!(m, Min, x);
 
         let mut dual = FxHashMap::default();
-        dual.insert(first.id(), 1.0);
-        dual.insert(second.id(), 2.0);
+        dual.insert(first.row_id(), 1.0);
+        dual.insert(second.row_id(), 2.0);
         let r = SolverResult { model_id: m.id(), dual, ..Default::default() };
 
         let out = r.report(&m).unwrap().to_string();

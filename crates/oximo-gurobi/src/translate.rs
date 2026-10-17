@@ -1,5 +1,5 @@
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
-use oximo_solver::reconstruct::{ObjectiveTransform, normalize_result};
+use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 use std::time::Instant;
 
 use gurobi_rs::constr::RangeExpr;
@@ -45,7 +45,7 @@ pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, Solver
     }
     let env = default_env()?;
     let mut built = build(model, opts, &env)?;
-    run_and_collect(&mut built, kind)
+    run_and_collect(&mut built, kind, model)
 }
 
 /// Create the default Gurobi [`Env`].
@@ -180,10 +180,11 @@ fn validate_model_operators(model: &Model) -> Result<(), SolverError> {
 pub(crate) fn run_and_collect(
     built: &mut Built,
     kind: ModelKind,
+    model: &Model,
 ) -> Result<SolverResult, SolverError> {
     let started = Instant::now();
     built.model.optimize().map_err(map_gurobi_err)?;
-    collect_after_optimize(built, kind, started.elapsed())
+    collect_after_optimize(built, kind, model, started.elapsed())
 }
 
 /// Optimize with a user callback and collect results through the same path as
@@ -191,6 +192,7 @@ pub(crate) fn run_and_collect(
 pub(crate) fn run_and_collect_with_callback<F>(
     built: &mut Built,
     kind: ModelKind,
+    model: &Model,
     callback: &mut F,
     mask: Option<gurobi_rs::callback::CallbackMask>,
 ) -> Result<SolverResult, SolverError>
@@ -203,12 +205,13 @@ where
         None => built.model.optimize_with_callback(callback),
     }
     .map_err(map_gurobi_err)?;
-    collect_after_optimize(built, kind, started.elapsed())
+    collect_after_optimize(built, kind, model, started.elapsed())
 }
 
 fn collect_after_optimize(
     built: &mut Built,
     kind: ModelKind,
+    model: &Model,
     elapsed: std::time::Duration,
 ) -> Result<SolverResult, SolverError> {
     let native_status = built.model.get_attr(attr::Status).map_err(map_gurobi_err)?;
@@ -237,8 +240,9 @@ fn collect_after_optimize(
     .map(|count| count as u64);
     let (major, minor, technical) = gurobi_rs::version();
 
-    Ok(normalize_result(
+    Ok(finalize_result(
         SolverResult {
+            semantic_dual: FxHashMap::default(),
             model_id: built.model_id,
             termination,
             primal_status: PrimalStatus::NoSolution,
@@ -259,6 +263,7 @@ fn collect_after_optimize(
             solver_version: Some(format!("{major}.{minor}.{technical}").into()),
             parameters: built.parameters.clone(),
         },
+        model,
         built.vars.len(),
     ))
 }
@@ -279,7 +284,7 @@ where
     }
     let env = default_env()?;
     let mut built = build(model, opts, &env)?;
-    run_and_collect_with_callback(&mut built, kind, callback, mask)
+    run_and_collect_with_callback(&mut built, kind, model, callback, mask)
 }
 
 /// Build `model`, solve it, and when Gurobi finds it infeasible compute an
@@ -392,14 +397,13 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
         }
     }
 
-    for (i, handle) in built.soc_rows.iter().enumerate() {
+    for handle in &built.soc_rows {
         let quadratic =
             model.get_obj_attr(attr::IISQConstr, &handle.quadratic).map_err(map_gurobi_err)?;
         let sign =
             model.get_obj_attr(attr::IISConstr, &handle.bound_sign).map_err(map_gurobi_err)?;
         if quadratic != 0 || sign != 0 {
-            iis.soc_constraints
-                .push(SocConstraintId(u32::try_from(i).expect("soc index fits u32")));
+            iis.soc_constraints.push(handle.id);
         }
     }
 
@@ -597,6 +601,7 @@ pub(crate) struct ConstraintHandle {
 /// Squaring `||terms|| <= bound` also requires the generated `bound >= 0`
 /// side row. Both rows belong to the original cone for IIS reporting.
 pub(crate) struct SocHandle {
+    pub id: SocConstraintId,
     pub quadratic: gurobi_rs::QConstr,
     pub bound_sign: gurobi_rs::Constr,
     pub bound: LinearTerms<'static>,
@@ -757,7 +762,7 @@ fn add_soc_rows(
 ) -> Result<Vec<SocHandle>, SolverError> {
     let arena = prepared.arena();
     let mut rows = Vec::with_capacity(socs.len());
-    for (i, s) in socs.iter().enumerate() {
+    for (i, s) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         let mut q = QuadExpr::new();
         for &term in &s.terms {
             let t = prepared.linear(term).ok_or_else(|| SolverError::Nonlinear {
@@ -783,7 +788,12 @@ fn add_soc_rows(
         let sign_name = format!("{}_sign", s.name);
         let sign_row =
             gurobi_model.add_constr(&sign_name, c!(e >= -b.constant)).map_err(map_gurobi_err)?;
-        rows.push(SocHandle { quadratic: qrow, bound_sign: sign_row, bound: b.into_owned() });
+        rows.push(SocHandle {
+            id: SocConstraintId(u32::try_from(i).expect("SOC count overflow")),
+            quadratic: qrow,
+            bound_sign: sign_row,
+            bound: b.into_owned(),
+        });
     }
     Ok(rows)
 }
@@ -1020,7 +1030,7 @@ fn collect_solution(
     soc_dual.reserve(soc_rows.len());
     if let Some(first) = solutions.first() {
         let primal = &first.primal;
-        for (i, handle) in soc_rows.iter().enumerate() {
+        for handle in soc_rows {
             if let Ok(pi) = model.get_obj_attr(attr::QCPi, &handle.quadratic) {
                 let b_val = handle.bound.constant
                     + handle
@@ -1029,7 +1039,7 @@ fn collect_solution(
                         .iter()
                         .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
                         .sum::<f64>();
-                soc_dual.insert(SocConstraintId(u32::try_from(i).unwrap()), 2.0 * b_val * pi.abs());
+                soc_dual.insert(handle.id, 2.0 * b_val * pi.abs());
             }
         }
     }

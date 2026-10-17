@@ -74,6 +74,14 @@ impl Solver for Baron {
         supported(kind)
     }
 
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        use oximo_core::Domain;
+        match domain {
+            Domain::Real | Domain::Integer | Domain::Binary => oximo_solver::Capability::Native,
+            _ => oximo_solver::Capability::Unsupported,
+        }
+    }
+
     fn solve(&mut self, model: &Model, opts: &BaronOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts, self.exec.as_deref())
     }

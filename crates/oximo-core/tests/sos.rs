@@ -71,7 +71,7 @@ fn sos_registry_and_display_are_complete() {
     variable!(m, x);
     variable!(m, y);
     let handle = m.add_sos_constraint("choice", SosType::Sos2, [(x, 10.0), (y, 20.0)]);
-    let id = handle.id();
+    let id = handle.sos_id();
 
     assert_eq!(id.index(), 0);
     assert_eq!(SosType::Sos1.label(), "SOS1");
@@ -82,7 +82,7 @@ fn sos_registry_and_display_are_complete() {
     assert!(m.has_sos_constraints());
     assert_eq!(m.sos_constraint_id("choice"), Some(id));
     assert_eq!(m.sos_constraint_id("missing"), None);
-    assert_eq!(m.display_sos(handle).to_string(), "choice: SOS2 [x: 10, y: 20]");
+    assert_eq!(m.display_sos(handle.sos_id()).to_string(), "choice: SOS2 [x: 10, y: 20]");
     assert!(m.to_string().contains("choice: SOS2 [x: 10, y: 20]"));
     assert_eq!(m.constraints().special_ordered_sets()[0].name, "choice");
 }
@@ -162,7 +162,7 @@ fn single_sos_reformulation_is_independent_and_tracks_artifacts() {
     objective!(m, Max, x + y);
     let choice = sos_constraint!(m, choice, SOS1, [(x, 1.0), (y, 2.0)]);
 
-    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     assert_ne!(transformed.id(), m.id());
 
     assert_eq!(m.num_variables(), 2);
@@ -179,7 +179,7 @@ fn single_sos_reformulation_is_independent_and_tracks_artifacts() {
     assert_eq!(transformed.sos_reformulations().len(), 1);
     let history = transformed.sos_reformulations();
     let artifacts = &history[0];
-    assert_eq!(artifacts.source, choice.id());
+    assert_eq!(artifacts.source, choice.sos_id());
     assert_eq!(artifacts.variables.len(), 2);
     assert_eq!(artifacts.constraints.len(), 4);
 }
@@ -192,21 +192,24 @@ fn sos_reformulation_requires_bounds_unless_fallback_is_explicit() {
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
 
     assert!(matches!(
-        choice.to_reformulated_model(SosReformulationOptions::default()),
+        choice.to_reformulated_model(&m, SosReformulationOptions::default()),
         Err(ReformulationError::MissingFiniteBound { side: "lower", .. })
     ));
     assert_eq!(m.num_variables(), 2, "failed reformulation did not mutate its source");
 
     let transformed = choice
-        .to_reformulated_model(SosReformulationOptions::default().with_fallback_big_m(100.0))
+        .to_reformulated_model(&m, SosReformulationOptions::default().with_fallback_big_m(100.0))
         .unwrap();
     assert_eq!(transformed.num_variables(), 4);
     assert!(!transformed.has_active_sos_constraints());
 
     assert!(matches!(
-        choice.to_reformulated_model(SosReformulationOptions::default().with_fallback_big_m(0.0),),
-        Err(ReformulationError::InvalidFallbackBigM(0.0))
-    ));
+            choice.to_reformulated_model(
+                &m,
+                SosReformulationOptions::default().with_fallback_big_m(0.0),
+            ),
+            Err(ReformulationError::InvalidFallbackBigM(0.0))
+        ));
 }
 
 #[test]
@@ -218,7 +221,8 @@ fn sos2_reformulation_uses_weight_order_and_adjacent_intervals() {
     objective!(m, Max, x + y + z);
     let adjacent = sos_constraint!(m, adjacent, SOS2, [(z, 30.0), (x, 10.0), (y, 20.0)]);
 
-    let transformed = adjacent.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed =
+        adjacent.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     let history = transformed.sos_reformulations();
     let artifacts = &history[0];
     assert_eq!(artifacts.variables.len(), 2, "one binary per adjacent interval");
@@ -286,7 +290,7 @@ fn generated_names_avoid_user_collisions() {
     constraint!(m, __oximo_sos0_select, x <= 1.0);
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
 
-    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     assert!(transformed.variable_id("__oximo_sos0_member_0_1").is_some());
     assert!(transformed.constraint_id("__oximo_sos0_select_1").is_some());
 }
@@ -300,7 +304,7 @@ fn reformulation_omits_sign_redundant_big_m_rows() {
     variable!(m, fixed, fix = 0.0);
     let choice = sos_constraint!(m, choice, SOS1, [crossing, nonnegative, nonpositive, fixed]);
 
-    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     let history = transformed.sos_reformulations();
     let artifacts = &history[0];
 
@@ -379,7 +383,7 @@ fn in_place_reformulation_preserves_handles_and_matches_independent_shape() {
     variable!(m, 0.0 <= y <= 5.0);
     objective!(m, Max, x + y);
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
-    let independent = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let independent = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
 
     let artifacts = m
         .reformulate_sos(SosReformulationOptions::default())
@@ -393,7 +397,7 @@ fn in_place_reformulation_preserves_handles_and_matches_independent_shape() {
     assert_eq!(artifacts.variables, independent.sos_reformulations()[0].variables);
     assert_eq!(artifacts.constraints, independent.sos_reformulations()[0].constraints);
     assert_eq!(m.display_expr(x + y).to_string(), "x + y");
-    assert!(choice.reformulate(SosReformulationOptions::default()).unwrap().is_none());
+    assert!(choice.reformulate(&m, SosReformulationOptions::default()).unwrap().is_none());
 }
 
 #[test]
@@ -439,7 +443,7 @@ fn preserving_reformulation_leaves_source_member_bounds_mutable() {
     variable!(m, 0.0 <= y <= 1.0);
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
 
-    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     m.unfix_var(x.var_id().unwrap(), -10.0, 100.0);
 
     assert!((m.variables()[x.var_id().unwrap().index()].ub - 100.0).abs() < f64::EPSILON);
@@ -479,7 +483,7 @@ fn reformulated_model_rejects_member_bound_changes() {
     variable!(m, 0.0 <= x <= 1.0);
     variable!(m, 0.0 <= y <= 1.0);
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
-    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
 
     transformed.unfix_var(x.var_id().unwrap(), -10.0, 100.0);
 }
@@ -491,7 +495,7 @@ fn trivial_reformulation_also_freezes_member_bounds() {
     variable!(m, x);
     variable!(m, y, fix = 0.0);
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
-    choice.reformulate(SosReformulationOptions::default()).unwrap();
+    choice.reformulate(&m, SosReformulationOptions::default()).unwrap();
 
     m.unfix_var(y.var_id().unwrap(), -1.0, 1.0);
 }
@@ -505,13 +509,13 @@ fn chained_preserving_reformulations_retain_complete_provenance() {
     let first = sos_constraint!(m, first, SOS1, [x, y]);
     let second = sos_constraint!(m, second, SOS1, [y, z]);
 
-    let once = first.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let once = first.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     let twice = once
-        .to_reformulated_sos_constraint_model(second.id(), SosReformulationOptions::default())
+        .to_reformulated_sos_constraint_model(second.sos_id(), SosReformulationOptions::default())
         .unwrap();
     let history = twice.sos_reformulations();
 
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0].source, first.id());
-    assert_eq!(history[1].source, second.id());
+    assert_eq!(history[0].source, first.sos_id());
+    assert_eq!(history[1].source, second.sos_id());
 }

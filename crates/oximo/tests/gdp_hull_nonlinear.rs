@@ -39,7 +39,7 @@ fn scip_solves_nested_nonlinear_hull_and_shifted_logarithm() {
     objective!(model, Max, flow);
 
     let options =
-        GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(flow, 1.0);
+        GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(flow, 1.0);
 
     let result = Scip::default().with_gdp(options).solve(&model, &ScipOptions::default()).unwrap();
 

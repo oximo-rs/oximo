@@ -473,6 +473,7 @@ fn effective_boxes(
     for &root in bounder.supporting_roots() {
         plan.dependencies(&arena, root);
     }
+    plan.locked_constraints.extend(bounder.supporting_constraints());
 
     source
         .iter()

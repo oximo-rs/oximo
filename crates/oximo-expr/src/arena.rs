@@ -274,6 +274,15 @@ pub struct ExprArena {
     classifications: Mutex<Option<Box<ExprClassCache>>>,
 }
 
+fn checked_id_range(start: usize, count: usize, kind: &str) -> std::ops::Range<usize> {
+    let end = start.checked_add(count).unwrap_or_else(|| panic!("{kind} overflow"));
+
+    if count != 0 {
+        u32::try_from(end - 1).unwrap_or_else(|_| panic!("{kind} overflow"));
+    }
+    start..end
+}
+
 // The cache holds derived values only, never calls user code while locked, and
 // cannot leave the expression nodes partially mutated when unwinding.
 impl std::panic::RefUnwindSafe for ExprArena {}
@@ -323,6 +332,43 @@ impl ExprArena {
     #[doc(hidden)]
     pub fn __reserve_nodes(&mut self, additional: usize) {
         Arc::make_mut(&mut self.nodes).reserve(additional);
+    }
+
+    /// Append a contiguous variable family, detaching node storage once.
+    /// Returns the expression indices in variable order.
+    ///
+    /// # Panics
+    /// Panics if the variable or expression indices exceed `u32::MAX`.
+    #[doc(hidden)]
+    pub fn __extend_vars(&mut self, variables: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        let expressions = checked_id_range(self.nodes.len(), variables.len(), "expression arena");
+        checked_id_range(variables.start, variables.len(), "variable count");
+        let nodes = Arc::make_mut(&mut self.nodes);
+        nodes.extend(
+            variables.map(|id| ExprNode::Var(VarId(u32::try_from(id).expect("checked ID")))),
+        );
+        expressions
+    }
+
+    /// Append parameter values and their expression nodes, detaching each buffer once.
+    /// Returns parameter indices and expression indices in input order.
+    ///
+    /// # Panics
+    /// Panics if the parameter or expression indices exceed `u32::MAX`.
+    #[doc(hidden)]
+    pub fn __extend_params(
+        &mut self,
+        values: impl ExactSizeIterator<Item = f64>,
+    ) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+        let parameters = checked_id_range(self.param_values.len(), values.len(), "parameter arena");
+        let expressions = checked_id_range(self.nodes.len(), values.len(), "expression arena");
+        Arc::make_mut(&mut self.param_values).extend(values);
+        Arc::make_mut(&mut self.nodes).extend(
+            parameters
+                .clone()
+                .map(|id| ExprNode::Param(ParamId(u32::try_from(id).expect("checked ID")))),
+        );
+        (parameters, expressions)
     }
 
     #[doc(hidden)]
@@ -436,6 +482,11 @@ impl ExprArena {
         Arc::make_mut(&mut self.param_values)[p.index()] = value;
     }
 
+    /// Whether a reformulation has fixed this parameter's value.
+    pub fn is_param_locked(&self, parameter: ParamId) -> bool {
+        self.locked_parameters.contains(&parameter)
+    }
+
     /// Preserve parameter values embedded in generated reformulation rows.
     #[doc(hidden)]
     pub fn __lock_parameters(&mut self, parameters: impl IntoIterator<Item = ParamId>) {
@@ -449,6 +500,7 @@ impl ExprArena {
 
 /// Read/push surface shared by the canonical and worker-local arenas.
 pub(crate) trait ArenaAccess {
+    fn len(&self) -> usize;
     fn get(&self, id: ExprId) -> &ExprNode;
     fn param_value(&self, id: ParamId) -> f64;
     fn push(&mut self, node: ExprNode) -> ExprId;
@@ -465,6 +517,10 @@ pub(crate) trait ArenaAccess {
 }
 
 impl ArenaAccess for ExprArena {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
     fn cached_degree(&self, id: ExprId) -> Option<Degree> {
         self.classifications.lock().as_deref_mut().and_then(|cache| cache.get(id))
     }
@@ -515,6 +571,10 @@ impl ForkedExprArena {
 }
 
 impl ArenaAccess for ForkedExprArena {
+    fn len(&self) -> usize {
+        self.base.len() + self.nodes.len()
+    }
+
     fn cached_degree(&self, id: ExprId) -> Option<Degree> {
         self.classifications.borrow_mut().get(id)
     }
@@ -667,8 +727,17 @@ impl ExprArenaCell {
         }
     }
 
+    /// Number of expression nodes available on this thread, including worker-local nodes.
+    #[doc(hidden)]
+    #[inline]
+    pub fn __node_count(&self) -> usize {
+        self.with_ref(|arena| arena.len())
+    }
+
+    #[inline]
     pub(crate) fn with_ref<R>(&self, f: impl FnOnce(&dyn ArenaAccess) -> R) -> R {
         let state = self.state.load(Ordering::Acquire);
+
         if state & BATCH_ACTIVE == 0 {
             self.assert_no_write_reentry(state);
             let arena = self.inner.lock();
@@ -689,8 +758,10 @@ impl ExprArenaCell {
         panic!("expression arena accessed outside its indexed worker during an active batch");
     }
 
+    #[inline]
     pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut dyn ArenaAccess) -> R) -> R {
         let state = self.state.load(Ordering::Acquire);
+
         if state & BATCH_ACTIVE == 0 {
             self.assert_no_write_reentry(state);
             let mut arena = self.inner.lock();
@@ -917,6 +988,36 @@ impl<'a> ExprArenaWriteGuard<'a> {
         self.guard.__reserve_nodes(count);
     }
 
+    #[doc(hidden)]
+    pub fn __extend_vars(
+        &mut self,
+        variables: std::ops::Range<usize>,
+    ) -> impl ExactSizeIterator<Item = crate::Expr<'a, crate::Affine>> + use<'a> {
+        let cell = self.cell;
+        self.guard.__extend_vars(variables).map(move |id| {
+            crate::Expr::from_id(ExprId(u32::try_from(id).expect("checked expression count")), cell)
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn __extend_params<I: ExactSizeIterator<Item = f64>>(
+        &mut self,
+        values: I,
+    ) -> impl ExactSizeIterator<Item = (ParamId, crate::Expr<'a, crate::Constant>)> + use<'a, I>
+    {
+        let cell = self.cell;
+        let (parameters, expressions) = self.guard.__extend_params(values);
+        parameters.zip(expressions).map(move |(parameter, expression)| {
+            (
+                ParamId(u32::try_from(parameter).expect("checked parameter count")),
+                crate::Expr::from_id(
+                    ExprId(u32::try_from(expression).expect("checked expression count")),
+                    cell,
+                ),
+            )
+        })
+    }
+
     pub fn var_expr(&mut self, var: VarId) -> crate::Expr<'a, crate::Affine> {
         let id = self.guard.var(var);
         crate::Expr::from_id(id, self.cell)
@@ -1065,6 +1166,39 @@ mod tests {
     use crate::{Expr, evaluate, extract_linear};
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn bulk_metadata_append_preserves_snapshot_ids_values_and_locks() {
+        let mut source = ExprArena::new();
+        let p = source.new_param(7.0);
+        source.param(p);
+        source.__lock_parameters([p]);
+        let snapshot = source.parameter_snapshot();
+        let mut fork = source.clone();
+
+        let expressions = fork.__extend_vars(3..5);
+        assert_eq!(expressions, 1..3);
+        assert!(matches!(fork.get(ExprId(1)), ExprNode::Var(VarId(3))));
+        assert!(matches!(fork.get(ExprId(2)), ExprNode::Var(VarId(4))));
+
+        let (parameters, expressions) = fork.__extend_params([11.0, 13.0].into_iter());
+        assert_eq!(parameters, 1..3);
+        assert_eq!(expressions, 3..5);
+        assert!(matches!(fork.get(ExprId(3)), ExprNode::Param(ParamId(1))));
+        assert!(matches!(fork.get(ExprId(4)), ExprNode::Param(ParamId(2))));
+        assert_eq!(fork.param_value(ParamId(2)), 13.0);
+        assert_eq!(source.num_params(), 1);
+        assert_eq!(source.len(), 1);
+        assert!(snapshot.same_bits(&source.parameter_snapshot()));
+        assert!(catch_unwind(AssertUnwindSafe(|| fork.set_param_value(p, 8.0))).is_err());
+
+        let before = fork.len();
+        let invalid = usize::try_from(u32::MAX).unwrap()..usize::try_from(u32::MAX).unwrap() + 2;
+        assert!(catch_unwind(AssertUnwindSafe(|| fork.__extend_vars(invalid))).is_err());
+        assert_eq!(fork.len(), before);
+        assert_eq!(fork.__extend_vars(5..5), before..before);
+        assert_eq!(fork.__extend_params(std::iter::empty()), (3..3, before..before));
+    }
 
     #[test]
     fn parameter_locks_survive_cloning_without_locking_the_source() {
