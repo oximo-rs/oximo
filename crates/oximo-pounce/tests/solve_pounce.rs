@@ -916,3 +916,138 @@ fn semi_model(integral: bool) -> Model {
     }
     m
 }
+
+#[test]
+fn route_validation_matches_ordinary_and_persistent_rejections() {
+    fn rejected(model: &Model, options: &PounceOptions) {
+        let mut persistent = Pounce.persistent();
+        let error = Pounce.solve(model, options).unwrap_err().to_string();
+        assert_eq!(persistent.solve(model, options).unwrap_err().to_string(), error);
+        for validation in
+            [Pounce.validate_model(model, options), persistent.validate_model(model, options)]
+        {
+            assert!(!validation.is_supported());
+            assert!(validation.errors.iter().any(|d| d.reason == error), "{validation:?}: {error}");
+        }
+    }
+
+    let qp = Model::new("QP route validation");
+    variable!(qp, -2.0 <= x <= 2.0);
+    objective!(qp, Min, x.square());
+    rejected(&qp, &PounceOptions::default().solver_selection(PounceSolverSelection::LpIpm));
+    rejected(&qp, &PounceOptions::default().set("solver_selection", "lp-ipm"));
+    let nonconvex = Model::new("nonconvex route validation");
+    variable!(nonconvex, -2.0 <= z <= 2.0);
+    objective!(nonconvex, Min, -z.square());
+
+    for selection in [
+        PounceSolverSelection::QpIpm,
+        PounceSolverSelection::QpActiveSet,
+        PounceSolverSelection::Socp,
+    ] {
+        rejected(&nonconvex, &PounceOptions::default().solver_selection(selection));
+    }
+
+    let nlp = Model::new("NLP route validation");
+    variable!(nlp, -2.0 <= y <= 2.0);
+    objective!(nlp, Min, y.sin());
+    for selection in [PounceSolverSelection::QpActiveSet, PounceSolverSelection::Socp] {
+        rejected(&nlp, &PounceOptions::default().solver_selection(selection));
+    }
+    let soc = Model::new("SOC route validation");
+    variable!(soc, sx);
+    variable!(soc, st >= 0.0);
+    soc.add_soc_constraint("cone", [sx], st);
+    objective!(soc, Min, st);
+
+    for options in [
+        PounceOptions::default().solver_selection(PounceSolverSelection::Nlp),
+        PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp),
+        PounceOptions::default().set("solver_selection", "nlp"),
+        PounceOptions::default().set("algorithm", "active-set-sqp"),
+        PounceOptions::default().set("solver_selection", "invalid"),
+        PounceOptions::default().set("solver_selection", true),
+    ] {
+        rejected(&soc, &options);
+    }
+
+    let options = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::Nlp)
+        .algorithm(PounceAlgorithm::ActiveSetSqp)
+        .set("algorithm", "interior-point")
+        .set("solver_selection", "socp");
+
+    assert!(Pounce.validate_model(&soc, &options).is_supported());
+    assert!(Pounce.persistent().validate_model(&soc, &options).is_supported());
+    assert!(Pounce.solve(&soc, &options).unwrap().has_solution());
+    assert!(Pounce.persistent().solve(&soc, &options).unwrap().has_solution());
+}
+
+#[test]
+fn route_validation_preserves_nlp_fallback_and_rechecks_forced_convexity() {
+    for maximize in [false, true] {
+        let model = Model::new("parameter-dependent convexity");
+
+        variable!(model, -2.0 <= x <= 2.0);
+        param!(model, weight = 1.0);
+        if maximize {
+            objective!(model, Max, weight * x.square());
+        } else {
+            objective!(model, Min, weight * x.square());
+        }
+
+        let persistent = Pounce.persistent();
+        for value in [1.0, -1.0, 1.0] {
+            weight.set_param_value(value);
+
+            for options in [
+                PounceOptions::default(),
+                PounceOptions::default().solver_selection(PounceSolverSelection::Nlp),
+                PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp),
+                PounceOptions::default()
+                    .solver_selection(PounceSolverSelection::QpIpm)
+                    .set("solver_selection", "nlp"),
+                PounceOptions::default()
+                    .solver_selection(PounceSolverSelection::QpIpm)
+                    .set("solver_selection", "auto"),
+            ] {
+                assert!(Pounce.validate_model(&model, &options).is_supported());
+                assert!(persistent.validate_model(&model, &options).is_supported());
+            }
+
+            let convex = if maximize { value < 0.0 } else { value > 0.0 };
+            for selection in [
+                PounceSolverSelection::QpIpm,
+                PounceSolverSelection::QpActiveSet,
+                PounceSolverSelection::Socp,
+            ] {
+                let options = PounceOptions::default().solver_selection(selection);
+                assert_eq!(Pounce.validate_model(&model, &options).is_supported(), convex);
+                assert_eq!(persistent.validate_model(&model, &options).is_supported(), convex);
+            }
+        }
+    }
+}
+
+#[test]
+fn automatic_validation_requires_convexity_for_active_explicit_soc_constraints() {
+    let model = Model::new("SOC route requires convexity");
+
+    variable!(model, -2.0 <= x <= 2.0);
+    variable!(model, t >= 0.0);
+    let cone = model.add_soc_constraint("cone", [x], t);
+    objective!(model, Min, -x.square());
+
+    let options = PounceOptions::default();
+    assert!(!Pounce.validate_model(&model, &options).is_supported());
+    assert!(!Pounce.persistent().validate_model(&model, &options).is_supported());
+    assert!(Pounce.solve(&model, &options).is_err());
+    assert!(Pounce.persistent().solve(&model, &options).is_err());
+
+    model.set_constraint_active(cone, false).unwrap();
+    for options in [options, PounceOptions::default().solver_selection(PounceSolverSelection::Nlp)]
+    {
+        assert!(Pounce.validate_model(&model, &options).is_supported());
+        assert!(Pounce.persistent().validate_model(&model, &options).is_supported());
+    }
+}
