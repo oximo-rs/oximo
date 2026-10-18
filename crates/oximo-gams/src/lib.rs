@@ -96,16 +96,10 @@ impl Solver for Gams {
         opts: &Self::Options,
     ) -> Vec<oximo_solver::CapabilityDiagnostic> {
         let mut diagnostics = Vec::new();
-        if !matches!(model.kind(), ModelKind::SDP | ModelKind::MISDP)
-            && let Err(error) = translate::validate_solver_type(
-                opts,
-                model.kind(),
-                translate::gams_solve_type(model.kind()),
-            )
-        {
+        if let Err(error) = translate::validate_model(model, opts) {
             diagnostics.push(oximo_solver::CapabilityDiagnostic {
                 constraint: None,
-                location: "GAMS subsolver".into(),
+                location: "GAMS translation".into(),
                 reason: error.to_string(),
             });
         }

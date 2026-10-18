@@ -50,9 +50,7 @@ pub fn solve(
     let prepared = LoweringContext::new(model)?;
     let parameters = prepared.arena().parameter_snapshot();
     let kind = prepared.kind();
-    let nonsmooth = analyze_gams_expressions(&prepared)?;
-    let solve_type = gams_solve_type_for(kind, nonsmooth);
-    validate_solver_type(opts, kind, solve_type)?;
+    let solve_type = validated_solve_type(&prepared, opts)?;
     validate_indicator_solver(model, opts)?;
     let vars = prepared.variables();
     let model_constraints = prepared.constraints();
@@ -753,6 +751,27 @@ pub(crate) fn gams_solve_type(kind: ModelKind) -> &'static str {
 
 fn gams_solve_type_for(kind: ModelKind, nonsmooth: bool) -> &'static str {
     if nonsmooth && kind == ModelKind::NLP { "DNLP" } else { gams_solve_type(kind) }
+}
+
+/// Check expression support and the selected solve type without invoking GAMS.
+pub(crate) fn validate_model(model: &Model, opts: &GamsOptions) -> Result<(), SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
+    let prepared = LoweringContext::new(model)?;
+    validated_solve_type(&prepared, opts).map(|_| ())
+}
+
+/// Use the same operator checks and nonsmooth routing for validation and solving.
+fn validated_solve_type(
+    prepared: &LoweringContext<'_>,
+    opts: &GamsOptions,
+) -> Result<&'static str, SolverError> {
+    let kind = prepared.kind();
+    let nonsmooth = analyze_gams_expressions(prepared)?;
+    let solve_type = gams_solve_type_for(kind, nonsmooth);
+    validate_solver_type(opts, kind, solve_type)?;
+    Ok(solve_type)
 }
 
 /// Reject an explicitly selected sub-solver that cannot handle `kind` before
