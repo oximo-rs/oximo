@@ -47,7 +47,7 @@ fn reformulated_sos1_solves_and_preserves_original_ids() {
     objective!(m, Max, x + y);
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
 
-    let transformed = choice.to_reformulated_model(SosReformulationOptions::default()).unwrap();
+    let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     assert!(Gurobi.supports_model(&transformed));
     let result = Gurobi
         .solve(&transformed, &GurobiOptions::default())

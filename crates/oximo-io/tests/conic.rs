@@ -101,3 +101,14 @@ fn all_exporters_reject_psd_even_with_nonlinear_model_kind() {
     assert!(matches!(to_mps_string(&m), Err(IoError::Conic)));
     assert!(matches!(to_nl_string(&m), Err(IoError::Conic)));
 }
+
+#[test]
+fn all_text_formats_export_the_lp_after_disabling_a_cone() {
+    let model = soc_model();
+    let handle = model.constraint_handle("cone").unwrap();
+    model.set_constraint_active(handle, false).unwrap();
+    assert_eq!(model.kind(), ModelKind::LP);
+    assert!(to_lp_string(&model).is_ok());
+    assert!(to_mps_string(&model).is_ok());
+    assert!(to_nl_string(&model).is_ok());
+}
