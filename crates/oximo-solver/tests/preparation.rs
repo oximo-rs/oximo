@@ -38,6 +38,11 @@ fn affine_rows_keep_bounds_constants_and_borrowed_storage() {
     assert!(row_sides(row).iter().all(Option::is_some));
     let AffineTerms::Borrowed(t) = terms else { panic!("direct affine row was copied") };
     assert!(matches!(t.coeffs, std::borrow::Cow::Borrowed(_)));
+
+    let streamed = prepared.require_linear_once(row.lhs, || "range".into()).unwrap();
+    assert!(matches!(streamed.coeffs, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(streamed.constant, t.constant);
+    assert!(std::ptr::eq(streamed.coeffs.as_ref(), t.coeffs.as_ref()));
 }
 
 #[test]

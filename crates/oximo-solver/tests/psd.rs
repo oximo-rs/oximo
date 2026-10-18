@@ -69,13 +69,15 @@ fn matrix_readback_checks_ownership_missing_entries_and_dual_status() {
         .map(|(i, entry)| (entry.var_id().unwrap(), f64::from(u32::try_from(i).unwrap())))
         .collect();
     assert_eq!(result.value_of_matrix(&x).unwrap().unwrap().upper_triangle(), &[0.0, 1.0, 2.0]);
-    result.psd_dual.insert(handle.id(), SymmetricMatrix::from_upper_triangle(2, [1.0, -1.0, 1.0]));
+    result
+        .psd_dual
+        .insert(handle.psd_id(), SymmetricMatrix::from_upper_triangle(2, [1.0, -1.0, 1.0]));
     result.dual_status = DualStatus::FeasiblePoint;
-    let result = oximo_solver::reconstruct::normalize_result(result, 3);
+    let result = oximo_solver::reconstruct::finalize_result(result, &m, 3);
     assert_eq!(result.psd_dual_of(handle).unwrap().unwrap()[(0, 1)], -1.0);
     let mut result = result;
     result.dual_status = DualStatus::NoSolution;
-    let result = oximo_solver::reconstruct::normalize_result(result, 3);
+    let result = oximo_solver::reconstruct::finalize_result(result, &m, 3);
     assert!(result.psd_dual.is_empty());
 }
 

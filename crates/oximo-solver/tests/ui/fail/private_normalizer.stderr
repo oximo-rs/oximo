@@ -1,0 +1,11 @@
+error[E0603]: function `normalize_result` is private
+ --> tests/ui/fail/private_normalizer.rs:1:32
+  |
+1 | use oximo_solver::reconstruct::normalize_result;
+  |                                ^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `normalize_result` is defined here
+ --> src/reconstruct.rs
+  |
+  | fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
