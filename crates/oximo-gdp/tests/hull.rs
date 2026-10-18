@@ -225,7 +225,7 @@ fn nonlinear_perspectives_and_explicit_references_are_exact_at_integer_points() 
         }
         let mut options = GdpReformulationOptions::new(Hull::default());
         if shifted {
-            options = options.with_hull_reference_point(x, 1.0);
+            options = options.with_hull_reference_coordinate(x, 1.0);
         }
 
         let report = model.reformulate_gdp(options).unwrap();
@@ -506,8 +506,8 @@ fn numeric_selectors_preserve_own_ancestor_sibling_and_unrelated_values() {
     let report = model
         .reformulate_gdp(
             GdpReformulationOptions::new(Hull::default())
-                .with_hull_reference_point(d.binary(), 0.25)
-                .with_hull_reference_point(unrelated.binary(), 0.5),
+                .with_hull_reference_coordinate(d.binary(), 0.25)
+                .with_hull_reference_coordinate(unrelated.binary(), 0.5),
         )
         .unwrap();
 
@@ -543,7 +543,7 @@ fn shifted_negative_nonlinear_equalities_are_exact_at_integer_points() {
 
     let report = model
         .reformulate_gdp(
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, -1.0),
+            GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, -1.0),
         )
         .unwrap();
 
@@ -653,10 +653,11 @@ fn invalid_reference_handles_and_coordinates_do_not_mutate_the_model() {
     let before = (model.num_variables(), model.num_constraints(), model.arena().len());
 
     for options in [
-        GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(z, 0.0),
-        GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(compound, 0.0),
-        GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, f64::INFINITY),
-        GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, 1e20),
+        GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(z, 0.0),
+        GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(compound, 0.0),
+        GdpReformulationOptions::new(Hull::default())
+            .with_hull_reference_coordinate(x, f64::INFINITY),
+        GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, 1e20),
     ] {
         assert!(model.reformulate_gdp(options.clone()).is_err());
         assert!(model.to_reformulated_gdp_model(options).is_err());
@@ -679,7 +680,7 @@ fn standalone_parents_leave_physical_variables_free_when_inactive() {
 
     let report = model
         .reformulate_gdp(
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, 1.0),
+            GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, 1.0),
         )
         .unwrap();
     for bits in 0..8 {
@@ -719,8 +720,8 @@ fn enumeration_uses_zero_references_for_local_descendants() {
     let options = GdpReformulationOptions::new(
         Hull::default().with_inclusive_policy(HullInclusivePolicy::Enumerate { max_patterns: 3 }),
     )
-    .with_hull_reference_point(grandchild.binary(), 0.25)
-    .with_hull_reference_point(x, 1.0);
+    .with_hull_reference_coordinate(grandchild.binary(), 0.25)
+    .with_hull_reference_coordinate(x, 1.0);
 
     let report = model.reformulate_gdp(options).unwrap();
     let selector = grandchild.binary().var_id().unwrap();
@@ -779,8 +780,8 @@ fn reference_shifts_must_preserve_small_active_row_bounds_atomically() {
         }
         let reference = if side == BoundSide::Lower { 1e16 } else { -1e16 };
 
-        let options =
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, reference);
+        let options = GdpReformulationOptions::new(Hull::default())
+            .with_hull_reference_coordinate(x, reference);
 
         let before = (
             model.num_variables(),
@@ -931,7 +932,7 @@ fn row_recovery_checks_equalities_ranges_constants_and_negative_coefficients() {
         };
 
         let options =
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, 1e16);
+            GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, 1e16);
 
         let before = (model.num_variables(), model.num_constraints(), model.arena().len());
         assert!(matches!(model.reformulate_gdp(options),
@@ -958,7 +959,7 @@ fn row_recovery_rejects_lost_nonlinear_corrections_and_accepts_a_safe_shift() {
 
     let report = model
         .reformulate_gdp(
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, -50.0),
+            GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, -50.0),
         )
         .unwrap();
     for active in [0.0, 1.0] {
@@ -981,7 +982,7 @@ fn row_recovery_preserves_representable_and_cancelling_reference_offsets() {
 
     let report = model
         .reformulate_gdp(
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, 1e16),
+            GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, 1e16),
         )
         .unwrap();
     for active in [0.0, 1.0] {
@@ -1002,8 +1003,8 @@ fn row_recovery_preserves_representable_and_cancelling_reference_offsets() {
     model
         .reformulate_gdp(
             GdpReformulationOptions::new(Hull::default())
-                .with_hull_reference_point(x, 1e16)
-                .with_hull_reference_point(z, 1.0),
+                .with_hull_reference_coordinate(x, 1e16)
+                .with_hull_reference_coordinate(z, 1.0),
         )
         .unwrap();
 
@@ -1015,7 +1016,7 @@ fn row_recovery_preserves_representable_and_cancelling_reference_offsets() {
 
     let report = model
         .reformulate_gdp(
-            GdpReformulationOptions::new(Hull::default()).with_hull_reference_point(x, 0.1),
+            GdpReformulationOptions::new(Hull::default()).with_hull_reference_coordinate(x, 0.1),
         )
         .unwrap();
 

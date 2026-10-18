@@ -39,7 +39,7 @@ fn named_blocks_preserve_sources_ids_and_history() {
     assert_ne!(clone.id(), m.id());
     assert!(m.has_unreformulated_gdp());
     assert!(!clone.has_unreformulated_gdp());
-    assert_eq!(clone.constraint_id("global"), Some(prior.id()));
+    assert_eq!(clone.constraint_id("global"), Some(prior.row_id()));
     let history = clone.gdp_reformulations();
     let report = &history[0];
     assert_eq!(report.disjunctions[0].source, choice.id());
