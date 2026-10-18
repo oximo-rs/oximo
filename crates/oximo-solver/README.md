@@ -26,17 +26,50 @@ pub trait Solver {
 
 Each backend defines its own `Options` type. Users get compile-time validation and LSP autocomplete on the options that actually apply to that backend.
 
+## Model compatibility
+
+`constraint_support(ConstraintSignature::of::<F, S>(), &options)` checks one
+function/set pair. `objective_support` and `domain_support(domain)` check the
+objective and variable domain separately. Queries return a `Capability`:
+
+| Variant                      | Meaning                                                                |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `Native`                     | The backend implements this interface; whole-model checks still apply. |
+| `Unsupported`                | No supported interface was found.                                      |
+| `RequiresValidation(reason)` | The actual function data or options must be inspected.                 |
+
+You can use `solver.validate_model(&model, &options).into_result()?` to check
+the complete combination before solving. For example, HiGHS supports MILP
+and continuous QP separately, but does not support MIQP.
+
+Direct model registration requires a recognized representation. Opaque custom
+pairs and objectives are rejected during construction. `TranslationContext` and
+`TypedConstraintTranslator` provide explicit typed translation operations; stock
+backends do not discover or invoke external translators automatically.
+
+## Shared preparation and reconstruction
+
+Create a fresh `prepare::LoweringContext` for each model build. It captures
+parameter values and exposes the original IDs, bounds, activity flags and semantic
+declarations.
+
+Adapters remain responsible for native layouts, supported representations,
+coordinate mappings, status decoding, and evidence that primal points, duals and
+global bounds are available. Finish every assembled result with
+`reconstruct::finalize_result`, passing the source model and variable count captured
+during translation.
+
 ## `SolverResult`
 
 `termination` records why the solve stopped, while `primal_status` records whether a usable
 point came back.
 
 | Field           | Type                           | Description                                       |
-|-----------------|--------------------------------|---------------------------------------------------|
+| --------------- | ------------------------------ | ------------------------------------------------- |
 | `termination`   | `TerminationStatus`            | Why the solve stopped                             |
 | `primal_status` | `PrimalStatus`                 | Whether a usable primal point is available        |
 | `solutions`     | `Vec<SolutionPoint>`           | Primal points, best first (empty if no solution)  |
-| `dual`          | `FxHashMap<ConstraintId, f64>` | Constraint duals at the best point                |
+| `dual`          | `FxHashMap<ConstraintId, f64>` | Stored algebraic-row duals at the best point      |
 | `reduced_costs` | `FxHashMap<VarId, f64>`        | Variable reduced costs at the best point          |
 | `best_bound`    | `Option<f64>`                  | Dual/relaxation bound (branch-and-bound backends) |
 | `gap`           | `Option<f64>`                  | Relative optimality gap, when reported            |
@@ -45,29 +78,6 @@ point came back.
 | `raw_log`       | `Option<String>`               | Solver stdout/stderr                              |
 
 Each `SolutionPoint` holds the `primal` variable values (`FxHashMap<VarId, f64>`) and that point's `objective` (`Option<f64>`). Index `0` is the best/incumbent. Backends with solution pools return the extra points after it.
-
-## Shared preparation and reconstruction
-
-Create a fresh `prepare::LoweringContext` per model build, and pass it through
-classification and emission. It freezes parameter values and exposes the original
-model entities. `PreparedExpressions` can be shared with parallel writers.
-Direct affine nodes borrow their coefficients. One-use streaming consumers can
-explicitly bypass reuse admission. Before cache initialization, first-use compound
-expressions return owned terms without locking or allocating shared storage.
-Once initialized, cached entries are checked independently of reuse admission;
-a small bounded history recognizes interleaved roots.
-
-`require_linear`, `require_linear_once`, and `require_quadratic` take a lazy location closure, e.g.
-`|| format!("constraint {:?}", row.name)`, which runs only on failure.
-Quadratic extraction returns `Extracted<QuadraticTerms>` (owned or shared),
-which dereferences to the original coefficient representation.
-
-Adapters own capability checks, native row/column layouts, reformulation choices,
-native status decoding, and evidence that points, duals and global bounds exist.
-`reconstruct` shares coordinate restoration and result cleanup. `normalize_result`
-removes incomplete/nonfinite points and clears uncertified multipliers. Discarding
-the incumbent also clears its native gap, which does not describe a surviving
-pool point.
 
 ## Result accessors
 
@@ -98,12 +108,17 @@ Snapshot queries return `Ok(None)` for missing primal variables or parameters
 added after the solve. Newly constructed expressions can use captured parameters.
 Constraint definitions and bounds still come from the supplied model.
 
+Use `dual_of(handle)` for the multiplier of the original constraint. The raw
+`dual` map uses stored algebraic rows, whose scaling may differ. If a solver or
+transformation cannot supply an original-constraint multiplier, `dual_of` returns
+`None`.
+
 ## `TerminationStatus`
 
 Why the solve stopped (complementary to whether a point was returned).
 
 | Variant                 | Meaning                                                |
-|-------------------------|--------------------------------------------------------|
+| ----------------------- | ------------------------------------------------------ |
 | `Optimal`               | Proven globally optimal                                |
 | `LocallyOptimal`        | A local optimum                                        |
 | `Infeasible`            | No feasible solution exists                            |
@@ -120,7 +135,7 @@ Why the solve stopped (complementary to whether a point was returned).
 ## `PrimalStatus`
 
 | Variant         | Meaning                                           |
-|-----------------|---------------------------------------------------|
+| --------------- | ------------------------------------------------- |
 | `NoSolution`    | No primal point is available                      |
 | `FeasiblePoint` | A feasible point is available, not proven optimal |
 | `OptimalPoint`  | A proven-optimal point is available               |
@@ -128,7 +143,7 @@ Why the solve stopped (complementary to whether a point was returned).
 ## `SolverError`
 
 | Variant                      | Cause                                                     |
-|------------------------------|-----------------------------------------------------------|
+| ---------------------------- | --------------------------------------------------------- |
 | `UnsupportedKind(ModelKind)` | Backend does not support this model kind                  |
 | `NoObjective`                | Model has no objective set                                |
 | `Nonlinear`                  | Backend cannot handle nonlinear expressions               |
@@ -150,7 +165,7 @@ let opts = MyBackendOptions::default()
 ```
 
 | Method                  | Field        | Type               |
-|-------------------------|--------------|--------------------|
+| ----------------------- | ------------ | ------------------ |
 | `.time_limit(Duration)` | `time_limit` | `Option<Duration>` |
 | `.threads(u32)`         | `threads`    | `Option<u32>`      |
 | `.verbose(bool)`        | `verbose`    | `Option<bool>`     |
