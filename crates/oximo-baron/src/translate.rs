@@ -231,6 +231,11 @@ fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<Baron
 /// used to rescale its squared-row price to the norm form.
 type BarParts = (String, Vec<VarId>, Vec<ConstraintId>, Vec<LinearTerms<'static>>);
 
+/// Check the complete translation, including operator restrictions, without running BARON.
+pub(crate) fn validate_model(model: &Model, opts: &BaronOptions) -> Result<(), SolverError> {
+    build_bar(model, opts).map(|_| ())
+}
+
 fn build_bar(model: &Model, opts: &BaronOptions) -> Result<BarParts, SolverError> {
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));

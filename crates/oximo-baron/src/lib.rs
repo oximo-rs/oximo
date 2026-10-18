@@ -82,6 +82,22 @@ impl Solver for Baron {
         }
     }
 
+    fn validate_model_extra(
+        &self,
+        model: &Model,
+        opts: &Self::Options,
+    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        translate::validate_model(model, opts)
+            .err()
+            .map(|error| oximo_solver::CapabilityDiagnostic {
+                constraint: None,
+                location: "BARON translation".into(),
+                reason: error.to_string(),
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn solve(&mut self, model: &Model, opts: &BaronOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts, self.exec.as_deref())
     }
