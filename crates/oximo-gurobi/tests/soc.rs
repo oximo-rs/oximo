@@ -114,5 +114,5 @@ fn soc_iis_maps_the_generated_bound_sign_row() {
     objective!(m, Min, x);
 
     let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute SOC IIS");
-    assert!(iis.soc_constraints.contains(&cone.id()), "cone missing from IIS: {iis:?}");
+    assert!(iis.soc_constraints.contains(&cone.soc_id()), "cone missing from IIS: {iis:?}");
 }

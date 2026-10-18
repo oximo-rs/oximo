@@ -359,9 +359,9 @@ fn lp_duals_are_a_valid_original_certificate() {
     let r = Scip::new().solve(&m, &opts).unwrap();
     close(r.objective().unwrap(), 3.0);
     assert_eq!(r.dual_status, oximo_solver::DualStatus::FeasiblePoint);
-    close(r.dual[&row.id()], 1.0);
+    close(r.dual[&row.row_id()], 1.0);
     objective!(m, Max, -x - 2.0 * y);
     let r = Scip::new().solve(&m, &opts).unwrap();
     assert_eq!(r.dual_status, oximo_solver::DualStatus::FeasiblePoint);
-    close(r.dual[&row.id()], -1.0);
+    close(r.dual[&row.row_id()], -1.0);
 }

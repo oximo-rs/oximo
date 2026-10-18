@@ -11,6 +11,23 @@ use rustc_hash::FxHashMap;
 
 use crate::{DualStatus, PrimalStatus, SolverResult, TerminationStatus};
 
+/// Finalize a backend result in the source model's coordinates.
+/// Applies semantic dual safeguards and the common result contract in one pass.
+/// The result and its points retain the parameter snapshot captured for the solve.
+/// Pass the variable count captured during translation, even if the source model
+/// has since gained variables (for example, from a solver callback).
+///
+/// # Panics
+/// Panics for a foreign result, foreign points, or conflicting parameter snapshots.
+#[inline]
+pub fn finalize_result(
+    result: SolverResult,
+    model: &oximo_core::Model,
+    num_variables: usize,
+) -> SolverResult {
+    normalize_result(result, num_variables).with_semantic_dual_defaults(model)
+}
+
 /// One native row's contribution to an original multiplier. Store `None` in
 /// the native row map when no reversible multiplier transformation is known.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -118,7 +135,7 @@ pub fn relative_gap(primal: Option<f64>, bound: Option<f64>) -> Option<f64> {
 /// Panics if a point's model identity or captured parameters conflict with the result.
 /// Use [`SolverResult::for_model`] and [`SolverResult::add_solution`] to assemble
 /// points from a single captured parameter state.
-pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
+fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
     for (index, point) in result.solutions.iter().enumerate() {
         assert!(
             point.model_id == oximo_core::ModelId::UNASSIGNED || point.model_id == result.model_id,
@@ -166,10 +183,16 @@ pub fn normalize_result(mut result: SolverResult, num_variables: usize) -> Solve
         result.gap = None;
     }
     if result.dual_status != DualStatus::FeasiblePoint {
+        result.semantic_dual.clear();
         result.dual.clear();
         result.soc_dual.clear();
         result.psd_dual.clear();
         result.reduced_costs.clear();
+    }
+    for value in result.semantic_dual.values_mut() {
+        if value.is_some_and(|v| !v.is_finite()) {
+            *value = None;
+        }
     }
     result.dual.retain(|_, v| v.is_finite());
     result.soc_dual.retain(|_, v| v.is_finite() && *v >= 0.0);

@@ -84,6 +84,7 @@ pub struct LoweringContext<'a> {
     constraints: ModelConstraints<'a>,
     objective: Ref<'a, Option<Objective>>,
     kind: ModelKind,
+    semantic: oximo_core::SemanticConstraints<'a>,
 }
 
 /// A shareable arena snapshot and bounded, reuse-admitted extraction caches.
@@ -223,7 +224,12 @@ impl<'a> LoweringContext<'a> {
             constraints: model.constraints(),
             objective: model.objective(),
             kind: model.kind(),
+            semantic: model.semantic_constraints_ref(),
         })
+    }
+
+    pub fn semantic_constraints(&self) -> &oximo_core::SemanticConstraints<'a> {
+        &self.semantic
     }
 
     /// Extract an active PSD matrix in ordinary upper-column coordinates.
@@ -312,6 +318,9 @@ impl<'a> LoweringContext<'a> {
         expr: ExprId,
         location: impl FnOnce() -> String,
     ) -> Result<LinearTerms<'_>, SolverError> {
+        if let ExprNode::Linear { coeffs, constant } = self.arena.get(expr) {
+            return Ok(LinearTerms::borrowed(coeffs, *constant));
+        }
         extract_linear(&self.arena, expr).ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
