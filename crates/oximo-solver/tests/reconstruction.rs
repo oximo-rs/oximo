@@ -1,8 +1,16 @@
 use oximo_core::{ConstraintId, VarId};
 use oximo_solver::reconstruct::{
-    ObjectiveTransform, accumulate_dual, normalize_result, project_primal, relative_gap,
+    ObjectiveTransform, accumulate_dual, finalize_result, project_primal, relative_gap,
 };
 use oximo_solver::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationStatus};
+
+fn model_with_variables(count: usize) -> oximo_core::Model {
+    let model = oximo_core::Model::new("result finalization");
+    for index in 0..count {
+        model.__var(format!("x{index}")).build();
+    }
+    model
+}
 
 fn point(values: &[(u32, f64)], objective: f64) -> SolutionPoint {
     SolutionPoint {
@@ -27,16 +35,22 @@ fn projection_handles_reordering_auxiliaries_and_missing_columns() {
 
 #[test]
 fn limits_require_points_and_invalid_incumbents_do_not_keep_their_duals() {
-    let mut result =
-        SolverResult { termination: TerminationStatus::TimeLimit, ..Default::default() };
-    assert_eq!(normalize_result(result.clone(), 1).primal_status, PrimalStatus::NoSolution);
+    let model = model_with_variables(1);
+    let mut result = SolverResult {
+        termination: TerminationStatus::TimeLimit,
+        ..SolverResult::for_model(&model)
+    };
+    assert_eq!(finalize_result(result.clone(), &model, 1).primal_status, PrimalStatus::NoSolution);
     result.solutions = vec![point(&[(0, 3.0)], 7.0)];
-    assert_eq!(normalize_result(result.clone(), 1).primal_status, PrimalStatus::FeasiblePoint);
+    assert_eq!(
+        finalize_result(result.clone(), &model, 1).primal_status,
+        PrimalStatus::FeasiblePoint
+    );
     result.solutions.insert(0, point(&[], 2.0));
     result.dual_status = DualStatus::FeasiblePoint;
     result.gap = Some(0.25);
     result.dual.insert(ConstraintId(0), 99.0);
-    let result = normalize_result(result, 1);
+    let result = finalize_result(result, &model, 1);
     assert_eq!(result.result_count(), 1);
     assert!(result.dual.is_empty());
     assert_eq!(result.dual_status, DualStatus::Unknown);
@@ -45,14 +59,16 @@ fn limits_require_points_and_invalid_incumbents_do_not_keep_their_duals() {
 
 #[test]
 fn discarded_only_incumbent_clears_gap_but_preserves_independent_bound() {
-    let result = normalize_result(
+    let model = model_with_variables(1);
+    let result = finalize_result(
         SolverResult {
             termination: TerminationStatus::TimeLimit,
             solutions: vec![point(&[(0, f64::NAN)], 7.0)],
             best_bound: Some(2.0),
             gap: Some(0.5),
-            ..Default::default()
+            ..SolverResult::for_model(&model)
         },
+        &model,
         1,
     );
     assert_eq!(result.primal_status, PrimalStatus::NoSolution);
@@ -62,12 +78,14 @@ fn discarded_only_incumbent_clears_gap_but_preserves_independent_bound() {
 
 #[test]
 fn empty_solutions_clear_gap() {
-    let result = normalize_result(
+    let model = model_with_variables(1);
+    let result = finalize_result(
         SolverResult {
             termination: TerminationStatus::TimeLimit,
             gap: Some(0.5),
-            ..Default::default()
+            ..SolverResult::for_model(&model)
         },
+        &model,
         1,
     );
     assert_eq!(result.primal_status, PrimalStatus::NoSolution);
@@ -76,17 +94,19 @@ fn empty_solutions_clear_gap() {
 
 #[test]
 fn gaps_use_restored_units_and_retain_native_conventions_separately() {
+    let model = model_with_variables(1);
     let transform = ObjectiveTransform { sign: -1.0, offset: 5.0 };
     let p = transform.restore(-10.0).unwrap();
     let b = transform.restore(-8.0).unwrap();
-    let result = normalize_result(
+    let result = finalize_result(
         SolverResult {
             termination: TerminationStatus::TimeLimit,
             solutions: vec![point(&[(0, 1.0)], p)],
             best_bound: Some(b),
             gap: Some(0.25),
-            ..Default::default()
+            ..SolverResult::for_model(&model)
         },
+        &model,
         1,
     );
     assert_eq!(result.gap, Some(0.25));
@@ -98,13 +118,19 @@ fn gaps_use_restored_units_and_retain_native_conventions_separately() {
 
 #[test]
 fn only_global_optimality_supplies_a_missing_bound() {
+    let model = model_with_variables(0);
     for (termination, bound) in [
         (TerminationStatus::Optimal, Some(3.0)),
         (TerminationStatus::LocallyOptimal, None),
         (TerminationStatus::Feasible, None),
     ] {
-        let result = normalize_result(
-            SolverResult { termination, solutions: vec![point(&[], 3.0)], ..Default::default() },
+        let result = finalize_result(
+            SolverResult {
+                termination,
+                solutions: vec![point(&[], 3.0)],
+                ..SolverResult::for_model(&model)
+            },
+            &model,
             0,
         );
         assert!(result.has_solution());
@@ -122,6 +148,7 @@ fn split_rows_accumulate_sign_and_objective_transform() {
 
 #[test]
 fn discarded_optimal_incumbent_does_not_certify_another_pool_point() {
+    let model = model_with_variables(1);
     for bound in [None, Some(2.0)] {
         let mut result = SolverResult {
             termination: TerminationStatus::Optimal,
@@ -130,12 +157,12 @@ fn discarded_optimal_incumbent_does_not_certify_another_pool_point() {
             best_bound: bound,
             gap: Some(0.0),
             dual_status: DualStatus::FeasiblePoint,
-            ..Default::default()
+            ..SolverResult::for_model(&model)
         };
         result.dual.insert(ConstraintId(0), 99.0);
         // Repeated normalization must not upgrade the retained pool point.
         for _ in 0..2 {
-            result = normalize_result(result, 1);
+            result = finalize_result(result, &model, 1);
             assert_eq!(result.termination, TerminationStatus::Optimal);
             assert_eq!(result.primal_status, PrimalStatus::FeasiblePoint);
             assert_eq!(result.objective(), Some(7.0));
@@ -149,8 +176,9 @@ fn discarded_optimal_incumbent_does_not_certify_another_pool_point() {
 
 #[test]
 fn normalization_filters_auxiliaries_but_rejects_invalid_original_values() {
+    let model = model_with_variables(1);
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let result = normalize_result(
+        let result = finalize_result(
             SolverResult {
                 termination: TerminationStatus::Optimal,
                 primal_status: PrimalStatus::OptimalPoint,
@@ -159,8 +187,9 @@ fn normalization_filters_auxiliaries_but_rejects_invalid_original_values() {
                     point(&[(0, 2.0), (7, bad)], 2.0),
                 ],
                 dual_status: DualStatus::FeasiblePoint,
-                ..Default::default()
+                ..SolverResult::for_model(&model)
             },
+            &model,
             1,
         );
         assert_eq!(result.result_count(), 1);

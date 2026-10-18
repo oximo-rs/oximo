@@ -7,11 +7,11 @@ fn scalar_ranges_and_display() {
     variable!(m, x);
     let le = indicator_constraint!(m, cap, b == 1 => x <= 4.0);
     let range = indicator_constraint!(m, band, b == 0 => -2.0 <= x <= 3.0);
-    assert_eq!(le.id(), IndicatorConstraintId(0));
+    assert_eq!(le.indicator_id(), IndicatorConstraintId(0));
     assert!(matches!(range, RangeIndicatorConstraintHandles::Interval(_)));
     assert_eq!(m.num_indicator_constraints(), 2);
     assert_eq!(m.num_constraints(), 2);
-    assert_eq!(m.display_indicator(le.id()).to_string(), "cap: b = 1 -> x <= 4");
+    assert_eq!(m.display_indicator(le.indicator_id()).to_string(), "cap: b = 1 -> x <= 4");
 }
 
 #[test]

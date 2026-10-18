@@ -40,6 +40,11 @@ impl Domain {
         matches!(self, Self::Integer | Self::Binary | Self::SemiInteger { .. })
     }
 
+    /// Integrality or a semicontinuity disjunction requires a discrete modeling capability.
+    pub fn requires_discrete_choice(self) -> bool {
+        !matches!(self, Self::Real)
+    }
+
     /// The semicontinuity gap floor: `Some(threshold)` for `SemiContinuous` /
     /// `SemiInteger`, `None` otherwise. Such a variable takes either 0 or a
     /// value `>= threshold`, so backends emit `threshold` as the lower bound.

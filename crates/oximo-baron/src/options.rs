@@ -266,7 +266,7 @@ impl BaronOptions {
     /// single-sided constraints and mark only sides whose feasible sets are known
     /// to be convex.
     #[must_use]
-    pub fn convex_equation(self, constraint: ConstraintHandle) -> Self {
+    pub fn convex_equation<F, S>(self, constraint: ConstraintHandle<F, S>) -> Self {
         self.convex_equations([constraint])
     }
 
@@ -276,11 +276,12 @@ impl BaronOptions {
     /// See [`Self::convex_equation`] for correctness and range-constraint
     /// requirements.
     #[must_use]
-    pub fn convex_equations<I>(mut self, constraints: I) -> Self
+    pub fn convex_equations<I, F, S>(mut self, constraints: I) -> Self
     where
-        I: IntoIterator<Item = ConstraintHandle>,
+        I: IntoIterator<Item = ConstraintHandle<F, S>>,
     {
         for constraint in constraints {
+            let constraint = constraint.erase();
             if !self.convex_equation_handles.contains(&constraint) {
                 self.convex_equation_handles.push(constraint);
             }

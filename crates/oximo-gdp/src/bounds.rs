@@ -1,7 +1,7 @@
 //! Domain validation and outward-rounded bounds over global and conditional boxes.
 
 use oximo_core::gdp::BooleanId;
-use oximo_core::{AlgebraicConstraint, Domain, Variable};
+use oximo_core::{AlgebraicConstraint, ConstraintId, Domain, Variable};
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp, extract_linear};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -406,13 +406,22 @@ pub(crate) struct Bounder<'a> {
     affine_slots: FxHashMap<oximo_expr::VarId, usize>,
     tightened: FxHashMap<oximo_expr::VarId, Bounds>,
     supporting_roots: FxHashSet<ExprId>,
+    supporting_constraints: FxHashSet<ConstraintId>,
     scope: Option<(&'a BoundScopes, Option<BooleanId>)>,
+}
+
+struct PropagationRow {
+    constraint: Option<ConstraintId>,
+    lhs: ExprId,
+    lower: f64,
+    upper: f64,
+    terms: LinearTerms<'static>,
 }
 
 /// Reusable propagation storage contains owned coefficients.
 #[derive(Default)]
 pub(crate) struct PropagationScratch {
-    rows: Vec<(ExprId, f64, f64, LinearTerms<'static>)>,
+    rows: Vec<PropagationRow>,
     supporting_roots: FxHashSet<ExprId>,
     stack: Vec<ExprId>,
 }
@@ -544,6 +553,7 @@ impl<'a> Bounder<'a> {
             affine_slots: FxHashMap::default(),
             tightened: FxHashMap::default(),
             supporting_roots: FxHashSet::default(),
+            supporting_constraints: FxHashSet::default(),
             scope,
         }
     }
@@ -613,25 +623,25 @@ impl<'a> Bounder<'a> {
 
     /// A bounded affine propagation pass over active unconditional rows.
     /// Only rows connected to a pending GDP source are used. All supporting
-    /// expressions must be locked together with the original source.
+    /// expressions and row definitions must be locked together with the original source.
     pub fn tighten_global(
         &mut self,
         constraints: &[AlgebraicConstraint],
         relevant: &FxHashSet<oximo_expr::VarId>,
     ) {
-        self.tighten_rows(
-            constraints.iter().filter(|row| row.active).map(|row| (row.lhs, row.lower, row.upper)),
-            Some(relevant),
-        );
-    }
-
-    pub fn tighten_rows(
-        &mut self,
-        constraints: impl IntoIterator<Item = (ExprId, f64, f64)>,
-        relevant: Option<&FxHashSet<oximo_expr::VarId>>,
-    ) {
         let mut scratch = PropagationScratch::default();
-        self.tighten_rows_reusing(constraints, relevant, &mut scratch);
+        self.tighten_tagged_rows_reusing(
+            constraints.iter().enumerate().filter(|(_, row)| row.active).map(|(index, row)| {
+                (
+                    Some(ConstraintId(u32::try_from(index).expect("registered constraint ID"))),
+                    row.lhs,
+                    row.lower,
+                    row.upper,
+                )
+            }),
+            Some(relevant),
+            &mut scratch,
+        );
     }
 
     pub fn tighten_rows_reusing(
@@ -640,10 +650,23 @@ impl<'a> Bounder<'a> {
         relevant: Option<&FxHashSet<oximo_expr::VarId>>,
         scratch: &mut PropagationScratch,
     ) {
+        self.tighten_tagged_rows_reusing(
+            constraints.into_iter().map(|(lhs, lower, upper)| (None, lhs, lower, upper)),
+            relevant,
+            scratch,
+        );
+    }
+
+    fn tighten_tagged_rows_reusing(
+        &mut self,
+        constraints: impl IntoIterator<Item = (Option<ConstraintId>, ExprId, f64, f64)>,
+        relevant: Option<&FxHashSet<oximo_expr::VarId>>,
+        scratch: &mut PropagationScratch,
+    ) {
         let mut budget = 50_000_usize;
         scratch.rows.clear();
 
-        for (lhs, lower, upper) in constraints {
+        for (constraint, lhs, lower, upper) in constraints {
             if !lower.is_finite() && !upper.is_finite() {
                 continue;
             }
@@ -655,7 +678,13 @@ impl<'a> Bounder<'a> {
             if let Some(terms) =
                 global_affine_terms(self.arena, lhs, &mut budget, &mut scratch.stack)
             {
-                scratch.rows.push((lhs, lower, upper, terms.into_owned()));
+                scratch.rows.push(PropagationRow {
+                    constraint,
+                    lhs,
+                    lower,
+                    upper,
+                    terms: terms.into_owned(),
+                });
             }
         }
 
@@ -665,7 +694,14 @@ impl<'a> Bounder<'a> {
         for _ in 0..4 {
             let mut changed = false;
 
-            for &(lhs, lower_bound, upper_bound, ref terms) in &scratch.rows {
+            for &PropagationRow {
+                constraint,
+                lhs,
+                lower: lower_bound,
+                upper: upper_bound,
+                ref terms,
+            } in &scratch.rows
+            {
                 if !all_rows && !terms.coeffs.iter().any(|(v, _)| relevant.contains(v)) {
                     continue;
                 }
@@ -704,6 +740,7 @@ impl<'a> Bounder<'a> {
                     if lower <= upper && (lower > current.lower || upper < current.upper) {
                         self.tightened.insert(variable, Bounds::new(lower, upper));
                         self.supporting_roots.insert(lhs);
+                        self.supporting_constraints.extend(constraint);
                         changed = true;
                     }
                 }
@@ -718,6 +755,10 @@ impl<'a> Bounder<'a> {
 
     pub fn supporting_roots(&self) -> &FxHashSet<ExprId> {
         &self.supporting_roots
+    }
+
+    pub fn supporting_constraints(&self) -> &FxHashSet<ConstraintId> {
+        &self.supporting_constraints
     }
 
     #[cfg(test)]

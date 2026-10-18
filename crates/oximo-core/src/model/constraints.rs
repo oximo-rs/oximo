@@ -6,9 +6,9 @@ use crate::constraint::{
 };
 use crate::domain::Domain;
 use crate::function_set::{
-    AlgebraicConstraintIr, Constraint, ConstraintIr, GreaterThan, Interval, IntoAffineConstraint,
-    IntoAffineFunction, IntoFunction, LessThan, LowerConstraint, ScalarFunction, SecondOrderCone,
-    Set as ConstraintSet, SocConstraintIr, VectorAffineFunction, validate_bounds,
+    AlgebraicConstraintIr, Constraint, GreaterThan, Interval, IntoAffineConstraint,
+    IntoAffineFunction, IntoFunction, LessThan, ScalarFunction, Set as ConstraintSet,
+    SocConstraintIr, validate_bounds,
 };
 use crate::indicator::{
     IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId,
@@ -19,8 +19,8 @@ use crate::sos::{
     SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType, validate_members,
 };
 use crate::{
-    IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint, PsdConstraintHandle,
-    PsdConstraintId, PsdConstraintIr,
+    IntoSymmetricAffineFunction, PsdConstraint, PsdConstraintHandle, PsdConstraintId,
+    PsdConstraintIr,
 };
 use oximo_expr::{
     Degree, Expr, ExprClass, ExprId, ExprIdRemap, ModelMismatchError, VarId, classify,
@@ -28,16 +28,157 @@ use oximo_expr::{
 use smol_str::SmolStr;
 use std::cell::Ref;
 
+/// Append an algebraic row, growing storage in chunks when capacity is exhausted.
+#[inline]
+pub(super) fn push_algebraic(rows: &mut Vec<AlgebraicConstraint>, row: AlgebraicConstraint) {
+    if rows.len() == rows.capacity() {
+        grow_algebraic(rows);
+    }
+    rows.push(row);
+}
+
+/// Grow algebraic row storage in larger chunks for individual insertions.
+#[cold]
+#[inline(never)]
+fn grow_algebraic(rows: &mut Vec<AlgebraicConstraint>) {
+    let additional = rows.capacity().checked_mul(3).expect("constraint capacity overflow").max(8);
+    rows.reserve(additional);
+}
+
+#[derive(Debug)]
+enum PendingSemantic {
+    Direct(super::semantic::ScalarSignature),
+    Extension(Box<crate::SemanticPair>),
+}
+
+impl PendingSemantic {
+    /// Return the compact source signature when the row uses a built-in representation.
+    fn signature(&self) -> Option<super::semantic::ScalarSignature> {
+        match self {
+            Self::Direct(signature) => Some(*signature),
+            Self::Extension(_) => None,
+        }
+    }
+
+    /// Keep a compact signature for direct rows, or retain the full source pair.
+    #[inline]
+    fn new(
+        source: crate::semantic::ScalarConstraintSource,
+        view: crate::semantic::ScalarConstraintView,
+    ) -> Self {
+        if let Some(signature) = source.direct_signature(view) {
+            Self::Direct(signature)
+        } else {
+            Self::Extension(Box::new(source.into_pair()))
+        }
+    }
+
+    /// Record an appended row's source function/set identity and provenance.
+    #[inline]
+    fn record(
+        self,
+        writer: &mut super::semantic::SemanticWriter<'_>,
+        id: ConstraintId,
+        name: &SmolStr,
+        origin: PendingOrigin,
+        alternative: bool,
+    ) {
+        match self {
+            Self::Direct(_) => match origin {
+                PendingOrigin::Declared => {
+                    writer.record_declared(id.into(), super::semantic::Representation::Scalar);
+                }
+                PendingOrigin::RangeName => {
+                    writer.record_row_range(id.into(), super::semantic::Representation::Scalar);
+                }
+                origin @ PendingOrigin::Range(_) => writer.record_native(
+                    id.into(),
+                    name.clone(),
+                    super::semantic::Representation::Scalar,
+                    origin.into_origin(name),
+                ),
+            },
+            Self::Extension(pair) => {
+                writer.record_pair(
+                    id.into(),
+                    name.clone(),
+                    *pair,
+                    origin.into_origin(name),
+                    !alternative,
+                );
+            }
+        }
+    }
+
+    /// Record a directly declared row using its compact signature or retained source pair.
+    #[inline]
+    fn record_declared(self, model: &Model, id: ConstraintId, name: &SmolStr, alternative: bool) {
+        match self {
+            Self::Direct(_) => {
+                model.record_declared_scalar(id);
+            }
+            Self::Extension(pair) => model.semantic_writer().record_pair(
+                id.into(),
+                name.clone(),
+                *pair,
+                crate::ConstraintOrigin::Declared,
+                !alternative,
+            ),
+        }
+    }
+
+    /// Remap expression IDs in a retained source pair after merging a worker arena.
+    fn remap(&mut self, remap: ExprIdRemap) {
+        if let Self::Extension(pair) = self {
+            pair.remap(remap);
+        }
+    }
+
+    /// Check whether the stored row differs from the original function/set pair.
+    #[inline]
+    fn alternative(&self, view: crate::semantic::ScalarConstraintView) -> bool {
+        match self {
+            Self::Direct(_) => false,
+            Self::Extension(pair) => !view.matches_pair(pair),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum PendingOrigin {
+    Declared,
+    RangeName,
+    Range(std::sync::Arc<SmolStr>),
+}
+
+impl PendingOrigin {
+    /// Resolve a pending declaration or range origin to its stored provenance.
+    fn into_origin(self, name: &SmolStr) -> crate::ConstraintOrigin {
+        match self {
+            Self::Declared => crate::ConstraintOrigin::Declared,
+            Self::RangeName => crate::ConstraintOrigin::Range(name.clone()),
+            Self::Range(name) => {
+                crate::ConstraintOrigin::Range(std::sync::Arc::unwrap_or_clone(name))
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct PendingConstraint {
     pub(super) name: SmolStr,
     lhs: ExprId,
     lower: f64,
     upper: f64,
+    semantic: PendingSemantic,
+    alternative: bool,
+    pub(super) origin: PendingOrigin,
 }
 
 #[derive(Debug)]
 pub(super) struct PendingIndicator {
+    semantic: crate::SemanticPair,
+    alternative: bool,
     name: SmolStr,
     trigger: VarId,
     active_value: bool,
@@ -47,34 +188,77 @@ pub(super) struct PendingIndicator {
 }
 
 impl PendingConstraint {
-    pub(super) fn from_expr<'a>(
+    /// Validate scalar bounds and retain the row and source pair for deferred registration.
+    pub(super) fn from_expr(
         name: SmolStr,
-        constraint: impl Into<AlgebraicConstraintIr<'a>>,
+        constraint: impl crate::function_set::ScalarConstraintInput,
     ) -> Self {
-        let constraint: AlgebraicConstraintIr = constraint.into();
-        let (lower, upper) = (constraint.lower, constraint.upper);
+        let constraint = constraint.into_scalar_input();
+        let (lower, upper) = (constraint.view.lower, constraint.view.upper);
         validate_bounds(lower, upper);
-        Self { name, lhs: constraint.lhs.id, lower, upper }
+
+        Self {
+            name,
+            lhs: constraint.view.lhs,
+            lower,
+            upper,
+            semantic: PendingSemantic::new(
+                constraint.semantic,
+                crate::semantic::ScalarConstraintView { lhs: constraint.view.lhs, lower, upper },
+            ),
+            alternative: false,
+            origin: PendingOrigin::Declared,
+        }
     }
 
+    /// Remap the stored row and its source pair, then refresh the lowering comparison.
     pub(super) fn remap(&mut self, remap: ExprIdRemap) {
         self.lhs = remap.apply(self.lhs);
+        self.semantic.remap(remap);
+        self.alternative = self.semantic.alternative(crate::semantic::ScalarConstraintView {
+            lhs: self.lhs,
+            lower: self.lower,
+            upper: self.upper,
+        });
     }
 }
 
 #[derive(Debug)]
 pub(super) struct PendingSoc {
     pub(super) name: SmolStr,
-    pub(super) terms: Vec<ExprId>,
-    pub(super) bound: ExprId,
+    pub(super) components: crate::SharedSlice<ExprId>,
 }
 
 impl PendingSoc {
+    /// Collect the affine SOC bound and terms while checking shared model ownership.
+    pub(super) fn new<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
+        name: SmolStr,
+        terms: impl IntoIterator<Item = A>,
+        bound: B,
+        expected_arena: usize,
+    ) -> Self {
+        let bound = bound.into_affine_function().expression();
+        super::assert_expr_arena(bound, expected_arena);
+        let components: crate::SharedSlice<_> = std::iter::once(bound.id())
+            .chain(terms.into_iter().map(|term| {
+                let term = term.into_affine_function().expression();
+                assert_eq!(
+                    super::arena_key(term.arena),
+                    expected_arena,
+                    "SOC components must belong to the same model"
+                );
+                term.id()
+            }))
+            .collect();
+        assert!(components.len() >= 2, "SOC needs at least two components");
+        Self { name, components }
+    }
+
+    /// Remap every SOC component after merging a worker arena.
     pub(super) fn remap(&mut self, remap: ExprIdRemap) {
-        for term in &mut self.terms {
-            *term = remap.apply(*term);
+        for root in &mut self.components {
+            *root = remap.apply(*root);
         }
-        self.bound = remap.apply(self.bound);
     }
 }
 
@@ -98,11 +282,12 @@ pub enum ConstraintRef<'a> {
     Indicator { id: IndicatorConstraintId, constraint: &'a IndicatorConstraint },
 }
 
-/// Unified borrowed view of every constraint declared on a [`Model`].
+/// Borrowed homogeneous algebraic, cone, SOS and indicator views of a [`Model`].
 ///
 /// The underlying algebraic, explicit-SOC, PSD, SOS, and indicator registries remain
 /// separate, so backends can iterate a homogeneous slice without a
 /// per-constraint branch.
+/// Use [`Model::semantic_constraints`] to inspect the original function/set identity.
 /// [`Self::iter`] visits algebraic constraints in [`ConstraintId`] order,
 /// followed by explicit cones, SOS constraints, and indicator constraints in
 /// their respective ID order.
@@ -131,15 +316,17 @@ impl ModelConstraints<'_> {
         &self.positive_semidefinite
     }
 
+    /// Borrow SOS constraints in their registry ID order, including inactive sources.
     pub fn special_ordered_sets(&self) -> &[SosConstraint] {
         &self.special_ordered_sets
     }
 
+    /// Borrow indicator constraints in their registry ID order, including inactive sources.
     pub fn indicators(&self) -> &[IndicatorConstraint] {
         &self.indicators
     }
 
-    /// Iterate over all declared constraints without allocating.
+    /// Iterate over all common constraint views without allocating.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "registration rejects constraint counts above u32::MAX"
@@ -174,6 +361,7 @@ impl ModelConstraints<'_> {
             + self.indicators.len()
     }
 
+    /// Return whether all constraint registries are empty.
     pub fn is_empty(&self) -> bool {
         self.algebraic.is_empty()
             && self.second_order_cones.is_empty()
@@ -184,27 +372,52 @@ impl ModelConstraints<'_> {
 }
 
 impl Model {
-    /// Register a mathematically compatible function/set pair in the heterogeneous IR.
+    /// Register a semantic pair with a recognized algebraic, conic, SOS, or indicator view.
+    ///
+    /// # Panics
+    /// Panics for an unsupported representation, invalid data, or a duplicate registry name.
     pub fn add_constraint<F, S>(
         &self,
         name: impl Into<SmolStr>,
         constraint: Constraint<F, S>,
-    ) -> <F::Ir as ConstraintIr>::Handle
+    ) -> ConstraintHandle<F::Owned, S>
     where
         S: ConstraintSet,
-        F: LowerConstraint<S>,
+        F: crate::FunctionInSet<S>,
     {
-        constraint.into_ir().register(self, name.into())
+        use crate::semantic::ScalarConstraintSource;
+        let name = name.into();
+        let scalar =
+            match ScalarConstraintSource::capture_unshared(&constraint.function, &constraint.set) {
+                Ok(source) => crate::function_set::PreparedScalarConstraint::declared(source),
+                Err(pair) => {
+                    let id = self.register_semantic_pair(name, pair);
+                    return ConstraintHandle::new(id, self.id());
+                }
+            };
+        let handle = self.__add_constraint(name, scalar);
+        ConstraintHandle::new(handle.id(), self.id())
     }
 
+    /// Register an explicitly lowered representation. Scalar IR retains its source declaration.
+    ///
+    /// # Panics
+    /// Panics for invalid data, ownership, or duplicate names.
+    pub fn add_lowered_constraint<I: crate::function_set::ConstraintIr>(
+        &self,
+        name: impl Into<SmolStr>,
+        ir: I,
+    ) -> I::Handle {
+        ir.register(self, name.into())
+    }
+
+    /// Check model ownership and register a lowered scalar constraint.
     pub(crate) fn register_algebraic_ir(
         &self,
         name: SmolStr,
         ir: AlgebraicConstraintIr<'_>,
     ) -> ConstraintHandle {
-        self.ensure_expr_model(ir.lhs).unwrap_or_else(|error| panic!("{error}"));
-        let id = self.register_constraint(name, ir.lhs.id, ir.lower, ir.upper);
-        ConstraintHandle::new(id, self.id())
+        self.__add_constraint(name, ir)
     }
 
     // Constraints
@@ -217,18 +430,22 @@ impl Model {
     /// Panics if a constraint with the same name is already registered, or if
     /// the constraint count exceeds `u32::MAX`.
     #[doc(hidden)]
-    pub fn __add_constraint<'a>(
+    #[inline]
+    pub fn __add_constraint<C: crate::function_set::ScalarConstraintInput>(
         &self,
         name: impl Into<SmolStr>,
-        c: impl Into<AlgebraicConstraintIr<'a>>,
-    ) -> ConstraintHandle {
-        let c: AlgebraicConstraintIr = c.into();
-        self.assert_expr_belongs(c.lhs);
-        let (lower, upper) = (c.lower, c.upper);
-        ConstraintHandle::new(
-            self.register_constraint(name.into(), c.lhs.id, lower, upper),
-            self.id(),
-        )
+        c: C,
+    ) -> ConstraintHandle<C::Function, C::Set> {
+        let c = c.into_scalar_input();
+        c.validate(self.id(), self.arena.__node_count());
+        let id = self.register_constraint(
+            name.into(),
+            c.view.lhs,
+            c.view.lower,
+            c.view.upper,
+            c.semantic,
+        );
+        ConstraintHandle::new(id, self.id())
     }
 
     /// Push a constraint row `lower <= lhs <= upper` into the registry. Shared by
@@ -238,39 +455,67 @@ impl Model {
     ///
     /// Panics if a constraint with the same name is already registered, if a
     /// bound is NaN, or if the constraint count exceeds `u32::MAX`.
+    #[inline]
     fn register_constraint(
         &self,
         name: SmolStr,
         lhs: ExprId,
         lower: f64,
         upper: f64,
+        semantic: crate::semantic::ScalarConstraintSource,
     ) -> ConstraintId {
+        assert_eq!(semantic.model_id(), self.id(), "function belongs to a different model");
         validate_bounds(lower, upper);
-        let mut by_name = self.constraint_names.borrow_mut();
-        assert!(!by_name.contains_key(&name), "constraint name {name:?} already registered");
-        let mut all = self.constraints.borrow_mut();
+        let view = crate::semantic::ScalarConstraintView { lhs, lower, upper };
+        let source = PendingSemantic::new(semantic, view);
+        let alternative = source.alternative(view);
+        let mut by_name = self.constraint_names_mut();
+        let mut all = self.constraints.borrow_mut_for_push();
         let id = ConstraintId(u32::try_from(all.len()).expect("constraint count overflow"));
-        all.push(AlgebraicConstraint { name: name.clone(), lhs, lower, upper, active: true });
-        by_name.insert(name, id);
+        by_name.insert_unique(name.clone(), id);
+        push_algebraic(
+            &mut all,
+            AlgebraicConstraint {
+                name,
+                lhs,
+                lower,
+                upper,
+                active: true,
+                signature: source.signature(),
+            },
+        );
+        source.record_declared(self, id, &all[id.index()].name, alternative);
+
+        if alternative {
+            self.alternative_scalar_views.borrow_mut().insert(id.into(), view);
+        }
+
         self.cached_kind.set(None);
         id
     }
 
-    // Call only after name preflight, with no intervening user callbacks.
+    /// Append prevalidated scalar rows and their source metadata, returning IDs in input order.
+    ///
+    /// Call only after name preflight, with no intervening user callbacks.
     pub(super) fn register_prevalidated_constraints_batch(
         &self,
-        items: Vec<PendingConstraint>,
+        items: impl IntoIterator<Item = PendingConstraint>,
+        count: usize,
     ) -> Vec<ConstraintId> {
-        let mut names = self.constraint_names.borrow_mut();
+        let mut names = self.constraint_names_mut();
         let mut constraints = self.constraints.borrow_mut();
-        let final_count =
-            constraints.len().checked_add(items.len()).expect("constraint count overflow");
+        let final_count = constraints.len().checked_add(count).expect("constraint count overflow");
+
         if final_count > 0 {
             u32::try_from(final_count - 1).expect("constraint count overflow");
         }
-        constraints.reserve(items.len());
-        names.reserve(items.len());
-        let mut ids = Vec::with_capacity(items.len());
+        constraints.reserve(count);
+        names.reserve(count);
+        self.reserve_semantics(ConstraintId(0).into(), count);
+        let mut ids = Vec::with_capacity(count);
+        let mut semantics = self.semantic_writer();
+        let mut alternatives = self.alternative_scalar_views.borrow_mut();
+
         for item in items {
             let id =
                 ConstraintId(u32::try_from(constraints.len()).expect("constraint count overflow"));
@@ -280,7 +525,20 @@ impl Model {
                 lower: item.lower,
                 upper: item.upper,
                 active: true,
+                signature: item.semantic.signature(),
             });
+
+            if item.alternative {
+                alternatives.insert(
+                    id.into(),
+                    crate::semantic::ScalarConstraintView {
+                        lhs: item.lhs,
+                        lower: item.lower,
+                        upper: item.upper,
+                    },
+                );
+            }
+            item.semantic.record(&mut semantics, id, &item.name, item.origin, item.alternative);
             names.insert(item.name, id);
             ids.push(id);
         }
@@ -293,8 +551,12 @@ impl Model {
         loop {
             let n = self.auto_seq.get();
             self.auto_seq.set(n + 1);
-            let candidate: SmolStr = format!("_c{n}").into();
-            if !self.constraint_names.borrow().contains_key(&candidate) {
+            use std::fmt::Write;
+            let mut candidate = smol_str::SmolStrBuilder::new();
+            write!(&mut candidate, "_c{n}").expect("format constraint name");
+            let candidate = candidate.finish();
+
+            if !self.constraint_names().contains_key(&candidate) {
                 break candidate;
             }
         }
@@ -303,11 +565,10 @@ impl Model {
     /// Register an anonymous constraint, deriving a unique name `_c{n}` from an
     /// internal counter. Backs the name-less form of the `constraint!` macro.
     #[doc(hidden)]
-    pub fn __add_constraint_auto<'a>(
+    pub fn __add_constraint_auto<C: crate::function_set::ScalarConstraintInput>(
         &self,
-        c: impl Into<AlgebraicConstraintIr<'a>>,
-    ) -> ConstraintHandle {
-        let c: AlgebraicConstraintIr = c.into();
+        c: C,
+    ) -> ConstraintHandle<C::Function, C::Set> {
         self.__add_constraint(self.next_auto_name(), c)
     }
 
@@ -324,15 +585,16 @@ impl Model {
         let lhs: Expr = lhs.into();
         self.assert_expr_belongs(lhs);
         self.add_constraint(name, Constraint::new(lhs.into_function(), Interval { lower, upper }))
-            .id()
+            .row_id()
     }
 
     /// Bulk-register constraints. Each entry is `(name, ConstraintExpr)`.
     /// Useful with `.par_iter().map(...).collect()` style construction.
+    #[inline]
     pub fn add_constraints<'a, I, C>(&'a self, items: I)
     where
         I: IntoIterator<Item = (SmolStr, C)>,
-        C: Into<AlgebraicConstraintIr<'a>>,
+        C: crate::function_set::ScalarConstraintInput,
     {
         for (name, c) in items {
             self.__add_constraint(name, c);
@@ -357,29 +619,78 @@ impl Model {
         B2: IntoRhs<'a, D>,
     {
         self.assert_expr_belongs(mid);
-        if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
+        let handles = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
             validate_bounds(lower, upper);
             let function = mid.into_function();
+
             if function.is_affine() {
-                RangeConstraintHandles::Interval(
-                    self.add_constraint(name, Constraint::new(function, Interval { lower, upper })),
-                )
-            } else {
-                let lower = self.__add_constraint(
-                    format!("{name}_lo"),
-                    Constraint::new(function, GreaterThan(lower)),
+                let name = SmolStr::from(name);
+                let mut names = self.constraint_names_mut();
+                assert!(!names.contains_key(&name), "constraint name {name:?} already registered");
+                let mut rows = self.constraints.borrow_mut();
+                let id =
+                    ConstraintId(u32::try_from(rows.len()).expect("constraint count overflow"));
+                let signature = super::semantic::ScalarSignature {
+                    function: super::semantic::storage::ScalarKind::of(&crate::FunctionValue::new(
+                        crate::Function::semantic_data(&function),
+                    ))
+                    .expect("built-in scalar function"),
+                    set: super::semantic::storage::BoundKind::Interval,
+                };
+                push_algebraic(
+                    &mut rows,
+                    AlgebraicConstraint {
+                        name: name.clone(),
+                        lhs: mid.id(),
+                        lower,
+                        upper,
+                        active: true,
+                        signature: Some(signature),
+                    },
                 );
-                let upper = self.__add_constraint(
-                    format!("{name}_hi"),
-                    Constraint::new(function, LessThan(upper)),
+                self.semantic_writer().record_native(
+                    id.into(),
+                    name.clone(),
+                    super::semantic::Representation::Scalar,
+                    crate::ConstraintOrigin::Range(name.clone()),
                 );
-                RangeConstraintHandles::Split { lower, upper }
+                names.insert(name, id);
+                self.invalidate_kind();
+                return RangeConstraintHandles::Interval(ConstraintHandle::new(id, self.id()));
             }
+
+            let lower = self.__add_constraint(
+                format!("{name}_lo"),
+                Constraint::new(function, GreaterThan(lower)),
+            );
+            let upper = self
+                .__add_constraint(format!("{name}_hi"), Constraint::new(function, LessThan(upper)));
+            RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
         } else {
             let lower = self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
             let upper = self.__add_constraint(format!("{name}_hi"), mid.le(hi));
-            RangeConstraintHandles::Split { lower, upper }
+            RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
+        };
+
+        let origin_name = name.to_owned();
+
+        match handles {
+            RangeConstraintHandles::Interval(handle) => self.set_constraint_origin(
+                handle.id(),
+                crate::ConstraintOrigin::Range(origin_name.into()),
+            ),
+            RangeConstraintHandles::Split { lower, upper } => {
+                self.set_constraint_origin(
+                    lower.id(),
+                    crate::ConstraintOrigin::Range(origin_name.clone().into()),
+                );
+                self.set_constraint_origin(
+                    upper.id(),
+                    crate::ConstraintOrigin::Range(origin_name.into()),
+                );
+            }
         }
+        handles
     }
 
     /// Anonymous form of [`Self::__add_range`] (auto-named rows).
@@ -395,28 +706,52 @@ impl Model {
         B2: IntoRhs<'a, D>,
     {
         self.assert_expr_belongs(mid);
-        if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
+        let handles = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
             validate_bounds(lower, upper);
             let function = mid.into_function();
+
             if function.is_affine() {
-                RangeConstraintHandles::Interval(self.add_constraint(
-                    self.next_auto_name(),
-                    Constraint::new(function, Interval { lower, upper }),
-                ))
+                RangeConstraintHandles::Interval(
+                    self.__add_constraint(
+                        self.next_auto_name(),
+                        Constraint::new(function, Interval { lower, upper }),
+                    )
+                    .erase(),
+                )
             } else {
                 let lower =
                     self.__add_constraint_auto(Constraint::new(function, GreaterThan(lower)));
                 let upper = self.__add_constraint_auto(Constraint::new(function, LessThan(upper)));
-                RangeConstraintHandles::Split { lower, upper }
+                RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
             }
         } else {
             let lower = self.__add_constraint_auto(mid.ge(lo));
             let upper = self.__add_constraint_auto(mid.le(hi));
-            RangeConstraintHandles::Split { lower, upper }
+            RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
+        };
+
+        let origin_name = format!("anonymous_range_{}", self.auto_seq.get());
+
+        match handles {
+            RangeConstraintHandles::Interval(handle) => self.set_constraint_origin(
+                handle.id(),
+                crate::ConstraintOrigin::Range(origin_name.into()),
+            ),
+            RangeConstraintHandles::Split { lower, upper } => {
+                self.set_constraint_origin(
+                    lower.id(),
+                    crate::ConstraintOrigin::Range(origin_name.clone().into()),
+                );
+                self.set_constraint_origin(
+                    upper.id(),
+                    crate::ConstraintOrigin::Range(origin_name.into()),
+                );
+            }
         }
+        handles
     }
 
-    /// Unified view of every algebraic, explicit SOC, SOS, and indicator
+    /// Unified view of every algebraic, explicit SOC/PSD, SOS, and indicator
     /// constraint declared on this model.
     pub fn constraints(&self) -> ModelConstraints<'_> {
         ModelConstraints {
@@ -430,20 +765,24 @@ impl Model {
 
     /// Total number of algebraic, SOC, PSD, SOS, and indicator constraints.
     pub fn num_constraints(&self) -> usize {
-        self.constraints.borrow().len()
-            + self.soc_constraints.borrow().len()
-            + self.psd_constraints.borrow().len()
-            + self.sos_constraints.borrow().len()
-            + self.indicator_constraints.borrow().len()
+        if self.implicit_scalars.get() {
+            self.scalar_declarations.get()
+        } else {
+            self.semantics.borrow().len()
+        }
     }
 
+    /// Look up an algebraic constraint ID by its registry name.
     pub fn constraint_id(&self, name: &str) -> Option<ConstraintId> {
-        self.constraint_names.borrow().get(name).copied()
+        self.constraint_names().get(name)
     }
 
-    /// Return a model-bound handle for a named algebraic constraint.
+    /// Look up a constraint by name across registries and bind its handle to this model.
+    ///
+    /// Returns `None` if the name is unknown or shared by more than one registry.
+    #[inline]
     pub fn constraint_handle(&self, name: &str) -> Option<ConstraintHandle> {
-        self.constraint_id(name).map(|id| ConstraintHandle::new(id, self.id()))
+        self.semantic_names.borrow().unique_id(name).map(|id| ConstraintHandle::new(id, self.id()))
     }
 
     /// Bind a raw algebraic constraint ID to this model.
@@ -461,32 +800,31 @@ impl Model {
         matrix: impl IntoSymmetricAffineFunction<'a>,
     ) -> PsdConstraintHandle {
         let function = matrix.into_symmetric_affine_function(self);
-        let side_dimension = function.matrix().side_dimension();
-        self.add_constraint(
-            name,
-            Constraint::new(function, PositiveSemidefiniteCone { side_dimension }),
-        )
+        self.register_psd_ir(name.into(), PsdConstraintIr(function))
     }
 
+    /// Register an affine PSD matrix and its semantic metadata under the given name.
     pub(crate) fn register_psd_ir(
         &self,
         name: SmolStr,
         ir: PsdConstraintIr<'_>,
     ) -> PsdConstraintHandle {
-        for &entry in ir.0.matrix().upper_triangle() {
-            self.assert_expr_belongs(entry);
-        }
-        let matrix = ir.0.matrix().map(|entry| entry.id());
-        let mut names = self.psd_names.borrow_mut();
-        validate_batch_names(&names, [&name], "PSD constraint", 1);
-        let mut all = self.psd_constraints.borrow_mut();
-        let id = PsdConstraintId(u32::try_from(all.len()).expect("PSD count overflow"));
-        all.push(PsdConstraint { name: name.clone(), matrix, active: true });
-        names.insert(name, id);
+        self.assert_expr_belongs(ir.0.matrix()[(0, 0)]);
+        let mut names = self.psd_names_mut();
+        let mut rows = self.psd_constraints.borrow_mut();
+        let id = PsdConstraintId(u32::try_from(rows.len()).expect("PSD count overflow"));
+        names.insert_unique(name.clone(), id);
+        rows.push(PsdConstraint {
+            name: name.clone(),
+            matrix: ir.0.matrix().map(|entry| entry.id()),
+            active: true,
+        });
+        self.record_declared_native(id.into(), super::semantic::Representation::Psd);
         self.invalidate_kind();
         PsdConstraintHandle::new(id, self.id())
     }
 
+    /// Register a PSD constraint with an automatically generated unique name.
     #[doc(hidden)]
     pub fn __add_psd_constraint_auto<'a>(
         &'a self,
@@ -496,37 +834,45 @@ impl Model {
             let n = self.auto_seq.get();
             self.auto_seq.set(n.checked_add(1).expect("constraint name count overflow"));
             let name = format!("_psd{n}");
-            if !self.psd_names.borrow().contains_key(name.as_str()) {
+
+            if !self.psd_names().contains_key(name.as_str()) {
                 return self.add_psd_constraint(name, matrix);
             }
         }
     }
 
+    /// Borrow the PSD registry, including inactive constraints.
     pub fn psd_constraints(&self) -> Ref<'_, Vec<PsdConstraint>> {
         self.psd_constraints.borrow()
     }
 
+    /// Count all PSD declarations, including inactive constraints.
     pub fn num_psd_constraints(&self) -> usize {
         self.psd_constraints.borrow().len()
     }
 
+    /// Return whether at least one PSD constraint is active.
     pub fn has_active_psd_constraints(&self) -> bool {
         self.psd_constraints.borrow().iter().any(|c| c.active)
     }
 
+    /// Look up a PSD constraint ID by name.
     pub fn psd_constraint_id(&self, name: &str) -> Option<PsdConstraintId> {
-        self.psd_names.borrow().get(name).copied()
+        self.psd_names().get(name)
     }
 
+    /// Return a named PSD handle only when its semantic signature is the built-in pair.
+    /// Custom wrappers remain accessible through `typed_constraint_handle` or an erased handle.
     pub fn psd_constraint_handle(&self, name: &str) -> Option<PsdConstraintHandle> {
-        self.psd_constraint_id(name).map(|id| PsdConstraintHandle::new(id, self.id()))
+        self.psd_constraint_handle_from_id(self.psd_constraint_id(name)?)
     }
 
+    /// Bind a raw PSD ID only when it has the built-in function/set signature.
     pub fn psd_constraint_handle_from_id(
         &self,
         id: PsdConstraintId,
     ) -> Option<PsdConstraintHandle> {
-        (id.index() < self.num_psd_constraints()).then(|| PsdConstraintHandle::new(id, self.id()))
+        self.try_typed_handle(ConstraintHandle::new(id, self.id())).ok().flatten()
     }
 
     /// Change PSD activity while invalidating the cached model classification.
@@ -567,55 +913,79 @@ impl Model {
         terms: impl IntoIterator<Item = A>,
         bound: B,
     ) -> SocConstraintHandle {
-        let function = VectorAffineFunction::new(
-            std::iter::once(bound.into_affine_function())
-                .chain(terms.into_iter().map(IntoAffineFunction::into_affine_function)),
-        );
-        let dimension = function.dimension();
-        self.add_constraint(name, Constraint::new(function, SecondOrderCone { dimension }))
+        let pending = PendingSoc::new(name.into(), terms, bound, super::arena_key(&self.arena));
+        self.register_soc_components(pending.name, pending.components)
     }
 
+    /// Check the lowered SOC function's ownership and register its affine components.
     pub(crate) fn register_soc_ir(
         &self,
         name: SmolStr,
         ir: SocConstraintIr<'_>,
     ) -> SocConstraintHandle {
-        self.ensure_expr_model(ir.0.first).unwrap_or_else(|error| panic!("{error}"));
-        let terms = ir.0.rest;
-        let bound = ir.0.first;
-        let mut by_name = self.soc_names.borrow_mut();
-        assert!(!by_name.contains_key(&name), "SOC constraint name {name:?} already registered");
-        let mut all = self.soc_constraints.borrow_mut();
-        let id = SocConstraintId(u32::try_from(all.len()).expect("SOC constraint count overflow"));
-        all.push(SocConstraint { name: name.clone(), terms, bound: bound.id, active: true });
-        by_name.insert(name, id);
-        self.cached_kind.set(None);
+        let data = ir.0.into_data();
+        assert!(data.components.len() >= 2, "SOC needs at least two components");
+        self.ensure_model_id(data.model_id).unwrap_or_else(|error| panic!("{error}"));
+        self.register_soc_components(name, data.components)
+    }
+
+    /// Register SOC components with the bound first, followed by the norm terms.
+    fn register_soc_components(
+        &self,
+        name: SmolStr,
+        components: crate::SharedSlice<ExprId>,
+    ) -> SocConstraintHandle {
+        let mut names = self.soc_names_mut();
+        let mut rows = self.soc_constraints.borrow_mut();
+        let id = SocConstraintId(u32::try_from(rows.len()).expect("SOC count overflow"));
+        names.insert_unique(name.clone(), id);
+        let bound = components[0];
+        let dimension = components.len();
+        let terms = components.into_slice(1..dimension);
+        rows.push(SocConstraint { name: name.clone(), bound, terms, active: true });
+        self.record_declared_native(id.into(), super::semantic::Representation::Soc);
+        self.invalidate_kind();
         SocConstraintHandle::new(id, self.id())
     }
 
-    // Call only after name preflight, with no intervening user callbacks.
-    pub(super) fn register_prevalidated_soc_batch(&self, items: Vec<PendingSoc>) {
-        let mut names = self.soc_names.borrow_mut();
+    /// Append prevalidated SOC constraints and their semantic metadata in input order.
+    ///
+    /// Call only after name preflight, with no intervening user callbacks.
+    pub(super) fn register_prevalidated_soc_batch(
+        &self,
+        items: impl IntoIterator<Item = PendingSoc>,
+        count: usize,
+    ) {
+        let mut names = self.soc_names_mut();
         let mut constraints = self.soc_constraints.borrow_mut();
         let final_count =
-            constraints.len().checked_add(items.len()).expect("SOC constraint count overflow");
+            constraints.len().checked_add(count).expect("SOC constraint count overflow");
         if final_count > 0 {
             u32::try_from(final_count - 1).expect("SOC constraint count overflow");
         }
-        constraints.reserve(items.len());
-        names.reserve(items.len());
+        constraints.reserve(count);
+        names.reserve(count);
+        self.reserve_semantics(SocConstraintId(0).into(), count);
+        let mut semantics = self.semantic_writer();
+
         for item in items {
             let id = SocConstraintId(
                 u32::try_from(constraints.len()).expect("SOC constraint count overflow"),
             );
-            constraints.push(SocConstraint {
-                name: item.name.clone(),
-                terms: item.terms,
-                bound: item.bound,
-                active: true,
-            });
+            let components = item.components;
+            let bound = components[0];
+            let dimension = components.len();
+            let terms = components.into_slice(1..dimension);
+            semantics.record_native(
+                id.into(),
+                item.name.clone(),
+                super::semantic::Representation::Soc,
+                crate::ConstraintOrigin::Declared,
+            );
+            constraints.push(SocConstraint { name: item.name.clone(), terms, bound, active: true });
             names.insert(item.name, id);
         }
+
         self.cached_kind.set(None);
     }
 
@@ -627,7 +997,8 @@ impl Model {
             let n = self.auto_seq.get();
             self.auto_seq.set(n + 1);
             let candidate: SmolStr = format!("_soc{n}").into();
-            if !self.soc_names.borrow().contains_key(&candidate) {
+
+            if !self.soc_names().contains_key(&candidate) {
                 break candidate;
             }
         }
@@ -654,31 +1025,38 @@ impl Model {
         self.soc_constraints.borrow()
     }
 
+    /// Return whether at least one explicit SOC constraint is active.
+    pub fn has_active_soc_constraints(&self) -> bool {
+        self.soc_constraints.borrow().iter().any(|c| c.active)
+    }
+
+    /// Count all explicit SOC declarations, including inactive constraints.
     pub fn num_soc_constraints(&self) -> usize {
         self.soc_constraints.borrow().len()
     }
 
+    /// Look up an explicit SOC constraint ID by name.
     pub fn soc_constraint_id(&self, name: &str) -> Option<SocConstraintId> {
-        self.soc_names.borrow().get(name).copied()
+        self.soc_names().get(name)
     }
 
-    /// Return a model-bound handle for a named explicit SOC constraint.
+    /// Return a named SOC handle only when its semantic signature is the built-in pair.
+    /// Custom wrappers remain accessible through `typed_constraint_handle` or an erased handle.
     pub fn soc_constraint_handle(&self, name: &str) -> Option<SocConstraintHandle> {
-        self.soc_constraint_id(name).map(|id| SocConstraintHandle::new(id, self.id()))
+        self.soc_constraint_handle_from_id(self.soc_constraint_id(name)?)
     }
 
-    /// Bind a raw explicit-SOC constraint ID to this model.
+    /// Bind a raw SOC ID only when it has the built-in function/set signature.
     pub fn soc_constraint_handle_from_id(
         &self,
         id: SocConstraintId,
     ) -> Option<SocConstraintHandle> {
-        (id.index() < self.soc_constraints.borrow().len())
-            .then(|| SocConstraintHandle::new(id, self.id()))
+        self.try_typed_handle(ConstraintHandle::new(id, self.id())).ok().flatten()
     }
 
-    /// Whether the model carries any explicit SOC or PSD constraints.
+    /// Return whether at least one explicit SOC or PSD constraint is active.
     pub fn has_cones(&self) -> bool {
-        !self.soc_constraints.borrow().is_empty() || !self.psd_constraints.borrow().is_empty()
+        self.has_active_soc_constraints() || self.has_active_psd_constraints()
     }
 
     /// Register an explicit SOS1 or SOS2 constraint. Members must be bare
@@ -693,7 +1071,7 @@ impl Model {
         name: impl Into<SmolStr>,
         sos_type: SosType,
         members: impl IntoIterator<Item = (Expr<'a, D>, f64)>,
-    ) -> SosConstraintHandle<'a> {
+    ) -> SosConstraintHandle {
         let name = name.into();
         let members: Vec<SosMember> = members
             .into_iter()
@@ -707,35 +1085,43 @@ impl Model {
             })
             .collect();
         validate_members(&name, &members);
-        let mut by_name = self.sos_names.borrow_mut();
+        let mut by_name = self.sos_names_mut();
         assert!(!by_name.contains_key(&name), "SOS constraint name {name:?} already registered");
         let mut all = self.sos_constraints.borrow_mut();
         let id = SosConstraintId(u32::try_from(all.len()).expect("SOS constraint count overflow"));
+        self.record_sos_semantic(id, name.clone());
         all.push(SosConstraint { name: name.clone(), sos_type, members, active: true });
         by_name.insert(name, id);
         self.cached_kind.set(None);
-        SosConstraintHandle { model: self, id }
+        SosConstraintHandle::new(id, self.id())
     }
 
-    // Call only after name preflight, with no intervening user callbacks.
+    /// Append prevalidated SOS constraints and their semantic metadata in input order.
+    ///
+    /// Call only after name preflight, with no intervening user callbacks.
     pub(super) fn register_prevalidated_sos_batch(
         &self,
         sos_type: SosType,
-        items: Vec<PendingSos>,
+        items: impl IntoIterator<Item = PendingSos>,
+        count: usize,
     ) {
-        let mut names = self.sos_names.borrow_mut();
+        let mut names = self.sos_names_mut();
         let mut constraints = self.sos_constraints.borrow_mut();
         let final_count =
-            constraints.len().checked_add(items.len()).expect("SOS constraint count overflow");
+            constraints.len().checked_add(count).expect("SOS constraint count overflow");
         if final_count > 0 {
             u32::try_from(final_count - 1).expect("SOS constraint count overflow");
         }
-        constraints.reserve(items.len());
-        names.reserve(items.len());
+        constraints.reserve(count);
+        names.reserve(count);
+        self.reserve_semantics(SosConstraintId(0).into(), count);
+        let mut semantics = self.semantic_writer();
+
         for item in items {
             let id = SosConstraintId(
                 u32::try_from(constraints.len()).expect("SOS constraint count overflow"),
             );
+            semantics.record_sos(id, item.name.clone());
             constraints.push(SosConstraint {
                 name: item.name.clone(),
                 sos_type,
@@ -747,8 +1133,9 @@ impl Model {
         self.cached_kind.set(None);
     }
 
+    /// Register one prepared SOS constraint and its source metadata.
     pub(super) fn register_sos_one(&self, sos_type: SosType, item: PendingSos) {
-        let mut names = self.sos_names.borrow_mut();
+        let mut names = self.sos_names_mut();
         assert!(
             !names.contains_key(&item.name),
             "SOS constraint name {:?} already registered",
@@ -758,6 +1145,7 @@ impl Model {
         let id = SosConstraintId(
             u32::try_from(constraints.len()).expect("SOS constraint count overflow"),
         );
+        self.record_sos_semantic(id, item.name.clone());
         constraints.push(SosConstraint {
             name: item.name.clone(),
             sos_type,
@@ -784,7 +1172,7 @@ impl Model {
         name: impl Into<SmolStr>,
         sos_type: SosType,
         variables: impl IntoIterator<Item = Expr<'a, D>>,
-    ) -> SosConstraintHandle<'a> {
+    ) -> SosConstraintHandle {
         self.add_sos_constraint(
             name,
             sos_type,
@@ -798,47 +1186,55 @@ impl Model {
         )
     }
 
+    /// Generate a unique `_sos{n}` name in the SOS registry.
     fn next_auto_sos_name(&self) -> SmolStr {
         loop {
             let n = self.auto_seq.get();
             self.auto_seq.set(n + 1);
             let candidate: SmolStr = format!("_sos{n}").into();
-            if !self.sos_names.borrow().contains_key(&candidate) {
+
+            if !self.sos_names().contains_key(&candidate) {
                 break candidate;
             }
         }
     }
 
+    /// Register an SOS constraint with supplied weights and an automatically generated name.
     #[doc(hidden)]
     pub fn __add_sos_constraint_auto<'a, D: Degree>(
         &'a self,
         sos_type: SosType,
         members: impl IntoIterator<Item = (Expr<'a, D>, f64)>,
-    ) -> SosConstraintHandle<'a> {
+    ) -> SosConstraintHandle {
         self.add_sos_constraint(self.next_auto_sos_name(), sos_type, members)
     }
 
+    /// Register an SOS constraint with automatic weights and an automatically generated name.
     #[doc(hidden)]
     pub fn __add_sos_constraint_auto_weights<'a, D: Degree>(
         &'a self,
         sos_type: SosType,
         variables: impl IntoIterator<Item = Expr<'a, D>>,
-    ) -> SosConstraintHandle<'a> {
+    ) -> SosConstraintHandle {
         self.add_sos_constraint_auto_weights(self.next_auto_sos_name(), sos_type, variables)
     }
 
+    /// Borrow the SOS registry, including inactive and reformulated sources.
     pub fn sos_constraints(&self) -> Ref<'_, Vec<SosConstraint>> {
         self.sos_constraints.borrow()
     }
 
+    /// Count all SOS declarations, including inactive and reformulated sources.
     pub fn num_sos_constraints(&self) -> usize {
         self.sos_constraints.borrow().len()
     }
 
+    /// Look up an SOS constraint ID by name.
     pub fn sos_constraint_id(&self, name: &str) -> Option<SosConstraintId> {
-        self.sos_names.borrow().get(name).copied()
+        self.sos_names().get(name)
     }
 
+    /// Return whether any SOS declarations exist, including inactive sources.
     pub fn has_sos_constraints(&self) -> bool {
         !self.sos_constraints.borrow().is_empty()
     }
@@ -852,6 +1248,7 @@ impl Model {
 
     // Indicator constraints
 
+    /// Check that the trigger belongs to this model and is a bare binary variable.
     pub(super) fn indicator_trigger<'a>(&self, trigger: impl Into<Expr<'a>>) -> VarId {
         let trigger: Expr = trigger.into();
         self.assert_expr_belongs(trigger);
@@ -863,19 +1260,21 @@ impl Model {
         id
     }
 
+    /// Validate and register an affine indicator consequent with its source metadata.
     fn register_indicator(
         &self,
         name: SmolStr,
         trigger: VarId,
         active_value: bool,
         lhs: ExprId,
-        lower: f64,
-        upper: f64,
+        bounds: (f64, f64),
+        semantic: Option<crate::SemanticPair>,
     ) -> IndicatorConstraintId {
+        let (lower, upper) = bounds;
         validate_bounds(lower, upper);
         let class = classify(&self.arena.borrow(), lhs);
         assert!(class == ExprClass::Linear, "indicator consequent must be affine, got {class:?}");
-        let mut names = self.indicator_names.borrow_mut();
+        let mut names = self.indicator_names_mut();
         assert!(
             !names.contains_key(&name),
             "indicator constraint name {name:?} already registered"
@@ -883,6 +1282,19 @@ impl Model {
         let mut all = self.indicator_constraints.borrow_mut();
         let id = IndicatorConstraintId(
             u32::try_from(all.len()).expect("indicator constraint count overflow"),
+        );
+        self.record_indicator_semantic(
+            id,
+            name.clone(),
+            trigger,
+            active_value,
+            semantic.unwrap_or_else(|| crate::SemanticPair {
+                function: crate::FunctionValue::new(
+                    crate::ScalarFunctionData::<oximo_expr::Affine>::new(self.id(), lhs),
+                ),
+                set: crate::SetValue::new(Interval { lower, upper }),
+            }),
+            crate::semantic::ScalarConstraintView { lhs, lower, upper },
         );
         all.push(IndicatorConstraint {
             name: name.clone(),
@@ -898,6 +1310,7 @@ impl Model {
         id
     }
 
+    /// Prepare an affine indicator consequent while retaining its original function/set pair.
     pub(super) fn prepare_indicator<'a>(
         &self,
         name: SmolStr,
@@ -908,16 +1321,20 @@ impl Model {
         let consequent = consequent.into_affine_constraint().0;
         self.assert_expr_belongs(consequent.lhs);
         let (lower, upper) = (consequent.lower, consequent.upper);
-        self.prepare_indicator_interval(
+        let mut pending = self.prepare_indicator_interval(
             name,
             trigger,
             active_value,
             consequent.lhs.id,
             lower,
             upper,
-        )
+        );
+        pending.semantic = consequent.semantic.into_pair();
+
+        pending
     }
 
+    /// Validate an affine interval consequent and prepare its indicator source data.
     pub(super) fn prepare_indicator_interval(
         &self,
         name: SmolStr,
@@ -932,16 +1349,31 @@ impl Model {
             classify(&self.arena.borrow(), lhs) == ExprClass::Linear,
             "indicator consequent must be affine"
         );
-        PendingIndicator { name, trigger, active_value, lhs, lower, upper }
+        PendingIndicator {
+            alternative: false,
+            name,
+            trigger,
+            active_value,
+            lhs,
+            lower,
+            upper,
+            semantic: crate::SemanticPair {
+                function: crate::FunctionValue::new(
+                    crate::ScalarFunctionData::<oximo_expr::Affine>::new(self.id(), lhs),
+                ),
+                set: crate::SetValue::new(Interval { lower, upper }),
+            },
+        }
     }
 
+    /// Check batch names and append prepared indicators, returning IDs in input order.
     pub(super) fn register_indicators_batch(
         &self,
-        items: Vec<PendingIndicator>,
+        mut items: Vec<PendingIndicator>,
     ) -> Vec<IndicatorConstraintId> {
-        let mut names = self.indicator_names.borrow_mut();
+        let mut names = self.indicator_names_mut();
         validate_batch_names(
-            &names,
+            |name| names.contains_key(name),
             items.iter().map(|item| &item.name),
             "indicator constraint",
             items.len(),
@@ -954,12 +1386,45 @@ impl Model {
         if final_count > 0 {
             u32::try_from(final_count - 1).expect("indicator constraint count overflow");
         }
+
+        for item in &mut items {
+            item.alternative = !crate::semantic::ScalarConstraintView {
+                lhs: item.lhs,
+                lower: item.lower,
+                upper: item.upper,
+            }
+            .matches_pair(&item.semantic);
+        }
+
         constraints.reserve(items.len());
         names.reserve(items.len());
+        self.reserve_semantics(IndicatorConstraintId(0).into(), items.len());
         let mut ids = Vec::with_capacity(items.len());
+        let mut semantics = self.semantic_writer();
+        let mut alternatives = self.alternative_scalar_views.borrow_mut();
+
         for item in items {
             let id = IndicatorConstraintId(
                 u32::try_from(constraints.len()).expect("indicator constraint count overflow"),
+            );
+
+            if item.alternative {
+                alternatives.insert(
+                    id.into(),
+                    crate::semantic::ScalarConstraintView {
+                        lhs: item.lhs,
+                        lower: item.lower,
+                        upper: item.upper,
+                    },
+                );
+            }
+            semantics.record_indicator(
+                id,
+                item.name.clone(),
+                self.id(),
+                (item.trigger, item.active_value),
+                item.semantic,
+                !item.alternative,
             );
             constraints.push(IndicatorConstraint {
                 name: item.name.clone(),
@@ -990,7 +1455,7 @@ impl Model {
         trigger: impl Into<Expr<'a>>,
         active_value: bool,
         consequent: impl IntoAffineConstraint<'a>,
-    ) -> IndicatorConstraintHandle<'a> {
+    ) -> IndicatorConstraintHandle {
         let trigger = self.indicator_trigger(trigger);
         let consequent = consequent.into_affine_constraint().0;
         self.assert_expr_belongs(consequent.lhs);
@@ -999,12 +1464,13 @@ impl Model {
             trigger,
             active_value,
             consequent.lhs.id,
-            consequent.lower,
-            consequent.upper,
+            (consequent.lower, consequent.upper),
+            Some(consequent.semantic.into_pair()),
         );
-        IndicatorConstraintHandle { model: self, id }
+        IndicatorConstraintHandle::new(id, self.id())
     }
 
+    /// Register a named indicator constraint on behalf of the modeling macro.
     #[doc(hidden)]
     pub fn __add_indicator_constraint<'a>(
         &'a self,
@@ -1012,29 +1478,32 @@ impl Model {
         trigger: impl Into<Expr<'a>>,
         active_value: bool,
         consequent: impl IntoAffineConstraint<'a>,
-    ) -> IndicatorConstraintHandle<'a> {
+    ) -> IndicatorConstraintHandle {
         let trigger: Expr = trigger.into();
         self.add_indicator_constraint(name, trigger, active_value, consequent)
     }
 
+    /// Generate a unique `_ind{n}` name in the indicator registry.
     fn next_auto_indicator_name(&self) -> SmolStr {
         loop {
             let n = self.auto_seq.get();
             self.auto_seq.set(n + 1);
             let candidate: SmolStr = format!("_ind{n}").into();
-            if !self.indicator_names.borrow().contains_key(&candidate) {
+
+            if !self.indicator_names().contains_key(&candidate) {
                 break candidate;
             }
         }
     }
 
+    /// Register an indicator constraint with an automatically generated unique name.
     #[doc(hidden)]
     pub fn __add_indicator_constraint_auto<'a>(
         &'a self,
         trigger: impl Into<Expr<'a>>,
         active_value: bool,
         consequent: impl IntoAffineConstraint<'a>,
-    ) -> IndicatorConstraintHandle<'a> {
+    ) -> IndicatorConstraintHandle {
         let trigger: Expr = trigger.into();
         self.add_indicator_constraint(
             self.next_auto_indicator_name(),
@@ -1044,6 +1513,7 @@ impl Model {
         )
     }
 
+    /// Register an indicator whose affine consequent lies between numeric bounds.
     #[doc(hidden)]
     pub fn __add_indicator_interval<'a>(
         &'a self,
@@ -1053,15 +1523,23 @@ impl Model {
         lhs: impl Into<Expr<'a>>,
         lower: f64,
         upper: f64,
-    ) -> IndicatorConstraintHandle<'a> {
+    ) -> IndicatorConstraintHandle {
         let trigger: Expr = trigger.into();
         let lhs: Expr = lhs.into();
         self.assert_expr_belongs(lhs);
         let trigger = self.indicator_trigger(trigger.erase());
-        let id = self.register_indicator(name.into(), trigger, active_value, lhs.id, lower, upper);
-        IndicatorConstraintHandle { model: self, id }
+        let id = self.register_indicator(
+            name.into(),
+            trigger,
+            active_value,
+            lhs.id,
+            (lower, upper),
+            None,
+        );
+        IndicatorConstraintHandle::new(id, self.id())
     }
 
+    /// Register a two-sided indicator range as one interval or two scalar consequents.
     #[doc(hidden)]
     pub fn __add_indicator_range<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
         &'a self,
@@ -1071,7 +1549,7 @@ impl Model {
         mid: impl IntoAffineFunction<'a>,
         lo: B1,
         hi: B2,
-    ) -> RangeIndicatorConstraintHandles<'a> {
+    ) -> RangeIndicatorConstraintHandles {
         let trigger: Expr = trigger.into();
         let mid = mid.into_affine_function().expression().erase();
         self.assert_expr_belongs(mid);
@@ -1088,33 +1566,34 @@ impl Model {
                 upper,
             );
             let id = self.register_indicators_batch(vec![pending])[0];
-            RangeIndicatorConstraintHandles::Interval(IndicatorConstraintHandle { model: self, id })
+            RangeIndicatorConstraintHandles::Interval(IndicatorConstraintHandle::new(id, self.id()))
         } else {
             let lower = self.prepare_indicator(
                 format!("{name}_lo").into(),
                 trigger,
                 active_value,
-                mid.ge(lo).into_ir().into_affine(),
+                mid.ge(lo).into_checked_affine(),
             );
             let upper = self.prepare_indicator(
                 format!("{name}_hi").into(),
                 trigger,
                 active_value,
-                mid.le(hi).into_ir().into_affine(),
+                mid.le(hi).into_checked_affine(),
             );
             let mut ids = self.register_indicators_batch(vec![lower, upper]).into_iter();
-            let lower = IndicatorConstraintHandle {
-                model: self,
-                id: ids.next().expect("lower indicator range ID missing"),
-            };
-            let upper = IndicatorConstraintHandle {
-                model: self,
-                id: ids.next().expect("upper indicator range ID missing"),
-            };
+            let lower = IndicatorConstraintHandle::new(
+                ids.next().expect("lower indicator range ID missing"),
+                self.id(),
+            );
+            let upper = IndicatorConstraintHandle::new(
+                ids.next().expect("upper indicator range ID missing"),
+                self.id(),
+            );
             RangeIndicatorConstraintHandles::Split { lower, upper }
         }
     }
 
+    /// Register a two-sided indicator range with an automatically generated base name.
     #[doc(hidden)]
     pub fn __add_indicator_range_auto<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
         &'a self,
@@ -1123,29 +1602,34 @@ impl Model {
         mid: impl IntoAffineFunction<'a>,
         lo: B1,
         hi: B2,
-    ) -> RangeIndicatorConstraintHandles<'a> {
+    ) -> RangeIndicatorConstraintHandles {
         let trigger: Expr = trigger.into();
         let mid = mid.into_affine_function().expression().erase();
         let name = self.next_auto_indicator_name();
         self.__add_indicator_range(&name, trigger, active_value, mid, lo, hi)
     }
 
+    /// Borrow the indicator registry, including inactive and reformulated sources.
     pub fn indicator_constraints(&self) -> Ref<'_, Vec<IndicatorConstraint>> {
         self.indicator_constraints.borrow()
     }
 
+    /// Count all indicator declarations, including inactive and reformulated sources.
     pub fn num_indicator_constraints(&self) -> usize {
         self.indicator_constraints.borrow().len()
     }
 
+    /// Look up an indicator constraint ID by name.
     pub fn indicator_constraint_id(&self, name: &str) -> Option<IndicatorConstraintId> {
-        self.indicator_names.borrow().get(name).copied()
+        self.indicator_names().get(name)
     }
 
+    /// Return whether any indicator declarations exist, including inactive sources.
     pub fn has_indicator_constraints(&self) -> bool {
         !self.indicator_constraints.borrow().is_empty()
     }
 
+    /// Return whether at least one indicator constraint is active.
     pub fn has_active_indicator_constraints(&self) -> bool {
         self.indicator_constraints.borrow().iter().any(|c| c.active)
     }

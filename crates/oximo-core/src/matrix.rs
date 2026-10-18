@@ -64,13 +64,14 @@
 
 use std::fmt;
 use std::ops::{Add, Index, Mul, Neg, Sub};
+use std::sync::Arc;
 
 /// A symmetric matrix stored as its unscaled upper triangle, column by column.
 /// Mirrored indices always refer to the same entry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SymmetricMatrix<T> {
     side_dimension: usize,
-    entries: Vec<T>,
+    entries: Arc<[T]>,
 }
 
 /// Invalid dense row input for a symmetric matrix.
@@ -140,7 +141,7 @@ impl<T> SymmetricMatrix<T> {
                 entries.push(entry.clone());
             }
         }
-        Ok(Self { side_dimension: n, entries })
+        Ok(Self { side_dimension: n, entries: entries.into() })
     }
 
     /// Construct from unscaled upper-triangle entries in column order.
@@ -151,7 +152,7 @@ impl<T> SymmetricMatrix<T> {
         let len = triangle_len(n);
         let entries: Vec<_> = entries.into_iter().collect();
         assert_eq!(entries.len(), len, "symmetric matrix triangle length mismatch");
-        Self { side_dimension: n, entries }
+        Self { side_dimension: n, entries: entries.into() }
     }
 
     /// Construct from unscaled lower-triangle entries in column order.
@@ -173,12 +174,20 @@ impl<T> SymmetricMatrix<T> {
     /// # Panics
     /// Panics for an invalid dimension.
     pub fn from_upper_fn(n: usize, mut f: impl FnMut(usize, usize) -> T) -> Self {
-        let mut entries = Vec::with_capacity(triangle_len(n));
-        for j in 0..n {
-            for i in 0..=j {
-                entries.push(f(i, j));
-            }
-        }
+        let (mut row, mut column) = (0, 0);
+        let entries = (0..triangle_len(n))
+            .map(|_| {
+                let value = f(row, column);
+
+                if row == column {
+                    row = 0;
+                    column += 1;
+                } else {
+                    row += 1;
+                }
+                value
+            })
+            .collect();
         Self { side_dimension: n, entries }
     }
 
@@ -191,9 +200,20 @@ impl<T> SymmetricMatrix<T> {
         &self.entries
     }
 
+    pub(crate) fn for_each_mut(&mut self, visitor: impl FnMut(&mut T))
+    where
+        T: Clone,
+    {
+        Arc::make_mut(&mut self.entries).iter_mut().for_each(visitor);
+    }
+
     /// Consume the matrix into its ordinary upper triangle.
-    pub fn into_upper_triangle(self) -> Vec<T> {
-        self.entries
+    /// Copies the shared triangle into an owned vector.
+    pub fn into_upper_triangle(self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.entries.to_vec()
     }
 
     pub fn map<U>(&self, f: impl FnMut(&T) -> U) -> SymmetricMatrix<U> {
@@ -299,7 +319,7 @@ macro_rules! matrix_binary {
             fn $method(self, rhs: &SymmetricMatrix<R>) -> Self::Output {
                 assert_eq!(self.side_dimension, rhs.side_dimension, "matrix dimension mismatch");
                 SymmetricMatrix::from_upper_triangle(self.side_dimension,
-                    self.entries.iter().zip(&rhs.entries).map(|(&l, &r)| l $op r))
+                    self.entries.iter().zip(rhs.entries.iter()).map(|(&l, &r)| l $op r))
             }
         }
         impl<L: Copy + $trait<R>, R: Copy> $trait<SymmetricMatrix<R>> for SymmetricMatrix<L> {

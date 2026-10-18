@@ -170,14 +170,7 @@ impl PouncePersistent {
         };
         let elapsed = started.elapsed();
         state.warm = outcome.warm.take();
-        Ok(assemble(
-            prep.sign,
-            outcome,
-            elapsed,
-            model.id(),
-            prepared.arena().parameter_snapshot(),
-            model.num_variables(),
-        ))
+        Ok(assemble(prep.sign, outcome, elapsed, model, prepared.arena().parameter_snapshot()))
     }
 
     fn solve_convex(
@@ -234,14 +227,7 @@ impl PouncePersistent {
             .then(|| convex::warm_from_solution(route, &state.problem, &solution));
         let sign = state.problem.sign();
         outcome.warm = None;
-        Ok(assemble(
-            sign,
-            outcome,
-            elapsed,
-            model.id(),
-            prepared.arena().parameter_snapshot(),
-            model.num_variables(),
-        ))
+        Ok(assemble(sign, outcome, elapsed, model, prepared.arena().parameter_snapshot()))
     }
 
     fn validate_convex_options(&mut self, opts: &PounceOptions) -> Result<(), SolverError> {
@@ -274,6 +260,18 @@ impl Solver for PouncePersistent {
             kind,
             ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
         )
+    }
+
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Solver::domain_support(&crate::Pounce, domain)
+    }
+
+    fn validate_model_extra(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        oximo_solver::Solver::validate_model_extra(&crate::Pounce, model, opts)
     }
 
     fn solve(&mut self, model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {

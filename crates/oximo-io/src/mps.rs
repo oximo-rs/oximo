@@ -11,6 +11,7 @@
 //! - Gurobi, "Model File Formats." <https://docs.gurobi.com/projects/optimizer/en/current/reference/fileformats/modelformats.html>
 //! - IBM ILOG CPLEX, "Quadratically constrained programs (QCP) in MPS files." <https://www.ibm.com/docs/en/cofz/12.9.0?topic=extensions-quadratically-constrained-programs-qcp-in-mps-files>
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -21,7 +22,7 @@ use oximo_core::{
     SosType, var_name,
 };
 use oximo_expr::{Expr, QuadraticTerms, VarId, describe_nonlinear_term, extract_quadratic};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::error::IoError;
 
@@ -1021,28 +1022,40 @@ fn unique_mps_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
     fallback_prefix: &str,
     reserved: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    let mut used: HashSet<String> = reserved.into_iter().map(str::to_owned).collect();
+) -> Vec<Cow<'a, str>> {
+    let names = names.into_iter();
+    let mut used: FxHashSet<Cow<'a, str>> = reserved.into_iter().map(Cow::Borrowed).collect();
+    used.reserve(names.size_hint().0);
+
     names
-        .into_iter()
         .enumerate()
         .map(|(index, name)| {
-            let base: String = name
-                .chars()
-                .map(|ch| {
-                    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
-                        ch
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let base =
-                if base.is_empty() { format!("{fallback_prefix}{}", index + 1) } else { base };
+            let base = if name.is_empty() {
+                Cow::Owned(format!("{fallback_prefix}{}", index + 1))
+            } else if name
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'.' | b'-'))
+            {
+                Cow::Borrowed(name)
+            } else {
+                Cow::Owned(
+                    name.chars()
+                        .map(|ch| {
+                            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
+                                ch
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect(),
+                )
+            };
+
             let mut candidate = base.clone();
             let mut suffix = 1;
+
             while used.contains(&candidate) {
-                candidate = format!("{base}_{suffix}");
+                candidate = Cow::Owned(format!("{base}_{suffix}"));
                 suffix += 1;
             }
             used.insert(candidate.clone());
@@ -1055,7 +1068,7 @@ fn write_quadratic_section<W: Write>(
     out: &mut W,
     header: &str,
     terms: &QuadraticTerms,
-    variable_names: &[String],
+    variable_names: &[Cow<'_, str>],
     format: MpsQuadraticFormat,
     objective: bool,
 ) -> Result<(), IoError> {
@@ -1090,7 +1103,7 @@ fn write_quadratic_section<W: Write>(
 fn write_sos_section<W: Write>(
     out: &mut W,
     constraints: &[SosConstraint],
-    variable_names: &[String],
+    variable_names: &[Cow<'_, str>],
 ) -> Result<(), IoError> {
     writeln!(out, "SOS")?;
     let active = || constraints.iter().filter(|constraint| constraint.active);
@@ -1330,10 +1343,12 @@ pub fn write_mps_with<W: Write>(
     options: &MpsWriteOptions,
 ) -> Result<(), IoError> {
     model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
+
     if model.has_active_psd_constraints() {
         return Err(IoError::Conic);
     }
-    if model.num_soc_constraints() > 0
+
+    if model.has_active_soc_constraints()
         || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
     {
         return Err(IoError::Conic);
@@ -1372,9 +1387,10 @@ pub fn write_mps_with<W: Write>(
     for (v, c) in &obj_terms.linear {
         col_index.entry(*v).or_default().push(("OBJ", *c));
     }
+
     for (row_name, terms) in row_names.iter().zip(con_terms.iter()) {
         for (v, coef) in &terms.linear {
-            col_index.entry(*v).or_default().push((row_name.as_str(), *coef));
+            col_index.entry(*v).or_default().push((row_name.as_ref(), *coef));
         }
     }
 
@@ -1710,7 +1726,7 @@ pub fn to_mps_string(model: &Model) -> Result<String, IoError> {
 ///
 /// Panics if the MPS writer produces non-UTF-8 output.
 pub fn to_mps_string_with(model: &Model, options: &MpsWriteOptions) -> Result<String, IoError> {
-    let mut buf = Vec::new();
+    let mut buf = crate::text_buffer(model);
     write_mps_with(model, &mut buf, options)?;
     Ok(String::from_utf8(buf).expect("MPS writer emits ASCII"))
 }

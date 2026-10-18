@@ -187,7 +187,7 @@ fn nonlinear_iis_maps_generated_abs_definition() {
     objective!(m, Min, x);
 
     let iis = Gurobi.compute_iis(&m, &GurobiOptions::default()).expect("compute nonlinear IIS");
-    assert!(iis.constraints.contains(&conflict.id()));
+    assert!(iis.constraints.contains(&conflict.row_id()));
 }
 
 #[test]

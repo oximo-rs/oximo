@@ -254,7 +254,7 @@ fn priced_columns_have_separate_ids_and_objective_contributions() {
     let m = Model::new("pricing");
     variable!(m, x >= 0.0);
     let row = constraint!(m, demand, x >= 1.0);
-    let row_id = row.id();
+    let row_id = row.row_id();
     objective!(m, Min, 10.0 * x);
     let mut s = Scip::new().with_plugins(move |r| {
         r.pricer(settings("price"), &[row_id], Price { row: row_id, added: false })

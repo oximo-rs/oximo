@@ -43,15 +43,18 @@ impl<'a> Expr<'a> {
         Self::from_id(id, arena)
     }
 
+    #[inline]
     pub fn constant(arena: &'a ExprArenaCell, value: f64) -> Expr<'a, Constant> {
         Expr::from_id(arena.with_mut(|a| a.constant(value)), arena)
     }
 
+    #[inline]
     pub fn from_var(arena: &'a ExprArenaCell, var: VarId) -> Expr<'a, Affine> {
         Expr::from_id(arena.with_mut(|a| a.var(var)), arena)
     }
 
     /// Make a symbolic, variable-independent parameter handle.
+    #[inline]
     pub fn from_param(arena: &'a ExprArenaCell, param: ParamId) -> Expr<'a, Constant> {
         Expr::from_id(arena.with_mut(|a| a.push(ExprNode::Param(param))), arena)
     }

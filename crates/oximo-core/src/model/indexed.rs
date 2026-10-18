@@ -1,14 +1,15 @@
 //! Indexed family construction and worker-local expression preparation.
 
-use super::constraints::{PendingConstraint, PendingSoc, PendingSos};
+#[cfg(feature = "benchmark-support")]
+use super::benchmark_support::{IndexedPhase, PhaseTimer};
+use super::constraints::{PendingConstraint, PendingOrigin, PendingSoc, PendingSos};
 use super::variables::{PendingParam, PendingVar};
 use super::{Model, arena_key, assert_expr_arena, validate_batch_names};
 use crate::constraint::{ConstraintHandle, IntoRhs, RangeConstraintHandles, Relate};
 use crate::domain::Domain;
 use crate::function_set::{
-    AlgebraicConstraintIr, Constraint, GreaterThan, Interval, IntoAffineConstraint,
-    IntoAffineFunction, IntoFunction, LessThan, ScalarFunction, SecondOrderCone,
-    VectorAffineFunction, validate_bounds,
+    Constraint, GreaterThan, Interval, IntoAffineConstraint, IntoAffineFunction, IntoFunction,
+    LessThan, ScalarFunction, validate_bounds,
 };
 use crate::indexed::{
     IndexedConstraint, IndexedFamily, IndexedIndicatorConstraint, IndexedParam,
@@ -17,7 +18,9 @@ use crate::indexed::{
 use crate::indicator::{IndicatorConstraintHandle, RangeIndicatorConstraintHandles};
 use crate::set::{Axis, FromIndexKey, IndexKey, Set};
 use crate::sos::{SosMember, SosType, validate_members};
-use crate::{IntoSymmetricAffineFunction, PsdConstraint, PsdConstraintId};
+use crate::{
+    IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint, PsdConstraintId,
+};
 use oximo_expr::{Degree, Expr, ExprClass, ModelMismatchError};
 use rayon::prelude::*;
 use smol_str::SmolStr;
@@ -51,18 +54,20 @@ fn prepare_range<
     B1: IntoRhs<'a, D>,
     B2: IntoRhs<'a, D>,
 >(
-    name: String,
+    name: SmolStr,
     mid: Expr<'a, D>,
     lo: B1,
     hi: B2,
 ) -> (PendingConstraint, Option<PendingConstraint>) {
-    if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
+    let origin = name.clone();
+    let mut pending = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
         let function = mid.into_function();
         validate_bounds(lower, upper);
+
         if function.is_affine() {
             (
                 PendingConstraint::from_expr(
-                    name.into(),
+                    name,
                     Constraint::new(function, Interval { lower, upper }),
                 ),
                 None,
@@ -84,7 +89,16 @@ fn prepare_range<
             PendingConstraint::from_expr(format!("{name}_lo").into(), mid.ge(lo)),
             Some(PendingConstraint::from_expr(format!("{name}_hi").into(), mid.le(hi))),
         )
+    };
+
+    if let Some(second) = &mut pending.1 {
+        let origin = std::sync::Arc::new(origin);
+        pending.0.origin = PendingOrigin::Range(std::sync::Arc::clone(&origin));
+        second.origin = PendingOrigin::Range(origin);
+    } else {
+        pending.0.origin = PendingOrigin::RangeName;
     }
+    pending
 }
 
 fn prepare_soc<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
@@ -93,14 +107,7 @@ fn prepare_soc<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
     bound: B,
     expected_arena: usize,
 ) -> PendingSoc {
-    let function = VectorAffineFunction::new(
-        std::iter::once(bound.into_affine_function())
-            .chain(terms.into_iter().map(IntoAffineFunction::into_affine_function)),
-    );
-    assert_expr_arena(function.first, expected_arena);
-    let dimension = function.dimension();
-    let ir = Constraint::new(function, SecondOrderCone { dimension }).into_ir();
-    PendingSoc { name, terms: ir.0.rest, bound: ir.0.first.id }
+    PendingSoc::new(name, terms, bound, expected_arena)
 }
 
 impl Model {
@@ -164,7 +171,11 @@ impl Model {
     {
         let axes = set.axes().map(Box::from);
         let keys: Vec<IndexKey> = set.iter().collect();
+
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_METADATA_THRESHOLD) {
+            self.parameters.borrow_mut().reserve(keys.len());
+            self.param_names.borrow_mut().reserve(keys.len());
+            self.arena.borrow_mut().__reserve_nodes(keys.len());
             let handles = keys
                 .iter()
                 .map(|key| {
@@ -235,11 +246,11 @@ impl Model {
         name_prefix: &str,
         set: &Set<K>,
         rule: F,
-    ) -> IndexedConstraint<K>
+    ) -> IndexedConstraint<K, C::Function, C::Set>
     where
         K: FromIndexKey,
         F: Fn(K) -> C + Send + Sync,
-        C: Into<AlgebraicConstraintIr<'a>>,
+        C: crate::function_set::ScalarConstraintInput,
     {
         self.add_constraints_over_with(name_prefix, set, &rule, None)
     }
@@ -250,29 +261,37 @@ impl Model {
         set: &Set<K>,
         rule: &F,
         forced_parallel: Option<bool>,
-    ) -> IndexedConstraint<K>
+    ) -> IndexedConstraint<K, C::Function, C::Set>
     where
         K: FromIndexKey,
         F: Fn(K) -> C + Send + Sync,
-        C: Into<AlgebraicConstraintIr<'a>>,
+        C: crate::function_set::ScalarConstraintInput,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
+
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_ALGEBRAIC_THRESHOLD) {
+            self.reserve_scalar_family(keys.len());
             let mut ids = Vec::with_capacity(keys.len());
+
             for key in &keys {
-                let constraint: AlgebraicConstraintIr = rule(K::from_index_key(key)).into();
-                self.assert_expr_belongs(constraint.lhs);
-                let name: SmolStr = format_index_name(name_prefix, key).into();
-                ids.push(self.__add_constraint(name, constraint));
+                let constraint = rule(K::from_index_key(key));
+                let name: SmolStr = format_index_name_small(name_prefix, key);
+                let handle = self.__add_constraint(name, constraint);
+                ids.push(ConstraintHandle::new(handle.id(), self.id()));
             }
             return IndexedConstraint::new(keys, set.axes(), ids);
         }
 
+        #[cfg(feature = "benchmark-support")]
+        let mut phases = PhaseTimer::new();
+
         let arena = &self.arena;
-        let expected_arena = arena_key(arena);
         let mut batch = arena.__begin_batch();
         let snapshot = batch.snapshot();
         let chunk_size = indexed_chunk_size(keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Setup);
+
         let mut forks: Vec<_> = keys
             .par_chunks(chunk_size)
             .map(|chunk| {
@@ -280,10 +299,9 @@ impl Model {
                     chunk
                         .iter()
                         .map(|key| {
-                            let name = format_index_name(name_prefix, key).into();
-                            let constraint: AlgebraicConstraintIr =
-                                rule(K::from_index_key(key)).into();
-                            assert_expr_arena(constraint.lhs, expected_arena);
+                            let name = format_index_name_small(name_prefix, key);
+                            let constraint = rule(K::from_index_key(key)).into_scalar_input();
+                            constraint.validate(arena.model_id(), arena.__node_count());
                             PendingConstraint::from_expr(name, constraint)
                         })
                         .collect::<Vec<_>>()
@@ -291,30 +309,44 @@ impl Model {
             })
             .collect();
         drop(snapshot);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::WorkerPreparation);
         {
-            let existing = self.constraint_names.borrow();
+            let existing = self.constraint_names();
             validate_batch_names(
-                &existing,
+                |name| existing.contains_key(name),
                 forks.iter().flat_map(|fork| fork.value.iter().map(|item| &item.name)),
                 "constraint",
                 keys.len(),
             );
         }
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::NameValidation);
+
         let remaps = batch.merge(&mut forks);
-        let mut pending = Vec::with_capacity(keys.len());
-        for (mut fork, remap) in forks.into_iter().zip(remaps) {
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::ArenaMerge);
+
+        for (fork, remap) in forks.iter_mut().zip(remaps) {
             for item in &mut fork.value {
                 item.remap(remap);
             }
-            pending.extend(fork.value);
         }
+
+        let pending = forks.into_iter().flat_map(|fork| fork.value);
         drop(batch);
-        let ids = self
-            .register_prevalidated_constraints_batch(pending)
-            .into_iter()
-            .map(|id| ConstraintHandle::new(id, self.id()))
-            .collect();
-        IndexedConstraint::new(keys, set.axes(), ids)
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::RootRemapping);
+        let registered = self.register_prevalidated_constraints_batch(pending, keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Registration);
+
+        let ids = registered.into_iter().map(|id| ConstraintHandle::new(id, self.id()));
+        let result = IndexedConstraint::new(keys, set.axes(), ids);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::HandleAssembly);
+
+        result
     }
 
     /// Macro-facing entry point for a two-sided range family. Each key maps to
@@ -356,21 +388,30 @@ impl Model {
         F: Fn(K) -> (Expr<'a, D>, B1, B2) + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
+
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_RANGE_THRESHOLD) {
+            self.reserve_scalar_family(keys.len());
             let mut ids = Vec::with_capacity(keys.len());
+
             for key in &keys {
                 let (mid, lo, hi) = rule(K::from_index_key(key));
                 self.assert_expr_belongs(mid);
-                ids.push(self.__add_range(&format_index_name(name, key), mid, lo, hi));
+                ids.push(self.__add_range(&format_index_name_small(name, key), mid, lo, hi));
             }
             return IndexedRangeConstraint::new(keys, set.axes(), ids);
         }
+
+        #[cfg(feature = "benchmark-support")]
+        let mut phases = PhaseTimer::new();
 
         let arena = &self.arena;
         let expected_arena = arena_key(arena);
         let mut batch = arena.__begin_batch();
         let snapshot = batch.snapshot();
         let chunk_size = indexed_chunk_size(keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Setup);
+
         let mut forks: Vec<_> = keys
             .par_chunks(chunk_size)
             .map(|chunk| {
@@ -383,7 +424,7 @@ impl Model {
                         let (mid, lo, hi) = rule(K::from_index_key(key));
                         assert_expr_arena(mid, expected_arena);
                         let (first, upper) =
-                            prepare_range(format_index_name(name, key), mid, lo, hi);
+                            prepare_range(format_index_name_small(name, key), mid, lo, hi);
                         prepared.row_counts.push(if upper.is_some() { 2 } else { 1 });
                         prepared.rows.push(first);
                         prepared.rows.extend(upper);
@@ -393,46 +434,61 @@ impl Model {
             })
             .collect();
         drop(snapshot);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::WorkerPreparation);
         let row_count = forks.iter().map(|fork| fork.value.rows.len()).sum();
         {
-            let existing = self.constraint_names.borrow();
+            let existing = self.constraint_names();
             validate_batch_names(
-                &existing,
+                |name| existing.contains_key(name),
                 forks.iter().flat_map(|fork| fork.value.rows.iter().map(|item| &item.name)),
                 "constraint",
                 row_count,
             );
         }
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::NameValidation);
+
         let remaps = batch.merge(&mut forks);
-        let mut pending = Vec::with_capacity(row_count);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::ArenaMerge);
         let mut row_counts = Vec::with_capacity(keys.len());
-        for (mut fork, remap) in forks.into_iter().zip(remaps) {
+
+        for (fork, remap) in forks.iter_mut().zip(remaps) {
             for item in &mut fork.value.rows {
                 item.remap(remap);
             }
-            row_counts.extend(fork.value.row_counts);
-            pending.extend(fork.value.rows);
+            row_counts.extend_from_slice(&fork.value.row_counts);
         }
+
+        let pending = forks.into_iter().flat_map(|fork| fork.value.rows);
         drop(batch);
-        let mut ids = self.register_prevalidated_constraints_batch(pending).into_iter();
-        let groups = row_counts
-            .into_iter()
-            .map(|count| {
-                let first = ids.next().expect("range row ID missing");
-                match count {
-                    1 => RangeConstraintHandles::Interval(ConstraintHandle::new(first, self.id())),
-                    2 => RangeConstraintHandles::Split {
-                        lower: ConstraintHandle::new(first, self.id()),
-                        upper: ConstraintHandle::new(
-                            ids.next().expect("upper range row ID missing"),
-                            self.id(),
-                        ),
-                    },
-                    _ => unreachable!("range must lower to one or two rows"),
-                }
-            })
-            .collect();
-        IndexedRangeConstraint::new(keys, set.axes(), groups)
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::RootRemapping);
+        let mut ids = self.register_prevalidated_constraints_batch(pending, row_count).into_iter();
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Registration);
+        let groups = row_counts.into_iter().map(|count| {
+            let first = ids.next().expect("range row ID missing");
+
+            match count {
+                1 => RangeConstraintHandles::Interval(ConstraintHandle::new(first, self.id())),
+                2 => RangeConstraintHandles::Split {
+                    lower: ConstraintHandle::new(first, self.id()),
+                    upper: ConstraintHandle::new(
+                        ids.next().expect("upper range row ID missing"),
+                        self.id(),
+                    ),
+                },
+                _ => unreachable!("range must lower to one or two rows"),
+            }
+        });
+
+        let result = IndexedRangeConstraint::new(keys, set.axes(), groups);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::HandleAssembly);
+
+        result
     }
 
     /// Transactional indexed PSD registration with deterministic worker arena remapping.
@@ -459,7 +515,7 @@ impl Model {
                             assert_expr_arena(entry, expected_arena);
                         }
                         (
-                            SmolStr::from(format_index_name(prefix, key)),
+                            format_index_name_small(prefix, key),
                             function.matrix().map(|entry| entry.id()),
                         )
                     })
@@ -472,9 +528,9 @@ impl Model {
             vec![prepare(&keys)]
         };
         drop(snapshot);
-        let mut names = self.psd_names.borrow_mut();
+        let mut names = self.psd_names_mut();
         validate_batch_names(
-            &names,
+            |name| names.contains_key(name),
             forks.iter().flat_map(|fork| fork.value.iter().map(|(name, _)| name)),
             "PSD constraint",
             keys.len(),
@@ -489,11 +545,21 @@ impl Model {
         for (fork, remap) in forks.into_iter().zip(remaps) {
             for (name, matrix) in fork.value {
                 let id = PsdConstraintId(u32::try_from(all.len()).expect("PSD count overflow"));
-                all.push(PsdConstraint {
-                    name: name.clone(),
-                    matrix: matrix.map(|&entry| remap.apply(entry)),
-                    active: true,
-                });
+                let matrix = matrix.map(|&entry| remap.apply(entry));
+                self.record_semantic(
+                    id.into(),
+                    name.clone(),
+                    crate::SemanticPair {
+                        function: crate::FunctionValue::new(crate::SymmetricAffineData {
+                            model_id: self.id(),
+                            matrix: matrix.clone(),
+                        }),
+                        set: crate::SetValue::new(PositiveSemidefiniteCone {
+                            side_dimension: matrix.side_dimension(),
+                        }),
+                    },
+                );
+                all.push(PsdConstraint { name: name.clone(), matrix, active: true });
                 names.insert(name, id);
             }
         }
@@ -544,20 +610,29 @@ impl Model {
         F: Fn(K) -> (T, B) + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
+
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOC_THRESHOLD) {
+            self.soc_constraints.borrow_mut().reserve(keys.len());
+            self.soc_names_mut().reserve(keys.len());
+            self.reserve_semantics(crate::SocConstraintId(0).into(), keys.len());
+
             for key in &keys {
-                let name: SmolStr = format_index_name(name_prefix, key).into();
+                let name: SmolStr = format_index_name_small(name_prefix, key);
                 let (terms, bound) = rule(K::from_index_key(key));
                 self.add_soc_constraint(name, terms, bound);
             }
             return;
         }
 
+        #[cfg(feature = "benchmark-support")]
+        let mut phases = PhaseTimer::new();
         let arena = &self.arena;
         let expected_arena = arena_key(arena);
         let mut batch = arena.__begin_batch();
         let snapshot = batch.snapshot();
         let chunk_size = indexed_chunk_size(keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Setup);
         let mut forks: Vec<_> = keys
             .par_chunks(chunk_size)
             .map(|chunk| {
@@ -565,7 +640,7 @@ impl Model {
                     chunk
                         .iter()
                         .map(|key| {
-                            let name = format_index_name(name_prefix, key).into();
+                            let name = format_index_name_small(name_prefix, key);
                             let (terms, bound) = rule(K::from_index_key(key));
                             prepare_soc(name, terms, bound, expected_arena)
                         })
@@ -574,25 +649,36 @@ impl Model {
             })
             .collect();
         drop(snapshot);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::WorkerPreparation);
         {
-            let existing = self.soc_names.borrow();
+            let existing = self.soc_names();
             validate_batch_names(
-                &existing,
+                |name| existing.contains_key(name),
                 forks.iter().flat_map(|fork| fork.value.iter().map(|item| &item.name)),
                 "SOC constraint",
                 keys.len(),
             );
         }
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::NameValidation);
         let remaps = batch.merge(&mut forks);
-        let mut pending = Vec::with_capacity(keys.len());
-        for (mut fork, remap) in forks.into_iter().zip(remaps) {
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::ArenaMerge);
+
+        for (fork, remap) in forks.iter_mut().zip(remaps) {
             for item in &mut fork.value {
                 item.remap(remap);
             }
-            pending.extend(fork.value);
         }
+
+        let pending = forks.into_iter().flat_map(|fork| fork.value);
         drop(batch);
-        self.register_prevalidated_soc_batch(pending);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::RootRemapping);
+        self.register_prevalidated_soc_batch(pending, keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Registration);
     }
 
     fn add_pending_sos_over(
@@ -603,16 +689,24 @@ impl Model {
         prepare: impl Fn(&IndexKey) -> PendingSos + Send + Sync,
     ) {
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOS_THRESHOLD) {
+            self.sos_constraints.borrow_mut().reserve(keys.len());
+            self.sos_names_mut().reserve(keys.len());
+            self.reserve_semantics(crate::SosConstraintId(0).into(), keys.len());
+
             for key in &keys {
                 self.register_sos_one(sos_type, prepare(key));
             }
             return;
         }
 
+        #[cfg(feature = "benchmark-support")]
+        let mut phases = PhaseTimer::new();
         let arena = &self.arena;
         let batch = arena.__begin_batch();
         let snapshot = batch.snapshot();
         let chunk_size = indexed_chunk_size(keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Setup);
         let forks: Vec<_> = keys
             .par_chunks(chunk_size)
             .map(|chunk| {
@@ -622,19 +716,27 @@ impl Model {
             })
             .collect();
         drop(snapshot);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::WorkerPreparation);
         {
-            let existing = self.sos_names.borrow();
+            let existing = self.sos_names();
             validate_batch_names(
-                &existing,
+                |name| existing.contains_key(name),
                 forks.iter().flat_map(|fork| fork.value.iter().map(|item| &item.name)),
                 "SOS constraint",
                 keys.len(),
             );
         }
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::NameValidation);
         // Valid SOS members contain only VarIds, so no expression-root remap is needed.
         drop(batch);
-        let pending = forks.into_iter().flat_map(|fork| fork.value).collect();
-        self.register_prevalidated_sos_batch(sos_type, pending);
+        let pending = forks.into_iter().flat_map(|fork| fork.value);
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::RootRemapping);
+        self.register_prevalidated_sos_batch(sos_type, pending, keys.len());
+        #[cfg(feature = "benchmark-support")]
+        phases.mark(IndexedPhase::Registration);
     }
 
     #[doc(hidden)]
@@ -667,7 +769,7 @@ impl Model {
         let keys: Vec<IndexKey> = set.iter().collect();
         let expected_arena = arena_key(&self.arena);
         self.add_pending_sos_over(keys, sos_type, forced_parallel, |key| {
-            let name: SmolStr = format_index_name(name_prefix, key).into();
+            let name: SmolStr = format_index_name_small(name_prefix, key);
             let members: Vec<_> = rule(K::from_index_key(key))
                 .into_iter()
                 .map(|(expr, weight)| {
@@ -711,7 +813,7 @@ impl Model {
         let keys: Vec<IndexKey> = set.iter().collect();
         let expected_arena = arena_key(&self.arena);
         self.add_pending_sos_over(keys, sos_type, forced_parallel, |key| {
-            let name: SmolStr = format_index_name(name_prefix, key).into();
+            let name: SmolStr = format_index_name_small(name_prefix, key);
             let members: Vec<_> = rule(K::from_index_key(key))
                 .into_iter()
                 .enumerate()
@@ -736,7 +838,7 @@ impl Model {
         prefix: &str,
         set: &Set<K>,
         rule: F,
-    ) -> IndexedIndicatorConstraint<'a, K>
+    ) -> IndexedIndicatorConstraint<K>
     where
         K: FromIndexKey,
         F: Fn(K) -> (Expr<'a, D>, bool, C),
@@ -749,7 +851,7 @@ impl Model {
                 let (trigger, value, consequent) = rule(K::from_index_key(key));
                 let trigger = self.indicator_trigger(trigger.erase());
                 self.prepare_indicator(
-                    format_index_name(prefix, key).into(),
+                    format_index_name_small(prefix, key),
                     trigger,
                     value,
                     consequent,
@@ -759,7 +861,7 @@ impl Model {
         let handles = self
             .register_indicators_batch(pending)
             .into_iter()
-            .map(|id| IndicatorConstraintHandle { model: self, id })
+            .map(|id| IndicatorConstraintHandle::new(id, self.id()))
             .collect();
         IndexedIndicatorConstraint::new(keys, set.axes(), handles)
     }
@@ -770,7 +872,7 @@ impl Model {
         prefix: &str,
         set: &Set<K>,
         rule: F,
-    ) -> IndexedRangeIndicatorConstraint<'a, K>
+    ) -> IndexedRangeIndicatorConstraint<K>
     where
         K: FromIndexKey,
         B1: IntoRhs<'a>,
@@ -786,31 +888,27 @@ impl Model {
             let mid = mid.into_affine_function().expression().erase();
             self.assert_expr_belongs(mid);
             let trigger = self.indicator_trigger(trigger.erase());
-            let name = format_index_name(prefix, key);
+            let name = format_index_name_small(prefix, key);
+
             if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
                 && mid.__class() == ExprClass::Linear
             {
-                pending.push(self.prepare_indicator_interval(
-                    name.into(),
-                    trigger,
-                    value,
-                    mid.id,
-                    lower,
-                    upper,
-                ));
+                pending.push(
+                    self.prepare_indicator_interval(name, trigger, value, mid.id, lower, upper),
+                );
                 row_counts.push(1_u8);
             } else {
                 pending.push(self.prepare_indicator(
                     format!("{name}_lo").into(),
                     trigger,
                     value,
-                    mid.ge(lo).into_ir().into_affine(),
+                    mid.ge(lo).into_checked_affine(),
                 ));
                 pending.push(self.prepare_indicator(
                     format!("{name}_hi").into(),
                     trigger,
                     value,
-                    mid.le(hi).into_ir().into_affine(),
+                    mid.le(hi).into_checked_affine(),
                 ));
                 row_counts.push(2_u8);
             }
@@ -819,18 +917,19 @@ impl Model {
         let handles = row_counts
             .into_iter()
             .map(|count| {
-                let lower = IndicatorConstraintHandle {
-                    model: self,
-                    id: ids.next().expect("indicator range ID missing"),
-                };
+                let lower = IndicatorConstraintHandle::new(
+                    ids.next().expect("indicator range ID missing"),
+                    self.id(),
+                );
+
                 match count {
                     1 => RangeIndicatorConstraintHandles::Interval(lower),
                     2 => RangeIndicatorConstraintHandles::Split {
                         lower,
-                        upper: IndicatorConstraintHandle {
-                            model: self,
-                            id: ids.next().expect("upper indicator range ID missing"),
-                        },
+                        upper: IndicatorConstraintHandle::new(
+                            ids.next().expect("upper indicator range ID missing"),
+                            self.id(),
+                        ),
                     },
                     _ => unreachable!("indicator range must lower to one or two rows"),
                 }
@@ -949,6 +1048,12 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
             self;
 
         if !indexed_parallel(keys.len(), parallel, PAR_INDEXED_METADATA_THRESHOLD) {
+            if !keys.is_empty() && keys.len() < PAR_INDEXED_METADATA_THRESHOLD {
+                model.variables.borrow_mut().reserve(keys.len());
+                model.var_names.borrow_mut().reserve(keys.len());
+                model.arena.borrow_mut().__reserve_nodes(keys.len());
+            }
+
             let handles = keys
                 .iter()
                 .map(|key| {
@@ -981,6 +1086,7 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn format_index_name(base: &str, key: &IndexKey) -> String {
     let mut out = String::with_capacity(base.len() + 4);
     out.push_str(base);
@@ -1021,4 +1127,12 @@ pub fn display_index_key(key: &IndexKey) -> String {
     let mut out = String::new();
     write_key_parts(&mut out, key);
     out
+}
+
+impl Model {
+    fn reserve_scalar_family(&self, count: usize) {
+        self.constraints.borrow_mut().reserve(count);
+        self.constraint_names_mut().reserve(count);
+        self.reserve_semantics(crate::ConstraintId(0).into(), count);
+    }
 }

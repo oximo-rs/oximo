@@ -109,7 +109,7 @@ impl ClarabelPersistent {
         let started = Instant::now();
         state.solver.solve();
         let elapsed = started.elapsed();
-        Ok(read_result(&state.solver, &state.problem.meta, model.id(), elapsed))
+        Ok(read_result(&state.solver, &state.problem.meta, model, elapsed))
     }
 }
 
@@ -126,6 +126,10 @@ impl Solver for ClarabelPersistent {
 
     fn supports(&self, kind: ModelKind) -> bool {
         crate::supported(kind)
+    }
+
+    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Solver::domain_support(&crate::Clarabel, domain)
     }
 
     fn solve(

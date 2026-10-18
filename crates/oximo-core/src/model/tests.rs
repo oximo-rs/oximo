@@ -10,6 +10,70 @@ use oximo_expr::{ExprClass, ModelMismatchError, classify, extract_linear};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
+fn metadata_batches_preserve_names_ids_and_atomicity_on_fresh_and_populated_forks() {
+    use super::variables::{PendingParam, PendingVar};
+    use crate::Domain;
+
+    for populated in [false, true] {
+        let source = Model::new("metadata");
+        if populated {
+            source.__var("existing_x").build();
+            source.__param("existing_p", 5.0);
+        }
+        let model = source.fork();
+        let first = usize::from(populated);
+        let vars = [
+            PendingVar { name: "x".into(), lb: -1.0, ub: 4.0 },
+            PendingVar { name: "y".into(), lb: 0.0, ub: 8.0 },
+        ];
+        let params = [
+            PendingParam { name: "p".into(), value: 11.0 },
+            PendingParam { name: "q".into(), value: 13.0 },
+        ];
+        let handles = model.register_vars_batch(&vars, Domain::Integer);
+        let parameters = model.register_params_batch(&params);
+        for (offset, (variable, parameter)) in handles.iter().zip(&parameters).enumerate() {
+            assert_eq!(variable.var_id().unwrap().index(), first + offset);
+            assert_eq!(parameter.param_id().unwrap().index(), first + offset);
+            assert_eq!(model.variable_id(&vars[offset].name), variable.var_id());
+            assert_eq!(model.parameter_id(&params[offset].name), parameter.param_id());
+            assert_eq!(model.param_value_of(*parameter).unwrap(), Some(params[offset].value));
+            assert_eq!(model.variables()[first + offset].domain, Domain::Integer);
+        }
+        assert_eq!(source.num_variables(), first);
+        assert!(source.variable_id("x").is_none());
+        assert!(source.parameter_id("p").is_none());
+
+        let before = model.arena().len();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| model.register_vars_batch(&vars, Domain::Real)))
+                .is_err()
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| model.register_params_batch(&params))).is_err());
+        assert_eq!(model.num_variables(), first + 2);
+        assert_eq!(model.arena().len(), before);
+    }
+
+    let model = Model::new("duplicate_batch");
+    let vars = [
+        PendingVar { name: "duplicate".into(), lb: 0.0, ub: 1.0 },
+        PendingVar { name: "duplicate".into(), lb: 0.0, ub: 1.0 },
+    ];
+    let params = [
+        PendingParam { name: "duplicate".into(), value: 1.0 },
+        PendingParam { name: "duplicate".into(), value: 2.0 },
+    ];
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| model.register_vars_batch(&vars, Domain::Real))).is_err()
+    );
+    assert!(catch_unwind(AssertUnwindSafe(|| model.register_params_batch(&params))).is_err());
+    assert_eq!(model.num_variables(), 0);
+    assert_eq!(model.arena().len(), 0);
+    assert!(model.variable_id("duplicate").is_none());
+    assert!(model.parameter_id("duplicate").is_none());
+}
+
+#[test]
 fn inline_indexed_variable_names_match_existing_rendering() {
     let keys = [
         IndexKey::Int(-123),
@@ -308,13 +372,13 @@ fn indexed_constraint_handles_match_in_serial_and_parallel() {
         );
         for (key, id) in ordinary.iter() {
             assert_eq!(ordinary.get(key), Some(id));
-            assert_eq!(model.constraint_handle(&format!("c[{key}]")), Some(id));
+            assert_eq!(model.constraint_handle(&format!("c[{key}]")), Some(id.erase()));
         }
         for (key, ids) in ranges.iter() {
             assert_eq!(ranges.get(key), Some(ids));
             match ids {
                 RangeConstraintHandles::Interval(id) => {
-                    assert_eq!(model.constraint_handle(&format!("r[{key}]")), Some(id));
+                    assert_eq!(model.constraint_handle(&format!("r[{key}]")), Some(id.erase()));
                     let row = &model.constraints.borrow()[id.index()];
                     assert_eq!((row.lower, row.upper), (0.0, 10.0));
                     assert_eq!(classify(&model.arena(), row.lhs), ExprClass::Linear);
@@ -333,7 +397,7 @@ fn indexed_constraint_handles_match_in_serial_and_parallel() {
             }
         }
         Handles {
-            ordinary: ordinary.iter().map(|(key, handle)| (key, handle.id())).collect(),
+            ordinary: ordinary.iter().map(|(key, handle)| (key, handle.row_id())).collect(),
             ranges: ranges.iter().map(|(key, handles)| (key, handles.ids())).collect(),
         }
     }
@@ -486,7 +550,7 @@ fn parallel_range_failure_does_not_mutate_model_or_arena() {
         }));
         assert!(result.is_err());
         assert_eq!(model.num_constraints(), 1);
-        assert_eq!(model.constraint_handle("r[17]_hi"), Some(prior));
+        assert_eq!(model.constraint_handle("r[17]_hi"), Some(prior.erase()));
         assert_eq!(model.arena().len(), arena_len);
 
         // The failed batch must also release the arena for subsequent builds.

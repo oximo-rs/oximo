@@ -6,6 +6,8 @@ use thiserror::Error;
 /// Why an explicit model reformulation could not be constructed.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum ReformulationError {
+    #[error(transparent)]
+    ModelMismatch(#[from] oximo_expr::ModelMismatchError),
     #[error("SOS constraint #{0} does not exist on this model")]
     UnknownSosConstraint(usize),
     #[error("fallback Big-M must be finite and positive, got {0}")]

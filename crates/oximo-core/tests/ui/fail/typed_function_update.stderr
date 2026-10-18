@@ -1,0 +1,18 @@
+error[E0271]: type mismatch resolving `<ScalarFunctionData<Quadratic> as Function>::Owned == ScalarFunctionData<Affine>`
+ --> tests/ui/fail/typed_function_update.rs:6:34
+  |
+6 |     m.set_constraint_function(c, Function::semantic_data(&x.square().into_function())).unwrap();
+  |       -----------------------    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ScalarFunctionData<Affine>`, found `ScalarFunctionData<Quadratic>`
+  |       |
+  |       required by a bound introduced by this call
+  |
+  = note: expected struct `ScalarFunctionData<oximo_core::Affine>`
+             found struct `ScalarFunctionData<oximo_core::Quadratic>`
+note: required by a bound in `model::semantic::<impl oximo_core::Model>::set_constraint_function`
+ --> src/model/semantic.rs
+  |
+  |     pub fn set_constraint_function<F: crate::SemanticFunction, S: crate::function_set::Set>(
+  |            ----------------------- required by a bound in this associated function
+...
+  |         function: impl crate::Function<Owned = F>,
+  |                                        ^^^^^^^^^ required by this bound in `model::semantic::<impl Model>::set_constraint_function`

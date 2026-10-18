@@ -45,6 +45,10 @@ impl Solver for Highs {
         supported(kind)
     }
 
+    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Capability::Native
+    }
+
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts)
     }
@@ -55,5 +59,28 @@ impl PersistentSolver for Highs {
 
     fn persistent(&self) -> HighsPersistent {
         HighsPersistent::new()
+    }
+}
+
+impl<S: oximo_solver::translation::ScalarBoundSet>
+    oximo_solver::TypedConstraintTranslator<oximo_core::ScalarFunctionData<oximo_core::Affine>, S>
+    for Highs
+where
+    oximo_core::ScalarFunctionData<oximo_core::Affine>: oximo_core::FunctionInSet<S>,
+{
+    type Output = oximo_solver::translation::AffineRow;
+
+    fn translate(
+        &self,
+        function: &oximo_core::ScalarFunctionData<oximo_core::Affine>,
+        set: &S,
+        context: &oximo_solver::TranslationContext,
+    ) -> Result<Self::Output, oximo_solver::SolverError> {
+        oximo_solver::TypedConstraintTranslator::translate(
+            &oximo_solver::AffineRowTranslator,
+            function,
+            set,
+            context,
+        )
     }
 }

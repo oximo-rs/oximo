@@ -166,7 +166,7 @@ fn indicator_inputs_are_checked_before_registration() {
     assert_eq!(m.num_indicator_constraints(), 0);
     let checked = x.nonlinear().try_affine().unwrap();
     let row = indicator_constraint!(m, row, b == 1 => checked <= 1.0);
-    assert_eq!(row.id().0, 0);
+    assert_eq!(row.indicator_id().0, 0);
     assert_panics_with(|| indicator_constraint!(m, row, b == 1 => x <= 1.0), "already registered");
     assert_eq!(m.num_indicator_constraints(), 1);
 }

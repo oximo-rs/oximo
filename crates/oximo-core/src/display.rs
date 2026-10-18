@@ -46,7 +46,7 @@ impl fmt::Display for ExprDisplay<'_> {
 }
 
 /// Displays one constraint as `name: lhs <= rhs` (or a range / equality).
-/// Built by [`Model::display_constraint`].
+/// Built by [`Model::display_row`].
 #[derive(Debug)]
 pub struct ConstraintDisplay<'a> {
     model: &'a Model,
@@ -222,7 +222,7 @@ impl Model {
 
     /// Display adapter for one algebraic constraint.
     #[must_use]
-    pub fn display_constraint(&self, id: ConstraintId) -> ConstraintDisplay<'_> {
+    pub fn display_row(&self, id: ConstraintId) -> ConstraintDisplay<'_> {
         ConstraintDisplay { model: self, id }
     }
 
@@ -240,13 +240,13 @@ impl Model {
     }
 
     #[must_use]
-    pub fn display_sos(&self, id: impl Into<SosConstraintId>) -> SosDisplay<'_> {
-        SosDisplay { model: self, id: id.into() }
+    pub fn display_sos(&self, id: SosConstraintId) -> SosDisplay<'_> {
+        SosDisplay { model: self, id }
     }
 
     #[must_use]
-    pub fn display_indicator(&self, id: impl Into<IndicatorConstraintId>) -> IndicatorDisplay<'_> {
-        IndicatorDisplay { model: self, id: id.into() }
+    pub fn display_indicator(&self, id: IndicatorConstraintId) -> IndicatorDisplay<'_> {
+        IndicatorDisplay { model: self, id }
     }
 }
 
@@ -288,7 +288,8 @@ impl fmt::Display for Model {
                 )?;
             }
         }
-        if self.is_feasibility() || self.objective.borrow().is_some() {
+
+        if self.is_feasibility() || self.semantic_objective.borrow().is_some() {
             writeln!(f, "{}", self.display_objective())?;
         }
         #[cfg(feature = "gdp")]
@@ -303,9 +304,11 @@ impl fmt::Display for Model {
             let n_sos = u32::try_from(n_sos).expect("sos count fits u32");
             let n_indicators = u32::try_from(n_indicators).expect("indicator count fits u32");
             writeln!(f, "s.t.")?;
+
             for i in 0..n_constraints {
-                writeln!(f, "  {}", self.display_constraint(ConstraintId(i)))?;
+                writeln!(f, "  {}", self.display_row(ConstraintId(i)))?;
             }
+
             for i in 0..n_socs {
                 writeln!(f, "  {}", self.display_soc(SocConstraintId(i)))?;
             }
@@ -388,15 +391,15 @@ mod tests {
         let m = Model::new("t");
         let x = m.__var("x").build();
         let eq = m.__add_constraint("e", x.eq(5.0));
-        assert_eq!(m.display_constraint(eq.id()).to_string(), "e: x = 5");
+        assert_eq!(m.display_row(eq.row_id()).to_string(), "e: x = 5");
 
         m.__add_range("r", x, 2.0, 10.0);
         let r = m.constraint_id("r").unwrap();
-        assert_eq!(m.display_constraint(r).to_string(), "r: 2 <= x <= 10");
+        assert_eq!(m.display_row(r).to_string(), "r: 2 <= x <= 10");
 
         let ge = m.__add_constraint("g", x.ge(1.0));
         m.constraints.borrow_mut()[ge.index()].active = false;
-        assert_eq!(m.display_constraint(ge.id()).to_string(), "g: x >= 1 (inactive)");
+        assert_eq!(m.display_row(ge.row_id()).to_string(), "g: x >= 1 (inactive)");
     }
 
     #[test]
@@ -459,7 +462,7 @@ mod tests {
         let y = m.__var("y").build();
         let t = m.__var("t").lb(0.0).build();
         let id = m.add_soc_constraint("q1", [x, y], t);
-        assert_eq!(m.display_soc(id.id()).to_string(), "q1: ||x, y|| <= t");
+        assert_eq!(m.display_soc(id.soc_id()).to_string(), "q1: ||x, y|| <= t");
         assert!(format!("{m}").contains("  q1: ||x, y|| <= t\n"));
     }
 
@@ -473,7 +476,7 @@ mod tests {
         let id = m.add_sos_constraint("choice", SosType::Sos1, [(x, 1.0), (y, 2.5)]);
         m.__minimize(x + y);
 
-        assert_eq!(m.display_sos(id).to_string(), "choice: SOS1 [x: 1, y: 2.5]");
+        assert_eq!(m.display_sos(id.sos_id()).to_string(), "choice: SOS1 [x: 1, y: 2.5]");
         let out = format!("{m}");
         let soc_pos = out.find("  q1: ||x, y|| <= t\n").expect("SOC block");
         let sos_pos = out.find("  choice: SOS1 [x: 1, y: 2.5]\n").expect("SOS block");
@@ -487,5 +490,78 @@ mod tests {
         let y = m.__var("y").build();
         let e = x * y - y;
         assert_eq!(m.display_expr(e).to_string(), "-y + x * y");
+    }
+}
+
+/// Render a source constraint with its original function and set.
+#[derive(Debug)]
+pub struct SemanticConstraintDisplay<'a> {
+    model: &'a Model,
+    handle: crate::ConstraintHandle,
+}
+
+impl Model {
+    /// Render the semantic source, independently of its lowered rows.
+    ///
+    /// # Errors
+    /// Returns an ownership error for a handle from another model.
+    pub fn display_constraint<F, S>(
+        &self,
+        handle: crate::ConstraintHandle<F, S>,
+    ) -> Result<SemanticConstraintDisplay<'_>, oximo_expr::ModelMismatchError> {
+        self.ensure_model_id(handle.model_id())?;
+        Ok(SemanticConstraintDisplay { model: self, handle: handle.erase() })
+    }
+}
+
+impl fmt::Display for SemanticConstraintDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let record = self
+            .model
+            .semantic_constraint(self.handle)
+            .map_err(|_| fmt::Error)?
+            .ok_or(fmt::Error)?;
+        match record.id {
+            crate::SemanticConstraintId::SecondOrderCone(id) => {
+                return write!(f, "{}", self.model.display_soc(id));
+            }
+            crate::SemanticConstraintId::SpecialOrderedSet(id) => {
+                return write!(f, "{}", self.model.display_sos(id));
+            }
+            crate::SemanticConstraintId::Indicator(id) => {
+                return write!(f, "{}", self.model.display_indicator(id));
+            }
+            _ => {}
+        }
+        write!(f, "{}: ", record.name)?;
+
+        if let Some(root) = match record.pair.function.representation() {
+            crate::FunctionRepresentationRef::Scalar(root) => Some(root),
+            _ => None,
+        } {
+            write!(f, "{}", self.model.display_expr_id(root))?;
+        } else {
+            write!(f, "{:?}", record.pair.function)?;
+        }
+
+        let set = record.pair.set;
+
+        if let Some(value) = set.downcast_ref::<crate::LessThan>() {
+            write!(f, " <= {}", fmt_num(value.0))?;
+        } else if let Some(value) = set.downcast_ref::<crate::GreaterThan>() {
+            write!(f, " >= {}", fmt_num(value.0))?;
+        } else if let Some(value) = set.downcast_ref::<crate::EqualTo>() {
+            write!(f, " = {}", fmt_num(value.0))?;
+        } else if let Some(value) = set.downcast_ref::<crate::Interval>() {
+            write!(f, " in [{}, {}]", fmt_num(value.lower), fmt_num(value.upper))?;
+        } else {
+            write!(f, " in {set:?}")?;
+        }
+
+        if !record.active {
+            f.write_str(" (inactive)")?;
+        }
+
+        Ok(())
     }
 }

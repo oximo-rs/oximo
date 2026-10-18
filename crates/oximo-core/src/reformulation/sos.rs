@@ -248,11 +248,17 @@ impl SosReformulationPlan {
     }
 
     fn apply(self, model: &Model) -> Vec<SosReformulationArtifacts> {
-        model.variables.borrow_mut().reserve_exact(self.additional_variables);
-        model.var_names.borrow_mut().reserve(self.additional_variables);
-        model.constraints.borrow_mut().reserve_exact(self.additional_constraints);
-        model.constraint_names.borrow_mut().reserve(self.additional_constraints);
-        model.arena.borrow_mut().__reserve_nodes(self.additional_expr_nodes);
+        if self.additional_variables != 0 {
+            model.variables.borrow_mut().reserve_exact(self.additional_variables);
+            model.var_names.borrow_mut().reserve(self.additional_variables);
+        }
+        if self.additional_constraints != 0 {
+            model.constraints.borrow_mut().reserve_exact(self.additional_constraints);
+            model.constraint_names_mut().reserve(self.additional_constraints);
+        }
+        if self.additional_expr_nodes != 0 {
+            model.arena.borrow_mut().__reserve_nodes(self.additional_expr_nodes);
+        }
 
         let mut artifacts = Vec::with_capacity(self.entries.len());
         for entry in self.entries {
@@ -260,8 +266,8 @@ impl SosReformulationPlan {
         }
         if !artifacts.is_empty() {
             model.invalidate_kind();
+            model.sos_reformulations.borrow_mut().extend(artifacts.iter().cloned());
         }
-        model.sos_reformulations.borrow_mut().extend(artifacts.iter().cloned());
         artifacts
     }
 }
@@ -347,6 +353,15 @@ impl PlannedSos {
                     );
                 }
             }
+        }
+        for &row in &generated_constraints {
+            model.set_constraint_origin(
+                row.into(),
+                crate::ConstraintOrigin::Generated {
+                    sources: vec![crate::SemanticConstraintId::SpecialOrderedSet(self.source)],
+                    transformation: "sos".into(),
+                },
+            );
         }
         model.sos_constraints.borrow_mut()[self.source.index()].active = false;
         SosReformulationArtifacts {
@@ -443,7 +458,7 @@ fn add_at_most_one(
         .reduce(|left, right| left + right)
         .expect("nontrivial SOS has at least one activation");
     let name = unique_constraint_name(model, &format!("__oximo_sos{}_select", sos_id.index()));
-    generated.push(model.__add_constraint(name, sum.le(1.0)).id());
+    generated.push(model.__add_constraint(name, sum.le(1.0)).row_id());
 }
 
 fn add_planned_member_gates(
@@ -466,16 +481,18 @@ fn add_planned_member_gates(
             model,
             &format!("__oximo_sos{}_member_{}_lower", sos_id.index(), planned.member_index),
         );
-        generated
-            .push(model.__add_constraint(lower_name, variable.ge(planned.lower * activation)).id());
+        generated.push(
+            model.__add_constraint(lower_name, variable.ge(planned.lower * activation)).row_id(),
+        );
     }
     if planned.upper > 0.0 {
         let upper_name = unique_constraint_name(
             model,
             &format!("__oximo_sos{}_member_{}_upper", sos_id.index(), planned.member_index),
         );
-        generated
-            .push(model.__add_constraint(upper_name, variable.le(planned.upper * activation)).id());
+        generated.push(
+            model.__add_constraint(upper_name, variable.le(planned.upper * activation)).row_id(),
+        );
     }
 }
 

@@ -12,7 +12,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
 use crate::constraint::{ConstraintId, IntoRhs, Relate};
-use crate::function_set::{AlgebraicConstraintIr, FunctionDegree, IntoFunction};
+use crate::function_set::{
+    FunctionDegree, IntoFunction, PreparedScalarConstraint, ScalarConstraintInput,
+};
 use crate::{FromIndexKey, IndexKey, Model, ReformulatedModel, Set, display_index_key};
 
 macro_rules! gdp_id {
@@ -468,6 +470,7 @@ pub struct BooleanRecord {
 /// Conditional algebraic row, separate from solver rows.
 #[derive(Clone, Debug)]
 pub struct DisjunctConstraintRecord {
+    pub semantic: crate::SemanticPair,
     pub name: SmolStr,
     pub indicator: BooleanId,
     pub lhs: ExprId,
@@ -823,6 +826,7 @@ pub(crate) struct GdpData {
     snapshot: GdpSnapshot,
     reports: Vec<GdpReformulationReport>,
     locked_variables: FxHashSet<VarId>,
+    locked_constraints: FxHashSet<ConstraintId>,
     pending_starts: GdpPendingStarts,
     names: FxHashSet<SmolStr>,
     auto_sequences: FxHashMap<(Option<BooleanId>, SmolStr), u64>,
@@ -929,7 +933,7 @@ impl GdpData {
         &mut self,
         name: SmolStr,
         indicator: BooleanId,
-        c: AlgebraicConstraintIr<'_>,
+        c: PreparedScalarConstraint,
     ) -> DisjunctConstraintId {
         assert!(
             self.snapshot.booleans[indicator.index()].state == DisjunctState::Open,
@@ -943,15 +947,21 @@ impl GdpData {
         self.snapshot.rows.push(DisjunctConstraintRecord {
             name,
             indicator,
-            lhs: c.lhs.id,
-            lower: c.lower,
-            upper: c.upper,
+            semantic: c.semantic.into_pair(),
+            lhs: c.view.lhs,
+            lower: c.view.lower,
+            upper: c.view.upper,
             state: ReformulationState::Pending,
         });
         id
     }
 
-    fn finish(&mut self, report: GdpReformulationReport, variables: Vec<VarId>) {
+    fn finish(
+        &mut self,
+        report: GdpReformulationReport,
+        variables: Vec<VarId>,
+        constraints: Vec<ConstraintId>,
+    ) {
         for row in &report.rows {
             let record = &mut self.snapshot.rows[row.source.index()];
             record.state = ReformulationState::Reformulated;
@@ -981,6 +991,7 @@ impl GdpData {
         }
 
         self.locked_variables.extend(variables);
+        self.locked_constraints.extend(constraints);
         self.pending_starts = GdpPendingStarts {
             rows: self.rows.len(),
             disjunctions: self.disjunctions.len(),
@@ -1005,6 +1016,10 @@ impl GdpData {
 
     pub(crate) fn locks_variable(&self, id: VarId) -> bool {
         self.locked_variables.contains(&id)
+    }
+
+    pub(crate) fn locks_constraint(&self, id: ConstraintId) -> bool {
+        self.locked_constraints.contains(&id)
     }
 }
 
@@ -1112,6 +1127,9 @@ impl Model {
 
     pub(crate) fn rebind_gdp_logic_identity(&self) {
         let mut gdp = self.gdp.borrow_mut();
+        for row in &mut gdp.snapshot.rows {
+            row.semantic.function.rebind_model(self.id());
+        }
         // Rebind the small report wrappers while retaining shared artifact data.
         for report in &mut gdp.reports {
             report.1 = Some(self.id());
@@ -1297,7 +1315,7 @@ impl Model {
         self.variables.borrow_mut().reserve(variables);
         self.var_names.borrow_mut().reserve(variables);
         self.constraints.borrow_mut().reserve(constraints);
-        self.constraint_names.borrow_mut().reserve(constraints);
+        self.constraint_names_mut().reserve(constraints);
         self.arena.borrow_mut().__reserve_nodes(nodes);
     }
 
@@ -1307,8 +1325,9 @@ impl Model {
         report: GdpReformulationReport,
         variables: Vec<VarId>,
         parameters: Vec<ParamId>,
+        constraints: Vec<ConstraintId>,
     ) {
-        self.gdp.borrow_mut().finish(report, variables);
+        self.gdp.borrow_mut().finish(report, variables, constraints);
         self.arena.borrow_mut().__lock_parameters(parameters);
     }
 
@@ -1353,20 +1372,17 @@ impl<'a> DisjunctContext<'a> {
     pub fn add_constraint(
         &self,
         name: impl Into<SmolStr>,
-        c: impl Into<AlgebraicConstraintIr<'a>>,
+        c: impl ScalarConstraintInput,
     ) -> DisjunctConstraintHandle {
-        let c = c.into();
-        assert_eq!(c.lhs.model_id(), self.model.id(), "foreign conditional expression");
+        let c = c.into_scalar_input();
+        c.validate(self.model.id(), self.model.arena.__node_count());
         let name = SmolStr::new(self.qualify(&name.into()));
         let id = self.model.gdp.borrow_mut().register_row(name, self.indicator, c);
         DisjunctConstraintHandle { id, model_id: self.model.id() }
     }
 
     #[doc(hidden)]
-    pub fn __add_constraint_auto(
-        &self,
-        c: impl Into<AlgebraicConstraintIr<'a>>,
-    ) -> DisjunctConstraintHandle {
+    pub fn __add_constraint_auto(&self, c: impl ScalarConstraintInput) -> DisjunctConstraintHandle {
         self.add_constraint(self.__gdp_auto_name("c"), c)
     }
 
@@ -1409,7 +1425,7 @@ impl<'a> DisjunctContext<'a> {
     }
 
     #[doc(hidden)]
-    pub fn __add_constraints_over<K: FromIndexKey, C: Into<AlgebraicConstraintIr<'a>>>(
+    pub fn __add_constraints_over<K: FromIndexKey, C: ScalarConstraintInput>(
         &self,
         prefix: &str,
         set: &Set<K>,

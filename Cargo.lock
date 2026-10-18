@@ -2437,6 +2437,7 @@ dependencies = [
 name = "oximo-core"
 version = "0.7.0"
 dependencies = [
+ "criterion",
  "ndarray",
  "num-traits",
  "oximo-expr",
@@ -2579,6 +2580,7 @@ dependencies = [
  "oximo-expr",
  "rustc-hash",
  "thiserror 2.0.18",
+ "trybuild",
 ]
 
 [[package]]

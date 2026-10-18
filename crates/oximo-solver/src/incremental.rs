@@ -53,7 +53,7 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     }
     let prepared = crate::prepare::LoweringContext::new(model)?;
     let kind = prepared.kind();
-    if model.num_soc_constraints() > 0 || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
+    if model.has_active_soc_constraints() || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
         return Err(SolverError::UnsupportedKind(kind));
     }
     let vars = prepared.variables();

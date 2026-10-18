@@ -62,7 +62,7 @@ Names are unique per registry. Registering a duplicate variable or constraint na
 
 ```rust,ignore
 m.num_variables()   // usize
-m.num_constraints() // algebraic + SOC + PSD + SOS + indicator constraints
+m.num_constraints() // all registered algebraic, conic, SOS, and indicator constraints
 m.variables()       // Ref<'_, Vec<Variable>>
 m.constraints()     // ModelConstraints<'_>
 m.constraints().algebraic()          // typed algebraic registry
@@ -78,13 +78,22 @@ m.soc_constraint_id("cone") // Option<SocConstraintId>
 m.sos_constraint_id("choice") // Option<SosConstraintId>
 ```
 
-`ModelConstraints::iter()` visits every declared constraint. Its `algebraic()`
-and `second_order_cones()` slices are convenient when both kinds are needed in
-one scope. Typed views keep backend passes homogeneous while preserving the
-same storage and typed IDs.
+`m.constraints()` provides the built-in algebraic and conic views. Use
+`m.semantic_constraints_ref().iter()` to inspect the original function/set types,
+data, activity, and provenance of all registered declarations.
 SOC-shaped quadratic constraints declared with `constraint!` remain algebraic
 entries; only constraints declared with `soc_constraint!` or
 `add_soc_constraint` appear in `second_order_cones()`.
+
+Owned `SemanticFunction` implementations can expose solver-independent structure
+through `representation()`: scalar expressions, affine vectors/matrices, variable
+vectors, or indicators. Registration and function updates interpret that representation
+together with its set. Exposing a representation preserves the custom function's exact
+type identity. Direct registration requires a recognized function/set view.
+
+`representation()` is the interface used for describing and inspecting function
+structure. Its borrowed descriptor exposes scalar roots, vector and matrix
+components, variable vectors, and indicator consequents.
 
 ### Fixing and unfixing variables
 
@@ -178,6 +187,28 @@ constraint!(m, band, 1.0 <= e <= 3.0);             // two-sided range -> one con
 constraint!(m, name = format!("c_{k}"), e == rhs); // computed run-time name
 ```
 
+### Function-in-set constraints and updates
+
+A constraint pairs a function with a set of allowed values: `x <= 5` means
+`x` belongs to `LessThan(5.0)`. The macros build these pairs for you; you can
+also register one directly with `m.add_constraint(name, Constraint::new(function, set))`.
+
+```rust
+use oximo_core::prelude::*;
+
+let m = Model::new("capacity");
+variable!(m, x >= 0.0);
+let cap = constraint!(m, cap, x <= 5.0);
+m.set_constraint_set(cap, LessThan(8.0)).unwrap();
+m.set_constraint_function(cap, (2.0 * x).into_function()).unwrap();
+m.set_constraint_active(cap, false).unwrap();
+
+println!("{}", m.display_constraint(cap).unwrap());
+```
+
+Use `handle.erase()` for collections of different constraint types, and
+`m.typed_constraint_handle::<F, S>(name)` to recover a checked typed handle.
+
 ### Indexed family over a set
 
 ```rust,ignore
@@ -198,9 +229,8 @@ use oximo_core::prelude::*;
 
 let m = Model::new("constraint_handles");
 variable!(m, x[i in 0..4] >= 0.0);
-let capacity: ConstraintHandle = constraint!(m, capacity, x[0] <= 10.0);
-let cover: IndexedConstraint<usize> =
-    constraint!(m, cover[i in 0..4 if i % 2 == 0], x[i] >= 1.0);
+let capacity = constraint!(m, capacity, x[0] <= 10.0);
+let cover = constraint!(m, cover[i in 0..4 if i % 2 == 0], x[i] >= 1.0);
 assert!(cover.get(1).is_none()); // filtered out
 for (i, cid) in cover.iter() {
     assert_eq!(cover.get(i), Some(cid));
@@ -217,7 +247,7 @@ let RangeConstraintHandles::Interval(cid) = bands.get(0).unwrap() else {
 order for dense, sparse, string, tuple, and filtered domains.
 
 Two-sided ranges return `RangeConstraintHandles::Interval(handle)` or
-`RangeConstraintHandles::Split { lower, upper }`. Call `.id()` on an individual
+`RangeConstraintHandles::Split { lower, upper }`. Call `.row_id()` on an individual
 handle when a backend-facing raw `ConstraintId` is required.
 
 ### Summation
@@ -273,7 +303,7 @@ Backends without native SOS support return an error.
 Reformulate one constraint through its handle, or every active SOS in a model explicitly:
 
 ```rust,ignore
-let transformed = one_choice.to_reformulated_model(SosReformulationOptions::default())?;
+let transformed = one_choice.to_reformulated_model(&m, SosReformulationOptions::default())?;
 solver.solve(&transformed, &options)?;
 
 let transformed = m.to_reformulated_sos_model(

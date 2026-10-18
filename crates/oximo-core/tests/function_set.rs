@@ -83,8 +83,11 @@ fn dynamic_relations_retain_expressions_and_checked_classification() {
         let ge: Constraint<ScalarDynamicFunction<'_>, GreaterThan> = expr.ge(-2.0);
         let eq: Constraint<ScalarDynamicFunction<'_>, EqualTo> = expr.eq(1.0);
         assert_eq!(le.function.expression().id(), expr.id());
-        let handles =
-            [m.__add_constraint_auto(le), m.__add_constraint_auto(ge), m.__add_constraint_auto(eq)];
+        let handles = [
+            m.__add_constraint_auto(le).erase(),
+            m.__add_constraint_auto(ge).erase(),
+            m.__add_constraint_auto(eq).erase(),
+        ];
         let rows = m.constraints();
         for (handle, expected) in
             handles.into_iter().zip([(f64::NEG_INFINITY, 3.0), (-2.0, f64::INFINITY), (1.0, 1.0)])
@@ -119,7 +122,7 @@ fn indexed_dynamic_relations_remap_local_roots_and_keep_parameters_live() {
         for key in [0_usize, 1024, 2047] {
             let handle = rows.get(key).unwrap();
             let row = &constraints.algebraic()[handle.index()];
-            assert_eq!(m.constraint_handle(&format!("rows[{key}]")), Some(handle));
+            assert_eq!(m.constraint_handle(&format!("rows[{key}]")), Some(handle.erase()));
             assert_eq!(evaluate(&arena, row.lhs, &&point[..]).unwrap(), 4.0 + 2.0 * parameter);
             assert_eq!(row.upper, 10.0);
         }
@@ -143,7 +146,9 @@ fn static_lowering_reuses_nodes_and_matches_macro_rows() {
     let qm = constraint!(m, qm, quadratic == 11.0);
     let nm = constraint!(m, nm, nonlinear >= 0.0);
     let rows = m.constraints();
-    for (direct, generated) in [(a, am), (q, qm), (n, nm)] {
+    for (direct, generated) in
+        [(a.erase(), am.erase()), (q.erase(), qm.erase()), (n.erase(), nm.erase())]
+    {
         let left = &rows.algebraic()[direct.index()];
         let right = &rows.algebraic()[generated.index()];
         assert_eq!((left.lhs, left.lower, left.upper), (right.lhs, right.lower, right.upper));
@@ -233,10 +238,20 @@ fn typed_and_macro_soc_share_the_registry() {
 }
 
 #[test]
-fn custom_pair_delegates_to_existing_ir() {
+fn custom_sets_require_an_explicit_lowering_to_a_supported_view() {
     struct CustomFunction<'a>(ScalarAffineFunction<'a>);
+
+    #[derive(Clone, Debug)]
     struct CustomSet(f64);
-    impl Function for CustomFunction<'_> {}
+
+    impl Function for CustomFunction<'_> {
+        type Owned = ScalarFunctionData<Affine>;
+
+        fn semantic_data(&self) -> Self::Owned {
+            Function::semantic_data(&self.0)
+        }
+    }
+
     impl ConstraintSet for CustomSet {}
     impl FunctionInSet<CustomSet> for CustomFunction<'_> {}
     impl<'a> LowerConstraint<CustomSet> for CustomFunction<'a> {
@@ -247,11 +262,25 @@ fn custom_pair_delegates_to_existing_ir() {
     }
     let m = Model::new("extension");
     variable!(m, x);
-    let c = m.add_constraint(
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        m.add_constraint(
+            "custom",
+            Constraint::new(CustomFunction(x.into_function()), CustomSet(4.0)),
+        );
+    }));
+    assert!(rejected.is_err());
+    assert_eq!(m.num_constraints(), 0);
+    assert!(m.constraint_handle("custom").is_none());
+
+    let c = m.add_lowered_constraint(
         "custom",
-        Constraint::new(CustomFunction(x.into_function()), CustomSet(4.0)),
+        Constraint::new(CustomFunction(x.into_function()), CustomSet(4.0)).into_ir(),
     );
-    assert_eq!(m.constraints().algebraic()[c.index()].as_single(), Some((Sense::Eq, 4.0)));
+    assert_eq!(m.constraints().algebraic().len(), 1);
+    assert_eq!(m.constraints().algebraic()[0].lower, 4.0);
+    assert_eq!(m.constraints().algebraic()[0].upper, 4.0);
+    let semantic = m.semantic_constraint(c).unwrap().unwrap();
+    assert_eq!(semantic.pair.set.downcast_ref::<CustomSet>().unwrap().0, 4.0);
 }
 
 #[test]

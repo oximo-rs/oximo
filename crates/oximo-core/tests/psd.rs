@@ -144,7 +144,7 @@ fn reformulated_clone_preserves_psd_registry_and_parameters() {
     let cloned = copy.model();
     assert_ne!(cloned.id(), m.id());
     assert_eq!(cloned.kind(), ModelKind::SDP);
-    assert_eq!(cloned.psd_constraint_id("positivity"), Some(handle.id()));
+    assert_eq!(cloned.psd_constraint_id("positivity"), Some(handle.psd_id()));
     assert_eq!(
         cloned.psd_constraints()[0].matrix.upper_triangle(),
         m.psd_constraints()[0].matrix.upper_triangle()

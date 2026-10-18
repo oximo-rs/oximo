@@ -75,12 +75,20 @@ FERAL inertia interface, and routes only a proved-convex model:
   and recognized quadratic SOC forms are translated.
 - QCP, indefinite QP, and general NLP use the TNLP/builder path.
 
-An inconclusive convexity test always falls back to NLP. If an automatic LP or
-detected-SOCP convex solve ends in a numerical failure, it receives one NLP
-attempt.
+An inconclusive convexity test falls back to NLP when there are no active
+explicit SOC constraints. Active explicit SOC constraints require a compatible
+conic route. If an automatic LP or detected-SOCP convex solve ends in a numerical
+failure, it receives one NLP attempt.
 Forced routes never change engines: `LpIpm`, `QpIpm`, `QpActiveSet`, and
 `Socp` either run that engine or return a compatibility error. `Nlp` always
 selects the general path.
+
+`validate_model` checks the effective route options, including raw overrides.
+With `Auto` and no active explicit SOC constraints, validation accepts the
+available NLP fallback without checking convexity. Solving still classifies the
+model to choose an engine. Forced convex routes and automatic routing with
+explicit SOC constraints retain the convexity checks needed for compatibility;
+forced NLP and LP routes use structural checks.
 
 
 ## Licensing

@@ -78,12 +78,39 @@ impl Solver for Gams {
         supported(kind)
     }
 
+    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Capability::Native
+    }
+
     fn supports_sos(&self, _sos_type: SosType) -> bool {
         true
     }
 
     fn supports_indicators(&self) -> bool {
         true
+    }
+
+    fn validate_model_extra(
+        &self,
+        model: &Model,
+        opts: &Self::Options,
+    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        let mut diagnostics = Vec::new();
+        if let Err(error) = translate::validate_model(model, opts) {
+            diagnostics.push(oximo_solver::CapabilityDiagnostic {
+                constraint: None,
+                location: "GAMS translation".into(),
+                reason: error.to_string(),
+            });
+        }
+        if let Err(error) = translate::validate_indicator_solver(model, opts) {
+            diagnostics.push(oximo_solver::CapabilityDiagnostic {
+                constraint: None,
+                location: "GAMS indicators".into(),
+                reason: error.to_string(),
+            });
+        }
+        diagnostics
     }
 
     fn solve(&mut self, model: &Model, opts: &GamsOptions) -> Result<SolverResult, SolverError> {

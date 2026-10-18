@@ -7,6 +7,17 @@ pub mod mps;
 pub mod nl;
 mod objective;
 
+/// Reserve ordinary text models without sizing nonlinear expressions in advance.
+fn text_buffer(model: &oximo_core::Model) -> Vec<u8> {
+    let estimate = model.num_constraints().saturating_add(model.num_variables()).saturating_mul(32);
+    if estimate < 4096 {
+        Vec::new()
+    } else {
+        let capacity = estimate.min(64 * 1024 * 1024).next_power_of_two();
+        Vec::with_capacity(capacity)
+    }
+}
+
 pub use error::IoError;
 pub use lp::{read_lp, read_lp_file, to_lp_string, write_lp};
 pub use mps::{

@@ -1,5 +1,5 @@
 use oximo_core::prelude::*;
-use oximo_solver::{SolutionPoint, SolverResult, reconstruct::normalize_result};
+use oximo_solver::{SolutionPoint, SolverResult, reconstruct::finalize_result};
 use rustc_hash::FxHashMap;
 
 #[test]
@@ -24,7 +24,7 @@ fn added_solutions_use_the_results_snapshot_even_after_the_model_changes() {
     assert_eq!(result.value_of(p * x), Ok(Some(6.0)));
     assert_eq!(result.value_of_with_current_parameters(p * x), Ok(Some(12.0)));
 
-    let normalized = normalize_result(result, 1);
+    let normalized = finalize_result(result, &model, 1);
     assert_eq!(normalized.value_of(p * x), Ok(Some(6.0)));
     assert_eq!(normalized.solution(1).unwrap().value_of(p * x), Ok(Some(8.0)));
 }
@@ -146,8 +146,8 @@ fn both_modes_validate_ownership_including_empty_results_and_inconsistent_points
     let cone = soc_constraint!(model, cone, [x] <= x + 1.0);
     let other = model.to_reformulated_sos_model(SosReformulationOptions::default()).unwrap();
     let foreign = other.variable_handle(x.var_id().unwrap());
-    let foreign_row = other.constraint_handle_from_id(row.id()).unwrap();
-    let foreign_cone = other.soc_constraint_handle_from_id(cone.id()).unwrap();
+    let foreign_row = other.constraint_handle_from_id(row.row_id()).unwrap();
+    let foreign_cone = other.soc_constraint_handle_from_id(cone.soc_id()).unwrap();
     let mut result = SolverResult::for_model(&model);
 
     assert!(result.value_of(foreign).is_err());
@@ -180,7 +180,7 @@ fn normalization_shares_original_parameters_with_all_points_and_is_repeatable() 
         .collect();
     model.set_param(p, 4.0).unwrap();
 
-    let result = normalize_result(normalize_result(result, 1), 1);
+    let result = finalize_result(finalize_result(result, &model, 1), &model, 1);
     assert_eq!(result.parameters.values(), &[2.0]);
     assert_eq!(result.solution(0).unwrap().value_of(p * x), Ok(Some(6.0)));
     assert_eq!(result.solution(1).unwrap().value_of(p * x), Ok(Some(8.0)));
@@ -211,7 +211,10 @@ fn normalization_rejects_foreign_points_even_when_parameter_snapshots_match() {
         assert_eq!(result.parameters, foreign.parameters);
         result.solutions.push(foreign);
         assert!(result.value_of(x).is_err());
-        let panic = std::panic::catch_unwind(|| normalize_result(result, 1)).unwrap_err();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            finalize_result(result, &model, 1)
+        }))
+        .unwrap_err();
         assert!(
             panic
                 .downcast_ref::<String>()
@@ -232,7 +235,7 @@ fn normalization_retags_unassigned_points_with_matching_parameter_snapshots() {
         SolutionPoint::new(&model, [(x.var_id().unwrap(), 3.0)].into_iter().collect(), Some(6.0));
     point.model_id = ModelId::UNASSIGNED;
     result.solutions.push(point);
-    let result = normalize_result(result, 1);
+    let result = finalize_result(result, &model, 1);
 
     assert_eq!(result.best().unwrap().model_id(), model.id());
     assert_eq!(result.value_of(p * x), Ok(Some(6.0)));
@@ -251,7 +254,7 @@ fn normalization_rejects_an_empty_result_snapshot_instead_of_erasing_point_param
         SolverResult { model_id: model.id(), solutions: vec![point], ..Default::default() };
 
     assert_eq!(result.value_of(p * x), Ok(Some(6.0)));
-    normalize_result(result, 1);
+    finalize_result(result, &model, 1);
 }
 
 #[test]
@@ -269,11 +272,23 @@ fn normalization_rejects_conflicting_parameter_bits_even_for_detached_points() {
             let mut point = point.clone();
             point.model_id = model_id;
             result.solutions = vec![point];
-            assert!(std::panic::catch_unwind(|| normalize_result(result.clone(), 1)).is_err());
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| finalize_result(
+                    result.clone(),
+                    &model,
+                    1
+                )))
+                .is_err()
+            );
         }
         // An assigned point with empty parameters is not a detached placeholder.
         result.solutions[0] = SolutionPoint { model_id: model.id(), ..Default::default() };
-        assert!(std::panic::catch_unwind(|| normalize_result(result, 1)).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| finalize_result(
+                result, &model, 1
+            )))
+            .is_err()
+        );
     }
 }
 
@@ -299,7 +314,7 @@ fn normalization_shares_independent_snapshots_with_identical_nan_and_signed_zero
         result.best().unwrap().parameters.values().as_ptr()
     );
 
-    let result = normalize_result(normalize_result(result, 1), 1);
+    let result = finalize_result(finalize_result(result, &model, 1), &model, 1);
     assert_eq!(
         result.parameters.values().as_ptr(),
         result.best().unwrap().parameters.values().as_ptr()

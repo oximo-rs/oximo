@@ -37,7 +37,7 @@
 //! are excluded. All expression entries must belong to the registering model.
 //! The cone dimension must match the matrix side dimension.
 
-use oximo_expr::{Affine, Constant, Dynamic, Expr, ExprArenaCell, ExprId, ModelId};
+use oximo_expr::{Affine, Constant, Dynamic, Expr, ExprArenaCell, ExprId};
 use smol_str::SmolStr;
 
 use crate::function_set::{
@@ -55,7 +55,15 @@ impl Set for PositiveSemidefiniteCone {}
 /// Symbolic affine symmetric matrix retaining rebindable arena expressions.
 #[derive(Clone, Debug)]
 pub struct SymmetricAffineFunction<'a>(pub(crate) SymmetricMatrix<Expr<'a, Affine>>);
-impl Function for SymmetricAffineFunction<'_> {}
+
+impl Function for SymmetricAffineFunction<'_> {
+    type Owned = crate::semantic::SymmetricAffineData;
+
+    fn semantic_data(&self) -> Self::Owned {
+        Self::Owned { model_id: self.0[(0, 0)].model_id(), matrix: self.0.map(|entry| entry.id()) }
+    }
+}
+
 impl FunctionInSet<PositiveSemidefiniteCone> for SymmetricAffineFunction<'_> {}
 impl<'a> SymmetricAffineFunction<'a> {
     /// Construct and check that all entries have the same arena owner.
@@ -165,29 +173,9 @@ impl PsdConstraintId {
     }
 }
 
-/// Model-bound handle to a PSD matrix constraint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PsdConstraintHandle {
-    id: PsdConstraintId,
-    model_id: ModelId,
-}
-impl PsdConstraintHandle {
-    pub(crate) const fn new(id: PsdConstraintId, model_id: ModelId) -> Self {
-        Self { id, model_id }
-    }
-
-    pub const fn id(self) -> PsdConstraintId {
-        self.id
-    }
-
-    pub const fn model_id(self) -> ModelId {
-        self.model_id
-    }
-
-    pub fn index(self) -> usize {
-        self.id.index()
-    }
-}
+/// Typed reference to a symmetric affine function in the PSD cone.
+pub type PsdConstraintHandle =
+    crate::ConstraintHandle<crate::semantic::SymmetricAffineData, PositiveSemidefiniteCone>;
 
 /// Registered PSD constraint; entries use ordinary upper-column triangle coordinates.
 #[derive(Clone, Debug)]

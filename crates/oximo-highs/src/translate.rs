@@ -1,14 +1,12 @@
 use oximo_solver::prepare::LoweringContext;
-use oximo_solver::reconstruct::{ObjectiveTransform, normalize_result};
+use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 use std::time::{Duration, Instant};
 
 use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
     Sense as HighsSense,
 };
-use oximo_core::{
-    ConstraintId, Domain, Model, ModelId, ModelKind, ObjectiveSense, VarId, Variable,
-};
+use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable};
 use oximo_expr::{ExprId, QuadraticTerms};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
@@ -56,16 +54,7 @@ pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverE
     let solved =
         live.try_solve().map_err(|e| SolverError::Backend(format!("HiGHS solve failed: {e:?}")))?;
     let elapsed = started.elapsed();
-    Ok(extract_result(
-        &solved,
-        meta.mixed_integer,
-        meta.obj_constant,
-        meta.num_constraints,
-        meta.cols.len(),
-        model.id(),
-        meta.parameters.clone(),
-        elapsed,
-    ))
+    Ok(extract_result(&solved, &meta, model, elapsed))
 }
 
 /// The HiGHS [`RowProblem`] plus the inputs needed to build and configure a live
@@ -134,9 +123,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     // Build the HiGHS row problem from the variables and constraints.
     let mut pb = RowProblem::new();
     let mut cols: Vec<highs::Col> = Vec::with_capacity(vars.len());
-    let mixed_integer = vars
-        .iter()
-        .any(|v| v.domain.is_integer() || matches!(v.domain, Domain::SemiContinuous { .. }));
+    let mixed_integer = vars.iter().any(|v| v.domain.requires_discrete_choice());
     let mut has_initial = false;
     let mut init_vals: Vec<f64> = vec![0.0; vars.len()];
     for (i, v) in vars.iter().enumerate() {
@@ -210,17 +197,17 @@ pub(crate) fn make_live(prob: Prob, opts: &HighsOptions) -> Result<HighsModel, S
 
 /// Map a solved HiGHS model into the generic [`SolverResult`], adding `obj_constant`
 /// back onto HiGHS' objective value.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_result(
     solved: &highs::SolvedModel,
-    mixed_integer: bool,
-    obj_constant: f64,
-    num_constraints: usize,
-    num_variables: usize,
-    model_id: ModelId,
-    parameters: oximo_solver::ParameterSnapshot,
+    meta: &Meta,
+    model: &Model,
     elapsed: Duration,
 ) -> SolverResult {
+    let mixed_integer = meta.mixed_integer;
+    let obj_constant = meta.obj_constant;
+    let num_constraints = meta.num_constraints;
+    let parameters = meta.parameters.clone();
+    let model_id = model.id();
     let native_status = solved.status();
     let termination = map_status(native_status);
     let has_point = solved.primal_solution_status() == HighsSolutionStatus::Feasible;
@@ -264,8 +251,9 @@ pub(crate) fn extract_result(
         .then(|| solved.int_info_value(c"mip_node_count").ok())
         .flatten()
         .and_then(|count| u64::try_from(count).ok());
-    normalize_result(
+    finalize_result(
         SolverResult {
+            semantic_dual: FxHashMap::default(),
             model_id,
             termination,
             primal_status: PrimalStatus::NoSolution,
@@ -286,7 +274,8 @@ pub(crate) fn extract_result(
             solver_version: None,
             parameters,
         },
-        num_variables,
+        model,
+        meta.cols.len(),
     )
 }
 
@@ -597,16 +586,7 @@ mod tests {
         let solved = make_live(prob, &opts).unwrap().try_solve().unwrap();
         let native_gap = solved.double_info_value(c"mip_gap").unwrap();
         assert!(native_gap.is_finite() && native_gap > 0.0, "native gap: {native_gap}");
-        let result = extract_result(
-            &solved,
-            true,
-            meta.obj_constant,
-            meta.num_constraints,
-            meta.cols.len(),
-            model.id(),
-            meta.parameters.clone(),
-            Duration::ZERO,
-        );
+        let result = extract_result(&solved, &meta, &model, Duration::ZERO);
         assert_eq!(result.gap, Some(native_gap));
         assert_eq!(result.objective(), Some(solved.objective_value() + 100.0));
         let native_bound = solved.double_info_value(c"mip_dual_bound").unwrap();
@@ -647,7 +627,7 @@ mod tests {
         variable!(m, x <= 10.0, SemiCont(5.0));
         constraint!(m, c, x >= 3.0);
         objective!(m, Min, x);
-        assert_eq!(m.kind(), ModelKind::LP);
+        assert_eq!(m.kind(), ModelKind::MILP);
 
         let res = solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);

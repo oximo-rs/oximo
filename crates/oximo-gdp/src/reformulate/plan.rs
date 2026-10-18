@@ -106,6 +106,7 @@ pub(super) struct PlanBuilder {
     pub(super) report: GdpReformulationReportData,
     pub(super) locked_variables: FxHashSet<VarId>,
     pub(super) locked_parameters: FxHashSet<ParamId>,
+    pub(super) locked_constraints: FxHashSet<ConstraintId>,
     dependency_nodes: FxHashSet<ExprId>,
     dependency_stack: Vec<ExprId>,
     expression_nodes: usize,
@@ -175,6 +176,7 @@ impl PlanBuilder {
             report: GdpReformulationReportData::default(),
             locked_variables: FxHashSet::default(),
             locked_parameters: FxHashSet::default(),
+            locked_constraints: FxHashSet::default(),
             dependency_nodes: FxHashSet::default(),
             dependency_stack: Vec::new(),
             expression_nodes: 0,
@@ -616,6 +618,7 @@ impl ValidatedPlan {
             report,
             locked_variables,
             locked_parameters,
+            locked_constraints,
             expression_nodes,
             generated_nodes,
             source_nodes,
@@ -704,6 +707,7 @@ impl ValidatedPlan {
             report.clone(),
             locked_variables.into_iter().collect(),
             locked_parameters.into_iter().collect(),
+            locked_constraints.into_iter().collect(),
         );
 
         report

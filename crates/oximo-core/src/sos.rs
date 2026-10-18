@@ -48,65 +48,31 @@ impl SosConstraintId {
     }
 }
 
-/// A model-bound handle to an SOS constraint.
-///
-/// Single-constraint forms of [`crate::sos_constraint!`] and the programmatic
-/// SOS registration methods return this handle.
-#[derive(Copy, Clone)]
-pub struct SosConstraintHandle<'a> {
-    pub(crate) model: &'a Model,
-    pub(crate) id: SosConstraintId,
-}
+/// Typed semantic reference to a variable vector in a special ordered set.
+pub type SosConstraintHandle =
+    crate::ConstraintHandle<crate::VariableVectorData, crate::SpecialOrderedSet>;
 
-impl std::fmt::Debug for SosConstraintHandle<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SosConstraintHandle").field("id", &self.id).finish()
-    }
-}
-
-impl SosConstraintHandle<'_> {
-    #[must_use]
-    pub const fn id(self) -> SosConstraintId {
-        self.id
-    }
-
-    #[must_use]
-    pub fn index(self) -> usize {
-        self.id.index()
-    }
-
-    /// Produce an independent model in which this SOS constraint is replaced
-    /// by mixed-integer algebraic constraints.
-    ///
+impl SosConstraintHandle {
     /// # Errors
-    ///
-    /// Returns [`ReformulationError`] when a fallback Big-M is invalid or a
-    /// member lacks a finite bound and no fallback was supplied.
+    /// Returns an ownership or reformulation error before changing the model.
     pub fn to_reformulated_model(
         self,
+        model: &Model,
         options: SosReformulationOptions,
     ) -> Result<ReformulatedModel, ReformulationError> {
-        self.model.to_reformulated_sos_constraint_model(self.id, options)
+        model.ensure_model_id(self.model_id())?;
+        model.to_reformulated_sos_constraint_model(self.sos_id(), options)
     }
 
-    /// Replace this SOS constraint on its source model without cloning the
-    /// model. Returns `Ok(None)` if it was already reformulated.
-    ///
     /// # Errors
-    ///
-    /// Returns [`ReformulationError`] before modifying the model when the
-    /// fallback Big-M or a required member bound is invalid.
+    /// Returns an ownership or reformulation error before changing the model.
     pub fn reformulate(
         self,
+        model: &Model,
         options: SosReformulationOptions,
     ) -> Result<Option<SosReformulationArtifacts>, ReformulationError> {
-        self.model.reformulate_sos_constraint(self.id, options)
-    }
-}
-
-impl From<SosConstraintHandle<'_>> for SosConstraintId {
-    fn from(value: SosConstraintHandle<'_>) -> Self {
-        value.id
+        model.ensure_model_id(self.model_id())?;
+        model.reformulate_sos_constraint(self.sos_id(), options)
     }
 }
 

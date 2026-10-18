@@ -11,7 +11,7 @@ fn derives_tight_m_and_preserves_history_and_ids() {
 
     // Maximum at the inactive trigger value is 2*10 - 3*(-2) + 7 = 33.
     let transformed =
-        source.to_reformulated_model(IndicatorReformulationOptions::default()).unwrap();
+        source.to_reformulated_model(&model, IndicatorReformulationOptions::default()).unwrap();
     assert_eq!(transformed.num_variables(), model.num_variables());
     assert!(!transformed.indicator_constraints()[0].active);
     assert_eq!(transformed.constraints().algebraic()[0].name, "__oximo_indicator0_upper");
@@ -23,7 +23,7 @@ fn derives_tight_m_and_preserves_history_and_ids() {
     );
     assert_eq!(terms.constant, -26.0);
     assert_eq!(transformed.constraints().algebraic()[0].upper, 0.0);
-    assert_eq!(transformed.indicator_reformulations()[0].source, source.id());
+    assert_eq!(transformed.indicator_reformulations()[0].source, source.indicator_id());
 
     // The original remains native and active.
     assert!(model.indicator_constraints()[0].active);
@@ -61,7 +61,8 @@ fn exact_equality_rows_and_trigger_in_body() {
     variable!(model, b, Binary);
     variable!(model, -1.0 <= x <= 3.0);
     let row = indicator_constraint!(model, equal, b == 1 => x + 2.0 * b == 1.0);
-    let transformed = row.to_reformulated_model(IndicatorReformulationOptions::default()).unwrap();
+    let transformed =
+        row.to_reformulated_model(&model, IndicatorReformulationOptions::default()).unwrap();
     assert_eq!(transformed.constraints().algebraic().len(), 2);
     let arena = transformed.arena();
     let lower = extract_linear(&arena, transformed.constraints().algebraic()[0].lhs).unwrap();
@@ -113,7 +114,9 @@ fn failures_are_atomic_and_fallback_is_a_row_m() {
         ),
         Err(ReformulationError::ParameterDependentIndicator { .. })
     ));
-    first.reformulate(IndicatorReformulationOptions::default().with_fallback_big_m(50.0)).unwrap();
+    first
+        .reformulate(&model, IndicatorReformulationOptions::default().with_fallback_big_m(50.0))
+        .unwrap();
     assert_eq!(model.constraints().algebraic().len(), 1);
     let arena = model.arena();
     let fallback_row = extract_linear(&arena, model.constraints().algebraic()[0].lhs).unwrap();
@@ -140,10 +143,12 @@ fn collision_safe_names_and_inactive_sources_are_stable() {
     constraint!(model, __oximo_indicator0_upper, x <= 1.0);
     let indicator = indicator_constraint!(model, cap, b == 1 => x <= 0.0);
     let artifacts =
-        indicator.reformulate(IndicatorReformulationOptions::default()).unwrap().unwrap();
+        indicator.reformulate(&model, IndicatorReformulationOptions::default()).unwrap().unwrap();
     assert_eq!(model.constraints().algebraic()[1].name, "__oximo_indicator0_upper_1");
     assert_eq!(model.indicator_reformulations()[0].constraints, artifacts.constraints);
-    assert!(indicator.reformulate(IndicatorReformulationOptions::default()).unwrap().is_none());
+    assert!(
+        indicator.reformulate(&model, IndicatorReformulationOptions::default()).unwrap().is_none()
+    );
     assert_eq!(model.indicator_reformulations().len(), 1);
 }
 

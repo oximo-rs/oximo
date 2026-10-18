@@ -22,7 +22,9 @@ pub mod param;
 pub mod prelude;
 pub mod psd;
 pub mod reformulation;
+pub mod semantic;
 pub mod set;
+mod shared;
 pub mod soc;
 pub mod sos;
 pub mod sum;
@@ -38,7 +40,8 @@ pub use display::{
     LogicalConstraintDisplay, LogicalExprDisplay,
 };
 pub use display::{
-    ConstraintDisplay, ExprDisplay, IndicatorDisplay, ObjectiveDisplay, SocDisplay, SosDisplay,
+    ConstraintDisplay, ExprDisplay, IndicatorDisplay, ObjectiveDisplay, SemanticConstraintDisplay,
+    SocDisplay, SosDisplay,
 };
 pub use domain::Domain;
 pub use error::{Error, Result};
@@ -53,16 +56,27 @@ pub use indicator::{
 pub use model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
 };
-pub use objective::{Objective, ObjectiveSense};
+pub use objective::{Objective, ObjectiveFunction, ObjectiveSense, SemanticObjective};
 pub use param::Parameter;
 pub use reformulation::{
     IndicatorReformulationArtifacts, IndicatorReformulationOptions, ReformulatedModel,
     ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
+#[doc(hidden)]
+pub use semantic::ScalarConstraintSource;
+pub use semantic::{
+    ConstraintOrigin, ConstraintUpdateError, Erased, FunctionKind, FunctionRef,
+    FunctionRepresentationRef, FunctionValue, IndicatorFunctionData, IndicatorSet,
+    ScalarConstraintView, ScalarFunctionData, SemanticConstraint, SemanticConstraintId,
+    SemanticConstraintRef, SemanticFunction, SemanticPair, SemanticPairRef, SemanticType, SetRef,
+    SetValue, SpecialOrderedSet, SymmetricAffineData, VariableVectorData, VariableVectorRef,
+    VectorAffineData,
+};
 pub use set::{
     Axis, FromIndexKey, FromIndexKeyRef, IndexKey, IndexKeyRef, IndexTuple, KeyCat, ScalarKey, Set,
     SetIter,
 };
+pub use shared::SharedSlice;
 #[doc(hidden)]
 pub use soc::__detect_soc_from_quadratic;
 pub use soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
@@ -84,10 +98,11 @@ pub use oximo_macros::{
 };
 
 pub use crate::function_set::{
-    AffineConstraintIr, AnyScalarFunction, Constraint, EqualTo, Function, FunctionInSet,
-    GreaterThan, Interval, IntoAffineConstraint, IntoAffineFunction, IntoFunction, LessThan,
-    LowerConstraint, ScalarAffineFunction, ScalarDynamicFunction, ScalarNonlinearFunction,
-    ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet, VectorAffineFunction,
+    AffineConstraintIr, AnyScalarFunction, AnyScalarFunctionData, Constraint, EqualTo, Function,
+    FunctionInSet, GreaterThan, Interval, IntoAffineConstraint, IntoAffineFunction, IntoFunction,
+    LessThan, LowerConstraint, ScalarAffineFunction, ScalarDynamicFunction,
+    ScalarNonlinearFunction, ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet,
+    VectorAffineFunction,
 };
 pub use oximo_expr::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
 
@@ -96,3 +111,5 @@ pub use psd::{
     IntoAffineMatrixEntry, IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint,
     PsdConstraintHandle, PsdConstraintId, PsdConstraintIr, SymmetricAffineFunction,
 };
+
+pub use model::SemanticConstraints;

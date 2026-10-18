@@ -25,6 +25,7 @@ num-traits.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 oximo-expr.workspace = true
 trybuild.workspace = true
 
@@ -42,4 +43,8 @@ required-features = ["benchmark-support"]
 
 [[bench]]
 name = "typed_ir"
+harness = false
+
+[[bench]]
+name = "semantic_structure"
 harness = false

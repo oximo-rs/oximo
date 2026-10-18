@@ -6,12 +6,12 @@ use oximo_core::prelude::*;
 fn scalar_relations_still_return_ids() {
     let m = Model::new("scalar_ids");
     variable!(m, x);
-    let named: ConstraintHandle = constraint!(m, capacity, x <= 10.0);
-    let anonymous: ConstraintHandle = constraint!(m, x >= 0.0);
-    let computed: ConstraintHandle = constraint!(m, name = format!("fixed_{}", 2), x == 2.0);
-    assert_eq!(m.constraint_handle("capacity"), Some(named));
-    assert_eq!(m.constraint_handle("_c0"), Some(anonymous));
-    assert_eq!(m.constraint_handle("fixed_2"), Some(computed));
+    let named: ConstraintHandle<_, _> = constraint!(m, capacity, x <= 10.0);
+    let anonymous: ConstraintHandle<_, _> = constraint!(m, x >= 0.0);
+    let computed: ConstraintHandle<_, _> = constraint!(m, name = format!("fixed_{}", 2), x == 2.0);
+    assert_eq!(m.constraint_handle("capacity"), Some(named.erase()));
+    assert_eq!(m.constraint_handle("_c0"), Some(anonymous.erase()));
+    assert_eq!(m.constraint_handle("fixed_2"), Some(computed.erase()));
 }
 
 #[test]
@@ -20,17 +20,17 @@ fn dense_family_returns_actual_ids_and_owns_its_entries() {
         let m = Model::new("dense_ids");
         variable!(m, x);
         constraint!(m, prior, x >= 0.0);
-        let cover: IndexedConstraint<usize> = constraint!(m, cover[_i in 3..6], x <= 10.0);
+        let cover: IndexedConstraint<usize, _, _> = constraint!(m, cover[_i in 3..6], x <= 10.0);
         assert_eq!(cover.len(), 3);
         assert!(!cover.is_empty());
         for (i, cid) in cover.iter() {
-            assert_eq!(m.constraint_handle(&format!("cover[{i}]")), Some(cid));
+            assert_eq!(m.constraint_handle(&format!("cover[{i}]")), Some(cid.erase()));
             assert_eq!(cover.get(i), Some(cid));
         }
         cover
     };
     assert_eq!(
-        cover.iter().map(|(key, handle)| (key, handle.id())).collect::<Vec<_>>(),
+        cover.iter().map(|(key, handle)| (key, handle.row_id())).collect::<Vec<_>>(),
         vec![(3, ConstraintId(1)), (4, ConstraintId(2)), (5, ConstraintId(3)),]
     );
     assert_eq!(cover.get(2), None);
@@ -46,13 +46,13 @@ fn dense_family_returns_actual_ids_and_owns_its_entries() {
 fn dense_tuple_lookup_uses_each_axis_offset() {
     let m = Model::new("grid_ids");
     variable!(m, x);
-    let grid: IndexedConstraint<(usize, usize)> =
+    let grid: IndexedConstraint<(usize, usize), _, _> =
         constraint!(m, grid[_i in 2..4, _j in 5..8], x <= 1.0);
     let expected = [(2, 5), (2, 6), (2, 7), (3, 5), (3, 6), (3, 7)];
     assert_eq!(grid.iter().map(|(key, _)| key).collect::<Vec<_>>(), expected);
     for (key, cid) in grid.iter() {
         assert_eq!(grid.get(key), Some(cid));
-        assert_eq!(m.constraint_handle(&format!("grid[{},{}]", key.0, key.1)), Some(cid));
+        assert_eq!(m.constraint_handle(&format!("grid[{},{}]", key.0, key.1)), Some(cid.erase()));
     }
     assert_eq!(grid.get((2, 8)), None);
     assert_eq!(grid.get((1, 5)), None);
@@ -64,17 +64,17 @@ fn sparse_and_filtered_domains_preserve_order() {
     let m = Model::new("sparse_ids");
     variable!(m, x);
     let indices = Set::from_ints([7, 3, 20]);
-    let sparse: IndexedConstraint<usize> = constraint!(m, sparse[_i in indices], x <= 5.0);
+    let sparse: IndexedConstraint<usize, _, _> = constraint!(m, sparse[_i in indices], x <= 5.0);
     assert_eq!(sparse.iter().map(|(i, _)| i).collect::<Vec<_>>(), [7, 3, 20]);
     for (i, cid) in sparse.iter() {
         assert_eq!(sparse.get(i), Some(cid));
-        assert_eq!(m.constraint_handle(&format!("sparse[{i}]")), Some(cid));
+        assert_eq!(m.constraint_handle(&format!("sparse[{i}]")), Some(cid.erase()));
     }
     assert_eq!(sparse.get(0), None);
     let filtered = constraint!(m, filtered[i in 0..6 if i % 2 == 0], x >= 0.0);
     assert_eq!(filtered.iter().map(|(i, _)| i).collect::<Vec<_>>(), [0, 2, 4]);
     assert_eq!(filtered.get(1), None);
-    assert_eq!(filtered.get(4), m.constraint_handle("filtered[4]"));
+    assert_eq!(filtered.get(4).map(ConstraintHandle::erase), m.constraint_handle("filtered[4]"));
 }
 
 #[test]
@@ -82,17 +82,20 @@ fn string_and_filtered_tuple_domains_support_lookup() {
     let m = Model::new("string_ids");
     variable!(m, x);
     let plants = Set::strings(["west", "skip", "east"]);
-    let supply: IndexedConstraint<String> =
+    let supply: IndexedConstraint<String, _, _> =
         constraint!(m, supply[p in plants if p != "skip"], x <= 5.0);
     assert_eq!(supply.iter().map(|(p, _)| p).collect::<Vec<_>>(), ["west", "east"]);
     assert_eq!(supply.get("skip"), None);
-    assert_eq!(supply.get("east"), m.constraint_handle("supply[east]"));
-    let grid: IndexedConstraint<(String, usize)> =
+    assert_eq!(
+        supply.get("east").map(ConstraintHandle::erase),
+        m.constraint_handle("supply[east]")
+    );
+    let grid: IndexedConstraint<(String, usize), _, _> =
         constraint!(m, grid[p in plants, i in 1..3 if p != "skip" && i == 2], x >= 0.0);
     assert_eq!(grid.len(), 2);
     for ((p, i), cid) in grid.iter() {
         assert_eq!(grid.get((p.as_str(), i)), Some(cid));
-        assert_eq!(m.constraint_handle(&format!("grid[{p},{i}]")), Some(cid));
+        assert_eq!(m.constraint_handle(&format!("grid[{p},{i}]")), Some(cid.erase()));
     }
     assert_eq!(grid.get(("west", 1)), None);
 }
@@ -192,10 +195,10 @@ fn range_family_can_mix_interval_and_split_entries() {
 fn index_used_only_in_format_string_still_binds() {
     let m = Model::new("fmt_ids");
     variable!(m, x);
-    let f: IndexedConstraint<usize> =
+    let f: IndexedConstraint<usize, _, _> =
         constraint!(m, f[i in 0..2], x <= format!("{i}").parse::<f64>().unwrap());
     assert_eq!(f.len(), 2);
-    let g: IndexedConstraint<usize> =
+    let g: IndexedConstraint<usize, _, _> =
         constraint!(m, g[i in 0..4 if !format!("{i}").is_empty()], x <= 1.0);
     assert_eq!(g.len(), 4);
 }

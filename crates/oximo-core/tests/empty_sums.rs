@@ -97,7 +97,7 @@ fn model_macros_supply_context_including_qualified_sums() {
     objective!(m, Min, 2.0 + oximo_core::sum!(sum!(x for _j in 0..0) for _i in 0..2));
     let arena = m.arena();
     let constraints = m.constraints();
-    for id in [named, anonymous, computed] {
+    for id in [named.erase(), anonymous.erase(), computed.erase()] {
         let terms = extract_linear(&arena, constraints.algebraic()[id.index()].lhs).unwrap();
         assert!(terms.coeffs.is_empty());
     }
@@ -130,9 +130,9 @@ fn indexed_sums_work_with_serial_and_parallel_arena_forks() {
                     panic!("expected an interval row");
                 };
                 for id in [
-                    implicit.get(i).unwrap(),
-                    explicit.get(i).unwrap(),
-                    aliased.get(i).unwrap(),
+                    implicit.get(i).unwrap().erase(),
+                    explicit.get(i).unwrap().erase(),
+                    aliased.get(i).unwrap().erase(),
                     range,
                 ] {
                     let terms =

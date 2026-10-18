@@ -47,7 +47,7 @@ fn display_expr_and_constraint_adapters() {
     variable!(m, y);
     constraint!(m, c, x * y - y <= 3.0);
     let c = m.constraint_id("c").unwrap();
-    assert_eq!(m.display_constraint(c).to_string(), "c: -y + x * y <= 3");
+    assert_eq!(m.display_row(c).to_string(), "c: -y + x * y <= 3");
     assert_eq!(m.display_expr(2.0 * x - y).to_string(), "2 x - y");
 }
 

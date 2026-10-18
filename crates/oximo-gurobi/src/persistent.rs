@@ -137,7 +137,7 @@ impl GurobiPersistent {
         }
 
         let st = self.state.as_mut().expect("state present before solve");
-        run_and_collect(&mut st.built, kind)
+        run_and_collect(&mut st.built, kind, model)
     }
 
     fn solve_resident_with_callback<F>(
@@ -173,7 +173,7 @@ impl GurobiPersistent {
             self.updates += 1;
         }
         let st = self.state.as_mut().expect("state present before solve");
-        crate::translate::run_and_collect_with_callback(&mut st.built, kind, callback, mask)
+        crate::translate::run_and_collect_with_callback(&mut st.built, kind, model, callback, mask)
     }
 
     /// Solve the resident model while receiving Gurobi callback events.
@@ -233,6 +233,10 @@ impl Solver for GurobiPersistent {
 
     fn supports(&self, kind: ModelKind) -> bool {
         crate::supported(kind)
+    }
+
+    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
+        oximo_solver::Capability::Native
     }
 
     fn supports_sos(&self, _sos_type: SosType) -> bool {

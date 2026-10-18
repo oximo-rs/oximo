@@ -47,7 +47,7 @@ fn indexed_constraint_handles_query_known_duals() {
     constraint!(m, prior, x[1] <= 10.0);
     let costs = [2.0, 1.0, 3.0, 1.0, 5.0];
     let demand = [1.0, 0.0, 2.0, 0.0, 3.0];
-    let cover: IndexedConstraint<usize> =
+    let cover: IndexedConstraint<usize, _, _> =
         constraint!(m, cover[i in 0..5 if i % 2 == 0], x[i] >= demand[i]);
     objective!(m, Min, sum!(costs[i] * x[i] for i in 0..5));
     let result = Highs.solve(&m, &HighsOptions::default()).unwrap();

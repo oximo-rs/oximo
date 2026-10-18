@@ -25,6 +25,48 @@ pub trait Solver {
 
     fn supports(&self, kind: ModelKind) -> bool;
 
+    /// Query an individual function/set interface, independently of model combinations.
+    fn constraint_support(
+        &self,
+        signature: crate::ConstraintSignature,
+        _opts: &Self::Options,
+    ) -> crate::Capability {
+        crate::capability::query_constraint(self, signature)
+    }
+
+    fn objective_support(
+        &self,
+        signature: oximo_core::SemanticType,
+        sense: oximo_core::ObjectiveSense,
+        _opts: &Self::Options,
+    ) -> crate::Capability {
+        crate::capability::query_objective(self, signature, sense)
+    }
+
+    /// Query the adapter's support for an individual variable domain.
+    /// Configuration-dependent restrictions are checked by [`Self::validate_model`].
+    fn domain_support(&self, domain: oximo_core::Domain) -> crate::Capability {
+        crate::capability::query_domain(self, domain)
+    }
+
+    /// Validate the complete combination, including options and adapter data restrictions.
+    fn validate_model(&self, model: &Model, opts: &Self::Options) -> crate::ModelValidation {
+        crate::capability::validate(self, model, opts)
+    }
+
+    /// Collect diagnostics for backend-specific model data and option restrictions.
+    ///
+    /// Called by the default [`Self::validate_model`] after the shared compatibility
+    /// checks. Override to report additional restrictions; the default returns no
+    /// diagnostics.
+    fn validate_model_extra(
+        &self,
+        _model: &Model,
+        _opts: &Self::Options,
+    ) -> Vec<crate::CapabilityDiagnostic> {
+        Vec::new()
+    }
+
     /// Whether this backend can consume native SOS constraints of `sos_type`.
     fn supports_sos(&self, _sos_type: SosType) -> bool {
         false
@@ -68,6 +110,8 @@ pub trait Solver {
     /// Solves the given `Model` using this solver.
     /// Results and all solution points must carry the model identity and the
     /// parameter snapshot used to translate or update the native problem.
+    /// Use [`crate::reconstruct::finalize_result`] to normalize the result and suppress
+    /// semantic dual fallback for alternative lowerings without mappings.
     ///
     /// # Errors
     ///

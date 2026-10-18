@@ -16,6 +16,7 @@ rustc-hash.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+trybuild.workspace = true
 criterion.workspace = true
 
 [[bench]]

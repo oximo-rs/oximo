@@ -92,7 +92,7 @@ pub fn write_nl_with<W: Write>(
     if model.has_active_psd_constraints() {
         return Err(IoError::Conic);
     }
-    if model.num_soc_constraints() > 0 {
+    if model.has_active_soc_constraints() {
         return Err(IoError::Conic);
     }
     if model.has_active_sos_constraints() {
