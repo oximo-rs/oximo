@@ -1,15 +1,17 @@
 //! Reversible coordinate changes and the common result contract.
 //!
 //! Adapters must establish native solution quality before supplying points,
-//! duals or global bounds.
+//! duals or global bounds. [`SourceProjection`] composes these helpers for
+//! callers that solve an independently transformed model and need results in
+//! the original model's coordinates.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
 
-use oximo_core::VarId;
+use oximo_core::{Model, ModelId, VarId};
 use rustc_hash::FxHashMap;
 
-use crate::{DualStatus, PrimalStatus, SolverResult, TerminationStatus};
+use crate::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationStatus};
 
 /// Finalize a backend result in the source model's coordinates.
 /// Applies semantic dual safeguards and the common result contract in one pass.
@@ -207,4 +209,197 @@ fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverRes
         result.gap = None;
     }
     result
+}
+
+/// Coordinate counts captured from a source model before a reformulation.
+///
+/// Entities appended by a reformulation have IDs at or above these bounds.
+/// For an in-place reformulation, capture this before modifying the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceCoordinates {
+    pub variables: usize,
+    /// Number of algebraic rows (`ConstraintId` indexes).
+    pub algebraic_constraints: usize,
+    pub soc_constraints: usize,
+    pub psd_constraints: usize,
+}
+
+impl SourceCoordinates {
+    /// Capture the source model's current coordinate counts.
+    #[must_use]
+    pub fn capture(model: &Model) -> Self {
+        Self {
+            variables: model.num_variables(),
+            algebraic_constraints: model.constraints().algebraic().len(),
+            soc_constraints: model.num_soc_constraints(),
+            psd_constraints: model.num_psd_constraints(),
+        }
+    }
+}
+
+/// Errors from projecting a transformed-model result back to its source.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProjectionError {
+    #[error("source {kind} coordinates ({count}) exceed the source model's {available}")]
+    CoordinatesExceedSource { kind: &'static str, count: usize, available: usize },
+    #[error("result belongs to model {actual:?}, expected transformed model {expected:?}")]
+    ForeignResult { expected: ModelId, actual: ModelId },
+}
+
+type SourceObjective<'a> = Box<dyn Fn(&SolutionPoint) -> Option<f64> + 'a>;
+
+/// Projects a result produced on a transformed model back into the source
+/// model's coordinates.
+///
+/// The projection:
+/// - drops generated variables, rows, SOC/PSD cones, and reduced costs;
+/// - rebinds the result and its points to the source model identity;
+/// - preserves the solve-time parameter snapshot;
+/// - optionally restores the objective convention and re-evaluates the source
+///   objective on each projected point;
+/// - applies [`finalize_result`] so the usual result contract holds.
+///
+/// Generated multipliers are dropped rather than reinterpreted in source
+/// coordinates. Semantic duals remain subject to the usual explicit-mapping
+/// rules; an unavailable value stays unavailable.
+pub struct SourceProjection<'a> {
+    source: &'a Model,
+    coordinates: SourceCoordinates,
+    objective: ObjectiveTransform,
+    reevaluate: Option<SourceObjective<'a>>,
+    transformed: Option<&'a Model>,
+}
+
+impl<'a> SourceProjection<'a> {
+    /// Capture the source counts now.
+    ///
+    /// Use [`Self::with_coordinates`] when an in-place reformulation has already
+    /// appended generated entities.
+    #[must_use]
+    pub fn capture(source: &'a Model) -> Self {
+        Self::with_coordinates(source, SourceCoordinates::capture(source))
+    }
+
+    /// Use counts captured before the model was transformed.
+    #[must_use]
+    pub fn with_coordinates(source: &'a Model, coordinates: SourceCoordinates) -> Self {
+        Self {
+            source,
+            coordinates,
+            objective: ObjectiveTransform { sign: 1.0, offset: 0.0 },
+            reevaluate: None,
+            transformed: None,
+        }
+    }
+
+    /// Require the result to belong to this transformed model.
+    #[must_use]
+    pub fn from_transformed(mut self, transformed: &'a Model) -> Self {
+        self.transformed = Some(transformed);
+        self
+    }
+
+    /// Restore the objective convention used by the source declaration.
+    ///
+    /// This transforms solution objectives and the best bound. It does not
+    /// change duals, which adapters must already have mapped into source
+    /// coordinates and sign.
+    #[must_use]
+    pub fn with_objective(mut self, transform: ObjectiveTransform) -> Self {
+        self.objective = transform;
+        self
+    }
+
+    /// Replace each projected objective with the source expression evaluated at
+    /// the projected point.
+    ///
+    /// The callback receives source coordinates and the solve-time parameter
+    /// snapshot. Returning `None` reports the value as unavailable instead of
+    /// retaining a native epigraph value. When supplied, this takes precedence
+    /// over [`Self::with_objective`] for solution objectives.
+    #[must_use]
+    pub fn reevaluate_objective<F>(mut self, evaluate: F) -> Self
+    where
+        F: Fn(&SolutionPoint) -> Option<f64> + 'a,
+    {
+        self.reevaluate = Some(Box::new(evaluate));
+        self
+    }
+
+    /// Project the result into the source model's coordinates.
+    ///
+    /// # Errors
+    /// Returns [`ProjectionError`] when the captured coordinates exceed the
+    /// source model or when [`Self::from_transformed`] was set and the result
+    /// belongs to another model.
+    pub fn project(self, result: SolverResult) -> Result<SolverResult, ProjectionError> {
+        let Self { source, coordinates, objective, reevaluate, transformed } = self;
+        check_source_coordinates(source, coordinates)?;
+        if let Some(transformed) = transformed
+            && result.model_id != transformed.id()
+        {
+            return Err(ProjectionError::ForeignResult {
+                expected: transformed.id(),
+                actual: result.model_id,
+            });
+        }
+
+        let mut result = result;
+
+        // Drop generated entities before rebinding.
+        for point in &mut result.solutions {
+            point.primal.retain(|id, _| id.index() < coordinates.variables);
+        }
+        result.dual.retain(|id, _| id.index() < coordinates.algebraic_constraints);
+        result.soc_dual.retain(|id, _| id.index() < coordinates.soc_constraints);
+        result.psd_dual.retain(|id, _| id.index() < coordinates.psd_constraints);
+        result.reduced_costs.retain(|id, _| id.index() < coordinates.variables);
+
+        // Restore objective units on the native certificate.
+        for point in &mut result.solutions {
+            point.objective = point.objective.and_then(|value| objective.restore(value));
+        }
+        result.best_bound = result.best_bound.and_then(|value| objective.restore(value));
+
+        // Rebind provenance before evaluating source expressions.
+        result.model_id = source.id();
+        for point in &mut result.solutions {
+            point.model_id = source.id();
+            if let Some(evaluate) = &reevaluate {
+                point.objective = evaluate(point);
+            }
+        }
+
+        Ok(finalize_result(result, source, coordinates.variables))
+    }
+}
+
+impl std::fmt::Debug for SourceProjection<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceProjection")
+            .field("source", &self.source.id())
+            .field("coordinates", &self.coordinates)
+            .field("objective", &self.objective)
+            .field("reevaluate", &self.reevaluate.is_some())
+            .field("transformed", &self.transformed.map(Model::id))
+            .finish()
+    }
+}
+
+fn check_source_coordinates(
+    model: &Model,
+    coordinates: SourceCoordinates,
+) -> Result<(), ProjectionError> {
+    for (kind, count, available) in [
+        ("variable", coordinates.variables, model.num_variables()),
+        ("algebraic row", coordinates.algebraic_constraints, model.constraints().algebraic().len()),
+        ("SOC constraint", coordinates.soc_constraints, model.num_soc_constraints()),
+        ("PSD constraint", coordinates.psd_constraints, model.num_psd_constraints()),
+    ] {
+        if count > available {
+            return Err(ProjectionError::CoordinatesExceedSource { kind, count, available });
+        }
+    }
+    Ok(())
 }
