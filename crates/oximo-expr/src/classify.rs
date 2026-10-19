@@ -342,7 +342,7 @@ mod tests {
         let square = arena.push(ExprNode::Mul(smallvec![x, x]));
         let root = arena.push(ExprNode::Mul(smallvec![param, square]));
         assert_eq!(classify(&arena, root), ExprClass::Quadratic);
-        arena.set_param_value(p, 3.0);
+        arena.set_param_value(p, 3.0).unwrap();
         assert_eq!(classify(&arena, root), ExprClass::Quadratic);
     }
 

@@ -181,12 +181,12 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// the next extraction/evaluation, which read the value straight from the
     /// arena.
     ///
-    /// # Panics
-    /// Panics if this handle is not a bare parameter (see [`Self::param_id`]),
-    /// or a reformulation has locked its value.
-    pub fn set_param_value(self, value: f64) {
-        let id = self.param_id().expect("set_param_value expects a bare parameter handle");
-        self.arena.borrow_mut().set_param_value(id, value);
+    /// # Errors
+    /// Rejects composed handles, non-finite values, unknown or locked parameters,
+    /// and assignments that invert a dependent variable's bounds.
+    pub fn set_param_value(self, value: f64) -> Result<(), crate::ModelError> {
+        let id = self.param_id().ok_or(crate::ModelError::InvalidHandle("parameter"))?;
+        self.arena.borrow_mut().set_param_value(id, value)
     }
 
     pub fn pow<E: Degree>(self, exponent: Expr<'a, E>) -> Expr<'a> {
@@ -435,16 +435,15 @@ mod tests {
         let node = arena.borrow_mut().param(pid);
         let p = Expr::new(node, &arena);
 
-        p.set_param_value(0.2);
+        p.set_param_value(0.2).unwrap();
         assert!((arena.borrow().param_value(pid) - 0.2).abs() < f64::EPSILON);
     }
 
     #[test]
-    #[should_panic(expected = "bare parameter handle")]
     fn set_param_value_panics_on_non_param() {
         let arena = ExprArenaCell::new(ExprArena::new());
         let c = Expr::constant(&arena, 1.0);
-        c.set_param_value(3.0);
+        assert!(c.set_param_value(3.0).is_err());
     }
 
     #[test]

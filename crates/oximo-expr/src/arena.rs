@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use parking_lot::{Mutex, MutexGuard};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use thiserror::Error;
 
@@ -270,7 +270,11 @@ pub enum ExprNode {
 pub struct ExprArena {
     nodes: Arc<Vec<ExprNode>>,
     param_values: Arc<Vec<f64>>,
+    parameter_revision: u64,
     locked_parameters: Arc<FxHashSet<ParamId>>,
+    bound_checks: Arc<FxHashMap<VarId, crate::model_error::BoundCheck>>,
+    bound_dependencies: Arc<FxHashMap<ParamId, FxHashSet<VarId>>>,
+    lock_sources: Arc<FxHashMap<ParamId, String>>,
     classifications: Mutex<Option<Box<ExprClassCache>>>,
 }
 
@@ -292,7 +296,11 @@ impl Clone for ExprArena {
         Self {
             nodes: Arc::clone(&self.nodes),
             param_values: Arc::clone(&self.param_values),
+            parameter_revision: self.parameter_revision,
             locked_parameters: Arc::clone(&self.locked_parameters),
+            bound_checks: Arc::clone(&self.bound_checks),
+            bound_dependencies: Arc::clone(&self.bound_dependencies),
+            lock_sources: Arc::clone(&self.lock_sources),
             classifications: Mutex::default(),
         }
     }
@@ -317,7 +325,11 @@ impl ExprArena {
         Self {
             nodes: Arc::new(nodes),
             param_values: Arc::new(self.param_values.as_ref().clone()),
+            parameter_revision: self.parameter_revision,
             locked_parameters: Arc::clone(&self.locked_parameters),
+            bound_checks: Arc::clone(&self.bound_checks),
+            bound_dependencies: Arc::clone(&self.bound_dependencies),
+            lock_sources: Arc::clone(&self.lock_sources),
             classifications: Mutex::default(),
         }
     }
@@ -362,6 +374,8 @@ impl ExprArena {
     ) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
         let parameters = checked_id_range(self.param_values.len(), values.len(), "parameter arena");
         let expressions = checked_id_range(self.nodes.len(), values.len(), "expression arena");
+        let values: Vec<_> = values.collect();
+        assert!(values.iter().all(|v| v.is_finite()), "parameter initial values must be finite");
         Arc::make_mut(&mut self.param_values).extend(values);
         Arc::make_mut(&mut self.nodes).extend(
             parameters
@@ -432,6 +446,7 @@ impl ExprArena {
     ///
     /// Panics if the number of parameters exceeds `u32::MAX`.
     pub fn new_param(&mut self, value: f64) -> ParamId {
+        assert!(value.is_finite(), "parameter initial value must be finite: {value}");
         let id = ParamId(u32::try_from(self.param_values.len()).expect("parameter arena overflow"));
         Arc::make_mut(&mut self.param_values).push(value);
         id
@@ -440,6 +455,11 @@ impl ExprArena {
     #[inline]
     pub fn num_params(&self) -> usize {
         self.param_values.len()
+    }
+
+    /// Revision for caches whose numerical assumptions depend on parameter values.
+    pub fn parameter_revision(&self) -> u64 {
+        self.parameter_revision
     }
 
     /// Capture parameter values without retaining the expression arena.
@@ -466,20 +486,148 @@ impl ExprArena {
     /// Re-bind parameter `p` to `value`. Takes effect on the next extraction or
     /// evaluation.
     ///
-    /// # Panics
-    ///
-    /// Panics if `p` was not allocated by [`Self::new_param`] on this arena,
-    /// or a reformulation has locked its value.
+    /// # Errors
+    /// Rejects unknown, locked, non-finite, or bound-infeasible assignments.
     #[inline]
-    pub fn set_param_value(&mut self, p: ParamId, value: f64) {
-        assert!(
-            !self.locked_parameters.contains(&p),
-            "cannot change a parameter embedded in a reformulation; change the source model before reformulating"
-        );
-        if self.param_values[p.index()].to_bits() == value.to_bits() {
-            return;
+    pub fn set_param_value(&mut self, p: ParamId, value: f64) -> Result<(), crate::ModelError> {
+        self.validate_single_param(p, value)?;
+
+        // Fast path for the common single write.
+		// a lone update cannot be duplicated, so it commits without
+		// the batch maps that `validate_param_values` builds.
+        if self.bound_dependencies.get(&p).is_some_and(|variables| !variables.is_empty()) {
+            return self.set_param_values(&[(p, value)]);
         }
-        Arc::make_mut(&mut self.param_values)[p.index()] = value;
+        self.__commit_param_values(&[(p, value)]);
+        Ok(())
+    }
+
+    /// Validate one update's parameter identity, value, and lock state.
+    #[inline]
+    fn validate_single_param(&self, p: ParamId, value: f64) -> Result<(), crate::ModelError> {
+        use crate::ModelError;
+        if self.try_param_value(p).is_none() {
+            return Err(ModelError::UnknownParam(p));
+        }
+        if !value.is_finite() {
+            return Err(ModelError::ParamDomain { param: p, value });
+        }
+        if self.is_param_locked(p) {
+            return Err(ModelError::FrozenByReformulation {
+                param: p,
+                source_name: self
+                    .lock_sources
+                    .get(&p)
+                    .cloned()
+                    .unwrap_or_else(|| "generated rows".into()),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate a complete parameter batch, including dependent bound ordering,
+    /// without applying it.
+    ///
+    /// # Errors
+    /// Rejects the entire batch if a parameter is unknown, duplicated,
+    /// non-finite, or frozen by a reformulation, or if a dependent variable
+    /// bound is infeasible.
+    pub fn validate_param_values(
+        &self,
+        updates: &[(ParamId, f64)],
+    ) -> Result<(), crate::ModelError> {
+        use crate::ModelError;
+        let mut values = FxHashMap::default();
+        for &(p, value) in updates {
+            self.validate_single_param(p, value)?;
+            if values.insert(p, value).is_some() {
+                return Err(ModelError::DuplicateParam(p));
+            }
+        }
+        let variables: FxHashSet<_> = updates
+            .iter()
+            .flat_map(|(p, _)| self.bound_dependencies.get(p).into_iter().flatten().copied())
+            .collect();
+        for variable in variables {
+            let check = &self.bound_checks[&variable];
+            let resolve = |b| match b {
+                crate::Bound::Constant(v) => v,
+                crate::Bound::Parameter(p) => {
+                    values.get(&p).copied().unwrap_or_else(|| self.param_value(p))
+                }
+            };
+            let (lower, upper) = (resolve(check.lower), resolve(check.upper));
+            if lower.is_nan()
+                || upper.is_nan()
+                || lower > upper
+                || lower == f64::INFINITY
+                || upper == f64::NEG_INFINITY
+            {
+                return Err(ModelError::BoundsInfeasible {
+                    variable: check.variable,
+                    lower,
+                    upper,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and atomically accept a complete assignment.
+	///
+    /// # Errors
+    /// Rejects the entire batch if any parameter or dependent bound is invalid.
+    pub fn set_param_values(
+        &mut self,
+        updates: &[(ParamId, f64)],
+    ) -> Result<(), crate::ModelError> {
+        self.validate_param_values(updates)?;
+        self.__commit_param_values(updates);
+        Ok(())
+    }
+
+    /// Commit a previously validated batch without a second validation pass.
+    /// Callers must have successfully called `validate_param_values` on this arena
+    /// with this exact batch, with no intervening parameter or bound changes.
+	///
+    /// This is intended for transactional consumers with independently owned arenas.
+    #[doc(hidden)]
+    pub fn __commit_param_values(&mut self, updates: &[(ParamId, f64)]) {
+        if updates.iter().any(|&(p, v)| self.param_value(p).to_bits() != v.to_bits()) {
+            self.parameter_revision = self.parameter_revision.wrapping_add(1);
+            let accepted = Arc::make_mut(&mut self.param_values);
+            for &(p, v) in updates {
+                debug_assert!(v.is_finite());
+                accepted[p.index()] = v;
+            }
+        }
+    }
+
+    /// Register or replace a parameter-bound validation record.
+    #[doc(hidden)]
+    pub fn __set_bound_check(&mut self, variable: VarId, lower: crate::Bound, upper: crate::Bound) {
+        let checks = Arc::make_mut(&mut self.bound_checks);
+        let dependencies = Arc::make_mut(&mut self.bound_dependencies);
+        if let Some(previous) = checks.remove(&variable) {
+            for p in [previous.lower, previous.upper].iter().filter_map(|b| b.parameter()) {
+                if let Some(vars) = dependencies.get_mut(&p) {
+                    vars.remove(&variable);
+                }
+            }
+        }
+        if lower.parameter().is_some() || upper.parameter().is_some() {
+            checks.insert(variable, crate::model_error::BoundCheck { variable, lower, upper });
+            for p in [lower, upper].iter().filter_map(|b| b.parameter()) {
+                dependencies.entry(p).or_default().insert(variable);
+            }
+        }
+    }
+
+    /// Lock a bound parameter together with the source declaration for diagnostics.
+    #[doc(hidden)]
+    pub fn __lock_bound_parameter(&mut self, parameter: ParamId, source: String) {
+        Arc::make_mut(&mut self.locked_parameters).insert(parameter);
+        Arc::make_mut(&mut self.lock_sources).insert(parameter, source);
     }
 
     /// Whether a reformulation has fixed this parameter's value.
@@ -974,8 +1122,33 @@ impl<'a> ExprArenaWriteGuard<'a> {
         self.guard.new_param(value)
     }
 
-    pub fn set_param_value(&mut self, param: ParamId, value: f64) {
-        self.guard.set_param_value(param, value);
+    /// Rebind a parameter through the arena's checked write boundary.
+	///
+    /// # Errors
+    /// Returns the same validation errors as `ExprArena::set_param_value`.
+    pub fn set_param_value(&mut self, param: ParamId, value: f64) -> Result<(), crate::ModelError> {
+        self.guard.set_param_value(param, value)
+    }
+
+    /// Atomically rebind several parameters through the checked arena boundary.
+	///
+    /// # Errors
+    /// Rejects the entire batch if any parameter or bound assignment is invalid.
+    pub fn set_param_values(
+        &mut self,
+        updates: &[(ParamId, f64)],
+    ) -> Result<(), crate::ModelError> {
+        self.guard.set_param_values(updates)
+    }
+
+    #[doc(hidden)]
+    pub fn __set_bound_check(&mut self, variable: VarId, lower: crate::Bound, upper: crate::Bound) {
+        self.guard.__set_bound_check(variable, lower, upper);
+    }
+
+    #[doc(hidden)]
+    pub fn __lock_bound_parameter(&mut self, parameter: ParamId, source: String) {
+        self.guard.__lock_bound_parameter(parameter, source);
     }
 
     #[doc(hidden)]
@@ -1190,7 +1363,7 @@ mod tests {
         assert_eq!(source.num_params(), 1);
         assert_eq!(source.len(), 1);
         assert!(snapshot.same_bits(&source.parameter_snapshot()));
-        assert!(catch_unwind(AssertUnwindSafe(|| fork.set_param_value(p, 8.0))).is_err());
+        assert!(fork.set_param_value(p, 8.0).is_err());
 
         let before = fork.len();
         let invalid = usize::try_from(u32::MAX).unwrap()..usize::try_from(u32::MAX).unwrap() + 2;
@@ -1207,17 +1380,74 @@ mod tests {
         let unrelated = source.new_param(2.0);
         let mut transformed = source.clone();
         transformed.__lock_parameters([locked]);
-        source.set_param_value(locked, 100.0);
+        source.set_param_value(locked, 100.0).unwrap();
         for mut copy in [transformed.clone(), transformed.__clone_with_additional_capacity(4)] {
-            assert!(
-                catch_unwind(AssertUnwindSafe(|| copy.set_param_value(locked, 100.0))).is_err()
-            );
+            assert!(copy.set_param_value(locked, 100.0).is_err());
             assert_eq!(copy.param_value(locked), 1.0);
-            copy.set_param_value(unrelated, 3.0);
+            copy.set_param_value(unrelated, 3.0).unwrap();
             assert_eq!(copy.param_value(unrelated), 3.0);
         }
         assert_eq!(source.param_value(locked), 100.0);
         assert_eq!(transformed.param_value(unrelated), 2.0);
+    }
+
+    #[test]
+    fn single_write_matches_the_batch_path_for_every_outcome() {
+        let mut arena = ExprArena::new();
+        let known = arena.new_param(1.0);
+        let other = arena.new_param(2.0);
+        let locked = arena.new_param(3.0);
+        let bound = arena.new_param(0.0);
+        let dependent = VarId(0);
+        arena.__set_bound_check(
+            dependent,
+            crate::Bound::Parameter(bound),
+            crate::Bound::Constant(10.0),
+        );
+        arena.__lock_bound_parameter(locked, "generated rows".into());
+
+        let cases = [
+            ("unknown", ParamId(999), 1.0),
+            ("non-finite", known, f64::INFINITY),
+            ("frozen", locked, 4.0),
+            ("bound-infeasible", bound, 20.0),
+            ("accepted", other, 7.0),
+            ("accepted-dependent", bound, 5.0),
+        ];
+
+        for (label, p, value) in cases {
+            let mut batch = arena.clone();
+            let mut single = arena.clone();
+
+            let expected = batch.set_param_values(&[(p, value)]);
+            let actual = single.set_param_value(p, value);
+
+            assert_eq!(actual, expected, "outcome diverged for {label}");
+            assert_eq!(
+                single.parameter_revision(),
+                batch.parameter_revision(),
+                "revision diverged for {label}"
+            );
+            for probe in [known, other, locked, bound] {
+                assert_eq!(
+                    single.param_value(probe).to_bits(),
+                    batch.param_value(probe).to_bits(),
+                    "value of {probe:?} diverged for {label}"
+                );
+            }
+        }
+
+        // NaN payloads never compare equal.
+        let mut batch = arena.clone();
+        let mut single = arena.clone();
+        assert!(matches!(
+            batch.set_param_values(&[(known, f64::NAN)]),
+            Err(crate::ModelError::ParamDomain { value, .. }) if value.is_nan()
+        ));
+        assert!(matches!(
+            single.set_param_value(known, f64::NAN),
+            Err(crate::ModelError::ParamDomain { value, .. }) if value.is_nan()
+        ));
     }
 
     #[test]
