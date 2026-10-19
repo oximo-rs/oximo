@@ -243,7 +243,7 @@ impl SourceCoordinates {
 pub enum ProjectionError {
     #[error("source {kind} coordinates ({count}) exceed the source model's {available}")]
     CoordinatesExceedSource { kind: &'static str, count: usize, available: usize },
-    #[error("result belongs to model {actual:?}, expected transformed model {expected:?}")]
+    #[error("result belongs to model {actual:?}, expected {expected:?}")]
     ForeignResult { expected: ModelId, actual: ModelId },
 }
 
@@ -331,18 +331,15 @@ impl<'a> SourceProjection<'a> {
     ///
     /// # Errors
     /// Returns [`ProjectionError`] when the captured coordinates exceed the
-    /// source model or when [`Self::from_transformed`] was set and the result
-    /// belongs to another model.
+    /// source model, or when the result belongs to a model other than the
+    /// expected one: the transformed model if [`Self::from_transformed`] was
+    /// set, otherwise the source model.
     pub fn project(self, result: SolverResult) -> Result<SolverResult, ProjectionError> {
         let Self { source, coordinates, objective, reevaluate, transformed } = self;
         check_source_coordinates(source, coordinates)?;
-        if let Some(transformed) = transformed
-            && result.model_id != transformed.id()
-        {
-            return Err(ProjectionError::ForeignResult {
-                expected: transformed.id(),
-                actual: result.model_id,
-            });
+        let expected = transformed.map_or_else(|| source.id(), Model::id);
+        if result.model_id != expected {
+            return Err(ProjectionError::ForeignResult { expected, actual: result.model_id });
         }
 
         let mut result = result;

@@ -121,6 +121,22 @@ fn projection_rejects_a_result_from_another_model() {
 }
 
 #[test]
+fn projection_rejects_a_foreign_result_without_a_transformed_model() {
+    let source = Model::new("in-place source");
+    let foreign = Model::new("foreign model");
+
+    let error = SourceProjection::capture(&source)
+        .project(SolverResult::for_model(&foreign))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProjectionError::ForeignResult { expected, actual }
+            if expected == source.id() && actual == foreign.id()
+    ));
+}
+
+#[test]
 fn in_place_reformulation_projects_without_cloning() {
     let source = Model::new("in place projection");
     variable!(source, 0.0 <= x <= 1.0);
