@@ -493,8 +493,8 @@ impl ExprArena {
         self.validate_single_param(p, value)?;
 
         // Fast path for the common single write.
-		// a lone update cannot be duplicated, so it commits without
-		// the batch maps that `validate_param_values` builds.
+        // a lone update cannot be duplicated, so it commits without
+        // the batch maps that `validate_param_values` builds.
         if self.bound_dependencies.get(&p).is_some_and(|variables| !variables.is_empty()) {
             return self.set_param_values(&[(p, value)]);
         }
@@ -574,7 +574,7 @@ impl ExprArena {
     }
 
     /// Validate and atomically accept a complete assignment.
-	///
+    ///
     /// # Errors
     /// Rejects the entire batch if any parameter or dependent bound is invalid.
     pub fn set_param_values(
@@ -589,7 +589,7 @@ impl ExprArena {
     /// Commit a previously validated batch without a second validation pass.
     /// Callers must have successfully called `validate_param_values` on this arena
     /// with this exact batch, with no intervening parameter or bound changes.
-	///
+    ///
     /// This is intended for transactional consumers with independently owned arenas.
     #[doc(hidden)]
     pub fn __commit_param_values(&mut self, updates: &[(ParamId, f64)]) {
@@ -1123,7 +1123,7 @@ impl<'a> ExprArenaWriteGuard<'a> {
     }
 
     /// Rebind a parameter through the arena's checked write boundary.
-	///
+    ///
     /// # Errors
     /// Returns the same validation errors as `ExprArena::set_param_value`.
     pub fn set_param_value(&mut self, param: ParamId, value: f64) -> Result<(), crate::ModelError> {
@@ -1131,7 +1131,7 @@ impl<'a> ExprArenaWriteGuard<'a> {
     }
 
     /// Atomically rebind several parameters through the checked arena boundary.
-	///
+    ///
     /// # Errors
     /// Rejects the entire batch if any parameter or bound assignment is invalid.
     pub fn set_param_values(

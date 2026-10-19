@@ -235,7 +235,7 @@ impl Model {
     }
 
     /// Fix variable `id` to a feasible finite value by replacing both bounds.
-	///
+    ///
     /// # Errors
     /// Rejects unknown or frozen variables, fractional integer fixings, values outside
     /// the current bounds, and values inside a semicontinuity gap.
@@ -293,7 +293,7 @@ impl Model {
 
     /// Restore constant or bare-parameter bounds on an existing variable.
     /// Use constant infinities for unbounded directions. Binary endpoints remain zero or one.
-	///
+    ///
     /// # Errors
     /// Rejects foreign/unknown parameters, invalid bounds, unsupported parameter-bound
     /// domains, and bounds embedded in a previous reformulation.
@@ -516,7 +516,7 @@ impl Model {
     }
 
     /// Checked handle variant of the atomic batch setter.
-	///
+    ///
     /// # Errors
     /// Rejects foreign or composed handles and invalid assignments.
     pub fn set_params(&self, updates: &[(Expr<'_, Constant>, f64)]) -> Result<(), ModelError> {
