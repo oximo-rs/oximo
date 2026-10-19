@@ -444,10 +444,13 @@ fn preserving_reformulation_leaves_source_member_bounds_mutable() {
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
 
     let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
-    m.unfix_var(x.var_id().unwrap(), -10.0, 100.0);
+    m.unfix_var(x.var_id().unwrap(), -10.0, 100.0).unwrap();
 
-    assert!((m.variables()[x.var_id().unwrap().index()].ub - 100.0).abs() < f64::EPSILON);
-    assert!((transformed.variables()[x.var_id().unwrap().index()].ub - 1.0).abs() < f64::EPSILON);
+    assert!((m.resolved_variables()[x.var_id().unwrap().index()].ub - 100.0).abs() < f64::EPSILON);
+    assert!(
+        (transformed.resolved_variables()[x.var_id().unwrap().index()].ub - 1.0).abs()
+            < f64::EPSILON
+    );
 }
 
 #[test]
@@ -467,17 +470,16 @@ fn reformulated_clone_rejects_source_handles_even_when_numeric_ids_collide() {
     assert_eq!(late_source_variable.var_id(), Some(auxiliary));
     assert_eq!(
         transformed.set_initial(late_source_variable, 0.75),
-        Err(ModelMismatchError::new(transformed.id(), source.id()))
+        Err(ModelMismatchError::new(transformed.id(), source.id()).into())
     );
-    assert_eq!(transformed.variables()[auxiliary.index()].initial, None);
+    assert_eq!(transformed.resolved_variables()[auxiliary.index()].initial, None);
 
     let transformed_x = transformed.variable_handle(x.var_id().unwrap());
     transformed.set_initial(transformed_x, 0.25).unwrap();
-    assert_eq!(transformed.variables()[x.var_id().unwrap().index()].initial, Some(0.25));
+    assert_eq!(transformed.resolved_variables()[x.var_id().unwrap().index()].initial, Some(0.25));
 }
 
 #[test]
-#[should_panic(expected = "after SOS constraint \"choice\" was reformulated")]
 fn reformulated_model_rejects_member_bound_changes() {
     let m = Model::new("frozen_reformulated_bounds");
     variable!(m, 0.0 <= x <= 1.0);
@@ -485,11 +487,10 @@ fn reformulated_model_rejects_member_bound_changes() {
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
     let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
 
-    transformed.unfix_var(x.var_id().unwrap(), -10.0, 100.0);
+    assert!(transformed.unfix_var(x.var_id().unwrap(), -10.0, 100.0).is_err());
 }
 
 #[test]
-#[should_panic(expected = "after SOS constraint \"choice\" was reformulated")]
 fn trivial_reformulation_also_freezes_member_bounds() {
     let m = Model::new("frozen_trivial_reformulation");
     variable!(m, x);
@@ -497,7 +498,7 @@ fn trivial_reformulation_also_freezes_member_bounds() {
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
     choice.reformulate(&m, SosReformulationOptions::default()).unwrap();
 
-    m.unfix_var(y.var_id().unwrap(), -1.0, 1.0);
+    assert!(m.unfix_var(y.var_id().unwrap(), -1.0, 1.0).is_err());
 }
 
 #[test]

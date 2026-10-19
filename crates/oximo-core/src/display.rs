@@ -14,7 +14,7 @@ use crate::indicator::IndicatorConstraintId;
 use crate::model::Model;
 use crate::soc::SocConstraintId;
 use crate::sos::SosConstraintId;
-use crate::var::{Variable, var_name};
+use crate::var::{ResolvedVariable as Variable, var_name};
 
 #[cfg(feature = "gdp")]
 mod gdp;
@@ -338,10 +338,10 @@ impl fmt::Display for Model {
             }
         }
         {
-            let vars = self.variables.borrow();
+            let vars = self.resolved_variables();
             if !vars.is_empty() {
                 writeln!(f, "vars")?;
-                for v in vars.iter() {
+                for v in &vars {
                     f.write_str("  ")?;
                     write_var_line(f, v)?;
                     writeln!(f)?;
@@ -449,7 +449,7 @@ mod tests {
         assert!(out.contains("minimize 4 x\n"), "{out}");
         assert!(out.contains("params\n  price = 4\n"), "{out}");
 
-        price.set_param_value(7.5);
+        price.set_param_value(7.5).unwrap();
         let out = format!("{m}");
         assert!(out.contains("minimize 7.5 x\n"), "{out}");
         assert!(out.contains("params\n  price = 7.5\n"), "{out}");

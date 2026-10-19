@@ -81,11 +81,15 @@ impl Model {
     /// 5. quadratic objective -> `QP`
     /// 6. otherwise -> `LP`
     pub fn kind(&self) -> ModelKind {
-        if let Some(k) = self.cached_kind.get() {
+        let revision = self.arena.borrow().parameter_revision();
+        if let Some(k) = self.cached_kind.get()
+            && revision == self.cached_kind_parameter_revision.get()
+        {
             return k;
         }
         let k = self.infer_kind_with(None);
         self.cached_kind.set(Some(k));
+        self.cached_kind_parameter_revision.set(revision);
         k
     }
 
@@ -107,7 +111,7 @@ impl Model {
 
     fn infer_kind_impl(&self, parallel: Option<bool>) -> ModelKind {
         let arena = self.arena.borrow();
-        let vars = self.variables.borrow();
+        let vars = self.resolved_variables();
         let has_int = vars.iter().any(|v| v.domain.requires_discrete_choice())
             || self.sos_constraints.borrow().iter().any(|constraint| constraint.active);
         let obj_class = self

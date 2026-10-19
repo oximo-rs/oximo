@@ -23,7 +23,7 @@ fn variable_bounds_apply() {
     let m = Model::new("bounds");
     variable!(m, 1.5 <= x <= 4.0);
     objective!(m, Min, x);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     let v = &vars[0];
     assert!((v.lb - 1.5).abs() < f64::EPSILON);
     assert!((v.ub - 4.0).abs() < f64::EPSILON);
@@ -264,7 +264,7 @@ fn semicontinuous_domain_sets_threshold() {
     let m = Model::new("semi");
     variable!(m, x <= 10.0, SemiCont(2.0));
     objective!(m, Min, x);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].domain, Domain::SemiContinuous { threshold: 2.0 });
     assert!((vars[0].ub - 10.0).abs() < f64::EPSILON);
 }
@@ -274,7 +274,7 @@ fn semi_integer_domain_sets_threshold() {
     let m = Model::new("semii");
     variable!(m, y <= 5.0, SemiInteger(1.0));
     objective!(m, Min, y);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].domain, Domain::SemiInteger { threshold: 1.0 });
     assert!(vars[0].domain.is_integer());
 }
@@ -284,7 +284,7 @@ fn keyword_bounds_match_relational() {
     let m = Model::new("kw_bounds");
     variable!(m, x, lb = 1.5, ub = 4.0);
     objective!(m, Min, x);
-    let v = &m.variables()[0];
+    let v = &m.resolved_variables()[0];
     assert!((v.lb - 1.5).abs() < f64::EPSILON);
     assert!((v.ub - 4.0).abs() < f64::EPSILON);
 }
@@ -296,7 +296,7 @@ fn keyword_domain_and_mixing() {
     variable!(m, vb, lb = 0.0, ub = 10.0, Int);
     variable!(m, vc, domain = SemiCont(2.0), ub = 10.0);
     objective!(m, Min, va + vb + vc);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].domain, Domain::Integer);
     assert_eq!(vars[1].domain, Domain::Integer);
     assert!((vars[1].ub - 10.0).abs() < f64::EPSILON);
@@ -311,7 +311,7 @@ fn keyword_initial_and_fix() {
     variable!(m, q, fix = 5.0);
     variable!(m, r, init = 2.0);
     objective!(m, Min, p + q + r);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].initial, Some(3.0));
     assert!((vars[1].lb - 5.0).abs() < f64::EPSILON);
     assert!((vars[1].ub - 5.0).abs() < f64::EPSILON);
@@ -325,7 +325,7 @@ fn keyword_indexed_bound_infers_key() {
     let cap = [2.0, 4.0, 6.0];
     variable!(m, w[i in items], lb = 0.0, ub = cap[i]);
     assert_eq!(w.len(), 3);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert!((vars[2].ub - 6.0).abs() < f64::EPSILON);
 }
 
@@ -341,7 +341,7 @@ fn domain_aliases_map_correctly() {
     variable!(m, vg, Continuous);
     objective!(m, Min, va + vb + vc + vd + ve + vf + vg);
 
-    let v = m.variables();
+    let v = m.resolved_variables();
     assert_eq!(v[0].domain, Domain::Binary);
     assert_eq!(v[1].domain, Domain::Binary);
     assert_eq!(v[2].domain, Domain::Integer);
@@ -487,7 +487,7 @@ fn index_dependent_bound_infers_key() {
     let cap = [2.0, 4.0, 6.0];
     variable!(m, 0.0 <= w[i in items] <= cap[i]);
     assert_eq!(w.len(), 3);
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert!((vars[2].ub - 6.0).abs() < f64::EPSILON);
 }
 

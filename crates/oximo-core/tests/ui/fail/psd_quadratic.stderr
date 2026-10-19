@@ -13,8 +13,8 @@ help: the following other types implement trait `IntoAffineMatrixEntry<'a>`
   |     ($($d:ty),*) => { $(impl<'a> IntoAffineMatrixEntry<'a> for Expr<'a, $d> {
   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |                         |
-  |                         `Expr<'_, Constant>`
   |                         `Expr<'_, oximo_core::Affine>`
+  |                         `Expr<'_, oximo_core::Constant>`
   |                         `Expr<'_>`
 ...
   | expression_entries!(Constant, Affine, Dynamic);

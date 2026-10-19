@@ -4,7 +4,7 @@ use smol_str::SmolStr;
 
 use crate::domain::Domain;
 use crate::model::Model;
-use crate::var::Variable;
+use crate::var::ResolvedVariable as Variable;
 
 /// Bounds of the variable's domain, including the zero branch of semi-domains.
 pub(crate) fn raw_effective_bounds(variable: &Variable) -> (f64, f64) {

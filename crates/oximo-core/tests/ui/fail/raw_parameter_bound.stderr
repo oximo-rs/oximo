@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `oximo_core::Bound: IntoBound<'_>` is not satisfied
+ --> tests/ui/fail/raw_parameter_bound.rs:2:65
+  |
+2 | fn main(){let model=Model::new("raw bound");model.__var("x").ub(Bound::Parameter(ParamId(0))).build();}
+  |                                                              -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBound<'_>` is not implemented for `oximo_core::Bound`
+  |                                                              |
+  |                                                              required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `IntoBound<'a>`:
+            `Expr<'a, oximo_core::Constant>` implements `IntoBound<'a>`
+            `f32` implements `IntoBound<'_>`
+            `f64` implements `IntoBound<'_>`
+            `i16` implements `IntoBound<'_>`
+            `i32` implements `IntoBound<'_>`
+            `i64` implements `IntoBound<'_>`
+            `i8` implements `IntoBound<'_>`
+            `isize` implements `IntoBound<'_>`
+          and $N others
+note: required by a bound in `VarBuilder::<'a>::ub`
+ --> src/var.rs
+  |
+  |     pub fn ub(mut self, v: impl IntoBound<'a>) -> Self {
+  |                                 ^^^^^^^^^^^^^ required by this bound in `VarBuilder::<'a>::ub`

@@ -128,7 +128,7 @@ fn plan_one(
             constraint: source.name.clone(),
         });
     }
-    let variables = model.variables.borrow();
+    let variables = model.resolved_variables();
     let inactive = if source.active_value { 0.0 } else { 1.0 };
     let mut minimum = terms.constant;
     let mut maximum = terms.constant;
@@ -202,6 +202,14 @@ fn contains_parameter(arena: &oximo_expr::ExprArena, root: ExprId) -> bool {
 impl PlannedIndicator {
     fn apply(self, model: &Model) -> IndicatorReformulationArtifacts {
         let source = model.indicator_constraints.borrow()[self.source.index()].clone();
+        let variables = extract_linear(&model.arena(), source.lhs)
+            .expect("validated indicator")
+            .coeffs
+            .iter()
+            .filter(|&&(v, k)| v != source.trigger && k != 0.0)
+            .map(|&(v, _)| v)
+            .collect::<Vec<_>>();
+        model.lock_bound_parameters(variables, source.name.as_str());
         let lhs = Expr::new(source.lhs, &model.arena);
         let trigger = Expr::from_var(&model.arena, source.trigger);
         let inactive = if source.active_value { 1.0 - trigger } else { trigger };

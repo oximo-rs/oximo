@@ -5,7 +5,7 @@ use oximo_core::prelude::*;
 
 fn detect_first(m: &Model) -> Option<SocForm> {
     let arena = m.arena();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     let model_constraints = m.constraints();
     let constraints = model_constraints.algebraic();
     oximo_expr::extract_quadratic(&arena, constraints[0].lhs)

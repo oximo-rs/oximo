@@ -2,7 +2,7 @@ use oximo_expr::{ExprArena, ExprId, LinearTerms, QuadraticTerms, VarId, extract_
 use smol_str::SmolStr;
 
 use crate::constraint::{AlgebraicConstraint, Sense};
-use crate::var::Variable;
+use crate::var::ResolvedVariable as Variable;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SocConstraintId(pub u32);

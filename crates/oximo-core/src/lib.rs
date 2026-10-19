@@ -57,6 +57,7 @@ pub use model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
 };
 pub use objective::{Objective, ObjectiveFunction, ObjectiveSense, SemanticObjective};
+pub use oximo_expr::ModelError;
 pub use param::Parameter;
 pub use reformulation::{
     IndicatorReformulationArtifacts, IndicatorReformulationOptions, ReformulatedModel,
@@ -82,7 +83,7 @@ pub use soc::__detect_soc_from_quadratic;
 pub use soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
-pub use var::{VarBuilder, Variable, var_name};
+pub use var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable, var_name};
 
 // Re-export the expression handle so downstream code does not need a separate
 // `oximo-expr` import.

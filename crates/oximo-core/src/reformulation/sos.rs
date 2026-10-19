@@ -10,7 +10,7 @@ use super::{ReformulatedModel, ReformulationError};
 use crate::constraint::{ConstraintId, Relate};
 use crate::model::Model;
 use crate::sos::{SosConstraint, SosConstraintId, SosMember, SosType};
-use crate::var::Variable;
+use crate::var::ResolvedVariable as Variable;
 
 /// Settings for an SOS-to-MILP reformulation.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -200,7 +200,7 @@ impl SosReformulationPlan {
         options: SosReformulationOptions,
     ) -> Result<Self, ReformulationError> {
         validate_options(options)?;
-        let variables = model.variables.borrow();
+        let variables = model.resolved_variables();
         let constraints = model.sos_constraints.borrow();
         let source = constraints
             .get(id.index())
@@ -218,7 +218,7 @@ impl SosReformulationPlan {
         options: SosReformulationOptions,
     ) -> Result<Self, ReformulationError> {
         validate_options(options)?;
-        let variables = model.variables.borrow();
+        let variables = model.resolved_variables();
         let constraints = model.sos_constraints.borrow();
         let mut entries =
             Vec::with_capacity(constraints.iter().filter(|constraint| constraint.active).count());
@@ -302,6 +302,9 @@ impl PlannedSos {
     }
 
     fn apply(self, model: &Model) -> SosReformulationArtifacts {
+        let source = model.sos_constraints.borrow()[self.source.index()].clone();
+        model
+            .lock_bound_parameters(source.members.iter().map(|m| m.variable), source.name.as_str());
         let (variable_capacity, constraint_capacity, _) = self.capacity();
         let mut generated_variables = Vec::with_capacity(variable_capacity);
         let mut generated_constraints = Vec::with_capacity(constraint_capacity);

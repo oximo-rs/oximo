@@ -6,8 +6,8 @@ error[E0277]: the trait bound `ScalarQuadraticFunction<'_>: IntoAffineFunction<'
   |
   = help: the following other types implement trait `IntoAffineFunction<'a>`:
             AnyScalarFunction<'a>
-            Expr<'a, Constant>
             Expr<'a, oximo_core::Affine>
+            Expr<'a, oximo_core::Constant>
             Expr<'a>
             ScalarAffineFunction<'a>
             ScalarDynamicFunction<'a>
