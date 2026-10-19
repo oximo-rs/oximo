@@ -125,9 +125,8 @@ fn projection_rejects_a_foreign_result_without_a_transformed_model() {
     let source = Model::new("in-place source");
     let foreign = Model::new("foreign model");
 
-    let error = SourceProjection::capture(&source)
-        .project(SolverResult::for_model(&foreign))
-        .unwrap_err();
+    let error =
+        SourceProjection::capture(&source).project(SolverResult::for_model(&foreign)).unwrap_err();
 
     assert!(matches!(
         error,
