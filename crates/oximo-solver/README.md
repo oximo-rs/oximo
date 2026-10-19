@@ -187,6 +187,32 @@ impl HasUniversal for MyOptions {
 }
 ```
 
+## Projecting reformulated results
+
+`to_reformulated_*` returns an independent model that preserves source IDs and
+appends generated variables, rows, and cones. `SourceProjection` maps a result
+solved on that model back to the source:
+
+```rust,ignore
+let coordinates = SourceCoordinates::capture(&source);
+let transformed = source.to_reformulated_sos_model(options)?;
+let result = solver.solve(&transformed, &solver_options)?;
+
+let projected = SourceProjection::with_coordinates(&source, coordinates)
+    .from_transformed(&transformed)
+    .with_objective(ObjectiveTransform { sign: 1.0, offset: 0.0 })
+    .reevaluate_objective(|point| point.value_of(x + y).ok().flatten())
+    .project(result)?;
+```
+
+The projection drops generated variables, algebraic rows, SOC/PSD cones, and
+their reduced costs and multipliers. It rebinds provenance to the source
+identity and preserves the solve-time parameter snapshot.
+
+For an in-place reformulation (`reformulate_sos`, `reformulate_indicators`),
+capture `SourceCoordinates` before transforming, then omit `from_transformed`
+because the result already belongs to the source identity.
+
 ## Writing a new backend
 
 Mirror the layout of an existing backend crate (`oximo-highs`, `oximo-gurobi`, `oximo-gams`):
