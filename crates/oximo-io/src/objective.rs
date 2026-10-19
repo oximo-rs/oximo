@@ -1,6 +1,6 @@
 //! Objective handling shared by the LP and MPS writers.
 
-use oximo_core::{Model, ObjectiveSense, Variable, var_name};
+use oximo_core::{Model, ObjectiveSense, ResolvedVariable, var_name};
 use oximo_expr::{ExprArena, QuadraticTerms, describe_nonlinear_term, extract_quadratic};
 
 use crate::error::IoError;
@@ -20,7 +20,7 @@ use crate::error::IoError;
 pub(crate) fn export_terms(
     model: &Model,
     arena: &ExprArena,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
 ) -> Result<(ObjectiveSense, QuadraticTerms), IoError> {
     model.ensure_gdp_reformulated().map_err(|_| IoError::UnreformulatedGdp)?;
     model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;

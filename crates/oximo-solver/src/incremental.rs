@@ -1,6 +1,6 @@
 use std::hash::Hasher;
 
-use oximo_core::{Model, ModelKind, ObjectiveSense, Variable};
+use oximo_core::{Model, ModelKind, ObjectiveSense, ResolvedVariable};
 use oximo_expr::VarId;
 use rustc_hash::FxHasher;
 
@@ -143,7 +143,7 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
 }
 
 /// Hash the parts that decide column count, integrality, and objective sense.
-fn hash_header(h: &mut FxHasher, vars: &[Variable], sense: ObjectiveSense) {
+fn hash_header(h: &mut FxHasher, vars: &[ResolvedVariable], sense: ObjectiveSense) {
     h.write_usize(vars.len());
     h.write_u8(match sense {
         ObjectiveSense::Minimize => 0,
@@ -219,7 +219,7 @@ mod tests {
         objective!(m, Max, p * x + 2.0 * y);
 
         let s1 = snapshot(&m).unwrap();
-        p.set_param_value(5.0);
+        p.set_param_value(5.0).unwrap();
         let s2 = snapshot(&m).unwrap();
         assert_eq!(s1.fingerprint, s2.fingerprint, "structure unchanged");
         assert_ne!(s1.obj_costs, s2.obj_costs, "coefficient moved");
@@ -263,7 +263,7 @@ mod tests {
         objective!(m, Max, x);
 
         let s1 = snapshot(&m).unwrap();
-        cap.set_param_value(20.0);
+        cap.set_param_value(20.0).unwrap();
         let s2 = snapshot(&m).unwrap();
         assert_ne!(s1.fingerprint, s2.fingerprint, "row bound changed");
     }
@@ -278,7 +278,7 @@ mod tests {
         objective!(m, Max, x + y);
 
         let s1 = snapshot(&m).unwrap();
-        a.set_param_value(3.0);
+        a.set_param_value(3.0).unwrap();
         let s2 = snapshot(&m).unwrap();
         assert_ne!(s1.fingerprint, s2.fingerprint, "matrix coefficient changed");
     }

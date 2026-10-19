@@ -17,7 +17,7 @@
 //!
 //! Within each bucket the original `VarId` order is preserved.
 
-use oximo_core::{Domain, Variable};
+use oximo_core::{Domain, ResolvedVariable};
 use oximo_expr::VarId;
 use rustc_hash::FxHashMap;
 
@@ -54,7 +54,7 @@ impl Bucket {
     }
 }
 
-fn bucket_for(v: &Variable, analysis: &Analysis) -> Bucket {
+fn bucket_for(v: &ResolvedVariable, analysis: &Analysis) -> Bucket {
     let in_c = analysis.nl_vars_c.contains(&v.id);
     let in_o = analysis.nl_vars_o.contains(&v.id);
     let is_int = v.domain.is_integer();
@@ -88,7 +88,7 @@ pub(crate) struct Permutation {
 }
 
 impl Permutation {
-    pub(crate) fn build(vars: &[Variable], analysis: &Analysis) -> Self {
+    pub(crate) fn build(vars: &[ResolvedVariable], analysis: &Analysis) -> Self {
         let mut indexed: Vec<(usize, Bucket)> =
             vars.iter().enumerate().map(|(i, v)| (i, bucket_for(v, analysis))).collect();
         indexed.sort_by_key(|(i, b)| (b.order(), *i));

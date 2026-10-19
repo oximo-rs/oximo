@@ -300,7 +300,7 @@ impl NlpEvaluator {
     /// objective nor a feasibility problem.
     pub fn new(model: &Model) -> Result<Self, AutodiffError> {
         let arena = model.arena();
-        let n_vars = model.variables().len();
+        let n_vars = model.num_variables();
         model.ensure_objective_declared().map_err(|_| AutodiffError::NoObjective)?;
         let objective_expr: Option<ExprId> = model.objective().as_ref().map(|o| o.expr);
         let constraint_exprs: Vec<ExprId> =
@@ -441,7 +441,7 @@ impl NlpEvaluator {
     /// a parametric sweep while staying correct.
     pub fn try_refresh(&mut self, model: &Model) -> bool {
         let arena = model.arena();
-        if model.variables().len() != self.n_vars
+        if model.num_variables() != self.n_vars
             || model.objective().as_ref().map(|o| o.expr) != self.objective_expr
         {
             return false;
@@ -1171,7 +1171,7 @@ mod tests {
                     assert_eq!(workspace.hessian_values.capacity(), values_capacity);
                 }
             });
-            weight.set_param_value(1.3);
+            weight.set_param_value(1.3).unwrap();
             assert!(ev.try_refresh(&m));
             let fresh = NlpEvaluator::new(&m).unwrap();
             assert_eq!(ev.constraint_work.jacobian.offsets, fresh.constraint_work.jacobian.offsets);
@@ -1183,7 +1183,7 @@ mod tests {
             ev.eval_hessian_lagrangian(&point, 0.8, &lambda, &mut refreshed);
             fresh.eval_hessian_lagrangian(&point, 0.8, &lambda, &mut rebuilt);
             assert_eq!(refreshed, rebuilt);
-            weight.set_param_value(0.7);
+            weight.set_param_value(0.7).unwrap();
             ev.refresh_params(&m);
         }
     }

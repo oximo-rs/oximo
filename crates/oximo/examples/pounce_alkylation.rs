@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("alkylate price sweep:");
     let mut solver = Pounce.persistent();
     for price in [0.055, 0.059, 0.063, 0.067, 0.071] {
-        alk_price.set_param_value(price);
+        alk_price.set_param_value(price).unwrap();
         let res = solver.solve(&m, &opts)?;
         println!(
             "  price {price:.3} $/oct-bbl -> profit {:>8.2} $/day, olefin {:>8.2} bpd, octane {:.2}",

@@ -840,12 +840,12 @@ impl std::fmt::Display for ModelReport<'_> {
         }
 
         // Variables
-        let vars = m.variables();
+        let vars = m.resolved_variables();
         writeln!(f, "\nvariables ({})", vars.len())?;
         if let Some(best) = r.best() {
             let width = vars.iter().map(|v| v.name.len()).max().unwrap_or(0);
             let show_rc = !r.reduced_costs.is_empty();
-            for v in vars.iter() {
+            for v in &vars {
                 let val = best.value(v.id).map_or_else(|| "n/a".to_owned(), num);
                 match (show_rc, r.reduced_costs.get(&v.id)) {
                     (true, Some(rc)) => {

@@ -145,7 +145,7 @@ impl HybridOracle {
             obj,
             cons,
             params,
-            n_vars: model.variables().len(),
+            n_vars: model.resolved_variables().len(),
             obj_expr,
             con_exprs,
             jac_structure: Vec::new(),
@@ -166,7 +166,7 @@ impl HybridOracle {
     pub(crate) fn matches(&self, model: &Model) -> bool {
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
-        self.n_vars == model.variables().len()
+        self.n_vars == model.resolved_variables().len()
             && self.obj_expr == model.objective().as_ref().map(|o| o.expr)
             && self.con_exprs.len() == constraints.len()
             && constraints.iter().map(|c| c.lhs).eq(self.con_exprs.iter().copied())
@@ -773,7 +773,7 @@ mod tests {
         o.eval_hessian_lagrangian(&[0.0], 1.0, &[0.0], &mut vals);
         assert_close(vals[0], 2.0, 1e-12, "H with w=1");
 
-        w.set_param_value(3.0);
+        w.set_param_value(3.0).unwrap();
         assert!(o.matches(&m), "same structure after set_param");
         o.refresh(&m);
         let mut vals = vec![0.0; o.hess_structure.len()];
@@ -799,14 +799,14 @@ mod tests {
         oracle.eval_constraint_jacobian(&[3.0], &mut jac);
         assert_eq!(jac, vec![6.0]);
 
-        w.set_param_value(0.0);
+        w.set_param_value(0.0).unwrap();
         oracle.refresh(&m);
         assert_eq!(oracle.jac_structure, Vec::<(usize, usize)>::new());
         let mut jac = Vec::new();
         oracle.eval_constraint_jacobian(&[3.0], &mut jac);
         assert_eq!(jac, Vec::<f64>::new());
 
-        w.set_param_value(2.0);
+        w.set_param_value(2.0).unwrap();
         oracle.refresh(&m);
         assert_eq!(oracle.jac_structure, vec![(0, 0)]);
         let mut jac = vec![0.0; oracle.jac_structure.len()];

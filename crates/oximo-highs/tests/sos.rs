@@ -49,7 +49,7 @@ fn highs_solves_reformulated_indicator_sides() {
         let model = Model::new("highs_indicator_reformulation");
         variable!(model, b, Binary);
         variable!(model, 0.0 <= x <= 10.0);
-        model.fix_var(b.var_id().unwrap(), active_value);
+        model.fix_var(b.var_id().unwrap(), active_value).unwrap();
         match row_kind {
             0 => {
                 indicator_constraint!(model, cap, b == 1 => x <= 4.0);

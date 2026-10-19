@@ -128,7 +128,7 @@ impl std::fmt::Display for IisReport<'_> {
         }
 
         if !iis.var_bounds.is_empty() {
-            let vars = m.variables();
+            let vars = m.resolved_variables();
             writeln!(f, "\nvariable bounds ({})", iis.var_bounds.len())?;
             for (id, kind) in &iis.var_bounds {
                 let side = match kind {

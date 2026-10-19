@@ -224,7 +224,7 @@ fn persistent_indicators_append_and_rebuild_after_parameter_edits() {
     indicator_constraint!(m, cap_row, b == 1 => x <= cap);
     close(solver.solve(&m, &opts).unwrap().objective().unwrap(), 3.0);
     assert_eq!(solver.reuse_count(), 1);
-    cap.set_param_value(2.0);
+    cap.set_param_value(2.0).unwrap();
     close(solver.solve(&m, &opts).unwrap().objective().unwrap(), 2.0);
     assert_eq!(solver.build_count(), 2);
 }
@@ -289,7 +289,7 @@ fn persistence_reuses_and_rebuilds_without_stale_parameters() {
     let mut solver = Scip::new().persistent();
     let first = solver.solve(&m, &opts).unwrap();
     close(first.objective().unwrap(), 13.0);
-    unused.set_param_value(9.0);
+    unused.set_param_value(9.0).unwrap();
     let second = solver.solve(&m, &opts).unwrap();
     close(second.objective().unwrap(), 13.0);
     assert_eq!(first.value_of(unused), Ok(Some(7.0)));
@@ -301,7 +301,7 @@ fn persistence_reuses_and_rebuilds_without_stale_parameters() {
     objective!(m, Max, p * x + 3.0 + y);
     close(solver.solve(&m, &opts).unwrap().objective().unwrap(), 9.0);
     assert_eq!(solver.build_count(), 1);
-    p.set_param_value(4.0);
+    p.set_param_value(4.0).unwrap();
     let warm = solver.solve(&m, &opts).unwrap();
     close(warm.objective().unwrap(), solve(&m).objective().unwrap());
     assert_eq!(solver.build_count(), 2);
@@ -325,7 +325,7 @@ fn nonlinear_persistence_and_new_options() {
     s.solve(&m, &opts).unwrap();
     s.solve(&m, &opts).unwrap();
     assert_eq!(s.build_count(), 1);
-    cap.set_param_value(3.0);
+    cap.set_param_value(3.0).unwrap();
     close(s.solve(&m, &opts).unwrap().objective().unwrap(), 3.0_f64.ln());
     assert_eq!(s.build_count(), 2);
     s.solve(&m, &opts.clone().node_limit(0)).unwrap();

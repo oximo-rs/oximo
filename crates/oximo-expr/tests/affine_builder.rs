@@ -51,10 +51,10 @@ fn builder_keeps_symbolic_coefficients_constants_and_first_seen_order() {
     builder.add_term(2.0, vars[1]).add_term(3.0, px);
     builder.add_term(1.0, vars[0]).add_term(4.0, p).add_constant(5.0);
     assert_eq!(arena.borrow().len(), before);
-    p.set_param_value(7.0); // rebinding before emission also stays symbolic
+    p.set_param_value(7.0).unwrap(); // rebinding before emission also stays symbolic
     let expr = builder.build();
     for value in [7.0, -3.0] {
-        p.set_param_value(value);
+        p.set_param_value(value).unwrap();
         let snapshot = arena.borrow();
         let terms = extract_linear(&snapshot, expr.id()).unwrap();
         assert_eq!(
@@ -181,7 +181,7 @@ fn shared_symbolic_dag_is_memoized_and_rebindable() {
         expr = expr + expr;
     }
     for value in [3.0, 5.0] {
-        p.set_param_value(value);
+        p.set_param_value(value).unwrap();
         let snapshot = arena.borrow();
         let expected = value * 2.0_f64.powi(40);
         assert_eq!(
@@ -212,12 +212,12 @@ fn builder_and_deferred_sums_handle_cancellation_and_nonfinite_values() {
             .iter()
             .all(|(_, c)| c.abs() < f64::EPSILON)
     );
-    let param = arena.borrow_mut().new_param(f64::INFINITY);
+    let param = arena.borrow_mut().new_param(2.0);
     let p = Expr::from_param(&arena, param);
     builder.add_term(0.0, p);
     let symbolic = builder.build();
-    assert!(evaluate(&arena.borrow(), symbolic.id(), &&[][..]).unwrap().is_nan());
-    p.set_param_value(2.0);
+    assert!(p.set_param_value(f64::INFINITY).is_err());
+    p.set_param_value(2.0).unwrap();
     assert!(evaluate(&arena.borrow(), symbolic.id(), &&[][..]).unwrap().abs() < f64::EPSILON);
     builder.add_constant(f64::INFINITY).add_constant(f64::NEG_INFINITY);
     let nan = builder.build();
@@ -279,7 +279,7 @@ fn numeric_cancellation_does_not_raise_product_or_power_degree() {
     let symbolic = p * left;
     let product = symbolic * vars[0];
     assert_eq!(product.__class(), ExprClass::Quadratic);
-    p.set_param_value(2.0);
+    p.set_param_value(2.0).unwrap();
     assert_eq!(evaluate(&arena.borrow(), product.id(), &&vec![1.0; 100][..]).unwrap(), 200.0);
     let scalar = p + p;
     let before = arena.borrow().len();
@@ -315,7 +315,7 @@ fn numeric_cancellation_under_symbolic_parents_stays_affine_after_rebinding() {
     // Rewriting never changes the original handles or the saved snapshot.
     assert!(matches!(snapshot.get(symbolic.id()), ExprNode::Add(_)));
     for value in [2.0_f64, -3.0, 0.0] {
-        p.set_param_value(value);
+        p.set_param_value(value).unwrap();
         let current = arena.borrow();
         for (index, &(expression, has_parameter)) in expressions.iter().enumerate() {
             assert!(expression.try_affine().is_ok(), "case {index}");
@@ -351,7 +351,7 @@ fn compaction_is_explicit_immutable_and_preserves_parameter_rebinding() {
     let p = Expr::from_param(&arena, parameter);
     let symbolic = (p * original + original).compact();
     for value in [2.0, 4.0] {
-        p.set_param_value(value);
+        p.set_param_value(value).unwrap();
         assert_eq!(
             evaluate(&arena.borrow(), symbolic.id(), &&vec![1.0; 100][..]).unwrap(),
             100.0 * (value + 1.0)
@@ -402,7 +402,7 @@ fn compensated_builder_keeps_symbolic_segments_live_and_nonfinite_arithmetic_obs
     builder.add_term(1.0, p * x);
     let expr = builder.build();
     for value in [2.0, 4.0] {
-        p.set_param_value(value);
+        p.set_param_value(value).unwrap();
         assert_eq!(evaluate(&arena.borrow(), expr.id(), &&[1.0][..]).unwrap(), value + 1.0);
     }
     builder.add_constant(f64::INFINITY);
@@ -512,7 +512,7 @@ fn hidden_overflow_guard_uses_current_parameter_bindings() {
     let p = Expr::from_param(&arena, parameter);
     let expression = -p * sum + (p * sum + p * sum);
     for value in [1e308, 2.0, 1e308] {
-        p.set_param_value(value);
+        p.set_param_value(value).unwrap();
         let snapshot = arena.borrow();
         let expected = if value > 1e300 { f64::INFINITY } else { 2.0 };
         assert!(
@@ -553,7 +553,7 @@ fn cancellation_under_a_deep_symbolic_spine_stays_affine_after_rebinding() {
             let expression = Expr::new(root, &arena) * vars[0];
             assert!(expression.try_affine().is_ok());
             for value in [2.0, -1.0, 0.0] {
-                p.set_param_value(value);
+                p.set_param_value(value).unwrap();
                 let snapshot = arena.borrow();
                 let terms = extract_linear(&snapshot, expression.id()).unwrap();
                 assert!(terms.coeffs.iter().all(|(var, _)| *var == VarId(0)));

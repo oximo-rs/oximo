@@ -84,7 +84,7 @@ fn flat_sum_preserves_subtraction_parentheses_and_variable_order() {
             .as_slice(),
     )
     .unwrap();
-    let names: Vec<_> = model.variables().iter().map(|v| v.name.to_string()).collect();
+    let names: Vec<_> = model.resolved_variables().iter().map(|v| v.name.to_string()).collect();
     assert_eq!(names, ["z", "y", "x"]);
     let arena = model.arena();
     let objective = model.try_objective().unwrap();
@@ -117,13 +117,16 @@ End
     let model = read_lp(Cursor::new(text)).expect("LP should parse");
     assert_eq!(model.num_variables(), 3);
     assert_eq!(model.num_constraints(), 3);
-    assert_eq!(model.variables()[0].name, "x");
-    assert!(model.variables()[0].lb.is_infinite() && model.variables()[0].lb.is_sign_negative());
-    assert!((model.variables()[0].ub - 10.0).abs() < f64::EPSILON);
-    assert!(matches!(model.variables()[1].domain, Domain::Integer));
-    assert!(matches!(model.variables()[2].domain, Domain::Binary));
-    assert!((model.variables()[2].lb - 1.0).abs() < f64::EPSILON);
-    assert!((model.variables()[2].ub - 1.0).abs() < f64::EPSILON);
+    assert_eq!(model.resolved_variables()[0].name, "x");
+    assert!(
+        model.resolved_variables()[0].lb.is_infinite()
+            && model.resolved_variables()[0].lb.is_sign_negative()
+    );
+    assert!((model.resolved_variables()[0].ub - 10.0).abs() < f64::EPSILON);
+    assert!(matches!(model.resolved_variables()[1].domain, Domain::Integer));
+    assert!(matches!(model.resolved_variables()[2].domain, Domain::Binary));
+    assert!((model.resolved_variables()[2].lb - 1.0).abs() < f64::EPSILON);
+    assert!((model.resolved_variables()[2].ub - 1.0).abs() < f64::EPSILON);
     assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
 }
 
@@ -147,7 +150,7 @@ fn accepts_moi_style_aliases_and_comparisons() {
     let text = "minimum obj: x\nsubject to\n c1: x < 2\n c2: x > -3\n c3: x == 1\n c4: x =< 4\n c5: x => -4\ninteger\n x\nEnd\n";
     let model = read_lp(text.as_bytes()).expect("aliases should parse");
     assert_eq!(model.num_constraints(), 5);
-    assert!(matches!(model.variables()[0].domain, Domain::Integer));
+    assert!(matches!(model.resolved_variables()[0].domain, Domain::Integer));
 }
 
 #[test]
@@ -201,7 +204,7 @@ fn writer_output_round_trips() {
     let got = read_lp(text.as_bytes()).expect("read written LP");
     assert_eq!(got.num_variables(), 2);
     assert_eq!(got.num_constraints(), 1);
-    assert!(matches!(got.variables()[1].domain, Domain::Integer));
+    assert!(matches!(got.resolved_variables()[1].domain, Domain::Integer));
 }
 
 #[test]
@@ -386,12 +389,12 @@ fn missing_objective_section_is_reported_with_position() {
 #[test]
 fn leading_negative_coefficient_uses_implicit_multiplication() {
     let model = read_lp("Minimize\n obj: - 2 x + y\nEnd\n".as_bytes()).expect("negative objective");
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     assert_eq!(objective_terms(&model).linear, vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
 
     let model = read_lp("Minimize\n obj: x\nSubject To\n c1: - 2 x + y >= 3\nEnd\n".as_bytes())
         .expect("negative row coefficient");
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let first_cstr_term = constraint_terms(&model, 0);
     assert_eq!(first_cstr_term.linear, vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
 
@@ -399,7 +402,7 @@ fn leading_negative_coefficient_uses_implicit_multiplication() {
         .expect("negative bracket coefficient");
     assert_eq!(
         objective_terms(&model).hessian,
-        vec![(model.variables()[0].id, model.variables()[0].id, -2.0)]
+        vec![(model.resolved_variables()[0].id, model.resolved_variables()[0].id, -2.0)]
     );
 }
 
@@ -419,7 +422,7 @@ fn constant_objective_declares_feasibility() {
 fn bounds_of(bounds: &str) -> Result<(f64, f64), IoError> {
     let text = format!("Minimize\n obj: x\nBounds\n{bounds}End\n");
     let model = read_lp(text.as_bytes())?;
-    Ok((model.variables()[0].lb, model.variables()[0].ub))
+    Ok((model.resolved_variables()[0].lb, model.resolved_variables()[0].ub))
 }
 
 fn assert_bound_error(bounds: &str, expected: &str) {

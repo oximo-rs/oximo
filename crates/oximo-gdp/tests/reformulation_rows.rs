@@ -156,9 +156,9 @@ fn hull_numeric_boxes_preserve_semicontinuous_domains_and_tightened_bounds() {
 
             let report = model.reformulate_gdp(Hull::default()).unwrap();
 
-            assert_eq!(model.variables()[x.var_id().unwrap().index()].domain, domain);
+            assert_eq!(model.resolved_variables()[x.var_id().unwrap().index()].domain, domain);
             for copy in &report.hull_variables {
-                assert_eq!(model.variables()[copy.generated.index()].domain, Domain::Real);
+                assert_eq!(model.resolved_variables()[copy.generated.index()].domain, Domain::Real);
                 if tighten {
                     assert!(copy.bounds[0] > 0.0 && copy.bounds[0] <= 1.0);
                 } else {

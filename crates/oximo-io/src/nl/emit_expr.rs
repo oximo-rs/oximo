@@ -399,7 +399,7 @@ mod tests {
         let stored = cache.extract(&arena, roots[8]).unwrap().coeffs.as_ptr();
         assert_eq!(cache.extract(&arena, roots[8]).unwrap().coeffs.as_ptr(), stored);
         drop(cache);
-        arena.set_param_value(pid, 3.0);
+        arena.set_param_value(pid, 3.0).unwrap();
         let mut next_export = EmitCache::default();
         assert_eq!(next_export.extract(&arena, roots[8]).unwrap().constant, 11.0);
     }

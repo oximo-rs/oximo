@@ -146,7 +146,7 @@ fn linear_snapshot(model: &Model) -> Result<Option<Snapshot>, SolverError> {
 }
 
 fn initial_values(model: &Model) -> Vec<Option<f64>> {
-    model.variables().iter().map(|variable| variable.initial).collect()
+    model.resolved_variables().iter().map(|variable| variable.initial).collect()
 }
 
 fn apply_linear_delta(

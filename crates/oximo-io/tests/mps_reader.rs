@@ -69,13 +69,16 @@ ENDATA
     assert_eq!(model.num_variables(), 2);
     assert_eq!(model.num_constraints(), 3);
     assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
-    assert!(matches!(model.variables()[0].domain, Domain::Integer));
-    assert!(close(model.variables()[0].lb, 0.0));
-    assert!(close(model.variables()[0].ub, 1.0));
-    assert!(model.variables()[1].lb.is_infinite() && model.variables()[1].lb.is_sign_negative());
+    assert!(matches!(model.resolved_variables()[0].domain, Domain::Integer));
+    assert!(close(model.resolved_variables()[0].lb, 0.0));
+    assert!(close(model.resolved_variables()[0].ub, 1.0));
+    assert!(
+        model.resolved_variables()[1].lb.is_infinite()
+            && model.resolved_variables()[1].lb.is_sign_negative()
+    );
 
     let objective = quadratic_terms(&model, true);
-    assert_eq!(objective.linear, vec![(model.variables()[0].id, 3.0)]);
+    assert_eq!(objective.linear, vec![(model.resolved_variables()[0].id, 3.0)]);
     assert!(close(objective.constant, 5.0));
     let constraints = model.constraints();
     assert!(close(constraints.algebraic()[0].lower, 6.0));
@@ -104,11 +107,11 @@ fn upstream_stacked_data_fixture_with_tabs_and_extra_row_fields() {
 fn upstream_integer_default_bounds_reset_on_explicit_bound() {
     let text = "NAME integer\nROWS\n N OBJ\nCOLUMNS\n marker 'MARKER' 'INTORG'\n x OBJ 1\n marker 'MARKER' 'INTEND'\n y OBJ 1\nBOUNDS\n LO BND x 2\nENDATA\n";
     let model = read_mps(text.as_bytes()).expect("integer default bounds fixture");
-    let x = &model.variables()[0];
+    let x = &model.resolved_variables()[0];
     assert!(matches!(x.domain, Domain::Integer));
     assert!(close(x.lb, 2.0));
     assert!(x.ub.is_infinite() && x.ub.is_sign_positive());
-    assert!(matches!(model.variables()[1].domain, Domain::Real));
+    assert!(matches!(model.resolved_variables()[1].domain, Domain::Real));
 }
 
 #[test]
@@ -116,13 +119,13 @@ fn negative_upper_bound_without_lower_bound_is_unbounded_below() {
     let initial =
         "NAME negative_up\nROWS\n N OBJ\nCOLUMNS\n x OBJ 1\nBOUNDS\n UP BND x -2\nENDATA\n";
     let model = read_mps(initial.as_bytes()).expect("negative initial upper bound");
-    let variable = &model.variables()[0];
+    let variable = &model.resolved_variables()[0];
     assert!(variable.lb.is_infinite() && variable.lb.is_sign_negative());
     assert!(close(variable.ub, -2.0));
 
     let explicit = "NAME explicit_lo\nROWS\n N OBJ\nCOLUMNS\n x OBJ 1\nBOUNDS\n LO BND x -5\n UP BND x -2\nENDATA\n";
     let model = read_mps(explicit.as_bytes()).expect("explicit lower bound");
-    let variable = &model.variables()[0];
+    let variable = &model.resolved_variables()[0];
     assert!(close(variable.lb, -5.0));
     assert!(close(variable.ub, -2.0));
 }
@@ -155,7 +158,7 @@ BOUNDS
 ENDATA
 ";
     let model = read_mps(text.as_bytes()).expect("named and unnamed bounds");
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     assert!(vars[0].lb.is_infinite() && vars[0].lb.is_sign_negative());
     assert!(close(vars[0].ub, 4.0));
     assert!(vars[1].lb.is_infinite() && vars[1].lb.is_sign_negative());
@@ -186,7 +189,7 @@ BOUNDS
 ENDATA
 ";
     let model = read_mps(text.as_bytes()).expect("domains");
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     assert!(matches!(vars[0].domain, Domain::Binary));
     assert!(matches!(vars[1].domain, Domain::Integer));
     assert_eq!((vars[1].lb, vars[1].ub), (-2.0, 7.0));
@@ -208,14 +211,14 @@ fn semi_domain_infinite_upper_bound_uses_mps_sentinel() {
     assert!(written.contains("SC BND") && written.contains(&sentinel));
 
     let model = read_mps(written.as_bytes()).expect("read sentinel semi upper bound");
-    let variable = &model.variables()[0];
+    let variable = &model.resolved_variables()[0];
     assert!(matches!(variable.domain, Domain::SemiContinuous { threshold: 2.0 }));
     assert!(close(variable.lb, 0.0));
     assert!(variable.ub.is_infinite() && variable.ub.is_sign_positive());
 
     let finite = "NAME finite\nROWS\n N obj\nCOLUMNS\n s obj 1\nBOUNDS\n LO BND s 2\n SC BND s 1e29\nENDATA\n";
     let model = read_mps(finite.as_bytes()).expect("finite semi upper bound");
-    assert!(close(model.variables()[0].ub, 1e29));
+    assert!(close(model.resolved_variables()[0].ub, 1e29));
 }
 
 #[test]
@@ -236,9 +239,12 @@ fn writer_round_trips_max_binary_semi_range_and_unused_variables() {
 
     let imported = read_mps(text.as_bytes()).expect("read writer output");
     assert_eq!(imported.num_variables(), 4);
-    assert_eq!(imported.variables()[3].name, "unused");
-    assert!(matches!(imported.variables()[1].domain, Domain::Binary));
-    assert!(matches!(imported.variables()[2].domain, Domain::SemiContinuous { threshold: 2.0 }));
+    assert_eq!(imported.resolved_variables()[3].name, "unused");
+    assert!(matches!(imported.resolved_variables()[1].domain, Domain::Binary));
+    assert!(matches!(
+        imported.resolved_variables()[2].domain,
+        Domain::SemiContinuous { threshold: 2.0 }
+    ));
     assert_eq!(imported.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
     let constraints = imported.constraints();
     assert_eq!((constraints.algebraic()[0].lower, constraints.algebraic()[0].upper), (1.0, 6.0));
@@ -349,7 +355,7 @@ fn writer_sanitizes_and_uniquifies_mps_names() {
     let imported = read_mps(text.as_bytes()).expect("read sanitized MPS");
 
     let variable_names: Vec<_> =
-        imported.variables().iter().map(|variable| variable.name.to_string()).collect();
+        imported.resolved_variables().iter().map(|variable| variable.name.to_string()).collect();
     assert_eq!(variable_names, ["_comment", "x_one", "x_one_1", "C4"]);
     let constraint_names: Vec<_> = imported
         .constraints()
@@ -536,8 +542,8 @@ fn sos_member_names_s1_s2_round_trip() {
     assert_eq!(roundtrip.num_sos_constraints(), 1);
     let members = &roundtrip.sos_constraints()[0].members;
     assert_eq!(members.len(), 2);
-    assert_eq!(roundtrip.variables()[members[0].variable.index()].name, "S1");
-    assert_eq!(roundtrip.variables()[members[1].variable.index()].name, "S2");
+    assert_eq!(roundtrip.resolved_variables()[members[0].variable.index()].name, "S1");
+    assert_eq!(roundtrip.resolved_variables()[members[1].variable.index()].name, "S2");
 }
 
 #[test]

@@ -282,8 +282,8 @@ fn nonlinear_equality_and_parameter_bounds() {
     assert!(satisfied(&m, &[0.0, 0.0]));
     assert!(!satisfied(&m, &[0.0, 1.0]));
     assert!(satisfied(&m, &[2.0_f64.sqrt(), 1.0]));
-    assert!(catch_unwind(AssertUnwindSafe(|| m.set_param(p, 3.0).unwrap())).is_err());
-    assert!(catch_unwind(AssertUnwindSafe(|| m.fix(x, 1.0).unwrap())).is_err());
+    assert!(m.set_param(p, 3.0).is_err());
+    assert!(m.fix(x, 1.0).is_err());
     m.set_initial(x, 1.0).unwrap();
     variable!(m, unrelated);
     m.fix(unrelated, 1.0).unwrap();
@@ -412,11 +412,8 @@ fn boolean_bounds_remain_binary_but_fixing_a_selector_is_allowed() {
     logical_constraint!(m, y);
     m.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
     m.fix(y.binary(), 1.0).unwrap();
-    m.unfix_var(y.binary().var_id().unwrap(), 0.0, 1.0);
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| m.unfix_var(y.binary().var_id().unwrap(), 0.0, 2.0)))
-            .is_err()
-    );
+    m.unfix_var(y.binary().var_id().unwrap(), 0.0, 1.0).unwrap();
+    assert!(m.unfix_var(y.binary().var_id().unwrap(), 0.0, 2.0).is_err());
 }
 
 #[test]
@@ -463,20 +460,18 @@ fn every_parameter_setter_preserves_reformulated_rows() {
     let report = model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
     assert!((report.rows[0].upper_m.unwrap().value - 8.0).abs() < 1e-10);
     let parameter_id = coefficient.param_id().unwrap();
-    assert!(catch_unwind(AssertUnwindSafe(|| coefficient.set_param_value(100.0))).is_err());
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| model.set_param(coefficient, 100.0).unwrap())).is_err()
-    );
-    assert!(catch_unwind(AssertUnwindSafe(|| model.set_param_id(parameter_id, 100.0))).is_err());
+    assert!(coefficient.set_param_value(100.0).is_err());
+    assert!(model.set_param(coefficient, 100.0).is_err());
+    assert!(model.set_param_id(parameter_id, 100.0).is_err());
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
-            model.__sum_context().borrow_mut().set_param_value(parameter_id, 100.0);
+            model.__sum_context().borrow_mut().set_param_value(parameter_id, 100.0).unwrap();
         }))
         .is_err()
     );
     assert_eq!(model.param_value(parameter_id), 1.0);
     assert!(satisfied(&model, &[10.0, 0.0]));
-    unrelated.set_param_value(100.0);
+    unrelated.set_param_value(100.0).unwrap();
     assert_eq!(model.param_value(unrelated.param_id().unwrap()), 100.0);
 }
 
@@ -488,12 +483,9 @@ fn indexed_parameter_handles_and_model_setters_share_locks() {
     boolean_variable!(model, active);
     disjunct_constraint!(model, active, capacity, coefficient[0] * flow <= 2.0);
     model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
-    assert!(catch_unwind(AssertUnwindSafe(|| coefficient[0].set_param_value(100.0))).is_err());
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| model.set_param_idx(&coefficient, 0, 100.0).unwrap()))
-            .is_err()
-    );
-    coefficient[1].set_param_value(100.0);
+    assert!(coefficient[0].set_param_value(100.0).is_err());
+    assert!(model.set_param_idx(&coefficient, 0, 100.0).is_err());
+    coefficient[1].set_param_value(100.0).unwrap();
     assert_eq!(model.param_value_idx(&coefficient, 0).unwrap(), Some(1.0));
     assert_eq!(model.param_value_idx(&coefficient, 1).unwrap(), Some(100.0));
 }
@@ -508,15 +500,13 @@ fn parameter_locks_are_preserved_by_clones_and_isolated_from_the_source() {
     let transformed = model.to_reformulated_gdp_model(GdpReformulationOptions::default()).unwrap();
     let parameter_id = coefficient.param_id().unwrap();
     let transformed_parameter = transformed.__sum_context().borrow_mut().param_expr(parameter_id);
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| transformed_parameter.set_param_value(100.0))).is_err()
-    );
-    coefficient.set_param_value(100.0);
+    assert!(transformed_parameter.set_param_value(100.0).is_err());
+    coefficient.set_param_value(100.0).unwrap();
     assert_eq!(model.param_value(parameter_id), 100.0);
     assert_eq!(transformed.param_value(parameter_id), 1.0);
     assert!(satisfied(&transformed, &[10.0, 0.0]));
     let cloned = transformed.to_reformulated_gdp_model(GdpReformulationOptions::default()).unwrap();
-    assert!(catch_unwind(AssertUnwindSafe(|| cloned.set_param_id(parameter_id, 100.0))).is_err());
+    assert!(cloned.set_param_id(parameter_id, 100.0).is_err());
     assert_eq!(cloned.param_value(parameter_id), 1.0);
 }
 
@@ -873,18 +863,12 @@ fn global_affine_bounds_tighten_both_m_sides_and_lock_supporting_dependencies() 
     assert!(satisfied(&model, &[1.0, 0.0, 0.0, 0.0]));
     assert!(satisfied(&model, &[3.0, 1.0, 0.0, 1.0]));
     assert!(!satisfied(&model, &[5.0, 3.0, 0.0, 1.0]));
-    assert!(catch_unwind(AssertUnwindSafe(|| cap.set_param_value(20.0))).is_err());
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| model.unfix_var(y.var_id().unwrap(), 0.0, 2000.0)))
-            .is_err()
-    );
-    unrelated.set_param_value(8.0);
-    model.unfix_var(z.var_id().unwrap(), 0.0, 2000.0);
+    assert!(cap.set_param_value(20.0).is_err());
+    assert!(model.unfix_var(y.var_id().unwrap(), 0.0, 2000.0).is_err());
+    unrelated.set_param_value(8.0).unwrap();
+    model.unfix_var(z.var_id().unwrap(), 0.0, 2000.0).unwrap();
     let clone = model.__gdp_clone();
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| clone.set_param_id(cap.param_id().unwrap(), 20.0)))
-            .is_err()
-    );
+    assert!(clone.set_param_id(cap.param_id().unwrap(), 20.0).is_err());
 }
 
 #[test]
@@ -980,7 +964,7 @@ fn global_bound_tightening_can_be_disabled_without_locking_global_parameters() {
             .unwrap();
         let expected = if tighten { 8.0 } else { 998.0 };
         assert!((report.rows[0].upper_m.unwrap().value - expected).abs() < 1e-9);
-        assert_eq!(catch_unwind(AssertUnwindSafe(|| cap.set_param_value(20.0))).is_err(), tighten);
+        assert_eq!(cap.set_param_value(20.0).is_err(), tighten);
         if tighten {
             assert!(!satisfied(&model, &[10.0, 0.5]));
         } else {
@@ -1010,7 +994,7 @@ fn unconditional_domain_bounds_can_validate_nonlinear_sources() {
     assert!(satisfied(&model, &[10.0, 0.0]));
     assert!(!satisfied(&model, &[10.0, 1.0]));
     assert!(satisfied(&model, &[2.0, 1.0]));
-    assert!(catch_unwind(AssertUnwindSafe(|| cap.set_param_value(20.0))).is_err());
+    assert!(cap.set_param_value(20.0).is_err());
 }
 
 #[test]
@@ -1108,8 +1092,8 @@ fn generated_numeric_overflow_is_rejected_before_any_mutation() {
         assert!(model.has_unreformulated_gdp());
         assert!(model.gdp().rows.iter().all(|row| row.state() == ReformulationState::Pending));
         assert!(model.gdp_reformulations().is_empty());
-        model.unfix_var(x.var_id().unwrap(), -2.0, 2.0);
-        offset.set_param_value(1.0);
+        model.unfix_var(x.var_id().unwrap(), -2.0, 2.0).unwrap();
+        offset.set_param_value(1.0).unwrap();
     }
 }
 
@@ -1191,8 +1175,8 @@ fn regression_big_m_precision_loss_is_rejected_atomically_on_both_sides() {
                     model.gdp().rows.iter().all(|row| row.state() == ReformulationState::Pending)
                 );
                 assert!(model.gdp_reformulations().is_empty());
-                model.unfix_var(x.var_id().unwrap(), -10.0, 10.0);
-                offset.set_param_value(0.0);
+                model.unfix_var(x.var_id().unwrap(), -10.0, 10.0).unwrap();
+                offset.set_param_value(0.0).unwrap();
                 let report = model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
                 assert_eq!(report.rows.len(), 2);
                 assert!(!model.has_unreformulated_gdp());
@@ -1248,8 +1232,8 @@ fn big_m_indicator_coefficient_precision_loss_is_atomic() {
                         model.gdp().rows.iter().all(|r| r.state() == ReformulationState::Pending)
                     );
 
-                    model.unfix_var(x.var_id().unwrap(), -1.0, 1.0);
-                    scale.set_param_value(coefficient);
+                    model.unfix_var(x.var_id().unwrap(), -1.0, 1.0).unwrap();
+                    scale.set_param_value(coefficient).unwrap();
                     model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
                     // Tighter bounds retain the selector's coefficient and restore
                     // the original active inequality on either side of its boundary.
@@ -1376,12 +1360,10 @@ fn logical_auxiliary_bounds_remain_binary_and_preserve_truth_tables() {
     assert_eq!(report.variables.len(), 1);
     let auxiliary = report.variables[0];
     for (lower, upper) in [(-1.0, 1.0), (0.0, 2.0)] {
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| model.unfix_var(auxiliary, lower, upper))).is_err()
-        );
+        assert!(model.unfix_var(auxiliary, lower, upper).is_err());
     }
-    model.fix_var(auxiliary, 0.0);
-    model.unfix_var(auxiliary, 0.0, 1.0);
+    model.fix_var(auxiliary, 0.0).unwrap();
+    model.unfix_var(auxiliary, 0.0, 1.0).unwrap();
     for mask in 0..8 {
         let a = mask & 1 != 0;
         let b = mask & 2 != 0;

@@ -29,7 +29,7 @@ fn indexed_reference_coordinates_shift_affine_copies_and_last_value_wins() {
         let reference = if copy.source == x[1].var_id().unwrap() { 2.0 } else { 1.0 };
         assert_eq!(copy.reference, reference);
         assert_eq!(copy.bounds, [1.0, 4.0]);
-        let generated = &model.variables()[copy.generated.index()];
+        let generated = &model.resolved_variables()[copy.generated.index()];
         assert_eq!([generated.lb, generated.ub], [(1.0 - reference).min(0.0), 4.0 - reference]);
     }
 }
@@ -357,8 +357,8 @@ fn division_diagnostics_preserve_operand_order_and_planning_leaves_dependencies_
     let options = GdpReformulationOptions::new(Hull::default())
         .with_hull_reference_coordinates([(x, 1.0), (y, 1.0)]);
     model.plan_gdp(options).unwrap();
-    limit.set_param_value(2.0);
-    model.fix_var(x.var_id().unwrap(), 2.0);
+    limit.set_param_value(2.0).unwrap();
+    model.fix_var(x.var_id().unwrap(), 2.0).unwrap();
     assert_eq!(model.param_value(limit.param_id().unwrap()), 2.0);
 }
 

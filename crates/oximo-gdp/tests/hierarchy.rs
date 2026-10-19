@@ -188,10 +188,7 @@ fn nonlinear_children_use_affine_ancestor_bounds_and_keep_global_domain_checks()
             assert_eq!(satisfied(&copy, &values), expected);
         }
     }
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rate.set_param_value(1.0)))
-            .is_err()
-    );
+    assert!(rate.set_param_value(1.0).is_err());
 
     let unsafe_model = Model::new("unsafe global domain");
     variable!(unsafe_model, 0.0 <= z <= 3.0);

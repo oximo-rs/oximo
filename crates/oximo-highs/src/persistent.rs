@@ -229,7 +229,7 @@ mod tests {
 
         let mut solver = Highs.persistent();
         for price in [1.0, 1.6, 2.0, 5.0, 11.0] {
-            p1.set_param_value(price);
+            p1.set_param_value(price).unwrap();
             let s = solver.solve(&m, &HighsOptions::default()).unwrap();
             let c = Highs.solve(&m, &HighsOptions::default()).unwrap();
             assert_eq!(s.termination, TerminationStatus::Optimal, "price {price}");
@@ -261,7 +261,7 @@ mod tests {
 
         let mut solver = Highs.persistent();
         for c in [100.0, 60.0, 140.0] {
-            cap.set_param_value(c);
+            cap.set_param_value(c).unwrap();
             let s = solver.solve(&m, &HighsOptions::default()).unwrap();
             let cold = Highs.solve(&m, &HighsOptions::default()).unwrap();
             assert_eq!(s.termination, TerminationStatus::Optimal, "cap {c}");
@@ -299,7 +299,7 @@ mod tests {
         objective!(m, Max, p1 * x1 + 5.0 * x2);
 
         let mut solver = Highs.persistent();
-        p1.set_param_value(2.0);
+        p1.set_param_value(2.0).unwrap();
         let first = solver.solve(&m, &HighsOptions::default()).unwrap();
         assert_eq!(first.termination, TerminationStatus::Optimal);
 
@@ -320,7 +320,7 @@ mod tests {
 
         let mut solver = Highs.persistent();
         for ub in [10.0, 8.0, 12.0] {
-            m.unfix_var(sid, 0.0, ub);
+            m.unfix_var(sid, 0.0, ub).unwrap();
             let warm = solver.solve(&m, &HighsOptions::default()).unwrap();
             let cold = Highs.solve(&m, &HighsOptions::default()).unwrap();
             assert_eq!(warm.termination, TerminationStatus::Optimal, "ub {ub}");
@@ -360,7 +360,7 @@ mod tests {
         let mut persistent_iters = 0u64;
         let mut cold_iters = 0u64;
         for bump_val in [0.0, 1.0, 2.0, 3.0, 4.0] {
-            bump.set_param_value(bump_val);
+            bump.set_param_value(bump_val).unwrap();
             let warm = solver.solve(&m, &HighsOptions::default()).unwrap();
             let cold = Highs.solve(&m, &HighsOptions::default()).unwrap();
             assert_eq!(warm.termination, TerminationStatus::Optimal, "bump {bump_val}");

@@ -335,7 +335,7 @@ mod tests {
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(!state.ipm.as_ref().unwrap().last_reused_transform());
 
-        unused.set_param_value(9.0);
+        unused.set_param_value(9.0).unwrap();
         let second = solver.solve(&model, &opts).unwrap();
         assert!(second.has_solution());
         assert_eq!(second.value_of(unused), Ok(Some(9.0)));
@@ -343,7 +343,7 @@ mod tests {
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(state.ipm.as_ref().unwrap().last_reused_transform());
 
-        weight.set_param_value(2.0);
+        weight.set_param_value(2.0).unwrap();
         assert!(solver.solve(&model, &opts).unwrap().has_solution());
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(!state.ipm.as_ref().unwrap().last_reused_transform());
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(false));
         assert_eq!(state.params.values().as_ptr(), first.parameters.values().as_ptr());
 
-        unused.set_param_value(9.0);
+        unused.set_param_value(9.0).unwrap();
         let second = solver.solve(&model, &opts).unwrap();
         assert!(second.has_solution());
         assert_eq!(second.value_of(unused), Ok(Some(9.0)));
@@ -378,12 +378,12 @@ mod tests {
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(true));
         assert_eq!(state.params.values().as_ptr(), second.parameters.values().as_ptr());
 
-        target.set_param_value(1.5);
+        target.set_param_value(1.5).unwrap();
         assert!(solver.solve(&model, &opts).unwrap().has_solution());
         let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(true));
 
-        scale.set_param_value(2.0);
+        scale.set_param_value(2.0).unwrap();
         assert!(solver.solve(&model, &opts).unwrap().has_solution());
         let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(false));
@@ -406,7 +406,7 @@ mod tests {
         let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(true));
 
-        target.set_param_value(1.5);
+        target.set_param_value(1.5).unwrap();
         assert!(solver.solve(&model, &opts).unwrap().has_solution());
         let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
         assert_eq!(state.resident.as_ref().unwrap().last_presolve_reused(), Some(false));

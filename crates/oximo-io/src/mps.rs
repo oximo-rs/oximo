@@ -1363,7 +1363,7 @@ pub fn write_mps_with<W: Write>(
         });
     }
     let arena = model.arena();
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     let (obj_sense, obj_terms) = crate::objective::export_terms(model, &arena, &vars)?;
@@ -1603,7 +1603,7 @@ fn write_mps_with_indicators<W: Write>(
     out: &mut W,
     options: MpsWriteOptions,
 ) -> Result<(), IoError> {
-    let source_vars = model.variables();
+    let source_vars = model.resolved_variables();
     let arena = model.arena();
     let temporary = Model::new(model.name.clone());
     let variables: Vec<_> = source_vars

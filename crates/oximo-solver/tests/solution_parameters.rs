@@ -259,8 +259,9 @@ fn normalization_rejects_an_empty_result_snapshot_instead_of_erasing_point_param
 
 #[test]
 fn normalization_rejects_conflicting_parameter_bits_even_for_detached_points() {
-    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
-    for (before, after) in [(2.0, 4.0), (0.0, -0.0), (nan, f64::from_bits(nan.to_bits() + 1))] {
+    let finite = 1.25_f64;
+    for (before, after) in [(2.0, 4.0), (0.0, -0.0), (finite, f64::from_bits(finite.to_bits() + 1))]
+    {
         let model = Model::new("conflicting snapshots");
         param!(model, p = before);
         variable!(model, x);
@@ -293,16 +294,16 @@ fn normalization_rejects_conflicting_parameter_bits_even_for_detached_points() {
 }
 
 #[test]
-fn normalization_shares_independent_snapshots_with_identical_nan_and_signed_zero_bits() {
+fn normalization_shares_independent_snapshots_with_identical_finite_and_signed_zero_bits() {
     let model = Model::new("equivalent snapshots");
 
-    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
-    param!(model, p = nan);
+    let finite = 1.25_f64;
+    param!(model, p = finite);
     param!(model, zero = -0.0);
     variable!(model, x);
     let mut result = SolverResult::for_model(&model);
     model.set_param(p, 1.0).unwrap();
-    model.set_param(p, nan).unwrap();
+    model.set_param(p, finite).unwrap();
     result.solutions.push(SolutionPoint::new(
         &model,
         [(x.var_id().unwrap(), 3.0)].into_iter().collect(),
@@ -319,7 +320,7 @@ fn normalization_shares_independent_snapshots_with_identical_nan_and_signed_zero
         result.parameters.values().as_ptr(),
         result.best().unwrap().parameters.values().as_ptr()
     );
-    assert_eq!(result.value_of(p).unwrap().unwrap().to_bits(), nan.to_bits());
+    assert_eq!(result.value_of(p).unwrap().unwrap().to_bits(), finite.to_bits());
     assert_eq!(result.value_of(zero).unwrap().unwrap().to_bits(), (-0.0_f64).to_bits());
 }
 

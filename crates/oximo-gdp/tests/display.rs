@@ -101,7 +101,7 @@ fn conditional_rows_render_all_sides_and_live_parameters() {
     ] {
         assert_eq!(model.display_disjunct_constraint(handle).to_string(), expected);
     }
-    coefficient.set_param_value(3.0);
+    coefficient.set_param_value(3.0).unwrap();
     assert_eq!(
         model.display_disjunct_constraint(upper.id()).to_string(),
         "active::upper: active -> 3 x <= 4 (pending)"

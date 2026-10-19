@@ -45,7 +45,7 @@ fn support(model: &Model, direction: [f64; 2]) -> f64 {
 
 fn linear_support(model: &Model, direction: &[(VarId, f64)]) -> f64 {
     let relaxed = Model::new("Hull LP relaxation");
-    for v in model.variables().iter() {
+    for v in &model.resolved_variables() {
         relaxed.__var(v.name.clone()).bounds(v.lb, v.ub).build();
     }
     let source_arena = model.arena();
@@ -102,7 +102,7 @@ fn inner_relaxation(inclusive: bool) -> Model {
 fn flattened_inclusive_relaxation(inner: &Model) -> Model {
     let model = Model::new("independent convex combination of nested pattern blocks");
 
-    for v in inner.variables().iter() {
+    for v in &inner.resolved_variables() {
         model.__var(v.name.clone()).bounds(v.lb, v.ub).build();
     }
     let x = model.variable_handle(VarId(0));
@@ -134,7 +134,7 @@ fn flattened_inclusive_relaxation(inner: &Model) -> Model {
     }
 
     // In the B-only pattern the child selectors and all child copies are absent.
-    for v in inner.variables().iter().skip(2) {
+    for v in inner.resolved_variables().iter().skip(2) {
         only_b.context().add_constraint(
             format!("absent {}", v.id.index()),
             model.variable_handle(v.id).eq(0.0),

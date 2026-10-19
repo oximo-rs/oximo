@@ -14,7 +14,7 @@
 //! variable sets `nl_vars_c`, `nl_vars_o` only count vars appearing inside the
 //! nonlinear residual.
 
-use oximo_core::{AlgebraicConstraint, Domain, Objective, Variable};
+use oximo_core::{AlgebraicConstraint, Domain, Objective, ResolvedVariable};
 use oximo_expr::{
     ExprArena, ExprId, ExprNode, LinearTerms, SignedExpr, VarId, Visitor, split_linear, walk_shared,
 };
@@ -89,7 +89,7 @@ impl Analysis {
 
     pub(crate) fn build(
         arena: &ExprArena,
-        vars: &[Variable],
+        vars: &[ResolvedVariable],
         constraints: &[AlgebraicConstraint],
         objective: Option<&Objective>,
         nonfinite_strings: bool,
@@ -251,7 +251,7 @@ mod tests {
         model.__add_constraint_auto((x + y * z).le(5.0));
 
         let arena = model.arena();
-        let variables = model.variables();
+        let variables = model.resolved_variables();
         let constraints = model.constraints();
         let analysis = Analysis::build(&arena, &variables, constraints.algebraic(), None, false)
             .expect("supported rows");
@@ -298,7 +298,7 @@ pub mod benchmark_support {
 
     pub fn analyze(model: &Model, parallel: bool) -> Result<usize, IoError> {
         let arena = model.arena();
-        let vars = model.variables();
+        let vars = model.resolved_variables();
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
         let objective = model.try_objective().map_err(|_| IoError::NoObjective)?;
@@ -327,7 +327,7 @@ pub mod benchmark_support {
 
     fn build(
         arena: &ExprArena,
-        vars: &[Variable],
+        vars: &[ResolvedVariable],
         constraints: &[AlgebraicConstraint],
         objective: &Objective,
         parallel: bool,

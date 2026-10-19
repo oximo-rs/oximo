@@ -6,7 +6,7 @@ use highs::{
     HessianFormat, HighsModelStatus, HighsSolutionStatus, Model as HighsModel, RowProblem,
     Sense as HighsSense,
 };
-use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, VarId, Variable};
+use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, ResolvedVariable, VarId};
 use oximo_expr::{ExprId, QuadraticTerms};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
@@ -302,7 +302,7 @@ fn objective_terms(
     kind: ModelKind,
     prepared: &LoweringContext<'_>,
     obj_expr: ExprId,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
 ) -> Result<ObjectiveTerms, SolverError> {
     let num_vars = vars.len();
     let mut coeffs = vec![0.0; num_vars];

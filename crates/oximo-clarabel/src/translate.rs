@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use oximo_core::{
-    ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, var_name,
+    ConstraintId, Model, ObjectiveSense, ResolvedVariable, Sense, SocConstraintId, SocForm,
+    var_name,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
@@ -384,10 +385,10 @@ fn translation_capacities(
     rows: &[Row<'_>],
     explicit_forms: &[SocForm],
 ) -> (usize, usize, usize) {
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
-    let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
+    let is_fixed = |v: &ResolvedVariable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     let mut row_count = 0;
     let mut nonzero_count = 0;
 
@@ -398,7 +399,7 @@ fn translation_capacities(
         row_count += multiplicity;
         nonzero_count += multiplicity * terms.coeffs.len();
     }
-    for var in vars.iter() {
+    for var in &vars {
         let multiplicity = if is_fixed(var) {
             1
         } else {
@@ -427,10 +428,10 @@ fn translation_capacities(
 /// `NonnegativeCone` block (inequalities/ranges, then finite bounds). Returns
 /// the accumulated [`Rows`] and the two block sizes.
 fn linear_rows(model: &Model, rows: &[Row<'_>], mut acc: Rows) -> (Rows, usize, usize) {
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
-    let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
+    let is_fixed = |v: &ResolvedVariable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     // ZeroCone rows: equalities, then fixed variables.
     for (i, (con, row)) in constraints.iter().zip(rows).enumerate() {
         if let Row::Lin(lt) = row
@@ -817,7 +818,7 @@ fn kkt_str(m: ClarabelDirectSolve) -> &'static str {
     }
 }
 
-fn reject_semi_domains(vars: &[Variable]) -> Result<(), SolverError> {
+fn reject_semi_domains(vars: &[ResolvedVariable]) -> Result<(), SolverError> {
     for v in vars {
         if v.domain.semi_threshold().is_some() {
             return Err(SolverError::Backend(format!(

@@ -1047,7 +1047,7 @@ mod tests {
         assert_eq!(m.num_variables(), 8);
         assert_eq!(m.num_constraints(), 4);
         assert_eq!(m.try_objective().unwrap().sense, ObjectiveSense::Minimize);
-        assert_eq!(m.variables()[0].name, "Buy['BEEF']");
+        assert_eq!(m.resolved_variables()[0].name, "Buy['BEEF']");
     }
 
     #[test]
@@ -1114,8 +1114,8 @@ mod tests {
         m.__minimize(x + y);
         let text = super::super::to_nl_string(&m).unwrap();
         let got = read_nl(text.as_bytes()).unwrap();
-        assert!(matches!(got.variables()[0].domain, Domain::Binary));
-        assert!(matches!(got.variables()[1].domain, Domain::Integer));
+        assert!(matches!(got.resolved_variables()[0].domain, Domain::Binary));
+        assert!(matches!(got.resolved_variables()[1].domain, Domain::Integer));
     }
 
     #[test]

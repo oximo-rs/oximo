@@ -187,7 +187,7 @@ fn forward_dependencies_and_parameter_updates_are_live() {
     *arena.get_mut(root) = ExprNode::Add(smallvec![sin, sin]);
     let x: &[f64] = &[];
     assert_eq!(evaluate(&arena, root, &x).unwrap(), 2.0 * 2.0_f64.sin());
-    arena.set_param_value(p, 3.0);
+    arena.set_param_value(p, 3.0).unwrap();
     assert_eq!(evaluate(&arena, root, &x).unwrap(), 2.0 * 3.0_f64.sin());
 }
 

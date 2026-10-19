@@ -64,8 +64,8 @@ fn deferred_parameter_affine_subtree_roundtrips_after_rebinding() {
             assert!((actual - coefficient.sin()).abs() < 1e-12, "{actual}");
         }
     }
-    m.set_param(p, f64::NAN).unwrap();
-    assert!(to_nl_string(&m).is_err(), "a new export must revalidate changed parameters");
+    assert!(m.set_param(p, f64::NAN).is_err());
+    assert!(to_nl_string(&m).is_ok(), "rejected writes preserve the exportable assignment");
 }
 
 #[test]

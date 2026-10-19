@@ -295,7 +295,7 @@ pub(crate) fn validate<S: Solver + ?Sized>(
         }
     }
 
-    for variable in model.variables().iter() {
+    for variable in &model.resolved_variables() {
         if let Some(reason) =
             solver.domain_support(variable.domain).rejection_reason("unsupported domain")
         {
@@ -433,7 +433,8 @@ fn support_for_native_signature<S: Solver + ?Sized>(
         && let SemanticConstraintId::Algebraic(id) = id
         && let Some(row) = model.constraints().algebraic().get(id.index())
         && let Some(quadratic) = oximo_expr::extract_quadratic(arena, row.lhs)
-        && oximo_core::__detect_soc_from_quadratic(&model.variables(), row, &quadratic).is_some()
+        && oximo_core::__detect_soc_from_quadratic(&model.resolved_variables(), row, &quadratic)
+            .is_some()
     {
         return Capability::Native;
     }

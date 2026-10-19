@@ -439,7 +439,7 @@ impl PlanBuilder {
             return Ok(());
         }
 
-        let vars = model.variables();
+        let vars = model.resolved_variables();
         let arena = model.arena();
 
         for row in &data.rows[row_start..] {

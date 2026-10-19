@@ -1,7 +1,7 @@
 //! Domain validation and outward-rounded bounds over global and conditional boxes.
 
 use oximo_core::gdp::BooleanId;
-use oximo_core::{AlgebraicConstraint, ConstraintId, Domain, Variable};
+use oximo_core::{AlgebraicConstraint, ConstraintId, Domain, ResolvedVariable};
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp, extract_linear};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -366,7 +366,7 @@ pub(crate) struct ExpressionAnalysis {
 /// supply boxes directly.
 #[derive(Clone, Copy)]
 enum VariableBounds<'a> {
-    Declared(&'a [Variable]),
+    Declared(&'a [ResolvedVariable]),
     Boxes(&'a [Bounds]),
 }
 
@@ -522,7 +522,7 @@ impl IntervalCache {
 }
 
 impl<'a> Bounder<'a> {
-    pub fn new(arena: &'a ExprArena, variables: &'a [Variable]) -> Self {
+    pub fn new(arena: &'a ExprArena, variables: &'a [ResolvedVariable]) -> Self {
         Self::with_scope(arena, VariableBounds::Declared(variables), None)
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
             x.max(y).erase(),
         ];
         let arena = m.arena();
-        let variables = m.variables();
+        let variables = m.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
 
         for (i, e) in expressions.iter().enumerate() {
@@ -1134,7 +1134,7 @@ mod tests {
         }
         drop(arena);
         let arena = m.arena();
-        let variables = m.variables();
+        let variables = m.resolved_variables();
         let bounds = Bounder::new(&arena, &variables).bound(id).unwrap();
         encloses(bounds, -1.0);
         encloses(bounds, 2.0);
@@ -1148,7 +1148,7 @@ mod tests {
         let cancelled = p * x - p * x + 1.0;
         let log = cancelled.ln();
         let arena = m.arena();
-        let variables = m.variables();
+        let variables = m.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
         let first = bounder.bound(cancelled.id).unwrap();
         let second = bounder.bound(cancelled.id).unwrap();
@@ -1178,7 +1178,7 @@ mod tests {
             .map(|parameter| arena.push(ExprNode::Add([shared, parameter].into_iter().collect())));
         drop(arena);
         let arena = m.arena();
-        let variables = m.variables();
+        let variables = m.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
 
         for (root, value) in roots.into_iter().zip([2.0, 5.0, 2.0]) {
@@ -1230,7 +1230,7 @@ mod tests {
         let mut rows = model.constraints().algebraic().to_vec();
         rows.last_mut().unwrap().active = false;
         let arena = model.arena();
-        let variables = model.variables();
+        let variables = model.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
         bounder.tighten_global(&rows, &FxHashSet::from_iter([x.var_id().unwrap()]));
         let xb = bounder.bound(x.id).unwrap();

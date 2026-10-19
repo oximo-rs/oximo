@@ -464,7 +464,7 @@ fn effective_boxes(
         plan.dependencies(&arena, row.lhs);
     }
 
-    let source = model.variables();
+    let source = model.resolved_variables();
     let mut bounder = Bounder::new(&arena, &source);
     if options.bound_tightening {
         bounder.tighten_global(model.constraints().algebraic(), &plan.locked_variables);

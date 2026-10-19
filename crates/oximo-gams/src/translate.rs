@@ -12,8 +12,8 @@ static SOLVE_ID: AtomicU64 = AtomicU64::new(0);
 
 use oximo_core::{
     AlgebraicConstraint, ConstraintId, Domain, IndicatorConstraint, Model, ModelId, ModelKind,
-    Objective, ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint, SosMember,
-    SosType, VarId, Variable,
+    Objective, ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId,
+    SosConstraint, SosMember, SosType, VarId,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
@@ -712,7 +712,7 @@ fn build_model_section(
     gms: &mut String,
     solve_type: &str,
     prepared: &PreparedExpressions,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     constraints: &[AlgebraicConstraint],
     socs: &[SocConstraint],
     sos_constraints: &[SosConstraint],
@@ -957,7 +957,7 @@ fn write_preamble(gms: &mut String) {
 
 /// Emit `Variables`, `Binary Variables`, `Integer Variables`,
 /// `Semicont Variables`, `Semiint Variables` sections.
-fn write_var_declarations(gms: &mut String, vars: &[Variable]) {
+fn write_var_declarations(gms: &mut String, vars: &[ResolvedVariable]) {
     let (mut cont, mut bin, mut int, mut semicont, mut semiint) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for v in vars {
@@ -983,7 +983,7 @@ fn write_var_declarations(gms: &mut String, vars: &[Variable]) {
     writeln!(gms).unwrap();
 }
 
-fn write_typed_var_section(gms: &mut String, header: &str, vars: &[&Variable]) {
+fn write_typed_var_section(gms: &mut String, header: &str, vars: &[&ResolvedVariable]) {
     if vars.is_empty() {
         return;
     }
@@ -1025,7 +1025,7 @@ fn write_sos_declarations(gms: &mut String, constraints: &[SosConstraint]) {
 
 fn write_bounds_and_initials(
     gms: &mut String,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     sos_constraints: &[SosConstraint],
 ) {
     for v in vars {
@@ -1046,7 +1046,7 @@ fn write_bounds_and_initials(
 /// bounds/domain determine their feasible values.
 fn write_sos_bounds_and_initials(
     gms: &mut String,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     constraints: &[SosConstraint],
 ) {
     for (sos_id, constraint) in active_sos_constraints(constraints) {
@@ -1060,7 +1060,7 @@ fn write_sos_bounds_and_initials(
     }
 }
 
-fn write_var_bounds(gms: &mut String, v: &Variable) {
+fn write_var_bounds(gms: &mut String, v: &ResolvedVariable) {
     let i = v.id.index();
     if matches!(v.domain, Domain::Binary) {
         // Default binary bounds are [0, 1], only emit when overridden or fixed.
@@ -1674,7 +1674,7 @@ mod tests {
     }
     fn render(model: &Model, opts: &GamsOptions) -> String {
         let _arena = model.arena();
-        let vars = model.variables();
+        let vars = model.resolved_variables();
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
         let socs = model.soc_constraints();
@@ -2291,7 +2291,7 @@ mod tests {
             members: vec![SosMember { variable: VarId(0), weight: 1.0 }],
             active: false,
         }];
-        let vars = vec![Variable {
+        let vars = vec![ResolvedVariable {
             id: VarId(0),
             name: "x".into(),
             domain: Domain::Real,
