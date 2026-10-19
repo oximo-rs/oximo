@@ -18,9 +18,7 @@ fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
     let coordinates = SourceCoordinates::capture(&source);
 
     source.set_param(weight, 2.0).unwrap();
-    let transformed = source
-        .to_reformulated_sos_model(SosReformulationOptions::default())
-        .unwrap();
+    let transformed = source.to_reformulated_sos_model(SosReformulationOptions::default()).unwrap();
     source.set_param(weight, 1.0).unwrap();
 
     let history = transformed.sos_reformulations();
@@ -207,7 +205,8 @@ fn projection_filters_generated_cone_duals() {
     variable!(source, t >= 0.0);
     let cone = soc_constraint!(source, cone, [x] <= t);
     variable!(source, z);
-    let positivity = psd_constraint!(source, positivity, SymmetricMatrix::from_upper_triangle(1, [z]));
+    let positivity =
+        psd_constraint!(source, positivity, SymmetricMatrix::from_upper_triangle(1, [z]));
 
     let coordinates = SourceCoordinates::capture(&source);
     assert_eq!(coordinates.soc_constraints, 1);
