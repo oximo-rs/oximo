@@ -7,5 +7,9 @@ error[E0603]: function `normalize_result` is private
 note: the function `normalize_result` is defined here
  --> src/reconstruct.rs
   |
-  | fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | / fn normalize_result(
+  | |     mut result: SolverResult,
+  | |     source_variables: &SourceIndices,
+  | |     retained: &FxHashSet<VarId>,
+  | | ) -> SolverResult {
+  | |_________________^

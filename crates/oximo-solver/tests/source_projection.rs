@@ -1,9 +1,64 @@
 use oximo_core::SemanticConstraintId;
+use oximo_core::VarId;
 use oximo_core::prelude::*;
 use oximo_solver::reconstruct::{
-    ObjectiveTransform, ProjectionError, SourceCoordinates, SourceProjection,
+    ObjectiveTransform, ProjectionError, SourceCoordinates, SourceProjection, SourceProjectionPlan,
 };
 use oximo_solver::{DualStatus, PrimalStatus, SolverResult};
+
+#[test]
+fn borrowed_plan_preserves_interleaved_source_rows_and_reuses_membership() {
+    let source = Model::new("reusable projection plan");
+    variable!(source, x);
+    variable!(source, generated);
+    variable!(source, z);
+    constraint!(source, first, x <= 1.0);
+    constraint!(source, generated_row, generated <= 2.0);
+    constraint!(source, last, z <= 3.0);
+    let first = source.constraint_id("first").unwrap();
+    let last = source.constraint_id("last").unwrap();
+    let generated_row = source.constraint_id("generated_row").unwrap();
+    let x_id = x.var_id().unwrap();
+    let z_id = z.var_id().unwrap();
+    let generated_id = generated.var_id().unwrap();
+    let plan = SourceProjectionPlan::new(SourceCoordinates::capture(&source))
+        .with_source_variables([x_id, z_id, x_id])
+        .with_source_rows([first, last, first])
+        .retain_variables([generated_id]);
+    let projection = SourceProjection::with_plan(&source, &plan);
+    let mut result = SolverResult::for_model(&source);
+    result.dual_status = DualStatus::FeasiblePoint;
+    result
+        .add_solution([(x_id, 1.0), (z_id, 2.0), (generated_id, 0.5)].into_iter().collect(), None);
+    result.dual = [(first, 1.0), (generated_row, 9.0), (last, 2.0)].into_iter().collect();
+    result.reduced_costs = [(x_id, 1.0), (generated_id, 9.0), (z_id, 2.0)].into_iter().collect();
+    for _ in 0..3 {
+        let projected = projection.project(result.clone()).unwrap();
+        assert_eq!(projected.primal().unwrap().len(), 3);
+        assert_eq!(projected.dual.len(), 2);
+        assert_eq!(projected.dual.get(&last), Some(&2.0));
+        assert!(!projected.dual.contains_key(&generated_row));
+        assert_eq!(projected.reduced_costs.len(), 2);
+        assert!(!projected.reduced_costs.contains_key(&generated_id));
+    }
+    // The same immutable plan remains usable by another projector.
+    assert!(SourceProjection::with_plan(&source, &plan).project(result).unwrap().has_solution());
+}
+
+#[test]
+fn explicit_source_rows_validate_indices_instead_of_only_set_length() {
+    let source = Model::new("explicit source row bounds");
+    variable!(source, x);
+    constraint!(source, row, x <= 1.0);
+    let error = SourceProjection::capture(&source)
+        .with_source_rows([oximo_core::ConstraintId(1)])
+        .project(SolverResult::for_model(&source))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProjectionError::CoordinatesExceedSource { kind: "algebraic row", count: 2, available: 1 }
+    ));
+}
 
 #[test]
 fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
@@ -211,6 +266,145 @@ fn projection_preserves_every_valid_solution_point() {
     assert_eq!(projected.solutions[0].objective, Some(3.0));
     assert_eq!(projected.solutions[1].objective, Some(7.0));
     assert_eq!(projected.primal_status, PrimalStatus::FeasiblePoint);
+}
+
+#[test]
+fn projection_retains_explicitly_requested_generated_variables() {
+    let source = Model::new("retained projection");
+    variable!(source, x);
+    variable!(source, y);
+
+    let x_id = x.var_id().unwrap();
+    let y_id = y.var_id().unwrap();
+    let retained = VarId(2);
+    let dropped = VarId(3);
+
+    let mut result = SolverResult::for_model(&source);
+    result.add_solution(
+        [(x_id, 1.0), (y_id, 2.0), (retained, 0.5), (dropped, 0.75)].into_iter().collect(),
+        Some(0.0),
+    );
+
+    let projected =
+        SourceProjection::capture(&source).retain_variables([retained]).project(result).unwrap();
+
+    let primal = projected.primal().unwrap();
+    assert_eq!(primal.len(), 3);
+    assert_eq!(primal.get(&retained), Some(&0.5));
+    assert_eq!(primal.get(&x_id), Some(&1.0));
+    assert!(!primal.contains_key(&dropped));
+}
+
+#[test]
+fn projection_drops_non_finite_retained_values() {
+    let source = Model::new("non-finite retained projection");
+    variable!(source, x);
+
+    let x_id = x.var_id().unwrap();
+    let retained = VarId(1);
+
+    let mut result = SolverResult::for_model(&source);
+    result.add_solution([(x_id, 1.0), (retained, f64::NAN)].into_iter().collect(), Some(0.0));
+
+    let projected =
+        SourceProjection::capture(&source).retain_variables([retained]).project(result).unwrap();
+
+    let primal = projected.primal().unwrap();
+    assert_eq!(primal.len(), 1);
+    assert!(!primal.contains_key(&retained));
+}
+
+#[test]
+fn projection_still_requires_every_source_variable_when_retaining() {
+    let source = Model::new("incomplete retained projection");
+    variable!(source, x);
+    variable!(source, _y);
+
+    let mut result = SolverResult::for_model(&source);
+    result.add_solution(
+        [(x.var_id().unwrap(), 1.0), (VarId(2), 0.5)].into_iter().collect(),
+        Some(0.0),
+    );
+
+    let projected =
+        SourceProjection::capture(&source).retain_variables([VarId(2)]).project(result).unwrap();
+
+    assert!(projected.solutions.is_empty());
+    assert_eq!(projected.primal_status, PrimalStatus::NoSolution);
+}
+
+#[test]
+fn explicit_source_variables_can_interleave_with_generated_ids() {
+    let source = Model::new("interleaved source projection");
+    variable!(source, x);
+    variable!(source, y);
+    variable!(source, z);
+
+    let x_id = x.var_id().unwrap();
+    let y_id = y.var_id().unwrap();
+    let z_id = z.var_id().unwrap();
+    let coordinates = SourceCoordinates { variables: 2, ..SourceCoordinates::capture(&source) };
+
+    let mut result = SolverResult::for_model(&source);
+    result.dual_status = DualStatus::FeasiblePoint;
+    result.add_solution([(x_id, 1.0), (y_id, 0.5), (z_id, 2.0)].into_iter().collect(), Some(0.0));
+    result.reduced_costs.insert(x_id, 1.0);
+    result.reduced_costs.insert(y_id, 9.0);
+    result.reduced_costs.insert(z_id, 2.0);
+
+    let projected = SourceProjection::with_coordinates(&source, coordinates)
+        .with_source_variables([x_id, z_id])
+        .project(result)
+        .unwrap();
+
+    let primal = projected.primal().unwrap();
+    assert_eq!(primal.len(), 2);
+    assert_eq!(primal.get(&x_id), Some(&1.0));
+    assert_eq!(primal.get(&z_id), Some(&2.0));
+    assert!(!primal.contains_key(&y_id));
+
+    assert_eq!(projected.reduced_costs.get(&x_id), Some(&1.0));
+    assert_eq!(projected.reduced_costs.get(&z_id), Some(&2.0));
+    assert!(!projected.reduced_costs.contains_key(&y_id));
+}
+
+#[test]
+fn explicit_source_variables_still_require_complete_source_points() {
+    let source = Model::new("incomplete explicit projection");
+    variable!(source, x);
+    variable!(source, _y);
+    variable!(source, z);
+
+    let x_id = x.var_id().unwrap();
+    let z_id = z.var_id().unwrap();
+    let coordinates = SourceCoordinates { variables: 2, ..SourceCoordinates::capture(&source) };
+
+    let mut result = SolverResult::for_model(&source);
+    result.add_solution([(x_id, 1.0), (VarId(1), 0.5)].into_iter().collect(), Some(0.0));
+
+    let projected = SourceProjection::with_coordinates(&source, coordinates)
+        .with_source_variables([x_id, z_id])
+        .project(result)
+        .unwrap();
+
+    assert!(projected.solutions.is_empty());
+    assert_eq!(projected.primal_status, PrimalStatus::NoSolution);
+}
+
+#[test]
+fn explicit_source_variables_must_belong_to_the_source_model() {
+    let source = Model::new("explicit source bounds");
+    variable!(source, _x);
+
+    let error = SourceProjection::capture(&source)
+        .with_source_variables([VarId(0), VarId(1)])
+        .project(SolverResult::for_model(&source))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ProjectionError::CoordinatesExceedSource { kind: "variable", count: 2, available: 1 }
+    ));
 }
 
 #[test]
