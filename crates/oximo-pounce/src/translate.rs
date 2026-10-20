@@ -73,7 +73,7 @@ pub(crate) struct Outcome {
 }
 
 pub(crate) fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
-    let vars = model.resolved_variables();
+    let vars = model.variables();
     if let Some(v) = vars.iter().find(|v| v.domain.semi_threshold().is_some()) {
         return Err(SolverError::Backend(format!(
             "variable {} has a semicontinuous/semi-integer domain, \

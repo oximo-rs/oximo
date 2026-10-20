@@ -145,7 +145,7 @@ impl HybridOracle {
             obj,
             cons,
             params,
-            n_vars: model.resolved_variables().len(),
+            n_vars: model.num_variables(),
             obj_expr,
             con_exprs,
             jac_structure: Vec::new(),
@@ -166,7 +166,7 @@ impl HybridOracle {
     pub(crate) fn matches(&self, model: &Model) -> bool {
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
-        self.n_vars == model.resolved_variables().len()
+        self.n_vars == model.num_variables()
             && self.obj_expr == model.objective().as_ref().map(|o| o.expr)
             && self.con_exprs.len() == constraints.len()
             && constraints.iter().map(|c| c.lhs).eq(self.con_exprs.iter().copied())
