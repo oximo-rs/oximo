@@ -175,7 +175,7 @@ fn persistent_matches_cold_on_parameter_sweep() {
 
     let mut solver = Pounce.persistent();
     for wv in [1.0, 2.0, 0.5] {
-        w.set_param_value(wv);
+        w.set_param_value(wv).unwrap();
         let warm = solver.solve(&m, &PounceOptions::default()).unwrap();
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "w {wv}: no solution");

@@ -1327,6 +1327,7 @@ impl Model {
         parameters: Vec<ParamId>,
         constraints: Vec<ConstraintId>,
     ) {
+        self.lock_bound_parameters(variables.iter().copied(), "GDP");
         self.gdp.borrow_mut().finish(report, variables, constraints);
         self.arena.borrow_mut().__lock_parameters(parameters);
     }

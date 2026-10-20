@@ -144,7 +144,7 @@ fn semantic_data_does_not_freeze_parameters_and_objective_degrees() {
     let handle = constraint!(m, row, p * x <= 3.0);
     objective!(m, Min, x.square());
     let before = m.semantic_constraint(handle).unwrap().unwrap();
-    p.set_param_value(4.0);
+    p.set_param_value(4.0).unwrap();
     let after = m.semantic_constraint(handle).unwrap().unwrap();
     assert_eq!(before.pair.function.expressions(), after.pair.function.expressions());
     assert!(
@@ -810,7 +810,7 @@ fn disabled_sources_do_not_lock_bounds_but_reformulated_sources_reject_updates()
     m.set_constraint_active(guard, false).unwrap();
     m.set_constraint_active(choice, false).unwrap();
     m.fix(x, 3.0).unwrap();
-    m.unfix_var(x.var_id().unwrap(), 0.0, 10.0);
+    m.unfix_var(x.var_id().unwrap(), 0.0, 10.0).unwrap();
     m.set_constraint_active(guard, true).unwrap();
     m.set_constraint_active(choice, true).unwrap();
     guard.reformulate(&m, IndicatorReformulationOptions::default()).unwrap();
@@ -856,7 +856,7 @@ fn disabled_sources_do_not_lock_bounds_but_reformulated_sources_reject_updates()
     );
     assert!(m.set_constraint_active(guard, true).is_err());
     assert_eq!(m.to_string(), before);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.fix(x, 1.0))).is_err());
+    assert!(m.fix(x, 1.0).is_err());
 }
 
 #[test]
@@ -962,13 +962,13 @@ fn fork_first_edits_detach_names_bounds_parameters_and_provenance() {
     let snapshot = model.semantic_constraint(row).unwrap().unwrap();
     let fork = model.fork();
     let fork_row = fork.semantic_constraint_handle(row.id()).unwrap();
-    fork.fix_var(x.var_id().unwrap(), 4.0);
-    fork.set_param_id(p.param_id().unwrap(), 8.0);
+    fork.fix_var(x.var_id().unwrap(), 4.0).unwrap();
+    fork.set_param_id(p.param_id().unwrap(), 8.0).unwrap();
     fork.set_constraint_origin(fork_row.id(), ConstraintOrigin::Range("fork range".into()));
     variable!(fork, y >= 0.0);
     constraint!(fork, added, y <= 3.0);
 
-    assert_eq!(model.variables()[0].ub, 10.0);
+    assert_eq!(model.resolved_variables()[0].ub, 10.0);
     assert_eq!(model.param_value_of(p).unwrap(), Some(2.0));
     assert!(!model.contains_constraint_name("added"));
     assert!(matches!(snapshot.origin, ConstraintOrigin::Declared));

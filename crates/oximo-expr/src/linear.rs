@@ -1270,9 +1270,13 @@ mod tests {
         let param = arena.new_param(0.0);
         let p = arena.param(param);
         for scalar in [-0.0, 0.0, 1.0, 1e308, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            arena.set_param_value(param, scalar);
+            if scalar.is_finite() {
+                arena.set_param_value(param, scalar).unwrap();
+            } else {
+                assert!(arena.set_param_value(param, scalar).is_err());
+            }
             let constant = arena.constant(scalar);
-            for factor in [constant, p] {
+            for factor in [Some(constant), scalar.is_finite().then_some(p)].into_iter().flatten() {
                 let left = arena.push(ExprNode::Mul(smallvec![factor, var]));
                 let right = arena.push(ExprNode::Mul(smallvec![var, factor]));
                 let sum = arena.push(ExprNode::Add(smallvec![left, right, var]));
@@ -1293,7 +1297,7 @@ mod tests {
         let term = arena.push(ExprNode::Mul(smallvec![p, var]));
         let sum = arena.push(ExprNode::Add(smallvec![term, term]));
         for value in [2.0, 3.0] {
-            arena.set_param_value(param, value);
+            arena.set_param_value(param, value).unwrap();
             assert_eq!(extract_linear(&arena, sum).unwrap().coeffs, vec![(VarId(0), 2.0 * value)]);
         }
     }
@@ -1406,7 +1410,7 @@ mod tests {
         let xnode = arena.push(ExprNode::Var(VarId(0)));
         let prod = mul_into(&mut arena, price, xnode);
 
-        arena.set_param_value(pid, 10.0);
+        arena.set_param_value(pid, 10.0).unwrap();
         let terms = extract_linear(&arena, prod).expect("linear");
         assert_eq!(&*terms.coeffs, &[(VarId(0), 10.0)][..]);
     }

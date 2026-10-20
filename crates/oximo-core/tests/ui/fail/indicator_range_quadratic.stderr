@@ -14,7 +14,7 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Affine>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, Constant>`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_>`

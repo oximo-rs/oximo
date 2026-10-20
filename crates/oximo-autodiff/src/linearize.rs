@@ -15,7 +15,7 @@ use crate::tape::Tape;
 /// Returns [`AutodiffError::DimensionMismatch`] if `x.len()` differs from the
 /// model's variable count.
 pub fn gradient_at(model: &Model, expr: Expr<'_>, x: &[f64]) -> Result<Vec<f64>, AutodiffError> {
-    let n = model.variables().len();
+    let n = model.num_variables();
     if x.len() != n {
         return Err(AutodiffError::DimensionMismatch { expected: n, got: x.len() });
     }

@@ -382,7 +382,7 @@ mod tests {
         let s = arena.push(ExprNode::Unary(UnaryOp::Sin, sum));
         assert_eq!(render_expr(&arena, s, &names), "sin(x - 3)");
 
-        arena.set_param_value(pid, 3.0);
+        arena.set_param_value(pid, 3.0).unwrap();
         assert_eq!(render_expr(&arena, s, &names), "sin(x + 3)");
     }
 

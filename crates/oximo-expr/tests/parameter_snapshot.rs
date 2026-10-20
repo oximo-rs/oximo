@@ -22,8 +22,8 @@ fn parameter_snapshot_survives_rebinding_append_cloning_and_arena_drop() {
         let snapshot = arena.parameter_snapshot();
         assert_eq!(snapshot.values().as_ptr(), snapshot.clone().values().as_ptr());
         let mut copy = arena.clone();
-        arena.set_param_value(p, 4.0);
-        copy.set_param_value(p, 6.0);
+        arena.set_param_value(p, 4.0).unwrap();
+        copy.set_param_value(p, 6.0).unwrap();
         let q = arena.new_param(5.0);
         assert_eq!(snapshot.value(p), Some(2.0));
         assert_eq!(snapshot.value(q), None);
@@ -35,14 +35,16 @@ fn parameter_snapshot_survives_rebinding_append_cloning_and_arena_drop() {
 
 #[test]
 fn identical_parameter_assignments_keep_shared_storage_and_distinct_bits_detach() {
-    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
-    for (initial, changed) in [(2.0, 4.0), (0.0, -0.0), (nan, f64::from_bits(nan.to_bits() + 1))] {
+    let finite = 1.25_f64;
+    for (initial, changed) in
+        [(2.0, 4.0), (0.0, -0.0), (finite, f64::from_bits(finite.to_bits() + 1))]
+    {
         let mut arena = ExprArena::new();
         let p = arena.new_param(initial);
         let saved = arena.parameter_snapshot();
-        arena.set_param_value(p, initial);
+        arena.set_param_value(p, initial).unwrap();
         assert_eq!(saved.values().as_ptr(), arena.parameter_snapshot().values().as_ptr());
-        arena.set_param_value(p, changed);
+        arena.set_param_value(p, changed).unwrap();
         assert_ne!(saved.values().as_ptr(), arena.parameter_snapshot().values().as_ptr());
         assert_eq!(saved.value(p).unwrap().to_bits(), initial.to_bits());
         assert_eq!(arena.param_value(p).to_bits(), changed.to_bits());
@@ -50,12 +52,11 @@ fn identical_parameter_assignments_keep_shared_storage_and_distinct_bits_detach(
 }
 
 #[test]
-#[should_panic(expected = "cannot change a parameter embedded in a reformulation")]
 fn identical_parameter_assignment_still_rejects_locked_parameters() {
     let mut arena = ExprArena::new();
     let p = arena.new_param(2.0);
     arena.__lock_parameters([p]);
-    arena.set_param_value(p, 2.0);
+    assert!(arena.set_param_value(p, 2.0).is_err());
 }
 
 #[test]
@@ -73,7 +74,7 @@ fn snapshot_context_never_falls_back_in_leaf_shallow_array_or_large_arena_querie
     let shared = arena.push(ExprNode::Add(Children::from_slice(&[product, product])));
     let missing_shared =
         arena.push(ExprNode::Add(Children::from_slice(&[missing_product, missing_product])));
-    arena.set_param_value(p, 4.0);
+    arena.set_param_value(p, 4.0).unwrap();
     for large in [false, true] {
         if large {
             // Large arenas select the hashed traversal for compound roots.
@@ -96,27 +97,23 @@ fn snapshot_context_never_falls_back_in_leaf_shallow_array_or_large_arena_querie
 }
 
 #[test]
-fn snapshot_bit_comparison_preserves_signed_zero_nan_payloads_and_length() {
+fn snapshot_bit_comparison_preserves_signed_zero_rejected_nonfinite_values_and_length() {
     let mut arena = ExprArena::new();
     let p = arena.new_param(0.0);
     let positive_zero = arena.parameter_snapshot();
     assert!(positive_zero.same_bits(&positive_zero.clone()));
-    arena.set_param_value(p, -0.0);
+    arena.set_param_value(p, -0.0).unwrap();
     assert!(!positive_zero.same_bits(&arena.parameter_snapshot()));
-    arena.set_param_value(p, 0.0);
+    arena.set_param_value(p, 0.0).unwrap();
     assert!(positive_zero.same_bits(&arena.parameter_snapshot()));
 
-    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
-    arena.set_param_value(p, nan);
-    let saved_nan = arena.parameter_snapshot();
-    assert!(saved_nan.same_bits(&saved_nan.clone()));
-    arena.set_param_value(p, nan);
-    assert!(saved_nan.same_bits(&arena.parameter_snapshot()));
-    arena.set_param_value(p, f64::from_bits(nan.to_bits() + 1));
-    assert!(!saved_nan.same_bits(&arena.parameter_snapshot()));
-    arena.set_param_value(p, nan);
+    let saved = arena.parameter_snapshot();
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(arena.set_param_value(p, value).is_err());
+        assert!(saved.same_bits(&arena.parameter_snapshot()));
+    }
     arena.new_param(1.0);
-    assert!(!saved_nan.same_bits(&arena.parameter_snapshot()));
+    assert!(!saved.same_bits(&arena.parameter_snapshot()));
     assert!(ParameterSnapshot::default().same_bits(&ParameterSnapshot::default()));
 }
 
@@ -129,13 +126,13 @@ fn snapshot_equality_compares_bits_for_shared_and_independent_storage() {
         }
         arena.parameter_snapshot()
     };
-    let nan = f64::from_bits(0x7ff8_0000_0000_0001);
-    let saved = capture(&[1.0, -0.0, nan, f64::INFINITY]);
+    let finite = 1.25_f64;
+    let saved = capture(&[1.0, -0.0, finite, f64::MAX]);
     assert_eq!(saved, saved.clone());
-    assert_eq!(saved, capture(&[1.0, -0.0, nan, f64::INFINITY]));
-    assert_ne!(saved, capture(&[1.0, 0.0, nan, f64::INFINITY]));
-    assert_ne!(saved, capture(&[1.0, -0.0, f64::from_bits(nan.to_bits() + 1), f64::INFINITY]));
-    assert_ne!(saved, capture(&[1.0, -0.0, nan]));
-    assert_ne!(saved, capture(&[2.0, -0.0, nan, f64::INFINITY]));
+    assert_eq!(saved, capture(&[1.0, -0.0, finite, f64::MAX]));
+    assert_ne!(saved, capture(&[1.0, 0.0, finite, f64::MAX]));
+    assert_ne!(saved, capture(&[1.0, -0.0, f64::from_bits(finite.to_bits() + 1), f64::MAX]));
+    assert_ne!(saved, capture(&[1.0, -0.0, finite]));
+    assert_ne!(saved, capture(&[2.0, -0.0, finite, f64::MAX]));
     assert_eq!(ParameterSnapshot::default(), capture(&[]));
 }

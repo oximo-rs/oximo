@@ -200,6 +200,28 @@ mod tests {
         (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
     }
 
+    #[test]
+    fn symbolic_bound_sweep_updates_and_rebuilds_match_cold_solves() {
+        let model = Model::new("resident symbolic bounds");
+        param!(model, cap = 5.0);
+        variable!(model, 0.0 <= x <= cap);
+        objective!(model, Max, x);
+        let options =
+            ClarabelOptions::default().presolve_enable(false).input_sparse_dropzeros(false);
+        let mut solver = Clarabel.persistent();
+
+        for (value, updates) in [(5.0, 0), (8.0, 1), (0.0, 1), (3.0, 1), (7.0, 2)] {
+            cap.set_param_value(value).unwrap();
+            let warm = solver.solve(&model, &options).unwrap();
+            let cold = Clarabel.solve(&model, &options).unwrap();
+            assert_eq!(warm.termination, TerminationStatus::Optimal);
+            assert!(close(warm.value_of(x).unwrap().unwrap(), value));
+            assert!(close(warm.objective().unwrap(), cold.objective().unwrap()));
+            assert_eq!(warm.parameters.value(cap.param_id().unwrap()), Some(value));
+            assert_eq!(solver.updates, updates);
+        }
+    }
+
     /// A parameter in an objective coefficient changes `q` only: the sparsity
     /// pattern is untouched, so the handle updates in place and must match the
     /// cold solve across the sweep.
@@ -215,7 +237,7 @@ mod tests {
 
         let mut solver = Clarabel.persistent();
         for price in [1.0, 1.6, 2.0, 5.0, 11.0] {
-            p1.set_param_value(price);
+            p1.set_param_value(price).unwrap();
             let s = solver.solve(&m, &ClarabelOptions::default()).unwrap();
             let c = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
             assert_eq!(s.termination, TerminationStatus::Optimal, "price {price}");
@@ -242,7 +264,7 @@ mod tests {
 
         let mut solver = Clarabel.persistent();
         for c in [100.0, 60.0, 140.0] {
-            cap.set_param_value(c);
+            cap.set_param_value(c).unwrap();
             let s = solver.solve(&m, &ClarabelOptions::default()).unwrap();
             let cold = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
             assert_eq!(s.termination, TerminationStatus::Optimal, "cap {c}");
@@ -263,7 +285,7 @@ mod tests {
 
         let mut solver = Clarabel.persistent();
         for av in [2.0, 1.0, 4.0] {
-            a.set_param_value(av);
+            a.set_param_value(av).unwrap();
             let s = solver.solve(&m, &ClarabelOptions::default()).unwrap();
             let cold = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
             assert_eq!(s.termination, TerminationStatus::Optimal, "a {av}");
@@ -309,7 +331,7 @@ mod tests {
 
         let mut solver = Clarabel.persistent();
         for wv in [1.0, 2.0, 0.5] {
-            wt.set_param_value(wv);
+            wt.set_param_value(wv).unwrap();
             let warm = solver.solve(&m, &ClarabelOptions::default()).unwrap();
             let cold = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap();
             assert_eq!(warm.termination, TerminationStatus::Optimal, "wt {wv}");
@@ -443,7 +465,7 @@ mod tests {
         objective!(m, Max, p1 * x1 + 5.0 * x2);
 
         let mut solver = Clarabel.persistent();
-        p1.set_param_value(2.0);
+        p1.set_param_value(2.0).unwrap();
         let first = solver.solve(&m, &ClarabelOptions::default()).unwrap();
         assert_eq!(first.termination, TerminationStatus::Optimal);
 

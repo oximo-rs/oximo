@@ -9,7 +9,7 @@ use oximo_gdp::prelude::*;
 fn satisfied(model: &Model, values: &[f64]) -> bool {
     let arena = model.arena();
     model
-        .variables()
+        .resolved_variables()
         .iter()
         .all(|v| values[v.id.index()] >= v.lb - 1e-8 && values[v.id.index()] <= v.ub + 1e-8)
         && model.constraints().algebraic().iter().all(|r| {
@@ -511,8 +511,13 @@ fn numeric_selectors_preserve_own_ancestor_sibling_and_unrelated_values() {
         )
         .unwrap();
 
-    assert_eq!(model.variables()[0].domain, Domain::Integer);
-    assert!(report.variables.iter().all(|v| model.variables()[v.index()].domain == Domain::Real));
+    assert_eq!(model.resolved_variables()[0].domain, Domain::Integer);
+    assert!(
+        report
+            .variables
+            .iter()
+            .all(|v| model.resolved_variables()[v.index()].domain == Domain::Real)
+    );
 
     for bits in 0..32 {
         let a = f64::from(bits & 1 != 0);
@@ -599,7 +604,6 @@ fn independent_big_m_trees_retain_hierarchical_estimates_beside_hull() {
 
 #[test]
 fn nonlinear_parameter_snapshots_and_clone_locks_are_isolated() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
     let model = Model::new("Hull parameter snapshot");
 
     variable!(model, -1.0 <= x <= 2.0);
@@ -610,21 +614,21 @@ fn nonlinear_parameter_snapshots_and_clone_locks_are_isolated() {
 
     let transformed = model.to_reformulated_gdp_model(Hull::default()).unwrap();
     let id = coefficient.param_id().unwrap();
-    coefficient.set_param_value(3.0);
+    coefficient.set_param_value(3.0).unwrap();
 
     assert_eq!(model.param_value(id), 3.0);
     assert_eq!(transformed.param_value(id), 2.0);
-    assert!(catch_unwind(AssertUnwindSafe(|| transformed.set_param_id(id, 4.0))).is_err());
-    assert!(catch_unwind(AssertUnwindSafe(|| transformed.fix_var(VarId(0), 0.0))).is_err());
+    assert!(transformed.set_param_id(id, 4.0).is_err());
+    assert!(transformed.fix_var(VarId(0), 0.0).is_err());
 
     let generated = transformed.gdp_reformulations()[0].hull_variables[0].generated;
-    assert!(catch_unwind(AssertUnwindSafe(|| transformed.fix_var(generated, 0.0))).is_err());
+    assert!(transformed.fix_var(generated, 0.0).is_err());
 
     let clone = transformed.to_reformulated_gdp_model(Hull::default()).unwrap();
 
-    assert!(catch_unwind(AssertUnwindSafe(|| clone.set_param_id(id, 4.0))).is_err());
+    assert!(clone.set_param_id(id, 4.0).is_err());
 
-    clone.set_param_id(unrelated.param_id().unwrap(), 5.0);
+    clone.set_param_id(unrelated.param_id().unwrap(), 5.0).unwrap();
     assert_eq!(transformed.param_value(unrelated.param_id().unwrap()), 1.0);
 
     let report = &transformed.gdp_reformulations()[0];
@@ -1376,7 +1380,7 @@ fn shared_nonlinear_source_preparation_keeps_each_bound_and_parameter_snapshot()
     disjunct_constraint!(model, active, first, body <= 1e16);
     disjunct_constraint!(model, active, second, body <= 1e16 + 2.0);
     model.plan_gdp(Hull::default()).unwrap();
-    factor.set_param_value(2.0);
+    factor.set_param_value(2.0).unwrap();
 
     let report = model.reformulate_gdp(Hull::default()).unwrap();
 

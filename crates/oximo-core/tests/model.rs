@@ -172,11 +172,11 @@ fn bound_change_invalidates_kind_cache() {
     assert_eq!(m.kind(), ModelKind::SOCP);
 
     // Unfixing back to a free variable demotes it again.
-    m.unfix_var(t.var_id().unwrap(), f64::NEG_INFINITY, f64::INFINITY);
+    m.unfix_var(t.var_id().unwrap(), f64::NEG_INFINITY, f64::INFINITY).unwrap();
     assert_eq!(m.kind(), ModelKind::QCP);
 
     // A nonnegative lower bound restores the cone.
-    m.unfix_var(t.var_id().unwrap(), 0.0, f64::INFINITY);
+    m.unfix_var(t.var_id().unwrap(), 0.0, f64::INFINITY).unwrap();
     assert_eq!(m.kind(), ModelKind::SOCP);
 }
 
@@ -252,7 +252,7 @@ fn fix_sets_equal_bounds() {
     let m = Model::new("fix_builder");
     variable!(m, 0.0 <= x <= 10.0);
     m.fix(x, 3.5).unwrap();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].lb, 3.5);
     assert_eq!(vars[0].ub, 3.5);
 }
@@ -263,26 +263,24 @@ fn fix_var_mutates_bounds_post_build() {
     variable!(m, 0.0 <= x <= 10.0);
     let _ = x;
     let id = m.variable_id("x").unwrap();
-    m.fix_var(id, 7.0);
-    let vars = m.variables();
+    m.fix_var(id, 7.0).unwrap();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].lb, 7.0);
     assert_eq!(vars[0].ub, 7.0);
 }
 
 #[test]
-#[should_panic(expected = "cannot fix integer variable \"y\" to the fractional value 0.3")]
 fn fix_rejects_a_fractional_value_on_an_integer_variable() {
     let m = Model::new("fix_fractional");
     variable!(m, 0.0 <= y <= 1, Int);
-    m.fix(y, 0.3).unwrap();
+    assert!(m.fix(y, 0.3).is_err());
 }
 
 #[test]
-#[should_panic(expected = "cannot fix binary variable \"z\" to the fractional value 0.3")]
 fn fix_rejects_a_fractional_value_on_a_binary_variable() {
     let m = Model::new("fix_fractional_binary");
     variable!(m, z, Bin);
-    m.fix(z, 0.3).unwrap();
+    assert!(m.fix(z, 0.3).is_err());
 }
 
 #[test]
@@ -290,25 +288,23 @@ fn fix_accepts_an_int_value_on_an_int_variable() {
     let m = Model::new("fix_integral");
     variable!(m, 0.0 <= y <= 20.0, Int);
     m.fix(y, 1.0).unwrap();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].lb, 1.0);
     assert_eq!(vars[0].ub, 1.0);
 }
 
 #[test]
-#[should_panic(expected = "cannot fix variable \"x\" to 7, outside its bounds [0, 5]")]
 fn fix_rejects_a_value_outside_the_declared_bounds() {
     let m = Model::new("fix_outside_bounds");
     variable!(m, 0.0 <= x <= 5.0);
-    m.fix(x, 7.0).unwrap();
+    assert!(m.fix(x, 7.0).is_err());
 }
 
 #[test]
-#[should_panic(expected = "cannot fix variable \"x\" to the non-finite value NaN")]
 fn fix_rejects_a_non_finite_value() {
     let m = Model::new("fix_non_finite");
     variable!(m, x);
-    m.fix(x, f64::NAN).unwrap();
+    assert!(m.fix(x, f64::NAN).is_err());
 }
 
 #[test]
@@ -316,29 +312,23 @@ fn fix_accepts_zero_on_a_semicontinuous_variable() {
     let m = Model::new("fix_semi_zero");
     variable!(m, 2.0 <= s <= 8.0, SemiCont(2.0));
     m.fix(s, 0.0).unwrap();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].lb, 0.0);
     assert_eq!(vars[0].ub, 0.0);
 }
 
 #[test]
-#[should_panic(
-    expected = "cannot fix semi-continuous(2) variable \"s\" to 1: it must be 0 or at least 2"
-)]
 fn fix_rejects_a_value_inside_the_semicontinuity_gap() {
     let m = Model::new("fix_semi_gap");
     variable!(m, s, SemiCont(2.0));
-    m.fix(s, 1.0).unwrap();
+    assert!(m.fix(s, 1.0).is_err());
 }
 
 #[test]
-#[should_panic(
-    expected = "cannot fix semi-integer(2) variable \"s\" to 1: it must be 0 or at least 2"
-)]
 fn fix_rejects_a_value_inside_the_semiinteger_gap() {
     let m = Model::new("fix_semi_gap");
     variable!(m, s, SemiInt(2.0));
-    m.fix(s, 1.0).unwrap();
+    assert!(m.fix(s, 1.0).is_err());
 }
 
 #[test]
@@ -347,7 +337,7 @@ fn fix_pins_var_expr_and_indexed_entry() {
     variable!(m, 0.0 <= x <= 10.0);
     m.fix(x, 3.0).unwrap();
     let xid = m.variable_id("x").unwrap();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[xid.index()].lb, 3.0);
     assert_eq!(vars[xid.index()].ub, 3.0);
     drop(vars);
@@ -356,7 +346,7 @@ fn fix_pins_var_expr_and_indexed_entry() {
     variable!(m, w[k in keys], Bin);
     m.fix(w["a"], 1.0).unwrap();
     let aid = m.variable_id("w[a]").unwrap();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[aid.index()].lb, 1.0);
     assert_eq!(vars[aid.index()].ub, 1.0);
 }
@@ -378,17 +368,15 @@ fn unfix_var_restores_bounds() {
     variable!(m, 0.0 <= x <= 10.0);
     let _ = x;
     let id = m.variable_id("x").unwrap();
-    m.fix_var(id, 7.0);
-    m.unfix_var(id, 0.0, 10.0);
-    let vars = m.variables();
+    m.fix_var(id, 7.0).unwrap();
+    m.unfix_var(id, 0.0, 10.0).unwrap();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].lb, 0.0);
     assert_eq!(vars[0].ub, 10.0);
 }
 
 #[test]
 fn binary_unfix_rejects_invalid_bounds_before_mutation() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
     let model = Model::new("binary unfix");
     variable!(model, selected, Bin);
     let id = selected.var_id().unwrap();
@@ -405,22 +393,22 @@ fn binary_unfix_rejects_invalid_bounds_before_mutation() {
         (f64::NEG_INFINITY, 1.0),
         (0.0, f64::INFINITY),
     ] {
-        assert!(catch_unwind(AssertUnwindSafe(|| model.unfix_var(id, lower, upper))).is_err());
-        let variables = model.variables();
+        assert!(model.unfix_var(id, lower, upper).is_err());
+        let variables = model.resolved_variables();
         assert_eq!(variables[id.index()].lb.to_bits(), 1.0_f64.to_bits());
         assert_eq!(variables[id.index()].ub.to_bits(), 1.0_f64.to_bits());
     }
 
-    for (lower, upper) in [(0.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
-        model.unfix_var(id, lower, upper);
-        let variables = model.variables();
+    for (lower, upper) in [(0.0_f64, 0.0_f64), (1.0, 1.0), (0.0, 1.0)] {
+        model.unfix_var(id, lower, upper).unwrap();
+        let variables = model.resolved_variables();
         assert_eq!(variables[id.index()].lb.to_bits(), lower.to_bits());
         assert_eq!(variables[id.index()].ub.to_bits(), upper.to_bits());
     }
 
-    model.unfix_var(id, 0.0, 1.0);
+    model.unfix_var(id, 0.0, 1.0).unwrap();
     model.fix(selected, 0.0).unwrap();
-    model.unfix_var(id, 0.0, 1.0);
+    model.unfix_var(id, 0.0, 1.0).unwrap();
     model.fix(selected, 1.0).unwrap();
 }
 
@@ -431,7 +419,7 @@ fn initial_value_stored_on_variable() {
     m.set_initial(x, 3.5).unwrap();
     variable!(m, y >= 0.0);
     let _ = y;
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].initial, Some(3.5));
     assert_eq!(vars[1].initial, None);
 }

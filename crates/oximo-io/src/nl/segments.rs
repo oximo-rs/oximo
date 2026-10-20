@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use oximo_core::{AlgebraicConstraint, Objective, ObjectiveSense, Sense, Variable};
+use oximo_core::{AlgebraicConstraint, Objective, ObjectiveSense, ResolvedVariable, Sense};
 use oximo_expr::{ExprArena, VarId};
 use rustc_hash::FxHashMap;
 
@@ -22,7 +22,7 @@ use crate::error::IoError;
 pub(crate) fn write_segments<W: Write>(
     w: &mut Writer<'_, W>,
     arena: &ExprArena,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     constraints: &[AlgebraicConstraint],
     objective: Option<&Objective>,
     analysis: &Analysis,
@@ -164,7 +164,7 @@ fn write_o_segment<'a, W: Write>(
 
 fn write_x_segment<W: Write>(
     w: &mut Writer<'_, W>,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     perm: &Permutation,
 ) -> Result<(), IoError> {
     let count = vars.iter().filter(|v| v.initial.is_some()).count();
@@ -262,7 +262,7 @@ fn write_r_segment<W: Write>(
 /// `b` segment (D. M. Gay, Table 17)
 fn write_b_segment<W: Write>(
     w: &mut Writer<'_, W>,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     perm: &Permutation,
 ) -> Result<(), IoError> {
     w.seg_header(b'b', &[], None)?;
@@ -329,7 +329,7 @@ fn row_entries(
 
 fn write_k_segment<W: Write>(
     w: &mut Writer<'_, W>,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     perm: &Permutation,
     analysis: &Analysis,
 ) -> Result<(), IoError> {

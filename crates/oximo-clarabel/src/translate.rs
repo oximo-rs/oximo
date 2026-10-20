@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{DefaultSettings, DefaultSolver, IPSolver, SolverStatus, SupportedConeT};
 use oximo_core::{
-    ConstraintId, Model, ObjectiveSense, Sense, SocConstraintId, SocForm, Variable, var_name,
+    ConstraintId, Model, ObjectiveSense, ResolvedVariable, Sense, SocConstraintId, SocForm,
+    var_name,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
@@ -223,7 +224,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     let explicit_forms =
         if direct.is_some() { Vec::new() } else { explicit_soc_forms(&prepared, socs, parallel)? };
     let (mut row_capacity, mut nonzero_capacity, mut soc_capacity) =
-        translation_capacities(model, &rows, &explicit_forms);
+        translation_capacities(&prepared, &rows, &explicit_forms);
     if let Some((row_count, nonzeros, cones)) = direct {
         row_capacity += row_count;
         nonzero_capacity += nonzeros;
@@ -231,7 +232,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     }
 
     let acc = Rows::with_capacity(row_capacity, nonzero_capacity);
-    let (mut acc, m_zero, m_nonneg) = linear_rows(model, &rows, acc);
+    let (mut acc, m_zero, m_nonneg) = linear_rows(&prepared, &rows, acc);
     let (soc_sizes, soc_block_starts, n_explicit) = soc_blocks(
         &rows,
         &explicit_forms,
@@ -380,14 +381,14 @@ fn classify_rows<'a>(
 
 /// Exact capacities for the final Clarabel row vectors and SOC metadata.
 fn translation_capacities(
-    model: &Model,
+    prepared: &LoweringContext<'_>,
     rows: &[Row<'_>],
     explicit_forms: &[SocForm],
 ) -> (usize, usize, usize) {
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
+    let is_fixed = |v: &ResolvedVariable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     let mut row_count = 0;
     let mut nonzero_count = 0;
 
@@ -398,7 +399,7 @@ fn translation_capacities(
         row_count += multiplicity;
         nonzero_count += multiplicity * terms.coeffs.len();
     }
-    for var in vars.iter() {
+    for var in vars {
         let multiplicity = if is_fixed(var) {
             1
         } else {
@@ -426,11 +427,15 @@ fn translation_capacities(
 /// `ZeroCone` block (equalities, then fixed variables) followed by the
 /// `NonnegativeCone` block (inequalities/ranges, then finite bounds). Returns
 /// the accumulated [`Rows`] and the two block sizes.
-fn linear_rows(model: &Model, rows: &[Row<'_>], mut acc: Rows) -> (Rows, usize, usize) {
-    let vars = model.variables();
-    let model_constraints = model.constraints();
+fn linear_rows(
+    prepared: &LoweringContext<'_>,
+    rows: &[Row<'_>],
+    mut acc: Rows,
+) -> (Rows, usize, usize) {
+    let vars = prepared.variables();
+    let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let is_fixed = |v: &Variable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
+    let is_fixed = |v: &ResolvedVariable| v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq();
     // ZeroCone rows: equalities, then fixed variables.
     for (i, (con, row)) in constraints.iter().zip(rows).enumerate() {
         if let Row::Lin(lt) = row
@@ -817,7 +822,7 @@ fn kkt_str(m: ClarabelDirectSolve) -> &'static str {
     }
 }
 
-fn reject_semi_domains(vars: &[Variable]) -> Result<(), SolverError> {
+fn reject_semi_domains(vars: &[ResolvedVariable]) -> Result<(), SolverError> {
     for v in vars {
         if v.domain.semi_threshold().is_some() {
             return Err(SolverError::Backend(format!(
@@ -927,6 +932,39 @@ mod tests {
     use oximo_solver::UniversalOptionsExt;
 
     use super::*;
+
+    #[test]
+    fn concurrent_rebinding_keeps_native_bound_rows_and_coefficients_in_one_snapshot() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let model = Model::new("consistent native bounds");
+        param!(model, cap = 1.0);
+        variable!(model, 0.0 <= x <= cap);
+        objective!(model, Min, cap * x);
+        let stop = AtomicBool::new(false);
+        let start = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let stop_ref = &stop;
+            let start_ref = &start;
+            let writer = scope.spawn(move || {
+                start_ref.wait();
+                while !stop_ref.load(Ordering::Relaxed) {
+                    cap.set_param_value(1.0).unwrap();
+                    cap.set_param_value(2.0).unwrap();
+                }
+            });
+            start.wait();
+            let consistent = (0..512).all(|_| {
+                let problem = super::build_problem(&model).unwrap();
+                let value = problem.meta.parameters.value(cap.param_id().unwrap()).unwrap();
+                problem.q == [value] && problem.b == [value, 0.0]
+            });
+            stop.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
+            assert!(consistent, "native data mixed parameter assignments");
+        });
+    }
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol

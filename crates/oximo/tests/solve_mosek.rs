@@ -55,8 +55,8 @@ fn mosek_feature_exposes_persistent_solver_through_prelude() {
 
     let mut solver: MosekPersistent = Mosek.persistent();
     for (coefficient, upper) in [(1.0, 10.0), (4.0, 3.0)] {
-        price.set_param_value(coefficient);
-        model.unfix_var(x.var_id().unwrap(), 0.0, upper);
+        price.set_param_value(coefficient).unwrap();
+        model.unfix_var(x.var_id().unwrap(), 0.0, upper).unwrap();
         let result = solver.solve(&model, &MosekOptions::default()).unwrap();
         assert_eq!(result.termination, TerminationStatus::Optimal);
         assert!((result.value_of(x).unwrap().unwrap() - upper).abs() < 1e-7);

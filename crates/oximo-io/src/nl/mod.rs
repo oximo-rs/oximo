@@ -107,7 +107,7 @@ pub fn write_nl_with<W: Write>(
             feature: "indicator constraints have no native NL segment".into(),
         });
     }
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     // A feasibility model writes a header with zero objectives and no `O`
@@ -187,7 +187,7 @@ pub fn write_nl_files(model: &Model, stub: &Path, opts: &WriteOptions) -> Result
 }
 
 fn write_aux_files(model: &Model, stub: &Path, nonfinite_strings: bool) -> Result<(), IoError> {
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     model.ensure_objective_declared().map_err(|_| IoError::NoObjective)?;

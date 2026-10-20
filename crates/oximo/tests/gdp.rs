@@ -243,7 +243,7 @@ fn hierarchical_big_m_strengthens_the_lp_and_preserves_the_milp_optimum() {
         // ones. This exercises the emitted coefficients rather than rebuilding M rows.
         let relaxation = Model::new("hierarchical LP relaxation");
         let variables: Vec<_> = model
-            .variables()
+            .resolved_variables()
             .iter()
             .map(|v| relaxation.__var(v.name.clone()).bounds(v.lb, v.ub).build())
             .collect();

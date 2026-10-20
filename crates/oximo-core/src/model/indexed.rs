@@ -1,5 +1,8 @@
 //! Indexed family construction and worker-local expression preparation.
 
+use crate::var::{Bound, IntoBound};
+use oximo_expr::ModelError;
+
 #[cfg(feature = "benchmark-support")]
 use super::benchmark_support::{IndexedPhase, PhaseTimer};
 use super::constraints::{PendingConstraint, PendingOrigin, PendingSoc, PendingSos};
@@ -124,8 +127,8 @@ impl Model {
             base_name: name.into(),
             keys: set.iter().collect(),
             axes: set.axes().map(Box::from),
-            lb: f64::NEG_INFINITY,
-            ub: f64::INFINITY,
+            lb: Bound::Constant(f64::NEG_INFINITY),
+            ub: Bound::Constant(f64::INFINITY),
             lb_by: None,
             ub_by: None,
             domain: Domain::Real,
@@ -200,24 +203,20 @@ impl Model {
     /// Re-bind the parameter at `key` of an indexed family to `value`. Takes
     /// effect on the next solve.
     ///
-    /// # Panics
-    ///
-    /// Panics if `key` is not present in the family.
-    ///
     /// # Errors
     ///
     /// Returns [`ModelMismatchError`] if `params` belongs to another model.
+    /// Missing keys, frozen parameters, invalid values, and inverted bounds are errors.
     pub fn set_param_idx<K, Q: Into<IndexKey>>(
         &self,
         params: &IndexedParam<'_, K>,
         key: Q,
         value: f64,
-    ) -> std::result::Result<(), ModelMismatchError> {
+    ) -> std::result::Result<(), ModelError> {
         self.ensure_model_id(params.model_id())?;
-        let e = params.get(key).expect("set_param_idx: key not present in indexed parameter");
-        let id = e.param_id().expect("indexed parameter entry is not a parameter handle");
-        self.set_param_id(id, value);
-        Ok(())
+        let e = params.get(key).ok_or(ModelError::InvalidHandle("indexed parameter key"))?;
+        let id = e.param_id().ok_or(ModelError::InvalidHandle("indexed parameter entry"))?;
+        self.set_param_id(id, value)
     }
 
     /// Current value bound to the parameter at `key` of an indexed family.
@@ -945,7 +944,7 @@ impl Model {
 /// `flow[2]` as separate scalar variables in the model. Call `.build()` to get
 /// an [`IndexedVar`] that maps each key to its [`Expr`] handle. Bounds and
 /// domain set here apply uniformly to every scalar in the collection.
-type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> f64 + Send + Sync + 'a>;
+type BoundFn<'a> = Box<dyn Fn(&IndexKey) -> Bound + Send + Sync + 'a>;
 
 #[must_use = "IndexedVarBuilder does nothing until you call .build()"]
 pub struct IndexedVarBuilder<'a, K = IndexKey> {
@@ -953,8 +952,8 @@ pub struct IndexedVarBuilder<'a, K = IndexKey> {
     base_name: String,
     keys: Vec<IndexKey>,
     axes: Option<Box<[Axis]>>,
-    lb: f64,
-    ub: f64,
+    lb: Bound,
+    ub: Bound,
     lb_by: Option<BoundFn<'a>>,
     ub_by: Option<BoundFn<'a>>,
     domain: Domain,
@@ -977,17 +976,23 @@ impl<'a, K> std::fmt::Debug for IndexedVarBuilder<'a, K> {
 }
 
 impl<'a, K> IndexedVarBuilder<'a, K> {
-    pub fn lb(mut self, v: f64) -> Self {
-        self.lb = v;
+    /// # Panics
+    /// Panics for a foreign handle or a composed bound expression.
+    pub fn lb(mut self, v: impl IntoBound<'a>) -> Self {
+        self.lb = v.into_bound(self.model).expect("invalid lower bound");
         self
     }
-    pub fn ub(mut self, v: f64) -> Self {
-        self.ub = v;
+    /// # Panics
+    /// Panics for a foreign handle or a composed bound expression.
+    pub fn ub(mut self, v: impl IntoBound<'a>) -> Self {
+        self.ub = v.into_bound(self.model).expect("invalid upper bound");
         self
     }
-    pub fn bounds(mut self, lb: f64, ub: f64) -> Self {
-        self.lb = lb;
-        self.ub = ub;
+    /// # Panics
+    /// Panics for a foreign handle or a composed bound expression.
+    pub fn bounds(mut self, lb: impl IntoBound<'a>, ub: impl IntoBound<'a>) -> Self {
+        self.lb = lb.into_bound(self.model).expect("invalid lower bound");
+        self.ub = ub.into_bound(self.model).expect("invalid upper bound");
         self
     }
     /// Per-key lower bound. Overrides [`Self::lb`] when both are set.
@@ -998,13 +1003,21 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     /// .lb_by(|(p, q): (String, String)| floor_for(&p, &q))
     /// .lb_by(|i: usize| lower_bounds[i])
     /// ```
-    pub fn lb_by<F>(mut self, f: F) -> Self
+    /// # Panics
+    /// Panics if an indexed bound is foreign or is not a bare parameter.
+    pub fn lb_by<F, B>(mut self, f: F) -> Self
     where
         K: FromIndexKey,
-        F: Fn(K) -> f64 + 'a,
+        F: Fn(K) -> B + 'a,
+        B: IntoBound<'a>,
         F: Send + Sync,
     {
-        self.lb_by = Some(Box::new(move |k: &IndexKey| f(K::from_index_key(k))));
+        let model_id = self.model.id();
+        self.lb_by = Some(Box::new(move |k: &IndexKey| {
+            f(K::from_index_key(k))
+                .__into_bound_for_model(model_id)
+                .expect("invalid indexed lower bound")
+        }));
         self
     }
     /// Per-key upper bound. Overrides [`Self::ub`] when both are set.
@@ -1015,13 +1028,21 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     /// .ub_by(|(p, q): (String, String)| capacity_for(&p, &q))
     /// .ub_by(|i: usize| upper_bounds[i])
     /// ```
-    pub fn ub_by<F>(mut self, f: F) -> Self
+    /// # Panics
+    /// Panics if an indexed bound is foreign or is not a bare parameter.
+    pub fn ub_by<F, B>(mut self, f: F) -> Self
     where
         K: FromIndexKey,
-        F: Fn(K) -> f64 + 'a,
+        F: Fn(K) -> B + 'a,
+        B: IntoBound<'a>,
         F: Send + Sync,
     {
-        self.ub_by = Some(Box::new(move |k: &IndexKey| f(K::from_index_key(k))));
+        let model_id = self.model.id();
+        self.ub_by = Some(Box::new(move |k: &IndexKey| {
+            f(K::from_index_key(k))
+                .__into_bound_for_model(model_id)
+                .expect("invalid indexed upper bound")
+        }));
         self
     }
     pub fn domain(mut self, d: Domain) -> Self {
@@ -1034,8 +1055,8 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
     }
     pub fn binary(mut self) -> Self {
         self.domain = Domain::Binary;
-        self.lb = 0.0;
-        self.ub = 1.0;
+        self.lb = Bound::Constant(0.0);
+        self.ub = Bound::Constant(1.0);
         self
     }
 
@@ -1060,7 +1081,12 @@ impl<'a, K> IndexedVarBuilder<'a, K> {
                     let scalar_name = format_index_name_small(&base_name, key);
                     let lo = lb_by.as_ref().map_or(lb, |f| f(key));
                     let hi = ub_by.as_ref().map_or(ub, |f| f(key));
-                    model.__var(scalar_name).lb(lo).ub(hi).domain(domain).build()
+                    {
+                        let mut builder = model.__var(scalar_name);
+                        builder.lb = lo;
+                        builder.ub = hi;
+                        builder.domain(domain).build()
+                    }
                 })
                 .collect();
             let storage = build_storage(keys, axes, handles);

@@ -16,7 +16,7 @@ fn affine_builder_registers_typed_and_parallel_constraints() {
     builder.add_term(3.0, p * x[0]).add_constant(5.0);
     let expression: Expr<'_, Affine> = builder.build();
     m.add_constraint("row", expression.le(100.0));
-    p.set_param_value(4.0);
+    p.set_param_value(4.0).unwrap();
     let snapshot = m.arena();
     let terms = extract_linear(&snapshot, expression.id()).unwrap();
     assert_eq!(terms.coeffs.len(), 128);

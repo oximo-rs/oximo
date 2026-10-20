@@ -105,6 +105,7 @@ pub struct Model {
     pub(crate) objective: RefCell<Option<Objective>>,
     objective_declared: Cell<bool>,
     cached_kind: Cell<Option<ModelKind>>,
+    cached_kind_parameter_revision: Cell<u64>,
     /// Monotonic counter for auto-naming anonymous constraints registered via
     /// the `constraint!` macro.
     auto_seq: Cell<u32>,
@@ -230,6 +231,7 @@ impl Model {
             objective: RefCell::new(self.objective.borrow().clone()),
             objective_declared: Cell::new(self.objective_declared.get()),
             cached_kind: Cell::new(self.cached_kind.get()),
+            cached_kind_parameter_revision: Cell::new(self.cached_kind_parameter_revision.get()),
             auto_seq: Cell::new(self.auto_seq.get()),
         };
 
@@ -283,6 +285,7 @@ impl Model {
             objective: RefCell::new(None),
             objective_declared: Cell::new(false),
             cached_kind: Cell::new(None),
+            cached_kind_parameter_revision: Cell::new(0),
             auto_seq: Cell::new(0),
         }
     }

@@ -98,8 +98,9 @@ components, variable vectors, and indicator consequents.
 ### Fixing and unfixing variables
 
 ```rust,ignore
-m.fix_var(var_id, 3.0);         // lb = ub = 3.0
-m.unfix_var(var_id, 0.0, 10.0); // restore bounds
+m.fix_var(var_id, 3.0)?;         // lb = ub = 3.0
+m.unfix_var(var_id, 0.0, 10.0)?; // restore bounds
+m.set_bounds(x, 0.0, 10.0)?;     // replace bounds using a model-checked variable handle
 ```
 
 ## Variables
@@ -391,7 +392,7 @@ syntax as `sum!` and preserve deterministic child order.
 
 ```rust,ignore
 param!(m, rate = 0.05);     // binds a re-bindable `rate: Expr<'_>`
-rate.set_param_value(0.07); // change between solves without rebuilding
+rate.set_param_value(0.07)?; // rebind before the next solve
 ```
 
 ### Indexed parameters
@@ -407,7 +408,7 @@ param!(m, w[(i, j) in rc] = weight(i, j));  // multi-index
 param!(m, c[p in plants] = price[p]);       // string-keyed (sparse)
 
 let unit = cost[1];             // index for a param `Expr`
-cost[1].set_param_value(9.0);   // re-bind one entry via its handle
+cost[1].set_param_value(9.0)?;   // re-bind one entry via its handle
 m.set_param_idx(&cost, 1, 9.0)?; // ...or by key on the model
 m.param_value_idx(&cost, 1);    // -> Some(9.0)
 ```

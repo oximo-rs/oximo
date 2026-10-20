@@ -162,12 +162,7 @@ fn in_place_history_prevents_bound_changes_and_chains_with_sos() {
     sos_constraint!(model, choice, SOS1, [x, y]);
     model.reformulate_indicators(IndicatorReformulationOptions::default()).unwrap();
     assert_eq!(model.indicator_reformulations().len(), 1);
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || model.fix_var(x.var_id().unwrap(), 1.0)
-        ))
-        .is_err()
-    );
+    assert!(model.fix_var(x.var_id().unwrap(), 1.0).is_err());
     let transformed = model.to_reformulated_sos_model(SosReformulationOptions::default()).unwrap();
     assert_eq!(transformed.indicator_reformulations().len(), 1);
     assert_eq!(transformed.sos_reformulations().len(), 1);

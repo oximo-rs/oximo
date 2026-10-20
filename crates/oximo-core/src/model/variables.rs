@@ -4,7 +4,8 @@ use super::{Model, validate_batch_names};
 use crate::SymmetricMatrix;
 use crate::domain::Domain;
 use crate::param::Parameter;
-use crate::var::{VarBuilder, Variable};
+use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
+use oximo_expr::ModelError;
 use oximo_expr::{Affine, Constant, Expr, ModelMismatchError, ParamId, VarId, extract_linear};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smol_str::SmolStr;
@@ -13,8 +14,8 @@ use std::cell::Ref;
 #[derive(Debug)]
 pub(super) struct PendingVar {
     pub(super) name: SmolStr,
-    pub(super) lb: f64,
-    pub(super) ub: f64,
+    pub(super) lb: Bound,
+    pub(super) ub: Bound,
 }
 
 #[derive(Debug)]
@@ -62,8 +63,8 @@ impl Model {
         VarBuilder {
             model: self,
             name: name.into(),
-            lb: f64::NEG_INFINITY,
-            ub: f64::INFINITY,
+            lb: Bound::Constant(f64::NEG_INFINITY),
+            ub: Bound::Constant(f64::INFINITY),
             domain: Domain::Real,
             initial: None,
         }
@@ -73,6 +74,19 @@ impl Model {
     /// returns its `Expr` handle.
     #[inline]
     pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a, Affine> {
+        let mut arena = self.arena.borrow_mut();
+        let (lo, hi) = (b.lb.resolve(&arena), b.ub.resolve(&arena));
+        crate::var::validate_bounds(
+            VarId(self.num_variables().try_into().expect("variable count")),
+            lo,
+            hi,
+        )
+        .expect("invalid variable bounds");
+        assert!(
+            (b.domain != Domain::Binary && b.domain.semi_threshold().is_none())
+                || (b.lb.parameter().is_none() && b.ub.parameter().is_none()),
+            "binary and semi-variable bounds must be constant"
+        );
         let mut names = self.var_names.borrow_mut();
         let std::collections::hash_map::Entry::Vacant(name_entry) = names.entry(b.name.clone())
         else {
@@ -89,10 +103,12 @@ impl Model {
             ub: b.ub,
             initial: b.initial,
         });
+        arena.__set_bound_check(id, b.lb, b.ub);
         name_entry.insert(id);
         drop(vars);
         drop(names);
         self.cached_kind.set(None);
+        drop(arena);
         Expr::from_var(&self.arena, id)
     }
 
@@ -105,6 +121,20 @@ impl Model {
             return Vec::new();
         }
 
+        let mut arena = self.arena.borrow_mut();
+        for (i, item) in items.iter().enumerate() {
+            crate::var::validate_bounds(
+                VarId((self.num_variables() + i).try_into().expect("variable count")),
+                item.lb.resolve(&arena),
+                item.ub.resolve(&arena),
+            )
+            .expect("invalid variable bounds");
+            assert!(
+                (domain != Domain::Binary && domain.semi_threshold().is_none())
+                    || (item.lb.parameter().is_none() && item.ub.parameter().is_none()),
+                "binary and semi-variable bounds must be constant"
+            );
+        }
         let mut names = self.var_names.borrow_mut();
         let mut vars = self.variables.borrow_mut();
         let first = vars.len();
@@ -123,7 +153,6 @@ impl Model {
             names.reserve(items.len());
         }
 
-        let mut arena = self.arena.borrow_mut();
         let expressions = arena.__extend_vars(first..final_count);
         let mut handles = Vec::with_capacity(items.len());
 
@@ -141,6 +170,7 @@ impl Model {
             if prepared_names.is_none() {
                 names.insert(item.name.clone(), id);
             }
+            arena.__set_bound_check(id, item.lb, item.ub);
             handles.push(expression);
         }
 
@@ -175,6 +205,12 @@ impl Model {
         self.variables.borrow()
     }
 
+    /// Capture numeric variable metadata at the current parameter assignment.
+    pub fn resolved_variables(&self) -> Vec<ResolvedVariable> {
+        let arena = self.arena();
+        self.variables.borrow().iter().map(|v| v.resolved(&arena)).collect()
+    }
+
     pub fn num_variables(&self) -> usize {
         self.variables.borrow().len()
     }
@@ -183,149 +219,186 @@ impl Model {
     /// Convenience over [`Self::fix_var`] for handles from the `variable!` macro
     /// or [`crate::IndexedVar`] indexing.
     ///
-    /// # Panics
-    ///
-    /// Panics if `e` is not a bare variable handle from this model lineage, or on anything
-    /// [`Self::fix_var`] rejects.
-    ///
     /// # Errors
     ///
-    /// Returns [`ModelMismatchError`] if `e` belongs to another model.
+    /// Rejects foreign or composed handles, non-finite values, and invalid variable writes.
     #[inline]
     pub fn fix<'a>(
         &self,
         e: impl Into<Expr<'a>>,
         value: f64,
-    ) -> std::result::Result<(), ModelMismatchError> {
+    ) -> std::result::Result<(), ModelError> {
         let e: Expr = e.into();
         self.ensure_expr_model(e)?;
-        let id = e.var_id().expect("Model::fix expects a single-variable expression");
-        self.fix_var(id, value);
-        Ok(())
+        let id = e.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
+        self.fix_var(id, value)
     }
 
-    /// Fix variable `id` to `value` by setting `lb = ub = value`.
+    /// Fix variable `id` to a feasible finite value by replacing both bounds.
     ///
-    /// `VarId` is a raw numeric index and carries no model provenance. Prefer
-    /// [`Self::fix`] when an expression handle is available.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `value` is not a feasible fixing for the variable (non-finite,
-    /// fractional on an integer domain, outside its bounds, or inside a
-    /// semicontinuity gap), or if its bounds are embedded in a previously
-    /// reformulated SOS, indicator, or GDP row.
-    pub fn fix_var(&self, id: VarId, value: f64) {
-        self.assert_reformulated_bounds_mutable(id);
+    /// # Errors
+    /// Rejects unknown or frozen variables, fractional integer fixings, values outside
+    /// the current bounds, and values inside a semicontinuity gap.
+    pub fn fix_var(&self, id: VarId, value: f64) -> Result<(), ModelError> {
+        self.ensure_reformulated_bounds_mutable(id)?;
+        let mut arena = self.arena.borrow_mut();
         let mut vars = self.variables.borrow_mut();
-        let v = &mut vars[id.index()];
-        crate::var::assert_fixable(&v.name, v.domain, v.lb, v.ub, value);
-        v.lb = value;
-        v.ub = value;
-        drop(vars);
+        let v = vars.get_mut(id.index()).ok_or(ModelError::UnknownVariable(id))?;
+        let (lb, ub) = v.resolved_bounds(&arena);
+        let semi_zero = v.domain.semi_threshold().is_some() && value == 0.0;
+        if !value.is_finite()
+            || (v.domain.is_integer() && value.fract() != 0.0)
+            || (!semi_zero && (value < lb || value > ub))
+            || v.domain.semi_threshold().is_some_and(|t| value != 0.0 && value < t)
+        {
+            return Err(ModelError::VariableValue { variable: id, operation: "fix", value });
+        }
+        v.lb = Bound::Constant(value);
+        v.ub = Bound::Constant(value);
+        arena.__set_bound_check(id, v.lb, v.ub);
         self.cached_kind.set(None);
+        Ok(())
     }
 
     /// Set the initial (warm-start) value of a single-variable expression.
     /// The macro API has no bound-style syntax for warm starts, so this is the
     /// supported way to seed `variable!`-declared variables.
     ///
-    /// # Panics
-    ///
-    /// Panics if `e` is not a bare variable handle from this model lineage.
-    ///
     /// # Errors
     ///
-    /// Returns [`ModelMismatchError`] if `e` belongs to another model.
+    /// Rejects foreign or composed handles, non-finite values, and invalid variable writes.
     #[inline]
     pub fn set_initial<'a>(
         &self,
         e: impl Into<Expr<'a>>,
         value: f64,
-    ) -> std::result::Result<(), ModelMismatchError> {
+    ) -> std::result::Result<(), ModelError> {
         let e: Expr = e.into();
         self.ensure_expr_model(e)?;
-        let id = e.var_id().expect("Model::set_initial expects a single-variable expression");
-        self.variables.borrow_mut()[id.index()].initial = Some(value);
+        let id = e.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
+        if !value.is_finite() {
+            return Err(ModelError::VariableValue {
+                variable: id,
+                operation: "initial value",
+                value,
+            });
+        }
+        self.variables
+            .borrow_mut()
+            .get_mut(id.index())
+            .ok_or(ModelError::UnknownVariable(id))?
+            .initial = Some(value);
         Ok(())
     }
 
-    /// Restore bounds on variable `id`. Pass `f64::NEG_INFINITY` / `f64::INFINITY`
-    /// to restore an unbounded direction.
+    /// Restore constant or bare-parameter bounds on an existing variable.
+    /// Use constant infinities for unbounded directions. Binary endpoints remain zero or one.
     ///
-    /// # Panics
+    /// # Errors
+    /// Rejects foreign/unknown parameters, invalid bounds, unsupported parameter-bound
+    /// domains, and bounds embedded in a previous reformulation.
+    pub fn unfix_var<'a>(
+        &self,
+        id: VarId,
+        lb: impl IntoBound<'a>,
+        ub: impl IntoBound<'a>,
+    ) -> Result<(), ModelError> {
+        self.ensure_reformulated_bounds_mutable(id)?;
+        self.replace_bounds(id, lb.into_bound(self)?, ub.into_bound(self)?)
+    }
+
+    /// Replace both bounds of a bare variable handle from this model.
     ///
-    /// Panics if the variable belongs to an SOS or indicator constraint that
-    /// has already been reformulated, or a GDP reformulation embeds its bounds.
-    /// Binary variables must keep ordered bounds with each endpoint exactly zero or one.
-    #[expect(clippy::float_cmp, reason = "binary bounds must be exactly zero or one")]
-    pub fn unfix_var(&self, id: VarId, lb: f64, ub: f64) {
-        self.assert_reformulated_bounds_mutable(id);
+    /// Accepts constants or bare parameter handles; use constant infinities for
+    /// unbounded directions. This also restores bounds after [`Self::fix`].
+    ///
+    /// # Errors
+    /// Rejects foreign or composed variable handles and any bounds rejected by
+    /// [`Self::unfix_var`], leaving the variable unchanged.
+    pub fn set_bounds<'a>(
+        &self,
+        variable: impl Into<Expr<'a>>,
+        lower: impl IntoBound<'a>,
+        upper: impl IntoBound<'a>,
+    ) -> Result<(), ModelError> {
+        let variable = variable.into();
+        self.ensure_expr_model(variable)?;
+        let id = variable.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
+        self.unfix_var(id, lower, upper)
+    }
+
+    fn replace_bounds(&self, id: VarId, lb: Bound, ub: Bound) -> Result<(), ModelError> {
+        let mut arena = self.arena.borrow_mut();
+        let (lo, hi) = (lb.resolve(&arena), ub.resolve(&arena));
+        crate::var::validate_bounds(id, lo, hi)?;
         let mut vars = self.variables.borrow_mut();
-        let v = &mut vars[id.index()];
-        if v.domain == Domain::Binary {
-            assert!(
-                (lb == 0.0 || lb == 1.0) && (ub == 0.0 || ub == 1.0) && lb <= ub,
-                "binary variable bounds must remain ordered and each be exactly zero or one"
-            );
+        let v = vars.get_mut(id.index()).ok_or(ModelError::UnknownVariable(id))?;
+        if (v.domain == Domain::Binary || v.domain.semi_threshold().is_some())
+            && (lb.parameter().is_some() || ub.parameter().is_some())
+        {
+            return Err(ModelError::ParameterBoundDomain);
+        }
+        if v.domain == Domain::Binary && !([0.0, 1.0].contains(&lo) && [0.0, 1.0].contains(&hi)) {
+            return Err(ModelError::BoundsInfeasible { variable: id, lower: lo, upper: hi });
         }
         v.lb = lb;
         v.ub = ub;
         drop(vars);
+        arena.__set_bound_check(id, lb, ub);
         self.cached_kind.set(None);
+        Ok(())
     }
 
     /// SOS, indicator, and GDP reformulations embed bounds in generated rows.
     /// Changing one of those bounds could make the rows stale.
-    fn assert_reformulated_bounds_mutable(&self, id: VarId) {
-        #[cfg(feature = "gdp")]
-        assert!(
-            !self.gdp.borrow().locks_variable(id),
-            "cannot change bounds embedded in a GDP reformulation; change the source model before reformulating"
-        );
-        let sos_source = {
-            let sources = self.sos_constraints.borrow();
-            self.sos_reformulations
-                .borrow()
-                .iter()
-                .map(|artifact| &sources[artifact.source.index()])
-                .find(|source| source.members.iter().any(|member| member.variable == id))
-                .map(|source| source.name.clone())
-        };
-
-        if let Some(source) = sos_source {
-            panic!(
-                "cannot change bounds of variable {:?} after SOS constraint {:?} was reformulated; \
-                 change bounds before reformulating or create a new reformulated model",
-                self.variables.borrow()[id.index()].name,
-                source,
-            );
+    fn ensure_reformulated_bounds_mutable(&self, id: VarId) -> Result<(), ModelError> {
+        if id.index() >= self.num_variables() {
+            return Err(ModelError::UnknownVariable(id));
         }
+        #[cfg(feature = "gdp")]
+        if self.gdp.borrow().locks_variable(id) {
+            return Err(ModelError::FrozenVariable(id));
+        }
+        let sos = self.sos_constraints.borrow();
+        if self
+            .sos_reformulations
+            .borrow()
+            .iter()
+            .any(|a| sos[a.source.index()].members.iter().any(|m| m.variable == id))
+        {
+            return Err(ModelError::FrozenVariable(id));
+        }
+        let indicators = self.indicator_constraints.borrow();
+        let arena = self.arena();
+        if self.indicator_reformulations.borrow().iter().any(|a| {
+            let c = &indicators[a.source.index()];
+            id != c.trigger
+                && extract_linear(&arena, c.lhs)
+                    .is_some_and(|t| t.coeffs.iter().any(|&(v, k)| v == id && k != 0.0))
+        }) {
+            return Err(ModelError::FrozenVariable(id));
+        }
+        Ok(())
+    }
 
-        let indicator_source = {
-            let sources = self.indicator_constraints.borrow();
-            let arena = self.arena.borrow();
-            self.indicator_reformulations
-                .borrow()
-                .iter()
-                .map(|artifact| &sources[artifact.source.index()])
-                .find(|source| {
-                    extract_linear(&arena, source.lhs).is_some_and(|terms| {
-                        id != source.trigger
-                            && terms.coeffs.iter().any(|(variable, coefficient)| {
-                                *variable == id && *coefficient != 0.0
-                            })
-                    })
-                })
-                .map(|source| source.name.clone())
-        };
-        if let Some(source) = indicator_source {
-            panic!(
-                "cannot change bounds of variable {:?} after indicator constraint {:?} was reformulated; \
-                 change bounds before reformulating or create a new reformulated model",
-                self.variables.borrow()[id.index()].name,
-                source,
-            );
+    /// Preserve symbolic bounds consumed by a generated reformulation.
+    pub(crate) fn lock_bound_parameters(
+        &self,
+        variables: impl IntoIterator<Item = VarId>,
+        source: &str,
+    ) {
+        let vars = self.variables.borrow();
+        let parameters: Vec<_> = variables
+            .into_iter()
+            .flat_map(|id| {
+                let v = &vars[id.index()];
+                [v.lb.parameter(), v.ub.parameter()].into_iter().flatten()
+            })
+            .collect();
+        drop(vars);
+        let mut arena = self.arena.borrow_mut();
+        for parameter in parameters {
+            arena.__lock_bound_parameter(parameter, source.to_owned());
         }
     }
 
@@ -423,25 +496,19 @@ impl Model {
 
     /// Re-bind the parameter referenced by handle `p` to `value`.
     ///
-    /// # Panics
-    ///
-    /// Panics if `p` is not a bare parameter handle from this model lineage
-    /// (one returned by the `param!` macro).
-    ///
     /// # Errors
     ///
-    /// Returns [`ModelMismatchError`] if `p` belongs to another model.
+    /// Rejects foreign or composed handles and invalid parameter assignments.
     #[inline]
     pub fn set_param<'a>(
         &self,
         p: impl Into<Expr<'a>>,
         value: f64,
-    ) -> std::result::Result<(), ModelMismatchError> {
+    ) -> std::result::Result<(), ModelError> {
         let p: Expr = p.into();
         self.ensure_expr_model(p)?;
-        let id = p.param_id().expect("Model::set_param expects a single-parameter expression");
-        self.set_param_id(id, value);
-        Ok(())
+        let id = p.param_id().ok_or(ModelError::InvalidHandle("parameter"))?;
+        self.set_param_id(id, value)
     }
 
     /// Re-bind parameter `id` to `value`. Takes effect on the next solve.
@@ -451,11 +518,38 @@ impl Model {
     /// `ParamId` is a raw numeric index and carries no model provenance; prefer
     /// [`Self::set_param`] when an expression handle is available.
     ///
-    /// # Panics
-    /// Panics if the ID is not registered, or a GDP reformulation embeds its value.
-    pub fn set_param_id(&self, id: ParamId, value: f64) {
-        self.arena.borrow_mut().set_param_value(id, value);
+    /// # Errors
+    /// Rejects unknown or frozen entities and invalid numerical assignments.
+    pub fn set_param_id(&self, id: ParamId, value: f64) -> Result<(), ModelError> {
+        self.arena.borrow_mut().set_param_value(id, value)?;
         self.cached_kind.set(None);
+        Ok(())
+    }
+
+    /// Atomically validate and apply a complete parameter batch.
+    ///
+    /// # Errors
+    /// Rejects unknown or frozen entities and invalid numerical assignments,
+    /// leaving every value unchanged.
+    pub fn set_param_ids(&self, updates: &[(ParamId, f64)]) -> Result<(), ModelError> {
+        self.arena.borrow_mut().set_param_values(updates)?;
+        self.cached_kind.set(None);
+        Ok(())
+    }
+
+    /// Checked handle variant of the atomic batch setter.
+    ///
+    /// # Errors
+    /// Rejects foreign or composed handles and invalid assignments.
+    pub fn set_params(&self, updates: &[(Expr<'_, Constant>, f64)]) -> Result<(), ModelError> {
+        let ids = updates
+            .iter()
+            .map(|&(p, v)| {
+                self.ensure_expr_model(p)?;
+                Ok((p.param_id().ok_or(ModelError::InvalidHandle("parameter"))?, v))
+            })
+            .collect::<Result<Vec<_>, ModelError>>()?;
+        self.set_param_ids(&ids)
     }
 
     /// Current value bound to parameter `id`.
@@ -509,8 +603,8 @@ impl Model {
         u32::try_from(final_count - 1).expect("variable count overflow");
         let items = SymmetricMatrix::from_upper_fn(n, |i, j| PendingVar {
             name: format!("{name}[{i},{j}]").into(),
-            lb: f64::NEG_INFINITY,
-            ub: f64::INFINITY,
+            lb: Bound::Constant(f64::NEG_INFINITY),
+            ub: Bound::Constant(f64::INFINITY),
         });
         let handles = self.register_vars_batch(items.upper_triangle(), Domain::Real);
         SymmetricMatrix::from_upper_triangle(n, handles)

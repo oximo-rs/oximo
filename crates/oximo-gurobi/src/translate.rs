@@ -7,8 +7,8 @@ use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_core::{
     AlgebraicConstraint, ConstraintId, Domain, IndicatorConstraint, IndicatorConstraintId, Model,
-    ModelId, ModelKind, ObjectiveSense, Sense, SocConstraint, SocConstraintId, SosConstraint,
-    SosConstraintId, SosType, VarId, Variable, var_name,
+    ModelId, ModelKind, ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId,
+    SosConstraint, SosConstraintId, SosType, VarId, var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term};
 use oximo_solver::{
@@ -455,7 +455,7 @@ fn generated_selected(
 /// domain, bounds, and any warm-start value.
 fn add_variables(
     gurobi_model: &mut gurobi_rs::Model,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
 ) -> Result<Vec<gurobi_rs::Var>, SolverError> {
     let specs = vars.iter().map(|v| {
         let vtype = match v.domain {
@@ -572,7 +572,7 @@ fn active_sos_constraints(
 
 fn apply_initial_values(
     gurobi_model: &gurobi_rs::Model,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     gurobi_vars: &[gurobi_rs::Var],
 ) -> Result<(), SolverError> {
     let starts = vars
@@ -755,7 +755,7 @@ fn add_constraints(
 /// `QCPi` multiplier back to the norm form.
 fn add_soc_rows(
     prepared: &PreparedExpressions,
-    vars: &[Variable],
+    vars: &[ResolvedVariable],
     socs: &[SocConstraint],
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],

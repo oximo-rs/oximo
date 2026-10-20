@@ -1,3 +1,4 @@
+pub use crate::ModelError;
 pub use crate::constraint::{
     AlgebraicConstraint, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
     RangeConstraintIds, Relate, Sense,
@@ -43,7 +44,7 @@ pub use crate::set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
 pub use crate::soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
 pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use crate::sum::SumDomain;
-pub use crate::var::{VarBuilder, Variable};
+pub use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
 pub use oximo_expr::{
     AffineBuilder, Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId, UnaryOp, VarId,
     dot,

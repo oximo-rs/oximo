@@ -459,7 +459,7 @@ fn extract_result(
     let has_point = solution_defined && has_primal_solution(solution_status);
     let has_dual = !mixed_integer && solution_defined && has_dual_solution(solution_status);
 
-    let variables = model.variables();
+    let variables = model.resolved_variables();
     let mut solutions = Vec::new();
     let mut dual = FxHashMap::default();
     let mut soc_dual = FxHashMap::default();

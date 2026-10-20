@@ -263,8 +263,8 @@ fn persistent_updates_linear_objective_and_bounds() {
 
     let mut solver = Mosek.persistent();
     for (coefficient, upper) in [(1.0, 10.0), (3.0, 4.0), (2.0, 7.0)] {
-        price.set_param_value(coefficient);
-        model.unfix_var(x.var_id().unwrap(), 0.0, upper);
+        price.set_param_value(coefficient).unwrap();
+        model.unfix_var(x.var_id().unwrap(), 0.0, upper).unwrap();
         let resident = solver.solve(&model, &MosekOptions::default()).unwrap();
         let cold = Mosek.solve(&model, &MosekOptions::default()).unwrap();
         assert_eq!(resident.termination, TerminationStatus::Optimal);
@@ -283,7 +283,7 @@ fn persistent_rebuilds_after_linear_row_change() {
 
     let mut solver = Mosek.persistent();
     for bound in [5.0, 2.0, 9.0] {
-        capacity.set_param_value(bound);
+        capacity.set_param_value(bound).unwrap();
         let resident = solver.solve(&model, &MosekOptions::default()).unwrap();
         let cold = Mosek.solve(&model, &MosekOptions::default()).unwrap();
         close(resident.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap());

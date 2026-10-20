@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `Expr<'_, oximo_core::Affine>: IntoBound<'_>` is not satisfied
+ --> tests/ui/fail/variable_dependent_bound.rs:2:88
+  |
+2 | fn main(){let model=Model::new("variable bound");variable!(model,y);variable!(model,x<=y);}
+  |                                                                     -------------------^-
+  |                                                                     |                  |
+  |                                                                     |                  the trait `IntoBound<'_>` is not implemented for `Expr<'_, oximo_core::Affine>`
+  |                                                                     required by a bound introduced by this call
+  |
+help: the trait `IntoBound<'_>` is not implemented for `Expr<'_, oximo_core::Affine>`
+      but it is implemented for `Expr<'_, oximo_core::Constant>`
+ --> src/var.rs
+  |
+  | impl<'a> IntoBound<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `oximo_core::Constant`, found `oximo_core::Affine`
+note: required by a bound in `VarBuilder::<'a>::ub`
+ --> src/var.rs
+  |
+  |     pub fn ub(mut self, v: impl IntoBound<'a>) -> Self {
+  |                                 ^^^^^^^^^^^^^ required by this bound in `VarBuilder::<'a>::ub`

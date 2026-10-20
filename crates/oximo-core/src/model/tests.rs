@@ -23,8 +23,8 @@ fn metadata_batches_preserve_names_ids_and_atomicity_on_fresh_and_populated_fork
         let model = source.fork();
         let first = usize::from(populated);
         let vars = [
-            PendingVar { name: "x".into(), lb: -1.0, ub: 4.0 },
-            PendingVar { name: "y".into(), lb: 0.0, ub: 8.0 },
+            PendingVar { name: "x".into(), lb: (-1.0).into(), ub: 4.0.into() },
+            PendingVar { name: "y".into(), lb: 0.0.into(), ub: 8.0.into() },
         ];
         let params = [
             PendingParam { name: "p".into(), value: 11.0 },
@@ -38,7 +38,7 @@ fn metadata_batches_preserve_names_ids_and_atomicity_on_fresh_and_populated_fork
             assert_eq!(model.variable_id(&vars[offset].name), variable.var_id());
             assert_eq!(model.parameter_id(&params[offset].name), parameter.param_id());
             assert_eq!(model.param_value_of(*parameter).unwrap(), Some(params[offset].value));
-            assert_eq!(model.variables()[first + offset].domain, Domain::Integer);
+            assert_eq!(model.resolved_variables()[first + offset].domain, Domain::Integer);
         }
         assert_eq!(source.num_variables(), first);
         assert!(source.variable_id("x").is_none());
@@ -56,8 +56,8 @@ fn metadata_batches_preserve_names_ids_and_atomicity_on_fresh_and_populated_fork
 
     let model = Model::new("duplicate_batch");
     let vars = [
-        PendingVar { name: "duplicate".into(), lb: 0.0, ub: 1.0 },
-        PendingVar { name: "duplicate".into(), lb: 0.0, ub: 1.0 },
+        PendingVar { name: "duplicate".into(), lb: 0.0.into(), ub: 1.0.into() },
+        PendingVar { name: "duplicate".into(), lb: 0.0.into(), ub: 1.0.into() },
     ];
     let params = [
         PendingParam { name: "duplicate".into(), value: 1.0 },
@@ -161,11 +161,11 @@ fn handle_mutations_reject_foreign_models_without_changing_colliding_slots() {
     let target_p = target.__param("p", 3.0);
 
     let expected = ModelMismatchError::new(target.id(), source.id());
-    assert_eq!(target.fix(source_x, 0.5), Err(expected));
-    assert_eq!(target.set_initial(source_x, 0.5), Err(expected));
-    assert_eq!(target.set_param(source_p, 9.0), Err(expected));
+    assert_eq!(target.fix(source_x, 0.5), Err(expected.into()));
+    assert_eq!(target.set_initial(source_x, 0.5), Err(expected.into()));
+    assert_eq!(target.set_param(source_p, 9.0), Err(expected.into()));
 
-    let variable = &target.variables()[target_x.var_id().unwrap().index()];
+    let variable = &target.resolved_variables()[target_x.var_id().unwrap().index()];
     assert_eq!((variable.lb, variable.ub, variable.initial), (-1.0, 1.0, None));
     assert_eq!(target.param_value_of(target_p).unwrap(), Some(3.0));
     assert_ne!(source.id(), target.id());
@@ -288,7 +288,10 @@ fn set_param_idx_rejects_foreign_family() {
     let items = Set::range(0..2);
     let pa = a.__indexed_param("p", &items, |_i: usize| 1.0);
     let pb = b.__indexed_param("p", &items, |_i: usize| 2.0);
-    assert_eq!(b.set_param_idx(&pa, 0usize, 5.0), Err(ModelMismatchError::new(b.id(), a.id())));
+    assert_eq!(
+        b.set_param_idx(&pa, 0usize, 5.0),
+        Err(ModelMismatchError::new(b.id(), a.id()).into())
+    );
     assert_eq!(b.param_value_idx(&pb, 0usize).unwrap(), Some(2.0));
 }
 
@@ -460,7 +463,7 @@ fn indexed_build_forced_parallel_matches_serial_for_every_family() {
         );
 
         let variables = model
-            .variables()
+            .resolved_variables()
             .iter()
             .map(|variable| {
                 format!(

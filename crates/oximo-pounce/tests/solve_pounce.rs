@@ -191,7 +191,7 @@ fn persistent_matches_cold_on_parameter_sweep() {
 
     let mut solver = Pounce.persistent();
     for wv in [1.0, 2.0, 0.5, 3.0] {
-        w.set_param_value(wv);
+        w.set_param_value(wv).unwrap();
         let warm = solver.solve(&m, &PounceOptions::default()).unwrap();
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "w {wv}: no solution");
@@ -355,11 +355,10 @@ fn verbose_builder_path_logs_exit_status() {
 #[test]
 fn invalid_generated_fbbt_tape_is_returned_as_a_solver_error() {
     let m = Model::new("invalid_fbbt_tape");
-    param!(m, offset = 0.0);
+    let offset = m.__constant(f64::NAN);
     variable!(m, -2.0 <= x <= 2.0, initial = 0.0);
     constraint!(m, nonlinear, offset + x.exp() <= 10.0);
     objective!(m, Min, x.powi(2));
-    offset.set_param_value(f64::NAN);
 
     let options = PounceOptions::default()
         .solver_selection(PounceSolverSelection::Nlp)
@@ -377,11 +376,10 @@ fn invalid_generated_fbbt_tape_is_returned_as_a_solver_error() {
 #[test]
 fn tnlp_fbbt_rejects_invalid_tapes_in_cold_and_persistent_solves() {
     let m = Model::new("invalid_tnlp_fbbt_tape");
-    param!(m, offset = 0.0);
+    let offset = m.__constant(f64::NAN);
     variable!(m, -2.0 <= x <= 2.0);
     constraint!(m, row, offset + x <= 1.0);
     objective!(m, Min, x.powi(2));
-    offset.set_param_value(f64::NAN);
 
     let options = PounceOptions::default()
         .solver_selection(PounceSolverSelection::Nlp)
@@ -624,7 +622,7 @@ fn persistent_convex_ipm_and_active_set_follow_parameter_sweeps() {
         let options = PounceOptions::default().solver_selection(selection);
         let mut persistent = Pounce.persistent();
         for value in [1.0, -2.0, 0.5, 3.0] {
-            target.set_param_value(value);
+            target.set_param_value(value).unwrap();
             let warm = persistent.solve(&m, &options).unwrap();
             let cold = Pounce.solve(&m, &options).unwrap();
             assert!(warm.has_solution(), "{selection:?}, target={value}");
@@ -651,7 +649,7 @@ fn persistent_conic_ipm_reuses_bound_expanded_warm_start() {
 
     let mut persistent = Pounce.persistent();
     for value in [1.0, 2.0, 0.5] {
-        weight.set_param_value(value);
+        weight.set_param_value(value).unwrap();
         let warm = persistent.solve(&m, &PounceOptions::default()).unwrap();
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "weight={value}: {:?}", warm.termination);
@@ -674,7 +672,7 @@ fn persistent_reset_then_solve_ok() {
     objective!(m, Min, w * x + y);
 
     let mut solver = Pounce.persistent();
-    w.set_param_value(2.0);
+    w.set_param_value(2.0).unwrap();
     let first = solver.solve(&m, &PounceOptions::default()).unwrap();
     solver.reset();
     let after = solver.solve(&m, &PounceOptions::default()).unwrap();
@@ -692,7 +690,7 @@ fn persistent_sweep_reclassifies_nonlinear_objective() {
 
     let mut solver = Pounce.persistent();
     for wv in [1.0, 0.0, 2.0] {
-        w.set_param_value(wv);
+        w.set_param_value(wv).unwrap();
         let warm = solver.solve(&m, &PounceOptions::default()).unwrap();
         let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap();
         assert!(warm.has_solution(), "w {wv}: no solution");
@@ -998,7 +996,7 @@ fn route_validation_preserves_nlp_fallback_and_rechecks_forced_convexity() {
 
         let persistent = Pounce.persistent();
         for value in [1.0, -1.0, 1.0] {
-            weight.set_param_value(value);
+            weight.set_param_value(value).unwrap();
 
             for options in [
                 PounceOptions::default(),

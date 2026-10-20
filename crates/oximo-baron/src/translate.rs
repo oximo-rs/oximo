@@ -9,7 +9,7 @@ use std::{fs, io};
 
 use oximo_core::{
     AlgebraicConstraint, ConstraintId, Domain, Model, ModelId, ModelMismatchError, Objective,
-    ObjectiveSense, Sense, SocConstraint, SocConstraintId, VarId, Variable,
+    ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId, VarId,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
@@ -302,7 +302,10 @@ fn build_bar_prepared(
 /// integer, positive, free). BARON numbers variables 1-based in this order, so
 /// the result maps "Variable no. `k`" back to a `VarId` when parsing the
 /// enumerated solution pool.
-fn write_var_declarations(bar: &mut String, vars: &[Variable]) -> Result<Vec<VarId>, SolverError> {
+fn write_var_declarations(
+    bar: &mut String,
+    vars: &[ResolvedVariable],
+) -> Result<Vec<VarId>, SolverError> {
     let (mut bin, mut int, mut pos, mut free) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for v in vars {
         match v.domain {
@@ -331,7 +334,7 @@ fn write_var_declarations(bar: &mut String, vars: &[Variable]) -> Result<Vec<Var
     Ok(order)
 }
 
-fn write_var_section(bar: &mut String, header: &str, vars: &[&Variable]) {
+fn write_var_section(bar: &mut String, header: &str, vars: &[&ResolvedVariable]) {
     if vars.is_empty() {
         return;
     }
@@ -345,7 +348,7 @@ fn write_var_section(bar: &mut String, header: &str, vars: &[&Variable]) {
     writeln!(bar, ";").unwrap();
 }
 
-fn write_bounds(bar: &mut String, vars: &[Variable]) {
+fn write_bounds(bar: &mut String, vars: &[ResolvedVariable]) {
     let mut lo = String::new();
     let mut hi = String::new();
     for v in vars {
@@ -373,7 +376,7 @@ fn write_bounds(bar: &mut String, vars: &[Variable]) {
 
 /// The lower bound to write, or `None` when it equals the implied default for
 /// the variable's declaration section (so we avoid redundant lines).
-fn lower_bound_to_emit(v: &Variable) -> Option<f64> {
+fn lower_bound_to_emit(v: &ResolvedVariable) -> Option<f64> {
     if !v.lb.is_finite() {
         return None;
     }
@@ -384,7 +387,7 @@ fn lower_bound_to_emit(v: &Variable) -> Option<f64> {
     }
 }
 
-fn upper_bound_to_emit(v: &Variable) -> Option<f64> {
+fn upper_bound_to_emit(v: &ResolvedVariable) -> Option<f64> {
     if !v.ub.is_finite() {
         return None;
     }
@@ -590,7 +593,7 @@ fn write_objective(
     Ok(())
 }
 
-fn write_starting_point(bar: &mut String, vars: &[Variable]) {
+fn write_starting_point(bar: &mut String, vars: &[ResolvedVariable]) {
     if !vars.iter().any(|v| v.initial.is_some()) {
         return;
     }
@@ -2004,7 +2007,7 @@ mod tests {
         let mut arena = ExprArena::new();
         let p = arena.new_param(2.0);
         let parameters = arena.parameter_snapshot();
-        arena.set_param_value(p, 4.0);
+        arena.set_param_value(p, 4.0).unwrap();
         let res = "\
 junk line
 The best solution found is:
@@ -2029,7 +2032,7 @@ The above solution has an objective value of:    0.0
         let mut arena = ExprArena::new();
         let p = arena.new_param(2.0);
         let parameters = arena.parameter_snapshot();
-        arena.set_param_value(p, 4.0);
+        arena.set_param_value(p, 4.0).unwrap();
         let res = "\
                          *** Normal completion ***
 

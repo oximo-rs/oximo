@@ -16,7 +16,7 @@ fn persistent_matches_cold_solve_on_objective_sweep() {
 
     let mut solver = Gurobi.persistent();
     for price in [1.0, 1.6, 2.0, 5.0, 11.0] {
-        p1.set_param_value(price);
+        p1.set_param_value(price).unwrap();
         let s = solver.solve(&m, &GurobiOptions::default()).expect("persistent solve");
         let c = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
         assert_eq!(s.termination, TerminationStatus::Optimal, "price {price}");
@@ -38,7 +38,7 @@ fn persistent_rebuilds_on_constraint_rhs_change() {
 
     let mut solver = Gurobi.persistent();
     for c in [100.0, 60.0, 140.0] {
-        cap.set_param_value(c);
+        cap.set_param_value(c).unwrap();
         let s = solver.solve(&m, &GurobiOptions::default()).expect("persistent solve");
         let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
         assert_eq!(s.termination, TerminationStatus::Optimal, "cap {c}");
@@ -134,7 +134,7 @@ fn persistent_milp_objective_sweep() {
 
     let mut solver = Gurobi.persistent();
     for v in [1.0, 2.0, 7.0] {
-        v0.set_param_value(v);
+        v0.set_param_value(v).unwrap();
         let s = solver.solve(&m, &GurobiOptions::default()).expect("persistent solve");
         let cold = Gurobi.solve(&m, &GurobiOptions::default()).expect("cold solve");
         assert_eq!(s.termination, TerminationStatus::Optimal, "v {v}");

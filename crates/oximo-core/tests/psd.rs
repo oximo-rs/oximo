@@ -149,7 +149,7 @@ fn reformulated_clone_preserves_psd_registry_and_parameters() {
         cloned.psd_constraints()[0].matrix.upper_triangle(),
         m.psd_constraints()[0].matrix.upper_triangle()
     );
-    cloned.set_param_id(p.param_id().unwrap(), 7.0);
+    cloned.set_param_id(p.param_id().unwrap(), 7.0).unwrap();
     let entry = cloned.psd_constraints()[0].matrix[(0, 0)];
     assert_eq!(oximo_expr::extract_linear(&cloned.arena(), entry).unwrap().constant, 7.0);
     assert_eq!(oximo_expr::extract_linear(&m.arena(), entry).unwrap().constant, 2.0);

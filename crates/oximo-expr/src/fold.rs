@@ -270,7 +270,7 @@ mod tests {
         let term = arena.push(ExprNode::Mul(smallvec![p, x]));
         let root = arena.push(ExprNode::Add(smallvec![term, term]));
         let snapshot = arena.clone();
-        arena.set_param_value(parameter, 3.0);
+        arena.set_param_value(parameter, 3.0).unwrap();
         for (source, expected) in [(&snapshot, 4.0), (&arena, 6.0)] {
             assert_eq!(
                 extract_linear(source, root).unwrap().coeffs.as_ref(),

@@ -34,7 +34,7 @@ impl Solver for BoundRows {
         let mut result = SolverResult::for_model(model);
         result.dual_status = DualStatus::FeasiblePoint;
         let mut primal = rustc_hash::FxHashMap::default();
-        for variable in model.variables().iter() {
+        for variable in &model.resolved_variables() {
             primal.insert(variable.id, 1.0);
         }
         result.add_solution(primal, Some(1.0));
@@ -266,7 +266,7 @@ fn typed_translation_checks_snapshot_ownership_and_numeric_data() {
     param!(m, p = 2.0);
     let function = Function::semantic_data(&(p * x + 1.0).into_function());
     let context = TranslationContext::new(&m).unwrap();
-    p.set_param_value(4.0);
+    p.set_param_value(4.0).unwrap();
     let row = context.translate(&AffineRowTranslator, &function, &LessThan(5.0)).unwrap();
     assert_eq!(row.terms.coeffs[0].1, 2.0);
     assert_eq!(row.upper, 4.0);

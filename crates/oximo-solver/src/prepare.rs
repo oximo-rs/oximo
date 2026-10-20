@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oximo_core::{
-    AlgebraicConstraint, Model, ModelConstraints, ModelKind, Objective, ObjectiveSense, Sense,
-    SocConstraint, SocForm, Variable,
+    AlgebraicConstraint, Model, ModelConstraints, ModelKind, Objective, ObjectiveSense,
+    ResolvedVariable, Sense, SocConstraint, SocForm,
 };
 use oximo_expr::{
     ExprArena, ExprId, ExprNode, LinearTerms, QuadraticTerms, extract_linear, extract_quadratic,
@@ -80,7 +80,7 @@ impl<T> Deref for Extracted<T> {
 #[derive(Debug)]
 pub struct LoweringContext<'a> {
     expressions: PreparedExpressions,
-    variables: Ref<'a, Vec<Variable>>,
+    variables: Vec<ResolvedVariable>,
     constraints: ModelConstraints<'a>,
     objective: Ref<'a, Option<Objective>>,
     kind: ModelKind,
@@ -218,12 +218,15 @@ impl<'a> LoweringContext<'a> {
     pub fn new(model: &'a Model) -> Result<Self, SolverError> {
         model.ensure_gdp_reformulated()?;
         model.ensure_objective_declared()?;
+        let arena = model.arena();
+        let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
+        let kind = model.__kind_at(&arena, &variables);
         Ok(Self {
-            expressions: PreparedExpressions::new((*model.arena()).clone()),
-            variables: model.variables(),
+            expressions: PreparedExpressions::new((*arena).clone()),
+            variables,
             constraints: model.constraints(),
             objective: model.objective(),
-            kind: model.kind(),
+            kind,
             semantic: model.semantic_constraints_ref(),
         })
     }
@@ -261,7 +264,7 @@ impl<'a> LoweringContext<'a> {
         Ok(oximo_core::SymmetricMatrix::from_upper_triangle(psd.matrix.side_dimension(), entries))
     }
 
-    pub fn variables(&self) -> &[Variable] {
+    pub fn variables(&self) -> &[ResolvedVariable] {
         &self.variables
     }
     pub fn constraints(&self) -> &ModelConstraints<'a> {
@@ -446,7 +449,7 @@ impl PreparedExpressions {
     /// Detect an optional cone representation using cached polynomial terms.
     pub fn detected_soc(
         &self,
-        variables: &[Variable],
+        variables: &[ResolvedVariable],
         row: &AlgebraicConstraint,
     ) -> Option<SocForm> {
         let q = self.quadratic(row.lhs)?;

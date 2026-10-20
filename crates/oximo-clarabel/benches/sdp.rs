@@ -45,7 +45,7 @@ fn bench(c: &mut Criterion) {
             let model = model(n, dense);
             let p = model.parameter_id("p").unwrap();
             for chordal in [true, false] {
-                model.set_param_id(p, 1.0);
+                model.set_param_id(p, 1.0).unwrap();
                 let options = ClarabelOptions::default()
                     .presolve_enable(false)
                     .input_sparse_dropzeros(false)
@@ -69,7 +69,7 @@ fn bench(c: &mut Criterion) {
                     |b| {
                         b.iter(|| {
                             high = !high;
-                            model.set_param_id(p, if high { 1.25 } else { 1.0 });
+                            model.set_param_id(p, if high { 1.25 } else { 1.0 }).unwrap();
                             black_box(persistent.solve(black_box(&model), &options).unwrap())
                         });
                     },

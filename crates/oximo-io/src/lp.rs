@@ -1175,7 +1175,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         return Err(IoError::Conic);
     }
     let arena = model.arena();
-    let vars = model.variables();
+    let vars = model.resolved_variables();
     let model_constraints = model.constraints();
     let constraints = model_constraints.algebraic();
     let (obj_sense, obj_terms) = crate::objective::export_terms(model, &arena, &vars)?;
@@ -1285,7 +1285,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     }
 
     let mut wrote_bounds_header = false;
-    for v in vars.iter() {
+    for v in &vars {
         if matches!(v.domain, Domain::Binary) {
             continue;
         }
@@ -1429,7 +1429,7 @@ fn unique_label(used: &mut FxHashSet<String>, base: &str) -> String {
 fn write_quadratic<W: Write>(
     out: &mut W,
     t: &QuadraticTerms,
-    vars: &[oximo_core::Variable],
+    vars: &[oximo_core::ResolvedVariable],
     constraint: bool,
 ) -> std::io::Result<()> {
     let mut first = true;

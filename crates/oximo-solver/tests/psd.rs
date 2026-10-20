@@ -42,9 +42,12 @@ fn psd_lowering_uses_live_parameters_and_rejects_nonfinite_entries() {
         assert_eq!(entry.constant, value);
         assert_eq!(entry.coeffs[0].1, value);
     }
-    m.set_param(p, f64::INFINITY).unwrap();
+    assert!(m.set_param(p, f64::INFINITY).is_err());
+    m.set_param(p, f64::MAX).unwrap();
+    let mut invalid = m.psd_constraints()[cone.index()].clone();
+    invalid.matrix = SymmetricMatrix::from_upper_triangle(1, [(p * p * x).id()]);
     let prepared = oximo_solver::prepare::LoweringContext::new(&m).unwrap();
-    let error = prepared.explicit_psd(&m.psd_constraints()[cone.index()]).unwrap_err();
+    let error = prepared.explicit_psd(&invalid).unwrap_err();
     assert!(error.to_string().contains("positivity"));
 }
 

@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for price in [1.0, 1.6, 2.0, 5.0, 11.0] {
         // Re-bind `p1` to the current price
-        p1.set_param_value(price);
+        p1.set_param_value(price).unwrap();
 
         let result = Highs.solve(&m, &HighsOptions::default())?;
         assert_eq!(result.termination, TerminationStatus::Optimal);

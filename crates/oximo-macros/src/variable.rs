@@ -102,13 +102,13 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                 let param = family_closure_param(bs);
                 let used = mark_bindings_used(bs);
                 match kind {
-                    BoundKind::Lb => quote!(.lb_by(move |#param| { #used f64::from(#val) })),
-                    BoundKind::Ub => quote!(.ub_by(move |#param| { #used f64::from(#val) })),
+                    BoundKind::Lb => quote!(.lb_by(|#param| { #used #val })),
+                    BoundKind::Ub => quote!(.ub_by(|#param| { #used #val })),
                 }
             }
             _ => match kind {
-                BoundKind::Lb => quote!(.lb(f64::from(#val))),
-                BoundKind::Ub => quote!(.ub(f64::from(#val))),
+                BoundKind::Lb => quote!(.lb(#val)),
+                BoundKind::Ub => quote!(.ub(#val)),
             },
         }
     };

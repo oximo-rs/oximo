@@ -37,7 +37,7 @@ fn deferred_and_builder_affine_expressions_compile_and_rebind() {
         let mut registers = vec![0.0; tape.n_regs()];
         let values = vec![1.0; 128];
         for value in [2.0, 5.0] {
-            parameter.set_param_value(value);
+            parameter.set_param_value(value).unwrap();
             let result = tape.value(&values, &[value], &[], &mut registers);
             assert_close(result, 128.0 + value, 1e-14, "affine parameter rebind");
             let slot = FunctionSlot::classify(&cell.borrow(), expression.id());

@@ -197,7 +197,7 @@ fn indexed_var_per_key_bounds() {
             }
         })
         .build();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].ub, 0.0);
     assert_eq!(vars[1].ub, 1.0);
     assert_eq!(vars[2].ub, 2.0);
@@ -294,7 +294,7 @@ fn lb_by_ub_by_override_binary_defaults() {
         .lb_by(|k: usize| if k == 0 { 1.0 } else { 0.0 })
         .ub_by(|k: usize| if k == 2 { 0.0 } else { 1.0 })
         .build();
-    let vars = m.variables();
+    let vars = m.resolved_variables();
     assert_eq!(vars[0].lb, 1.0); // fixed to 1
     assert_eq!(vars[0].ub, 1.0);
     assert_eq!(vars[1].lb, 0.0); // free binary
