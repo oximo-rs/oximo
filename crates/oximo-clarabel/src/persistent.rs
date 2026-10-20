@@ -200,6 +200,28 @@ mod tests {
         (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
     }
 
+    #[test]
+    fn symbolic_bound_sweep_updates_and_rebuilds_match_cold_solves() {
+        let model = Model::new("resident symbolic bounds");
+        param!(model, cap = 5.0);
+        variable!(model, 0.0 <= x <= cap);
+        objective!(model, Max, x);
+        let options =
+            ClarabelOptions::default().presolve_enable(false).input_sparse_dropzeros(false);
+        let mut solver = Clarabel.persistent();
+
+        for (value, updates) in [(5.0, 0), (8.0, 1), (0.0, 1), (3.0, 1), (7.0, 2)] {
+            cap.set_param_value(value).unwrap();
+            let warm = solver.solve(&model, &options).unwrap();
+            let cold = Clarabel.solve(&model, &options).unwrap();
+            assert_eq!(warm.termination, TerminationStatus::Optimal);
+            assert!(close(warm.value_of(x).unwrap().unwrap(), value));
+            assert!(close(warm.objective().unwrap(), cold.objective().unwrap()));
+            assert_eq!(warm.parameters.value(cap.param_id().unwrap()), Some(value));
+            assert_eq!(solver.updates, updates);
+        }
+    }
+
     /// A parameter in an objective coefficient changes `q` only: the sparsity
     /// pattern is untouched, so the handle updates in place and must match the
     /// cold solve across the sweep.
