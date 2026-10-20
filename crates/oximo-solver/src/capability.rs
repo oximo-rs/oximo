@@ -255,9 +255,10 @@ pub(crate) fn validate<S: Solver + ?Sized>(
 
     let semantic = model.semantic_constraints_ref();
     let arena = model.arena();
+    let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
 
     for c in semantic.iter().filter(|c| c.active) {
-        if let Some(reason) = support_for_record(solver, &c, model, &arena, opts)
+        if let Some(reason) = support_for_record(solver, &c, model, &arena, &variables, opts)
             .rejection_reason("unsupported function/set pair")
         {
             reject(
@@ -282,7 +283,7 @@ pub(crate) fn validate<S: Solver + ?Sized>(
             _ => None,
         } {
             solver.objective_support(
-                signature_for_class(oximo_expr::classify(&model.arena(), root)),
+                signature_for_class(oximo_expr::classify(&arena, root)),
                 objective.sense,
                 opts,
             )
@@ -295,7 +296,7 @@ pub(crate) fn validate<S: Solver + ?Sized>(
         }
     }
 
-    for variable in &model.resolved_variables() {
+    for variable in &variables {
         if let Some(reason) =
             solver.domain_support(variable.domain).rejection_reason("unsupported domain")
         {
@@ -303,14 +304,12 @@ pub(crate) fn validate<S: Solver + ?Sized>(
         }
     }
 
-    if !solver.supports(model.kind()) {
+    let kind = model.__kind_at(&arena, &variables);
+    if !solver.supports(kind) {
         reject(
             None,
             "model".into(),
-            format!(
-                "unsupported combination of domains, objective and constraints ({})",
-                model.kind()
-            ),
+            format!("unsupported combination of domains, objective and constraints ({kind})"),
         );
     }
 
@@ -339,6 +338,7 @@ pub(crate) fn support_for_record<S: Solver + ?Sized>(
     record: &oximo_core::SemanticConstraintRef<'_>,
     model: &Model,
     arena: &oximo_expr::ExprArena,
+    variables: &[oximo_core::ResolvedVariable],
     opts: &S::Options,
 ) -> Capability {
     if let Some(view) = model.alternative_lowering_view(record.id) {
@@ -353,7 +353,9 @@ pub(crate) fn support_for_record<S: Solver + ?Sized>(
             }
             _ => unreachable!("alternative scalar views belong to rows or indicator consequents"),
         };
-        return support_for_native_signature(solver, signature, record.id, model, arena, opts);
+        return support_for_native_signature(
+            solver, signature, record.id, model, arena, variables, opts,
+        );
     }
 
     let mut signature = ConstraintSignature {
@@ -393,7 +395,7 @@ pub(crate) fn support_for_record<S: Solver + ?Sized>(
         _ => return declared,
     }
 
-    support_for_native_signature(solver, signature, record.id, model, arena, opts)
+    support_for_native_signature(solver, signature, record.id, model, arena, variables, opts)
 }
 
 /// Recover the canonical bound set of a native scalar interval row.
@@ -417,6 +419,7 @@ fn support_for_native_signature<S: Solver + ?Sized>(
     id: SemanticConstraintId,
     model: &Model,
     arena: &oximo_expr::ExprArena,
+    variables: &[oximo_core::ResolvedVariable],
     opts: &S::Options,
 ) -> Capability {
     let narrowed = solver.constraint_support(signature, opts);
@@ -433,8 +436,7 @@ fn support_for_native_signature<S: Solver + ?Sized>(
         && let SemanticConstraintId::Algebraic(id) = id
         && let Some(row) = model.constraints().algebraic().get(id.index())
         && let Some(quadratic) = oximo_expr::extract_quadratic(arena, row.lhs)
-        && oximo_core::__detect_soc_from_quadratic(&model.resolved_variables(), row, &quadratic)
-            .is_some()
+        && oximo_core::__detect_soc_from_quadratic(variables, row, &quadratic).is_some()
     {
         return Capability::Native;
     }

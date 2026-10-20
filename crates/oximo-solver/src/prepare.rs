@@ -218,12 +218,15 @@ impl<'a> LoweringContext<'a> {
     pub fn new(model: &'a Model) -> Result<Self, SolverError> {
         model.ensure_gdp_reformulated()?;
         model.ensure_objective_declared()?;
+        let arena = model.arena();
+        let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
+        let kind = model.__kind_at(&arena, &variables);
         Ok(Self {
-            expressions: PreparedExpressions::new((*model.arena()).clone()),
-            variables: model.resolved_variables(),
+            expressions: PreparedExpressions::new((*arena).clone()),
+            variables,
             constraints: model.constraints(),
             objective: model.objective(),
-            kind: model.kind(),
+            kind,
             semantic: model.semantic_constraints_ref(),
         })
     }
