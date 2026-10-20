@@ -100,7 +100,7 @@ pub(crate) fn solve_task(
 }
 
 fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
-    for variable in &model.resolved_variables() {
+    for variable in model.variables().iter() {
         if matches!(variable.domain, Domain::SemiContinuous { .. } | Domain::SemiInteger { .. }) {
             return Err(SolverError::Backend(format!(
                 "MOSEK: variable '{}' uses a semi-continuous or semi-integer domain; \
