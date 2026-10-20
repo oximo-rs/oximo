@@ -2,7 +2,8 @@
 
 use super::Model;
 use crate::soc::is_detected_soc;
-use oximo_expr::{ExprClass, classify};
+use crate::var::ResolvedVariable;
+use oximo_expr::{ExprArena, ExprClass, classify};
 use rayon::prelude::*;
 use std::fmt;
 
@@ -81,13 +82,27 @@ impl Model {
     /// 5. quadratic objective -> `QP`
     /// 6. otherwise -> `LP`
     pub fn kind(&self) -> ModelKind {
-        let revision = self.arena.borrow().parameter_revision();
+        let arena = self.arena.borrow();
+        let revision = arena.parameter_revision();
         if let Some(k) = self.cached_kind.get()
             && revision == self.cached_kind_parameter_revision.get()
         {
             return k;
         }
-        let k = self.infer_kind_with(None);
+        let vars = self.variables.borrow().iter().map(|v| v.resolved(&arena)).collect::<Vec<_>>();
+        self.__kind_at(&arena, &vars)
+    }
+
+    /// Classify metadata captured from this model at one parameter assignment.
+    #[doc(hidden)]
+    pub fn __kind_at(&self, arena: &ExprArena, vars: &[ResolvedVariable]) -> ModelKind {
+        let revision = arena.parameter_revision();
+        if let Some(k) = self.cached_kind.get()
+            && revision == self.cached_kind_parameter_revision.get()
+        {
+            return k;
+        }
+        let k = self.infer_kind_impl(arena, vars, None);
         self.cached_kind.set(Some(k));
         self.cached_kind_parameter_revision.set(revision);
         k
@@ -98,38 +113,39 @@ impl Model {
     /// Automatic inference keeps the initial classification scan serial, then
     /// parallelizes only a large set of already-known quadratic candidates for
     /// SOC recognition. This keeps LP/NLP models off the Rayon path.
+    #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn infer_kind_with(&self, parallel: Option<bool>) -> ModelKind {
-        self.infer_kind_impl(parallel)
+        let arena = self.arena.borrow();
+        let vars = self.variables.borrow().iter().map(|v| v.resolved(&arena)).collect::<Vec<_>>();
+        self.infer_kind_impl(&arena, &vars, parallel)
     }
 
     /// Infer the kind with a forced serial or parallel SOC-recognition pass.
     /// This is used by benchmarks and parity tests.
     #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn infer_kind(&self, parallel: bool) -> ModelKind {
-        self.infer_kind_impl(Some(parallel))
+        self.infer_kind_with(Some(parallel))
     }
 
-    fn infer_kind_impl(&self, parallel: Option<bool>) -> ModelKind {
-        let arena = self.arena.borrow();
-        let vars = self.resolved_variables();
+    fn infer_kind_impl(
+        &self,
+        arena: &ExprArena,
+        vars: &[ResolvedVariable],
+        parallel: Option<bool>,
+    ) -> ModelKind {
         let has_int = vars.iter().any(|v| v.domain.requires_discrete_choice())
             || self.sos_constraints.borrow().iter().any(|constraint| constraint.active);
-        let obj_class = self
-            .objective
-            .borrow()
-            .as_ref()
-            .map_or(ExprClass::Linear, |o| classify(&arena, o.expr));
+        let obj_class =
+            self.objective.borrow().as_ref().map_or(ExprClass::Linear, |o| classify(arena, o.expr));
 
         let mut any_nonlinear = obj_class == ExprClass::Nonlinear;
         let mut plain_quad_con = false;
         let mut detected_soc = false;
         if !any_nonlinear {
             let constraints = self.constraints.borrow();
-            let arena_ref = &*arena;
-            let vars_ref = &*vars;
             let mut quadratic = Vec::new();
             for c in constraints.iter().filter(|c| c.active) {
-                match classify(arena_ref, c.lhs) {
+                match classify(arena, c.lhs) {
                     ExprClass::Linear => {}
                     ExprClass::Quadratic => quadratic.push(c),
                     ExprClass::Nonlinear => {
@@ -146,7 +162,7 @@ impl Model {
                     let (has_cone, has_plain) = quadratic
                         .par_iter()
                         .map(|c| {
-                            let is_soc = is_detected_soc(arena_ref, vars_ref, c);
+                            let is_soc = is_detected_soc(arena, vars, c);
                             (is_soc, !is_soc)
                         })
                         .reduce(
@@ -157,7 +173,7 @@ impl Model {
                     plain_quad_con = has_plain;
                 } else {
                     for c in quadratic {
-                        if is_detected_soc(arena_ref, vars_ref, c) {
+                        if is_detected_soc(arena, vars, c) {
                             detected_soc = true;
                         } else {
                             plain_quad_con = true;

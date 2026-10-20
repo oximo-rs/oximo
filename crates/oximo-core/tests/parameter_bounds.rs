@@ -92,3 +92,54 @@ fn expression_writes_invalidate_parameter_specific_soc_classification() {
     floor.set_param_value(0.0).unwrap();
     assert_eq!(model.kind(), ModelKind::SOCP);
 }
+
+#[test]
+fn classification_uses_the_supplied_parameter_assignment_and_cache_revision() {
+    let model = Model::new("saved classification");
+    param!(model, floor = 0.0);
+    variable!(model, x);
+    variable!(model, t >= floor);
+    constraint!(model, x.square() <= t.square());
+    objective!(model, Min, t);
+
+    let arena = model.arena();
+    let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
+    floor.set_param_value(-1.0).unwrap();
+    assert_eq!(model.kind(), ModelKind::QCP);
+    assert_eq!(model.__kind_at(&arena, &variables), ModelKind::SOCP);
+    assert_eq!(model.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn handle_bound_replacement_checks_identity_and_preserves_failed_writes() {
+    let model = Model::new("replace bounds");
+    let foreign = Model::new("foreign");
+    param!(model, cap = 5.0);
+    param!(foreign, other_cap = 9.0);
+    variable!(model, 0.0 <= x <= cap);
+    variable!(foreign, other_x);
+
+    for result in [
+        model.set_bounds(other_x, 0.0, 1.0),
+        model.set_bounds(x + x, 0.0, 1.0),
+        model.set_bounds(x, 0.0, other_cap),
+        model.set_bounds(x, 6.0, cap),
+    ] {
+        assert!(result.is_err());
+    }
+    assert_eq!(model.variables()[0].resolved_bounds(&model.arena()), (0.0, 5.0));
+    assert!(cap.set_param_value(-1.0).is_err());
+
+    model.fix(x, 2.0).unwrap();
+    model.set_bounds(x, 1.0, cap).unwrap();
+    assert!(cap.set_param_value(0.5).is_err());
+    cap.set_param_value(8.0).unwrap();
+    assert_eq!(model.variables()[0].resolved_bounds(&model.arena()), (1.0, 8.0));
+
+    model.set_bounds(x, 0.0, 10.0).unwrap();
+    cap.set_param_value(-1.0).unwrap();
+
+    sos_constraint!(model, choice, SOS1, [x]);
+    model.reformulate_sos(SosReformulationOptions::default()).unwrap();
+    assert!(matches!(model.set_bounds(x, 0.0, 20.0), Err(ModelError::FrozenVariable(_))));
+}

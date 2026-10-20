@@ -2,13 +2,14 @@
 
 use std::cell::Ref;
 
-use oximo_expr::{Expr, ExprId, ExprNode, extract_linear};
+use oximo_expr::{Expr, ExprArena, ExprId, ExprNode, extract_linear};
 
 use super::helpers::{raw_effective_bounds, unique_constraint_name};
 use super::{ReformulatedModel, ReformulationError};
 use crate::constraint::{ConstraintId, Relate};
 use crate::indicator::{IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId};
 use crate::model::Model;
+use crate::var::ResolvedVariable;
 
 /// Settings for explicit indicator-to-MILP reformulation.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -58,8 +59,13 @@ impl IndicatorPlan {
         let source = constraints
             .get(id.index())
             .ok_or(ReformulationError::UnknownIndicatorConstraint(id.index()))?;
-        let entries =
-            if source.active { vec![plan_one(model, id, source, options)?] } else { Vec::new() };
+        let entries = if source.active {
+            let arena = model.arena();
+            let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
+            vec![plan_one(&arena, &variables, id, source, options)?]
+        } else {
+            Vec::new()
+        };
         Ok(Self(entries))
     }
 
@@ -69,11 +75,17 @@ impl IndicatorPlan {
     ) -> Result<Self, ReformulationError> {
         validate_options(options)?;
         let constraints = model.indicator_constraints.borrow();
+        if !constraints.iter().any(|source| source.active) {
+            return Ok(Self(Vec::new()));
+        }
+        let arena = model.arena();
+        let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
         let mut entries = Vec::new();
         for (index, source) in constraints.iter().enumerate() {
             if source.active {
                 entries.push(plan_one(
-                    model,
+                    &arena,
+                    &variables,
                     IndicatorConstraintId(u32::try_from(index).expect("indicator ID overflow")),
                     source,
                     options,
@@ -106,7 +118,8 @@ fn validate_options(options: IndicatorReformulationOptions) -> Result<(), Reform
 }
 
 fn plan_one(
-    model: &Model,
+    arena: &ExprArena,
+    variables: &[ResolvedVariable],
     id: IndicatorConstraintId,
     source: &IndicatorConstraint,
     options: IndicatorReformulationOptions,
@@ -114,13 +127,12 @@ fn plan_one(
     if source.lower == f64::INFINITY || source.upper == f64::NEG_INFINITY {
         return Err(ReformulationError::InvalidIndicatorBounds { constraint: source.name.clone() });
     }
-    let arena = model.arena.borrow();
-    if contains_parameter(&arena, source.lhs) {
+    if contains_parameter(arena, source.lhs) {
         return Err(ReformulationError::ParameterDependentIndicator {
             constraint: source.name.clone(),
         });
     }
-    let terms = extract_linear(&arena, source.lhs).ok_or_else(|| {
+    let terms = extract_linear(arena, source.lhs).ok_or_else(|| {
         ReformulationError::InvalidIndicatorExpression { constraint: source.name.clone() }
     })?;
     if !terms.constant.is_finite() || terms.coeffs.iter().any(|(_, c)| !c.is_finite()) {
@@ -128,7 +140,6 @@ fn plan_one(
             constraint: source.name.clone(),
         });
     }
-    let variables = model.resolved_variables();
     let inactive = if source.active_value { 0.0 } else { 1.0 };
     let mut minimum = terms.constant;
     let mut maximum = terms.constant;

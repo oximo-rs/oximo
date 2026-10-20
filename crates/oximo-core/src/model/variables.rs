@@ -307,6 +307,26 @@ impl Model {
         self.replace_bounds(id, lb.into_bound(self)?, ub.into_bound(self)?)
     }
 
+    /// Replace both bounds of a bare variable handle from this model.
+    ///
+    /// Accepts constants or bare parameter handles; use constant infinities for
+    /// unbounded directions. This also restores bounds after [`Self::fix`].
+    ///
+    /// # Errors
+    /// Rejects foreign or composed variable handles and any bounds rejected by
+    /// [`Self::unfix_var`], leaving the variable unchanged.
+    pub fn set_bounds<'a>(
+        &self,
+        variable: impl Into<Expr<'a>>,
+        lower: impl IntoBound<'a>,
+        upper: impl IntoBound<'a>,
+    ) -> Result<(), ModelError> {
+        let variable = variable.into();
+        self.ensure_expr_model(variable)?;
+        let id = variable.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
+        self.unfix_var(id, lower, upper)
+    }
+
     fn replace_bounds(&self, id: VarId, lb: Bound, ub: Bound) -> Result<(), ModelError> {
         let mut arena = self.arena.borrow_mut();
         let (lo, hi) = (lb.resolve(&arena), ub.resolve(&arena));
@@ -501,7 +521,9 @@ impl Model {
     /// # Errors
     /// Rejects unknown or frozen entities and invalid numerical assignments.
     pub fn set_param_id(&self, id: ParamId, value: f64) -> Result<(), ModelError> {
-        self.set_param_ids(&[(id, value)])
+        self.arena.borrow_mut().set_param_value(id, value)?;
+        self.cached_kind.set(None);
+        Ok(())
     }
 
     /// Atomically validate and apply a complete parameter batch.

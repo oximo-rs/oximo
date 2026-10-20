@@ -100,6 +100,7 @@ components, variable vectors, and indicator consequents.
 ```rust,ignore
 m.fix_var(var_id, 3.0)?;         // lb = ub = 3.0
 m.unfix_var(var_id, 0.0, 10.0)?; // restore bounds
+m.set_bounds(x, 0.0, 10.0)?;     // replace bounds using a model-checked variable handle
 ```
 
 ## Variables
