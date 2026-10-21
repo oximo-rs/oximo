@@ -158,7 +158,7 @@ objectives, cones, native indicators, and SOS constraints are not supported.**
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `model.reformulate_gdp(method_or_options)`                          | Transform pending GDP components in place; original handles remain valid.      |
 | `model.to_reformulated_gdp_model(method_or_options)`                | Transform an independent copy and retain the source for other data or methods. |
-| `solver.with_gdp(method_or_options).solve(&model, &solver_options)` | Reformulate in place before invoking the backend with its ordinary options.    |
+| `solver.with_gdp(method_or_options).solve(&model, &solver_options)` | Reformulate in place, solve, and project the result to source coordinates.     |
 
 Reformulate before exporting or using an ordinary solver call. Validation errors
 leave the model unchanged. Successful reformulation locks bounds and parameter
@@ -244,9 +244,20 @@ The returned `GdpReformulationReport` maps source components to generated rows
 and variables. Transformation history is available through
 `model.gdp_reformulations()`.
 
+Each report includes complete `generated_variables` and `generated_rows` index
+ranges. The row range includes Hull copy bounds and aggregation rows even when
+they have no individual source-row mapping. Boolean binary counterparts are source
+variables and are excluded from the generated-variable range.
+
 Read a Hull activation with `result.hull_activation_value_of(handle)?`, obtaining
 the handle from `report.hull_activation(copy_index)` or `report.hull_activations()`
 in copy order.
+
+Results returned by `GdpSolver::solve` are projected to source coordinates:
+generated rows, copies, and multipliers are dropped, while Hull activation
+variables and Boolean binaries remain queryable. Reformulating with
+`model.reformulate_gdp` and calling the backend directly returns the
+reformulated model's coordinates instead.
 
 ## Implementation details
 

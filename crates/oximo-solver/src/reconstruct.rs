@@ -5,11 +5,12 @@
 //! callers that solve an independently transformed model and need results in
 //! the original model's coordinates.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
 
-use oximo_core::{Model, ModelId, VarId};
-use rustc_hash::FxHashMap;
+use oximo_core::{ConstraintId, Model, ModelId, VarId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationStatus};
 
@@ -27,7 +28,60 @@ pub fn finalize_result(
     model: &oximo_core::Model,
     num_variables: usize,
 ) -> SolverResult {
-    normalize_result(result, num_variables).with_semantic_dual_defaults(model)
+    finalize_result_retaining(
+        result,
+        model,
+        &SourceIndices::Prefix(num_variables),
+        &FxHashSet::default(),
+    )
+}
+
+/// Membership test for one source coordinate registry.
+#[derive(Clone, Debug)]
+enum SourceIndices {
+    /// Source IDs are the prefix `0..count`.
+    Prefix(usize),
+    /// Source IDs are interleaved with generated IDs.
+    Explicit { ids: FxHashSet<usize>, upper_bound: usize },
+}
+
+impl SourceIndices {
+    fn explicit(indices: impl IntoIterator<Item = usize>) -> Self {
+        let ids: FxHashSet<_> = indices.into_iter().collect();
+        let upper_bound = ids.iter().max().map_or(0, |id| id.saturating_add(1));
+        Self::Explicit { ids, upper_bound }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Prefix(count) => *count,
+            Self::Explicit { ids, .. } => ids.len(),
+        }
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        match self {
+            Self::Prefix(count) => index < *count,
+            Self::Explicit { ids, .. } => ids.contains(&index),
+        }
+    }
+
+    fn upper_bound(&self) -> usize {
+        match self {
+            Self::Prefix(count) => *count,
+            Self::Explicit { upper_bound, .. } => *upper_bound,
+        }
+    }
+}
+
+#[inline]
+fn finalize_result_retaining(
+    result: SolverResult,
+    model: &oximo_core::Model,
+    variables: &SourceIndices,
+    retained: &FxHashSet<VarId>,
+) -> SolverResult {
+    normalize_result(result, variables, retained).with_semantic_dual_defaults(model)
 }
 
 /// One native row's contribution to an original multiplier. Store `None` in
@@ -137,7 +191,11 @@ pub fn relative_gap(primal: Option<f64>, bound: Option<f64>) -> Option<f64> {
 /// Panics if a point's model identity or captured parameters conflict with the result.
 /// Use [`SolverResult::for_model`] and [`SolverResult::add_solution`] to assemble
 /// points from a single captured parameter state.
-fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverResult {
+fn normalize_result(
+    mut result: SolverResult,
+    source_variables: &SourceIndices,
+    retained: &FxHashSet<VarId>,
+) -> SolverResult {
     for (index, point) in result.solutions.iter().enumerate() {
         assert!(
             point.model_id == oximo_core::ModelId::UNASSIGNED || point.model_id == result.model_id,
@@ -157,10 +215,20 @@ fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverRes
     }
     let mut first = true;
     let mut lost_incumbent = false;
+    let expected = source_variables.len();
     result.solutions.retain_mut(|point| {
-        point.primal.retain(|id, value| id.index() < num_variables && value.is_finite());
+        let mut source_count = 0usize;
+        point.primal.retain(|id, value| {
+            let source = source_variables.contains(id.index());
+            let keep = (source || retained.contains(id)) && value.is_finite();
+            if keep && source {
+                source_count += 1;
+            }
+            keep
+        });
         point.objective = point.objective.filter(|v| v.is_finite());
-        let valid = point.primal.len() == num_variables;
+        // Retained generated coordinates do not count toward source completeness.
+        let valid = source_count == expected;
         if first {
             lost_incumbent = !valid;
             first = false;
@@ -215,6 +283,9 @@ fn normalize_result(mut result: SolverResult, num_variables: usize) -> SolverRes
 ///
 /// Entities appended by a reformulation have IDs at or above these bounds.
 /// For an in-place reformulation, capture this before modifying the model.
+/// Later source declarations can interleave with generated IDs; provide an
+/// explicit source sets through [`SourceProjection::with_source_variables`] and
+/// [`SourceProjection::with_source_rows`] in that case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceCoordinates {
     pub variables: usize,
@@ -249,23 +320,84 @@ pub enum ProjectionError {
 
 type SourceObjective<'a> = Box<dyn Fn(&SolutionPoint) -> Option<f64> + 'a>;
 
+/// Reusable coordinate membership for source-result projection.
+///
+/// Build once, then borrow with [`SourceProjection::with_plan`] for each solve.
+/// Rebuild after source or generated entities change.
+#[derive(Clone, Debug)]
+pub struct SourceProjectionPlan {
+    coordinates: SourceCoordinates,
+    variables: SourceIndices,
+    rows: SourceIndices,
+    retained: FxHashSet<VarId>,
+}
+
+impl SourceProjectionPlan {
+    #[must_use]
+    pub fn new(coordinates: SourceCoordinates) -> Self {
+        Self {
+            variables: SourceIndices::Prefix(coordinates.variables),
+            rows: SourceIndices::Prefix(coordinates.algebraic_constraints),
+            coordinates,
+            retained: FxHashSet::default(),
+        }
+    }
+
+    /// Replace the source-variable prefix with exactly these IDs.
+    #[must_use]
+    pub fn with_source_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
+        self.set_variables(variables);
+        self
+    }
+
+    /// Replace the source algebraic-row prefix with exactly these IDs.
+    #[must_use]
+    pub fn with_source_rows(mut self, rows: impl IntoIterator<Item = ConstraintId>) -> Self {
+        self.set_rows(rows);
+        self
+    }
+
+    /// Keep additional generated primal coordinates, without their reduced costs.
+    #[must_use]
+    pub fn retain_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
+        self.retained.extend(variables);
+        self
+    }
+
+    fn set_variables(&mut self, variables: impl IntoIterator<Item = VarId>) {
+        self.variables = SourceIndices::explicit(variables.into_iter().map(VarId::index));
+        self.coordinates.variables = self.variables.len();
+    }
+
+    fn set_rows(&mut self, rows: impl IntoIterator<Item = ConstraintId>) {
+        self.rows = SourceIndices::explicit(rows.into_iter().map(ConstraintId::index));
+        self.coordinates.algebraic_constraints = self.rows.len();
+    }
+}
+
 /// Projects a result produced on a transformed model back into the source
 /// model's coordinates.
 ///
 /// The projection:
-/// - drops generated variables, rows, SOC/PSD cones, and reduced costs;
+/// - drops generated variables, rows, SOC/PSD cones, and reduced costs, except
+///   for generated variables explicitly listed with [`Self::retain_variables`];
 /// - rebinds the result and its points to the source model identity;
 /// - preserves the solve-time parameter snapshot;
 /// - optionally restores the objective convention and re-evaluates the source
 ///   objective on each projected point;
 /// - applies [`finalize_result`] so the usual result contract holds.
 ///
+/// Source variables and algebraic rows are ID prefixes by default. Use
+/// [`Self::with_source_variables`] and [`Self::with_source_rows`] for interleaved
+/// source and generated IDs. Borrow a [`SourceProjectionPlan`] to reuse membership
+/// sets without cloning or rebuilding them, and reuse the projector across solves.
+///
 /// Generated multipliers are dropped rather than reinterpreted in source
 /// coordinates. Semantic duals remain subject to the usual explicit-mapping
 /// rules; an unavailable value stays unavailable.
 pub struct SourceProjection<'a> {
     source: &'a Model,
-    coordinates: SourceCoordinates,
+    plan: Cow<'a, SourceProjectionPlan>,
     objective: ObjectiveTransform,
     reevaluate: Option<SourceObjective<'a>>,
     transformed: Option<&'a Model>,
@@ -286,11 +418,57 @@ impl<'a> SourceProjection<'a> {
     pub fn with_coordinates(source: &'a Model, coordinates: SourceCoordinates) -> Self {
         Self {
             source,
-            coordinates,
+            plan: Cow::Owned(SourceProjectionPlan::new(coordinates)),
             objective: ObjectiveTransform { sign: 1.0, offset: 0.0 },
             reevaluate: None,
             transformed: None,
         }
+    }
+
+    /// Borrow a reusable plan without allocating or copying its membership sets.
+    #[must_use]
+    pub fn with_plan(source: &'a Model, plan: &'a SourceProjectionPlan) -> Self {
+        Self {
+            source,
+            plan: Cow::Borrowed(plan),
+            objective: ObjectiveTransform { sign: 1.0, offset: 0.0 },
+            reevaluate: None,
+            transformed: None,
+        }
+    }
+
+    /// Treat exactly these variables as source coordinates.
+    ///
+    /// Use when source entities declared after an in-place reformulation
+    /// interleave with generated IDs, so [`SourceCoordinates::variables`] no
+    /// longer identifies a prefix. [`Self::retain_variables`] still applies to
+    /// generated coordinates that must remain queryable.
+    #[must_use]
+    pub fn with_source_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
+        self.plan.to_mut().set_variables(variables);
+        self
+    }
+
+    /// Treat exactly these algebraic rows as source coordinates.
+    ///
+    /// Use when rows declared after an in-place reformulation interleave with
+    /// generated rows. SOC and PSD coordinates retain their captured prefixes.
+    #[must_use]
+    pub fn with_source_rows(mut self, rows: impl IntoIterator<Item = ConstraintId>) -> Self {
+        self.plan.to_mut().set_rows(rows);
+        self
+    }
+
+    /// Keep explicitly listed generated variables in each projected primal map.
+    ///
+    /// Source variables are always kept. Use this for generated coordinates
+    /// that remain intentionally queryable after projection, such as GDP Hull
+    /// activation variables. Only primal values are retained; generated rows,
+    /// duals, SOC/PSD multipliers, and reduced costs are still dropped.
+    #[must_use]
+    pub fn retain_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
+        self.plan.to_mut().retained.extend(variables);
+        self
     }
 
     /// Require the result to belong to this transformed model.
@@ -334,9 +512,11 @@ impl<'a> SourceProjection<'a> {
     /// source model, or when the result belongs to a model other than the
     /// expected one: the transformed model if [`Self::from_transformed`] was
     /// set, otherwise the source model.
-    pub fn project(self, result: SolverResult) -> Result<SolverResult, ProjectionError> {
-        let Self { source, coordinates, objective, reevaluate, transformed } = self;
-        check_source_coordinates(source, coordinates)?;
+    pub fn project(&self, result: SolverResult) -> Result<SolverResult, ProjectionError> {
+        let Self { source, plan, objective, reevaluate, transformed } = self;
+        let SourceProjectionPlan { coordinates, variables: source_variables, rows, retained } =
+            plan.as_ref();
+        check_source_coordinates(source, plan)?;
         let expected = transformed.map_or_else(|| source.id(), Model::id);
         if result.model_id != expected {
             return Err(ProjectionError::ForeignResult { expected, actual: result.model_id });
@@ -344,14 +524,20 @@ impl<'a> SourceProjection<'a> {
 
         let mut result = result;
 
-        // Drop generated entities before rebinding.
-        for point in &mut result.solutions {
-            point.primal.retain(|id, _| id.index() < coordinates.variables);
+        // Generated multipliers and reduced costs have no source meaning.
+        // Primals are filtered by `finalize_result` below, which also keeps
+        // explicitly retained generated variables.
+        if reevaluate.is_some() {
+            for point in &mut result.solutions {
+                point
+                    .primal
+                    .retain(|id, _| source_variables.contains(id.index()) || retained.contains(id));
+            }
         }
-        result.dual.retain(|id, _| id.index() < coordinates.algebraic_constraints);
+        result.dual.retain(|id, _| rows.contains(id.index()));
         result.soc_dual.retain(|id, _| id.index() < coordinates.soc_constraints);
         result.psd_dual.retain(|id, _| id.index() < coordinates.psd_constraints);
-        result.reduced_costs.retain(|id, _| id.index() < coordinates.variables);
+        result.reduced_costs.retain(|id, _| source_variables.contains(id.index()));
 
         // Restore objective units on the native certificate.
         for point in &mut result.solutions {
@@ -363,12 +549,12 @@ impl<'a> SourceProjection<'a> {
         result.model_id = source.id();
         for point in &mut result.solutions {
             point.model_id = source.id();
-            if let Some(evaluate) = &reevaluate {
+            if let Some(evaluate) = reevaluate {
                 point.objective = evaluate(point);
             }
         }
 
-        Ok(finalize_result(result, source, coordinates.variables))
+        Ok(finalize_result_retaining(result, source, source_variables, retained))
     }
 }
 
@@ -376,7 +562,7 @@ impl std::fmt::Debug for SourceProjection<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceProjection")
             .field("source", &self.source.id())
-            .field("coordinates", &self.coordinates)
+            .field("plan", &self.plan)
             .field("objective", &self.objective)
             .field("reevaluate", &self.reevaluate.is_some())
             .field("transformed", &self.transformed.map(Model::id))
@@ -386,11 +572,12 @@ impl std::fmt::Debug for SourceProjection<'_> {
 
 fn check_source_coordinates(
     model: &Model,
-    coordinates: SourceCoordinates,
+    plan: &SourceProjectionPlan,
 ) -> Result<(), ProjectionError> {
+    let coordinates = plan.coordinates;
     for (kind, count, available) in [
-        ("variable", coordinates.variables, model.num_variables()),
-        ("algebraic row", coordinates.algebraic_constraints, model.constraints().algebraic().len()),
+        ("variable", plan.variables.upper_bound(), model.num_variables()),
+        ("algebraic row", plan.rows.upper_bound(), model.constraints().algebraic().len()),
         ("SOC constraint", coordinates.soc_constraints, model.num_soc_constraints()),
         ("PSD constraint", coordinates.psd_constraints, model.num_psd_constraints()),
     ] {

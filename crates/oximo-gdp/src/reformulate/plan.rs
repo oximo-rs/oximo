@@ -622,10 +622,14 @@ impl ValidatedPlan {
             expression_nodes,
             generated_nodes,
             source_nodes,
+            next_variable,
+            next_constraint,
             ..
         } = plan;
 
         let mut report = report;
+        report.generated_variables = next_variable..next_variable + variables.len();
+        report.generated_rows = next_constraint..next_constraint + rows.len();
         let shift = variables.len();
         let remap = |id: ExprId| {
             if id.index() < source_nodes {
