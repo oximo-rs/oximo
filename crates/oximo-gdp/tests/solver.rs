@@ -59,7 +59,7 @@ fn solve_reformulates_in_place_and_processes_only_new_components_on_reuse() {
     assert_eq!(result.model_id(), model.id());
     assert!(!model.has_unreformulated_gdp());
     assert_eq!(model.gdp_reformulations().len(), 1);
-	
+
     let row_count = model.constraints().algebraic().len();
     solver.solve(&model, &false).unwrap();
     assert_eq!(model.constraints().algebraic().len(), row_count);
