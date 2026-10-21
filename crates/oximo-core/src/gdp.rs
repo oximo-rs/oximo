@@ -563,6 +563,18 @@ pub enum GdpHullActivation {
 }
 
 impl GdpHullActivation {
+    /// The variable whose value carries this activation.
+    ///
+    /// Indicator and complement activations read the source Boolean's binary
+    /// variable; pattern and branch-sum activations read a generated weight.
+    #[must_use]
+    pub const fn variable(self) -> VarId {
+        match self {
+            Self::Indicator { binary, .. } | Self::Complement { binary, .. } => binary,
+            Self::Pattern { weight, .. } | Self::BranchSum { weight, .. } => weight,
+        }
+    }
+
     /// Evaluate this activation using variable values, without an expression arena.
     /// Returns `None` for a missing value and preserves fractional relaxation values.
     pub fn value_with(self, mut value: impl FnMut(VarId) -> Option<f64>) -> Option<f64> {
@@ -775,6 +787,12 @@ impl GdpReformulationReport {
 #[derive(Clone, Debug, Default)]
 pub struct GdpReformulationReportData {
     pub planning: GdpPlanningStatistics,
+    /// Complete appended variable-index range (`VarId::index`), excluding
+    /// source Boolean counterparts. Empty when this call creates no variables.
+    pub generated_variables: std::ops::Range<usize>,
+    /// Complete appended algebraic-row index range (`ConstraintId::index`),
+    /// including copy bounds and aggregation rows without a source-row origin.
+    pub generated_rows: std::ops::Range<usize>,
     /// All registered Boolean decisions, including previously transformed ones.
     pub booleans: Vec<GdpBooleanMapping>,
     /// Auxiliary variables created by this call. Boolean counterparts are in `booleans`.
