@@ -1,11 +1,13 @@
 mod classify;
 mod constraints;
+mod dependencies;
 mod indexed;
 mod semantic;
 mod variables;
 
 pub use classify::ModelKind;
 pub use constraints::{ConstraintRef, ModelConstraints};
+pub use dependencies::{ModelParameterSnapshot, ParameterDependencies, ParameterTarget};
 pub use indexed::{IndexedVarBuilder, display_index_key};
 pub use semantic::SemanticConstraints;
 
@@ -35,7 +37,33 @@ use oximo_expr::{
 };
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use smol_str::SmolStr;
-use std::cell::{Cell, Ref, RefCell};
+#[cfg(feature = "gdp")]
+use std::cell::RefCell;
+use std::cell::{Cell, Ref};
+
+/// Opaque identity of the registered model data, excluding parameter values.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelUpdateKey {
+    model: ModelId,
+    name: SmolStr,
+    variables: u64,
+    var_names: u64,
+    semantics: u64,
+    alternative_scalar_views: u64,
+    inactive_scalar_views: u64,
+    constraints: u64,
+    semantic_names: u64,
+    soc_constraints: u64,
+    psd_constraints: u64,
+    sos_constraints: u64,
+    indicator_constraints: u64,
+    sos_reformulations: u64,
+    indicator_reformulations: u64,
+    semantic_objective: u64,
+    objective: u64,
+    objective_declared: bool,
+}
 
 #[cold]
 #[inline(never)]
@@ -101,8 +129,8 @@ pub struct Model {
     pub(crate) indicator_constraints: SharedCell<Vec<IndicatorConstraint>>,
     pub(crate) sos_reformulations: SharedCell<Vec<SosReformulationArtifacts>>,
     pub(crate) indicator_reformulations: SharedCell<Vec<IndicatorReformulationArtifacts>>,
-    pub(crate) semantic_objective: RefCell<Option<crate::objective::SemanticObjective>>,
-    pub(crate) objective: RefCell<Option<Objective>>,
+    pub(crate) semantic_objective: SharedCell<Option<crate::objective::SemanticObjective>>,
+    pub(crate) objective: SharedCell<Option<Objective>>,
     objective_declared: Cell<bool>,
     cached_kind: Cell<Option<ModelKind>>,
     cached_kind_parameter_revision: Cell<u64>,
@@ -143,6 +171,31 @@ impl std::fmt::Debug for Model {
 }
 
 impl Model {
+    /// Capture mutations relevant to persistent solver preparation.
+    #[doc(hidden)]
+    pub fn __update_key(&self) -> ModelUpdateKey {
+        ModelUpdateKey {
+            model: self.id(),
+            name: self.name.clone(),
+            variables: self.variables.revision(),
+            var_names: self.var_names.revision(),
+            semantics: self.semantics.revision(),
+            alternative_scalar_views: self.alternative_scalar_views.revision(),
+            inactive_scalar_views: self.inactive_scalar_views.revision(),
+            constraints: self.constraints.revision(),
+            semantic_names: self.semantic_names.revision(),
+            soc_constraints: self.soc_constraints.revision(),
+            psd_constraints: self.psd_constraints.revision(),
+            sos_constraints: self.sos_constraints.revision(),
+            indicator_constraints: self.indicator_constraints.revision(),
+            sos_reformulations: self.sos_reformulations.revision(),
+            indicator_reformulations: self.indicator_reformulations.revision(),
+            semantic_objective: self.semantic_objective.revision(),
+            objective: self.objective.revision(),
+            objective_declared: self.objective_declared.get(),
+        }
+    }
+
     /// Whether GDP components still need explicit reformulation.
     #[inline]
     pub fn has_unreformulated_gdp(&self) -> bool {
@@ -227,8 +280,8 @@ impl Model {
             indicator_constraints: self.indicator_constraints.clone(),
             sos_reformulations: self.sos_reformulations.clone(),
             indicator_reformulations: self.indicator_reformulations.clone(),
-            semantic_objective: RefCell::new(self.semantic_objective.borrow().clone()),
-            objective: RefCell::new(self.objective.borrow().clone()),
+            semantic_objective: SharedCell::new(self.semantic_objective.borrow().clone()),
+            objective: SharedCell::new(self.objective.borrow().clone()),
             objective_declared: Cell::new(self.objective_declared.get()),
             cached_kind: Cell::new(self.cached_kind.get()),
             cached_kind_parameter_revision: Cell::new(self.cached_kind_parameter_revision.get()),
@@ -281,8 +334,8 @@ impl Model {
             indicator_constraints: SharedCell::new(Vec::new()),
             sos_reformulations: SharedCell::new(Vec::new()),
             indicator_reformulations: SharedCell::new(Vec::new()),
-            semantic_objective: RefCell::new(None),
-            objective: RefCell::new(None),
+            semantic_objective: SharedCell::new(None),
+            objective: SharedCell::new(None),
             objective_declared: Cell::new(false),
             cached_kind: Cell::new(None),
             cached_kind_parameter_revision: Cell::new(0),

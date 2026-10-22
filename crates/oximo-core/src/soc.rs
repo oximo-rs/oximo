@@ -49,6 +49,14 @@ fn soc_quadratic(
     c: &AlgebraicConstraint,
     q: &QuadraticTerms,
 ) -> Option<(VarId, f64)> {
+    let (variable, scale) = soc_quadratic_candidate(c, q)?;
+    if vars[variable.index()].lb < 0.0 {
+        return None;
+    }
+    Some((variable, scale))
+}
+
+fn soc_quadratic_candidate(c: &AlgebraicConstraint, q: &QuadraticTerms) -> Option<(VarId, f64)> {
     let (sense, rhs) = c.as_single()?;
     if sense != Sense::Le {
         return None;
@@ -74,7 +82,7 @@ fn soc_quadratic(
         }
     }
     let (t, n) = negative?;
-    if positives == 0 || vars[t.index()].lb < 0.0 {
+    if positives == 0 {
         return None;
     }
     Some((t, n))
@@ -94,6 +102,12 @@ pub(crate) fn is_detected_soc(
         return false;
     }
     extract_quadratic(arena, c.lhs).is_some_and(|q| soc_quadratic(vars, c, &q).is_some())
+}
+
+/// Bound variable of a structurally eligible diagonal SOC, ignoring its bound.
+#[doc(hidden)]
+pub fn __soc_bound_variable(row: &AlgebraicConstraint, terms: &QuadraticTerms) -> Option<VarId> {
+    soc_quadratic_candidate(row, terms).map(|(variable, _)| variable)
 }
 
 // TODO: Here we are deliberately conservative and purely structural

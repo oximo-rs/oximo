@@ -32,7 +32,8 @@ pub use crate::indicator::{
     RangeIndicatorConstraintHandles, RangeIndicatorConstraintIds,
 };
 pub use crate::model::{
-    ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
+    ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, ModelParameterSnapshot,
+    ParameterDependencies, ParameterTarget, display_index_key,
 };
 pub use crate::objective::{Objective, ObjectiveSense};
 pub use crate::param::Parameter;
@@ -46,8 +47,8 @@ pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMem
 pub use crate::sum::SumDomain;
 pub use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
 pub use oximo_expr::{
-    AffineBuilder, Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId, UnaryOp, VarId,
-    dot,
+    AffineBuilder, Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId, ParameterSnapshot,
+    UnaryOp, VarId, dot,
 };
 #[cfg(feature = "gdp")]
 pub use oximo_macros::{

@@ -10,6 +10,27 @@ use oximo_expr::{ExprClass, ModelMismatchError, classify, extract_linear};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
+fn update_key_ignores_parameter_registration_and_names_but_tracks_new_uses() {
+    use crate::prelude::*;
+    let m = Model::new("parameter metadata");
+
+    param!(m, p = 1.0);
+    variable!(m, x);
+    objective!(m, Min, p * x);
+    let key = m.__update_key();
+    param!(m, unused = 2.0);
+    assert_eq!(key, m.__update_key());
+
+    m.parameters.borrow_mut()[0].name = "renamed".into();
+    m.param_names.borrow_mut().remove("p");
+    m.param_names.borrow_mut().insert("renamed".into(), p.param_id().unwrap());
+    assert_eq!(key, m.__update_key());
+
+    objective!(m, Min, unused * x);
+    assert_ne!(key, m.__update_key());
+}
+
+#[test]
 fn metadata_batches_preserve_names_ids_and_atomicity_on_fresh_and_populated_forks() {
     use super::variables::{PendingParam, PendingVar};
     use crate::Domain;
