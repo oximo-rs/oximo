@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 mod error;
+#[cfg(any(feature = "enzyme", test))]
+mod refresh;
 pub mod slot;
 pub mod sparsity;
 pub mod tape;
