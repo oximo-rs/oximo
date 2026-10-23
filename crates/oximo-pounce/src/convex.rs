@@ -364,13 +364,16 @@ fn replace_triplet_row(
     terms: &LinearTerms<'_>,
     scale: f64,
 ) -> bool {
-    let slots = matrix.iter().filter(|v| v.row == row).map(|v| v.col).collect::<Vec<_>>();
+    // `build_problem` and `append_soc` emit triplets in increasing row order.
+    let start = matrix.partition_point(|v| v.row < row);
+    let end = start + matrix[start..].partition_point(|v| v.row == row);
+    let slots = &mut matrix[start..end];
     if slots.len() != terms.coeffs.len()
-        || slots.iter().zip(terms.coeffs.iter()).any(|(col, (id, _))| *col != id.index())
+        || slots.iter().zip(terms.coeffs.iter()).any(|(slot, (id, _))| slot.col != id.index())
     {
         return false;
     }
-    for (slot, (_, value)) in matrix.iter_mut().filter(|v| v.row == row).zip(terms.coeffs.iter()) {
+    for (slot, (_, value)) in slots.iter_mut().zip(terms.coeffs.iter()) {
         slot.val = scale * value;
     }
     true
@@ -1050,6 +1053,63 @@ impl ActivePersistent {
 mod tests {
     use super::*;
     use oximo_core::{Model, constraint, objective, variable};
+
+    #[test]
+    fn row_replacement_updates_only_the_requested_row() {
+        use oximo_expr::VarId;
+
+        let terms = LinearTerms::owned(vec![(VarId(0), 3.0), (VarId(2), 5.0)], 0.0);
+        for row in [0, 2, 4] {
+            let mut matrix = Vec::new();
+            for index in [0, 2, 4] {
+                matrix.extend([Triplet::new(index, 0, 1.0), Triplet::new(index, 2, 2.0)]);
+            }
+
+            assert!(replace_triplet_row(&mut matrix, row, &terms, -2.0));
+            let actual: Vec<_> = matrix.iter().map(|v| (v.row, v.col, v.val)).collect();
+            let expected: Vec<_> = [0, 2, 4]
+                .into_iter()
+                .flat_map(|index| {
+                    let values = if index == row { [-6.0, -10.0] } else { [1.0, 2.0] };
+                    [(index, 0, values[0]), (index, 2, values[1])]
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn row_replacement_rejects_structure_changes_without_mutation() {
+        use oximo_expr::VarId;
+
+        for coeffs in [
+            vec![],
+            vec![(VarId(0), 3.0)],
+            vec![(VarId(0), 3.0), (VarId(1), 5.0)],
+            vec![(VarId(0), 3.0), (VarId(2), 5.0), (VarId(3), 7.0)],
+        ] {
+            let mut matrix = [Triplet::new(2, 0, 1.0), Triplet::new(2, 2, 2.0)];
+            let terms = LinearTerms::owned(coeffs, 0.0);
+            assert!(!replace_triplet_row(&mut matrix, 2, &terms, -1.0));
+            assert_eq!(matrix.map(|v| (v.row, v.col, v.val)), [(2, 0, 1.0), (2, 2, 2.0)]);
+        }
+    }
+
+    #[test]
+    fn row_replacement_accepts_missing_rows_only_for_empty_coefficients() {
+        use oximo_expr::VarId;
+
+        let empty = LinearTerms::default();
+        let nonempty = LinearTerms::owned(vec![(VarId(0), 3.0)], 0.0);
+        for row in [0, 2, 4, usize::MAX] {
+            let mut matrix = [Triplet::new(1, 0, 1.0), Triplet::new(3, 0, 2.0)];
+            assert!(replace_triplet_row(&mut matrix, row, &empty, 1.0));
+            assert!(!replace_triplet_row(&mut matrix, row, &nonempty, 1.0));
+            assert_eq!(matrix.map(|v| (v.row, v.col, v.val)), [(1, 0, 1.0), (3, 0, 2.0)]);
+        }
+        assert!(replace_triplet_row(&mut [], 0, &empty, 1.0));
+        assert!(!replace_triplet_row(&mut [], 0, &nonempty, 1.0));
+    }
 
     #[test]
     fn structural_routes_do_not_request_convexity_classification() {
