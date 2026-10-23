@@ -335,6 +335,101 @@ fn try_refresh_reuses_tapes_when_structure_preserved() {
 }
 
 #[test]
+fn selected_refresh_matches_fresh_derivatives_across_zero_crossings() {
+    let m = Model::new("selected refresh derivatives");
+    param!(m, p = 1.0);
+    variable!(m, x);
+    variable!(m, y);
+    objective!(m, Min, p * x * x + y * y);
+    let changed = constraint!(m, changed, p * x * x + x + y <= 4.0);
+    constraint!(m, unchanged, x * x + y * y <= 5.0);
+    let nonlinear = constraint!(m, nonlinear, p * x.sin() + y.exp() <= 6.0);
+
+    let mut ev = NlpEvaluator::new(&m).unwrap();
+    let targets = [
+        ParameterTarget::Objective,
+        ParameterTarget::Algebraic(changed.row_id()),
+        ParameterTarget::Algebraic(nonlinear.row_id()),
+    ];
+    let point = [0.7, -0.4];
+    for value in [2.0, 0.0, -1.0, 3.0] {
+        p.set_param_value(value).unwrap();
+        assert!(ev.try_refresh_selected(&m, &targets));
+        let fresh = NlpEvaluator::new(&m).unwrap();
+        assert_eq!(ev.jacobian_structure(), fresh.jacobian_structure());
+        assert_eq!(ev.hessian_lagrangian_structure(), fresh.hessian_lagrangian_structure());
+        assert_close(ev.eval_objective(&point), fresh.eval_objective(&point), 1e-12, "objective");
+
+        let mut actual = [0.0; 3];
+        let mut expected = [0.0; 3];
+        ev.eval_constraint(&point, &mut actual);
+        fresh.eval_constraint(&point, &mut expected);
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_close(actual, expected, 1e-12, "constraint");
+        }
+        for (sigma, lambda) in [(1.0, [0.0; 3]), (-0.5, [0.3, -0.7, 1.2])] {
+            for (actual, expected) in lagrangian_gradient(&ev, &point, sigma, &lambda)
+                .into_iter()
+                .zip(lagrangian_gradient(&fresh, &point, sigma, &lambda))
+            {
+                assert_close(actual, expected, 1e-12, "Lagrangian gradient");
+            }
+            for (actual, expected) in dense_hessian(&ev, &point, sigma, &lambda)
+                .into_iter()
+                .flatten()
+                .zip(dense_hessian(&fresh, &point, sigma, &lambda).into_iter().flatten())
+            {
+                assert_close(actual, expected, 1e-12, "Lagrangian Hessian");
+            }
+        }
+    }
+}
+
+#[test]
+fn declined_selected_refresh_preserves_values_and_derivatives() {
+    let m = Model::new("transactional derivative refresh");
+    param!(m, p = 1.0);
+    variable!(m, x);
+    objective!(m, Min, p * x * x);
+    let row = constraint!(m, row, p * x <= 3.0);
+    let targets = [ParameterTarget::Objective, ParameterTarget::Algebraic(row.row_id())];
+    let mut ev = NlpEvaluator::new(&m).unwrap();
+
+    p.set_param_value(0.0).unwrap();
+    assert!(!ev.try_refresh_selected(&m, &targets));
+    assert_close(ev.eval_objective(&[2.0]), 4.0, 1e-12, "objective after declined refresh");
+    assert_eq!(lagrangian_gradient(&ev, &[2.0], 1.0, &[1.0]), [5.0]);
+    assert_eq!(dense_hessian(&ev, &[2.0], 1.0, &[1.0]), [vec![2.0]]);
+    let mut values = [0.0];
+    ev.eval_constraint(&[2.0], &mut values);
+    assert_close(values[0], 2.0, 1e-12, "constraint after declined refresh");
+
+    p.set_param_value(2.0).unwrap();
+    assert!(ev.try_refresh_selected(&m, &targets));
+    assert_close(ev.eval_objective(&[2.0]), 8.0, 1e-12, "objective after successful refresh");
+    assert_eq!(lagrangian_gradient(&ev, &[2.0], 1.0, &[1.0]), [10.0]);
+    assert_eq!(dense_hessian(&ev, &[2.0], 1.0, &[1.0]), [vec![4.0]]);
+}
+
+#[test]
+fn selected_refresh_rejects_new_hessian_entries_with_unchanged_jacobian() {
+    let m = Model::new("changed Hessian support");
+    param!(m, p = 0.0);
+    variable!(m, x);
+    variable!(m, y);
+    objective!(m, Min, y * y);
+    let row = constraint!(m, row, p * x * x + x + y <= 4.0);
+    let mut ev = NlpEvaluator::new(&m).unwrap();
+
+    p.set_param_value(1.0).unwrap();
+    let fresh = NlpEvaluator::new(&m).unwrap();
+    assert_eq!(ev.jacobian_structure(), fresh.jacobian_structure());
+    assert_ne!(ev.hessian_lagrangian_structure(), fresh.hessian_lagrangian_structure());
+    assert!(!ev.try_refresh_selected(&m, &[ParameterTarget::Algebraic(row.row_id())]));
+    assert_eq!(dense_hessian(&ev, &[1.0, 2.0], 1.0, &[1.0]), [vec![0.0, 0.0], vec![0.0, 2.0]]);
+}
+
+#[test]
 fn try_refresh_declines_when_model_structure_differs() {
     let base = Model::new("base");
     variable!(base, -5.0 <= x <= 5.0);

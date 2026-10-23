@@ -168,6 +168,16 @@ fn pounce() {
     quadratic_rows(oximo_pounce::Pounce, oximo_pounce::PounceOptions::default());
 }
 
+#[cfg(feature = "pounce")]
+#[test]
+fn pounce_nlp() {
+    let opts = oximo_pounce::PounceOptions::default()
+        .solver_selection(oximo_pounce::PounceSolverSelection::Nlp);
+    linear_and_quadratic(oximo_pounce::Pounce, opts.clone());
+    nonlinear(oximo_pounce::Pounce, opts.clone());
+    quadratic_rows(oximo_pounce::Pounce, opts);
+}
+
 #[cfg(feature = "scip")]
 #[test]
 fn scip() {
