@@ -181,7 +181,7 @@ impl Built {
                                 values.insert(id, 0.0);
                             }
                             for &(id, c) in terms.coeffs.iter() {
-                                values.insert(id, c);
+                                *values.entry(id).or_insert(0.0) += c;
                             }
                             for (id, c) in values {
                                 self.model
@@ -1571,6 +1571,43 @@ mod refresh_tests {
     use super::*;
     use oximo_core::prelude::*;
     use oximo_solver::resident::PreparationChange;
+
+    #[test]
+    fn linear_row_refresh_sums_repeated_variables_and_clears_removed_coefficients() {
+        let m = Model::new("repeated row coefficients");
+        variable!(m, 0.0 <= x <= 3.0);
+        variable!(m, 0.0 <= y <= 3.0);
+        let row = constraint!(m, row, x + y <= 6.0);
+        objective!(m, Max, x);
+        let mut built = build_prepared(
+            &m,
+            &GurobiOptions::default(),
+            &default_env().unwrap(),
+            &LoweringContext::new(&m).unwrap(),
+        )
+        .unwrap();
+
+        let arena = m.__sum_context();
+        let x_id = x.var_id().unwrap();
+        let root = arena.borrow_mut().linear(vec![(x_id, 1.0), (x_id, 2.0)], 0.0);
+        let expression = oximo_expr::Expr::new(root, arena).try_affine().unwrap();
+        m.set_constraint_function(row, expression.into_function()).unwrap();
+        let prepared = LoweringContext::new(&m).unwrap();
+        let change = PreparationChange::Selected(
+            vec![oximo_core::ParameterTarget::Algebraic(row.row_id())].into(),
+        );
+        assert!(built.refresh(&prepared, &change).unwrap());
+
+        let [GurobiRow::Lin(native_row)] = built.constrs[row.row_id().index()].rows.as_slice()
+        else {
+            panic!("expected a linear row");
+        };
+        let x_coefficient = built.model.get_coeff(&built.vars[x_id.index()], native_row).unwrap();
+        let y_coefficient =
+            built.model.get_coeff(&built.vars[y.var_id().unwrap().index()], native_row).unwrap();
+        assert!((x_coefficient - 3.0).abs() <= f64::EPSILON);
+        assert!(y_coefficient.abs() <= f64::EPSILON);
+    }
 
     #[test]
     fn refresh_rebuilds_for_missing_active_mappings() {
