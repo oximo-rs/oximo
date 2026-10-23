@@ -419,7 +419,7 @@ impl Problem {
         let mut desired =
             terms.coeffs.iter().map(|(v, c)| (v.index(), scale * c)).collect::<Vec<_>>();
         desired.sort_unstable_by_key(|(col, _)| *col);
-        // Extraction canonicalizes duplicate variable coefficients, 
+        // Extraction canonicalizes duplicate variable coefficients,
         // so CSC support must remain identical.
         if slots.len() != desired.len()
             || slots.iter().zip(&desired).any(|((col, _), (other, _))| col != other)
