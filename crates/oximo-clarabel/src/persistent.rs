@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(first.termination, TerminationStatus::Optimal);
 
         m.set_param(p, 2.0).unwrap();
-        let new = super::build_problem(&m).unwrap();
+        let new = crate::translate::build_problem(&m).unwrap();
         let state = solver.state.as_mut().unwrap();
         assert!(state.problem.same_structure(&new));
         assert!(matches!(
@@ -476,7 +476,7 @@ mod tests {
 
         for coefficient in [2.0_f64, 0.0, -2.0] {
             m.set_param(p, coefficient).unwrap();
-            let new = super::build_problem(&m).unwrap();
+            let new = crate::translate::build_problem(&m).unwrap();
             let state = solver.state.as_ref().unwrap();
             assert!(state.problem.same_structure(&new));
             assert!(state.solver.is_data_update_allowed());
