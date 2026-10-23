@@ -1,4 +1,4 @@
-use std::hash::Hasher;
+use std::{borrow::Cow, hash::Hasher};
 
 use oximo_core::{Model, ModelKind, ObjectiveSense, ResolvedVariable};
 use oximo_expr::VarId;
@@ -52,6 +52,21 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
     let prepared = crate::prepare::LoweringContext::new(model)?;
+    if let Some(objective) = prepared.objective() {
+        prepared.require_linear(objective.expr, || "the objective".into())?;
+    }
+    snapshot_prepared(model, &prepared)
+}
+
+/// Capture a linear snapshot from an already captured solve-time view.
+#[doc(hidden)]
+pub fn snapshot_prepared(
+    model: &Model,
+    prepared: &crate::prepare::LoweringContext<'_>,
+) -> Result<Snapshot, SolverError> {
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
     let kind = prepared.kind();
     if model.has_active_soc_constraints() || matches!(kind, ModelKind::SOCP | ModelKind::MISOCP) {
         return Err(SolverError::UnsupportedKind(kind));
@@ -65,9 +80,9 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     let sense = obj.map_or(ObjectiveSense::Minimize, |o| o.sense);
     let (obj_by_id, obj_constant) = match obj {
         Some(o) => {
-            let lin = prepared.require_linear(o.expr, || "the objective".into())?;
+            let lin = prepared.require_quadratic(o.expr, || "the objective".into())?;
             let mut by_id = vec![0.0; vars.len()];
-            for &(v, c) in lin.coeffs.iter() {
+            for &(v, c) in &lin.linear {
                 by_id[v.index()] = c;
             }
             (by_id, lin.constant)
@@ -79,6 +94,8 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     let mut lb = Vec::with_capacity(vars.len());
     let mut ub = Vec::with_capacity(vars.len());
     let mut hasher = FxHasher::default();
+    hasher.write_usize(model.name.len());
+    hasher.write(model.name.as_bytes());
     hash_header(&mut hasher, vars, sense);
     for v in vars {
         obj_costs.push(obj_by_id[v.id.index()]);
@@ -88,6 +105,8 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
 
     let mut row_terms = Vec::new();
     for c in constraints {
+        hasher.write_usize(c.name.len());
+        hasher.write(c.name.as_bytes());
         let t = prepared.require_linear(c.lhs, || format!("constraint {:?}", c.name))?;
         hash_row(
             &mut hasher,
@@ -142,6 +161,53 @@ pub fn snapshot(model: &Model) -> Result<Snapshot, SolverError> {
     })
 }
 
+/// Refresh objective/bound-only changes without re-extracting or hashing rows.
+/// Row edits do a conservative full-fingerprint path.
+#[doc(hidden)]
+pub fn refresh_snapshot<'a>(
+    model: &Model,
+    prepared: &crate::prepare::LoweringContext<'_>,
+    change: &crate::resident::PreparationChange,
+    base: &'a Snapshot,
+) -> Result<Cow<'a, Snapshot>, SolverError> {
+    use crate::resident::PreparationChange;
+    use oximo_core::ParameterTarget;
+    if matches!(change, PreparationChange::Full)
+        || matches!(change, PreparationChange::Selected(targets) if targets.iter().any(|target|
+            !matches!(target, ParameterTarget::Objective | ParameterTarget::VariableBound(_))))
+    {
+        return snapshot_prepared(model, prepared).map(Cow::Owned);
+    }
+    if matches!(change, PreparationChange::Unchanged)
+        || matches!(change, PreparationChange::Selected(targets) if targets.is_empty())
+    {
+        return Ok(Cow::Borrowed(base));
+    }
+    let mut fresh = base.clone();
+    fresh.parameters = prepared.arena().parameter_snapshot();
+    if change.contains(ParameterTarget::Objective) {
+        fresh.obj_costs.fill(0.0);
+        fresh.obj_constant = 0.0;
+        if let Some(objective) = prepared.objective() {
+            let terms = prepared.require_quadratic(objective.expr, || "the objective".into())?;
+            for &(id, value) in &terms.linear {
+                fresh.obj_costs[id.index()] = value;
+            }
+            fresh.obj_constant = terms.constant;
+        }
+    }
+    if let PreparationChange::Selected(targets) = change {
+        for target in targets {
+            if let ParameterTarget::VariableBound(id) = target {
+                let variable = &prepared.variables()[id.index()];
+                fresh.lb[id.index()] = variable.lb;
+                fresh.ub[id.index()] = variable.ub;
+            }
+        }
+    }
+    Ok(Cow::Owned(fresh))
+}
+
 /// Hash the parts that decide column count, integrality, and objective sense.
 fn hash_header(h: &mut FxHasher, vars: &[ResolvedVariable], sense: ObjectiveSense) {
     h.write_usize(vars.len());
@@ -150,7 +216,23 @@ fn hash_header(h: &mut FxHasher, vars: &[ResolvedVariable], sense: ObjectiveSens
         ObjectiveSense::Maximize => 1,
     });
     for v in vars {
-        h.write_u8(u8::from(v.domain.is_integer()));
+        use oximo_core::Domain;
+        h.write_u8(match v.domain {
+            Domain::Real => 0,
+            Domain::Integer => 1,
+            Domain::Binary => 2,
+            Domain::SemiContinuous { .. } => 3,
+            Domain::SemiInteger { .. } => 4,
+        });
+        if let Some(threshold) = v.domain.semi_threshold() {
+            h.write_u64(threshold.to_bits());
+        }
+        h.write_usize(v.name.len());
+        h.write(v.name.as_bytes());
+        h.write_u8(u8::from(v.initial.is_some()));
+        if let Some(initial) = v.initial {
+            h.write_u64(initial.to_bits());
+        }
     }
 }
 
@@ -179,6 +261,41 @@ mod tests {
     use oximo_core::prelude::*;
 
     use super::snapshot;
+
+    #[test]
+    fn prepared_snapshot_rejects_active_psd_like_the_public_snapshot() {
+        let m = Model::new("PSD snapshot guard");
+        variable!(m, x);
+        psd_constraint!(m, SymmetricMatrix::from_upper_triangle(1, [x]));
+        objective!(m, Min, x);
+        let prepared = crate::prepare::LoweringContext::new(&m).unwrap();
+        assert!(matches!(
+            super::snapshot_prepared(&m, &prepared),
+            Err(crate::SolverError::UnsupportedConstraint("PSD"))
+        ));
+        assert!(matches!(snapshot(&m), Err(crate::SolverError::UnsupportedConstraint("PSD"))));
+    }
+
+    #[test]
+    fn unchanged_numeric_snapshot_is_borrowed_after_unused_parameter_change() {
+        let m = Model::new("borrowed numeric baseline");
+        param!(m, unused = 1.0);
+        variable!(m, 0.0 <= x <= 2.0);
+        objective!(m, Max, x);
+        let base = snapshot(&m).unwrap();
+        unused.set_param_value(2.0).unwrap();
+        let prepared = crate::prepare::LoweringContext::new(&m).unwrap();
+        let fresh = super::refresh_snapshot(
+            &m,
+            &prepared,
+            &crate::resident::PreparationChange::Unchanged,
+            &base,
+        )
+        .unwrap();
+        assert!(matches!(fresh, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(fresh.as_ref(), &raw const base));
+        assert_ne!(base.parameters.values(), prepared.arena().parameter_snapshot().values());
+    }
 
     #[test]
     fn row_scratch_preserves_fingerprint_bits_across_different_widths() {
