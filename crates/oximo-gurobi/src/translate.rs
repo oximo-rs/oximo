@@ -62,11 +62,249 @@ pub(crate) struct Built {
     pub vars: Vec<gurobi_rs::Var>,
     pub constrs: Vec<ConstraintHandle>,
     pub objective_generated: Vec<GeneratedConstraint>,
+    pub objective_variables: Vec<gurobi_rs::Var>,
+    aux_counter: u32,
     pub soc_rows: Vec<SocHandle>,
     pub sos: Vec<(SosConstraintId, gurobi_rs::SOS)>,
     pub indicators: Vec<(IndicatorConstraintId, Vec<gurobi_rs::GenConstr>)>,
     pub obj_constant: f64,
     pub has_semi: bool,
+}
+
+impl Built {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one update or replacement case per native source kind"
+    )]
+    pub(crate) fn refresh(
+        &mut self,
+        prepared: &LoweringContext<'_>,
+        change: &oximo_solver::resident::PreparationChange,
+    ) -> Result<bool, SolverError> {
+        use oximo_core::ParameterTarget;
+        use oximo_solver::resident::PreparationChange;
+        if matches!(change, PreparationChange::Full) || self.has_semi {
+            return Ok(false);
+        }
+        if let PreparationChange::Selected(targets) = change {
+            let replacements = targets
+                .iter()
+                .filter(|target| match target {
+                    ParameterTarget::Algebraic(id) => {
+                        let row = &prepared.constraints().algebraic()[id.index()];
+                        let group = &self.constrs[id.index()];
+                        row.active
+                            && (group.coefficients.is_none()
+                                || !group.variables.is_empty()
+                                || !group.generated.is_empty()
+                                || row.as_single().is_none()
+                                || oximo_expr::classify(prepared.arena(), row.lhs)
+                                    != oximo_expr::ExprClass::Linear)
+                    }
+                    ParameterTarget::SecondOrderCone(id) => {
+                        prepared.constraints().second_order_cones()[id.index()].active
+                    }
+                    ParameterTarget::Indicator(id) => {
+                        prepared.constraints().indicators()[id.index()].active
+                    }
+                    _ => false,
+                })
+                .count();
+            if replacements > 16 {
+                let groups = self
+                    .constrs
+                    .iter()
+                    .filter(|g| !g.rows.is_empty() || !g.generated.is_empty())
+                    .count()
+                    + self.soc_rows.len()
+                    + self.indicators.len();
+                if replacements > groups.div_ceil(8).max(16) {
+                    // Repeated compaction per group scales poorly for dense
+                    // replacements. Rebuild large batches with the retained env.
+                    // TODO: batch deletion/recreation before relaxing this policy.
+                    return Ok(false);
+                }
+            }
+            for target in targets {
+                match target {
+                    ParameterTarget::Objective => {
+                        self.model
+                            .set_objective(LinExpr::new(), ModelSense::Minimize)
+                            .map_err(map_gurobi_err)?;
+                        remove_generated(
+                            &mut self.model,
+                            std::mem::take(&mut self.objective_generated),
+                        )?;
+                        for variable in self.objective_variables.drain(..) {
+                            self.model.remove(variable).map_err(map_gurobi_err)?;
+                        }
+                        self.model.update().map_err(map_gurobi_err)?;
+                        if let Some(o) = prepared.objective() {
+                            let (constant, generated, variables) = set_objective(
+                                prepared,
+                                o.expr,
+                                o.sense,
+                                &mut self.model,
+                                &self.vars,
+                                &mut self.aux_counter,
+                            )?;
+                            self.obj_constant = constant;
+                            self.objective_generated = generated;
+                            self.objective_variables = variables;
+                        }
+                    }
+                    ParameterTarget::VariableBound(id) => {
+                        let v = &prepared.variables()[id.index()];
+                        self.model
+                            .set_obj_attr(attr::LB, &self.vars[id.index()], v.lb)
+                            .map_err(map_gurobi_err)?;
+                        self.model
+                            .set_obj_attr(attr::UB, &self.vars[id.index()], v.ub)
+                            .map_err(map_gurobi_err)?;
+                    }
+                    ParameterTarget::Algebraic(id) => {
+                        let source = &prepared.constraints().algebraic()[id.index()];
+                        if !source.active {
+                            continue;
+                        }
+                        let handle = &mut self.constrs[id.index()];
+                        if let (Some(terms), Some(previous), Some((_, rhs)), [GurobiRow::Lin(row)]) = (
+                            prepared.linear(source.lhs),
+                            &handle.coefficients,
+                            source.as_single(),
+                            handle.rows.as_slice(),
+                        ) && handle.variables.is_empty()
+                            && handle.generated.is_empty()
+                        {
+                            let mut values = FxHashMap::default();
+                            for &(id, _) in previous {
+                                values.insert(id, 0.0);
+                            }
+                            for &(id, c) in terms.coeffs.iter() {
+                                values.insert(id, c);
+                            }
+                            for (id, c) in values {
+                                self.model
+                                    .set_coeff(&self.vars[id.index()], row, c)
+                                    .map_err(map_gurobi_err)?;
+                            }
+                            self.model
+                                .set_obj_attr(attr::RHS, row, rhs - terms.constant)
+                                .map_err(map_gurobi_err)?;
+                            handle.coefficients = Some(terms.coeffs.to_vec());
+                        } else {
+                            let old = std::mem::replace(
+                                handle,
+                                ConstraintHandle {
+                                    rows: vec![],
+                                    generated: vec![],
+                                    variables: vec![],
+                                    coefficients: None,
+                                },
+                            );
+                            for row in old.rows {
+                                match row {
+                                    GurobiRow::Lin(row) => self.model.remove(row),
+                                    GurobiRow::Quad(row) => self.model.remove(row),
+                                }
+                                .map_err(map_gurobi_err)?;
+                            }
+                            remove_generated(&mut self.model, old.generated)?;
+                            for v in old.variables {
+                                self.model.remove(v).map_err(map_gurobi_err)?;
+                            }
+                            self.model.update().map_err(map_gurobi_err)?;
+                            let mut replacement = add_constraints(
+                                prepared,
+                                std::slice::from_ref(source),
+                                &mut self.model,
+                                &self.vars,
+                                &mut self.aux_counter,
+                                true,
+                            )?;
+                            self.constrs[id.index()] = replacement.pop().expect("one source group");
+                        }
+                    }
+                    ParameterTarget::SecondOrderCone(id) => {
+                        let source = &prepared.constraints().second_order_cones()[id.index()];
+                        if !source.active {
+                            continue;
+                        }
+                        let Some(position) = self.soc_rows.iter().position(|h| h.id == *id) else {
+                            return Ok(false);
+                        };
+                        {
+                            let old = self.soc_rows.remove(position);
+                            self.model.remove(old.quadratic).map_err(map_gurobi_err)?;
+                            self.model.remove(old.bound_sign).map_err(map_gurobi_err)?;
+                            self.model.update().map_err(map_gurobi_err)?;
+                            let source = &prepared.constraints().second_order_cones()[id.index()];
+                            let mut handles = add_soc_rows(
+                                prepared,
+                                prepared.variables(),
+                                std::slice::from_ref(source),
+                                &mut self.model,
+                                &self.vars,
+                            )?;
+                            let Some(mut handle) = handles.pop() else {
+                                return Ok(false);
+                            };
+                            handle.id = *id;
+                            self.soc_rows.insert(position, handle);
+                        }
+                    }
+                    ParameterTarget::Indicator(id) => {
+                        let source = &prepared.constraints().indicators()[id.index()];
+                        if !source.active {
+                            continue;
+                        }
+                        let Some(position) =
+                            self.indicators.iter().position(|(source, _)| source == id)
+                        else {
+                            return Ok(false);
+                        };
+                        {
+                            let (_, old) = self.indicators.remove(position);
+                            for row in old {
+                                self.model.remove(row).map_err(map_gurobi_err)?;
+                            }
+                            self.model.update().map_err(map_gurobi_err)?;
+                            let source = &prepared.constraints().indicators()[id.index()];
+                            let mut handles = add_indicator_constraints(
+                                prepared,
+                                std::slice::from_ref(source),
+                                &mut self.model,
+                                &self.vars,
+                            )?;
+                            let Some((_, handles)) = handles.pop() else {
+                                return Ok(false);
+                            };
+                            self.indicators.insert(position, (*id, handles));
+                        }
+                    }
+                    _ => return Ok(false),
+                }
+            }
+        }
+        self.parameters = prepared.arena().parameter_snapshot();
+        self.model.update().map_err(map_gurobi_err)?;
+        Ok(true)
+    }
+}
+
+fn remove_generated(
+    model: &mut gurobi_rs::Model,
+    rows: Vec<GeneratedConstraint>,
+) -> Result<(), SolverError> {
+    for row in rows {
+        match row {
+            GeneratedConstraint::Linear(row) => model.remove(row),
+            GeneratedConstraint::Quadratic(row) => model.remove(row),
+            GeneratedConstraint::General(row) => model.remove(row),
+        }
+        .map_err(map_gurobi_err)?;
+    }
+    Ok(())
 }
 
 /// Translate `model` into a configured-but-unsolved Gurobi model.
@@ -81,6 +319,26 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
     let prepared = LoweringContext::new(model)?;
+    build_view(model, opts, env, &prepared, false)
+}
+
+pub(crate) fn build_prepared(
+    model: &Model,
+    opts: &GurobiOptions,
+    env: &Env,
+    prepared: &LoweringContext<'_>,
+) -> Result<Built, SolverError> {
+    validate_model_operators(model)?;
+    build_view(model, opts, env, prepared, true)
+}
+
+fn build_view(
+    model: &Model,
+    opts: &GurobiOptions,
+    env: &Env,
+    prepared: &LoweringContext<'_>,
+    retain_coefficients: bool,
+) -> Result<Built, SolverError> {
     let kind = prepared.kind();
     let nonlinear_kind = matches!(
         kind,
@@ -108,23 +366,29 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
     // Aux-variable counter shared by the constraint and objective lowering so the
     // synthetic variable names stay unique across both.
     let mut aux_counter = 0_u32;
-    let gurobi_constrs =
-        add_constraints(&prepared, constraints, &mut gurobi_model, &gurobi_vars, &mut aux_counter)?;
-    let soc_rows = add_soc_rows(&prepared, vars, socs, &mut gurobi_model, &gurobi_vars)?;
+    let gurobi_constrs = add_constraints(
+        prepared,
+        constraints,
+        &mut gurobi_model,
+        &gurobi_vars,
+        &mut aux_counter,
+        retain_coefficients,
+    )?;
+    let soc_rows = add_soc_rows(prepared, vars, socs, &mut gurobi_model, &gurobi_vars)?;
     let special_ordered_sets = add_sos_constraints(sos, &mut gurobi_model, &gurobi_vars)?;
     let indicator_handles =
-        add_indicator_constraints(&prepared, indicators, &mut gurobi_model, &gurobi_vars)?;
+        add_indicator_constraints(prepared, indicators, &mut gurobi_model, &gurobi_vars)?;
 
-    let (obj_constant, objective_generated) = match objective.as_ref() {
+    let (obj_constant, objective_generated, objective_variables) = match objective.as_ref() {
         Some(o) => set_objective(
-            &prepared,
+            prepared,
             o.expr,
             o.sense,
             &mut gurobi_model,
             &gurobi_vars,
             &mut aux_counter,
         )?,
-        None => (0.0, Vec::new()),
+        None => (0.0, Vec::new(), Vec::new()),
     };
 
     // Warm starts are assigned only after the full structural model has been
@@ -146,6 +410,8 @@ pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Bu
         vars: gurobi_vars,
         constrs: gurobi_constrs,
         objective_generated,
+        objective_variables,
+        aux_counter,
         soc_rows,
         sos: special_ordered_sets,
         indicators: indicator_handles,
@@ -594,6 +860,8 @@ pub(crate) enum GurobiRow {
 pub(crate) struct ConstraintHandle {
     pub rows: Vec<GurobiRow>,
     pub generated: Vec<GeneratedConstraint>,
+    pub variables: Vec<gurobi_rs::Var>,
+    pub coefficients: Option<Vec<(VarId, f64)>>,
 }
 
 /// The native rows associated with one explicit second-order cone.
@@ -617,6 +885,7 @@ fn add_constraints(
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
+    retain_coefficients: bool,
 ) -> Result<Vec<ConstraintHandle>, SolverError> {
     let arena = prepared.arena();
     struct PendingSingle {
@@ -638,10 +907,15 @@ fn add_constraints(
     let mut singles = Vec::new();
     let mut ranges = Vec::new();
     let mut nonlinear = Vec::new();
+    let mut coefficients =
+        if retain_coefficients { vec![None; constraints.len()] } else { Vec::new() };
 
     for (index, c) in constraints.iter().enumerate() {
         if let Some((sense, rhs)) = c.as_single() {
             if let Some(t) = prepared.linear(c.lhs) {
+                if retain_coefficients {
+                    coefficients[index] = Some(t.coeffs.to_vec());
+                }
                 let mut expr = LinExpr::new();
                 for &(v, coeff) in t.coeffs.iter() {
                     expr.add_term(coeff, gurobi_vars[v.index()]);
@@ -658,6 +932,9 @@ fn add_constraints(
             }
         } else if c.is_range() {
             if let Some(t) = prepared.linear(c.lhs) {
+                if retain_coefficients {
+                    coefficients[index] = Some(t.coeffs.to_vec());
+                }
                 let mut expr = LinExpr::new();
                 for &(v, coeff) in t.coeffs.iter() {
                     expr.add_term(coeff, gurobi_vars[v.index()]);
@@ -673,7 +950,12 @@ fn add_constraints(
                 nonlinear.push(index);
             }
         } else if c.lower.is_infinite() && c.upper.is_infinite() {
-            slots[index] = Some(ConstraintHandle { rows: Vec::new(), generated: Vec::new() });
+            slots[index] = Some(ConstraintHandle {
+                rows: Vec::new(),
+                generated: Vec::new(),
+                variables: Vec::new(),
+                coefficients: None,
+            });
         } else {
             nonlinear.push(index);
         }
@@ -699,8 +981,12 @@ fn add_constraints(
         .add_constrs(single_names.iter().zip(single_batch_iter))
         .map_err(map_gurobi_err)?;
     for (index, handle) in single_indices.into_iter().zip(single_handles) {
-        slots[index] =
-            Some(ConstraintHandle { rows: vec![GurobiRow::Lin(handle)], generated: Vec::new() });
+        slots[index] = Some(ConstraintHandle {
+            rows: vec![GurobiRow::Lin(handle)],
+            generated: Vec::new(),
+            variables: Vec::new(),
+            coefficients: None,
+        });
     }
 
     let mut range_names = Vec::with_capacity(ranges.len());
@@ -717,14 +1003,25 @@ fn add_constraints(
     let range_handles = gurobi_model
         .add_ranges(range_names.iter().zip(range_batch_iter))
         .map_err(map_gurobi_err)?;
-    for (index, handle) in range_indices.into_iter().zip(range_handles.1) {
-        slots[index] =
-            Some(ConstraintHandle { rows: vec![GurobiRow::Lin(handle)], generated: Vec::new() });
+    if !range_handles.0.is_empty() {
+        // Gurobi creates range slacks during update. Materialize them before
+        // adding auxiliaries whose native indices appear in nonlinear trees.
+        gurobi_model.update().map_err(map_gurobi_err)?;
+    }
+    for ((index, handle), variable) in
+        range_indices.into_iter().zip(range_handles.1).zip(range_handles.0)
+    {
+        slots[index] = Some(ConstraintHandle {
+            rows: vec![GurobiRow::Lin(handle)],
+            generated: Vec::new(),
+            variables: vec![variable],
+            coefficients: None,
+        });
     }
 
     for index in nonlinear {
         let c = &constraints[index];
-        let (rows, generated) = add_nonlinear_constraint(
+        let (rows, generated, variables) = add_nonlinear_constraint(
             arena,
             c.lhs,
             c.as_single(),
@@ -735,7 +1032,13 @@ fn add_constraints(
             gurobi_vars,
             aux_counter,
         )?;
-        slots[index] = Some(ConstraintHandle { rows, generated });
+        slots[index] = Some(ConstraintHandle { rows, generated, variables, coefficients: None });
+    }
+
+    for (slot, coefficients) in slots.iter_mut().zip(coefficients) {
+        if let Some(handle) = slot {
+            handle.coefficients = coefficients;
+        }
     }
 
     slots
@@ -819,6 +1122,8 @@ fn add_squared_affine(
     }
 }
 
+type LoweredGroup = (Vec<GurobiRow>, Vec<GeneratedConstraint>, Vec<gurobi_rs::Var>);
+
 #[expect(clippy::too_many_arguments)]
 fn add_nonlinear_constraint(
     arena: &ExprArena,
@@ -830,14 +1135,15 @@ fn add_nonlinear_constraint(
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
-) -> Result<(Vec<GurobiRow>, Vec<GeneratedConstraint>), SolverError> {
+) -> Result<LoweredGroup, SolverError> {
     let mut ctx = LoweringCtx::new(gurobi_model, gurobi_vars, *aux_counter);
     let lowered = lower(arena, lhs, &mut ctx)?;
     *aux_counter = ctx.aux_counter;
     let generated = std::mem::take(&mut ctx.generated);
+    let variables = std::mem::take(&mut ctx.generated_variables);
     drop(ctx);
     let rows = add_comparison_rows(gurobi_model, name, &lowered, single, lower_bound, upper)?;
-    Ok((rows, generated))
+    Ok((rows, generated, variables))
 }
 
 fn add_comparison_rows(
@@ -898,7 +1204,7 @@ fn set_objective(
     gurobi_model: &mut gurobi_rs::Model,
     gurobi_vars: &[gurobi_rs::Var],
     aux_counter: &mut u32,
-) -> Result<(f64, Vec<GeneratedConstraint>), SolverError> {
+) -> Result<(f64, Vec<GeneratedConstraint>, Vec<gurobi_rs::Var>), SolverError> {
     let arena = prepared.arena();
     let gurobi_sense = match sense {
         ObjectiveSense::Minimize => ModelSense::Minimize,
@@ -913,7 +1219,7 @@ fn set_objective(
         // not need to track the constant separately.
         e.add_constant(t.constant);
         gurobi_model.set_objective(e, gurobi_sense).map_err(map_gurobi_err)?;
-        return Ok((0.0, Vec::new()));
+        return Ok((0.0, Vec::new(), Vec::new()));
     }
     let mut ctx = LoweringCtx::new(gurobi_model, gurobi_vars, *aux_counter);
     let lowered = lower(arena, obj_expr, &mut ctx)?;
@@ -922,8 +1228,9 @@ fn set_objective(
         .set_objective(lowered.into_expr_for_objective(), gurobi_sense)
         .map_err(map_gurobi_err)?;
     let generated = std::mem::take(&mut ctx.generated);
+    let variables = std::mem::take(&mut ctx.generated_variables);
     drop(ctx);
-    Ok((0.0, generated))
+    Ok((0.0, generated, variables))
 }
 
 /// Build `(solutions, reduced_costs, dual, soc_dual)` from a solved Gurobi
@@ -1256,5 +1563,41 @@ pub mod benchmark_support {
     pub fn translate(model: &Model, env: &Env) -> Result<usize, SolverError> {
         let built = build(model, &GurobiOptions::default(), env)?;
         Ok(built.vars.len() + built.constrs.len() + built.soc_rows.len())
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use oximo_core::prelude::*;
+    use oximo_solver::resident::PreparationChange;
+
+    #[test]
+    fn refresh_rebuilds_for_missing_active_mappings() {
+        let m = Model::new("missing active mappings");
+
+        param!(m, p = 1.0);
+        variable!(m, -2.0 <= x <= 2.0);
+        variable!(m, b, Binary);
+        param!(m, radius = 3.0);
+        soc_constraint!(m, cone, [p * x] <= radius);
+        indicator_constraint!(m, row, b == 1 => p * x <= 1.0);
+        objective!(m, Max, x);
+
+        let prepared = LoweringContext::new(&m).unwrap();
+        let mut built =
+            build_prepared(&m, &GurobiOptions::default(), &default_env().unwrap(), &prepared)
+                .unwrap();
+        built.soc_rows.clear();
+        let change = PreparationChange::Selected(
+            vec![oximo_core::ParameterTarget::SecondOrderCone(SocConstraintId(0))].into(),
+        );
+        assert!(!built.refresh(&prepared, &change).unwrap());
+
+        built.indicators.clear();
+        let change = PreparationChange::Selected(
+            vec![oximo_core::ParameterTarget::Indicator(IndicatorConstraintId(0))].into(),
+        );
+        assert!(!built.refresh(&prepared, &change).unwrap());
     }
 }
