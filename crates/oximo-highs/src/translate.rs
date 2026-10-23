@@ -102,6 +102,13 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
         return Err(SolverError::UnsupportedIndicator);
     }
     let prepared = LoweringContext::new(model)?;
+    build_problem_prepared(model, &prepared)
+}
+
+pub(crate) fn build_problem_prepared(
+    _model: &Model,
+    prepared: &LoweringContext<'_>,
+) -> Result<(Prob, Meta), SolverError> {
     let kind = prepared.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
@@ -115,7 +122,7 @@ pub(crate) fn build_problem(model: &Model) -> Result<(Prob, Meta), SolverError> 
     let obj = objective.as_ref();
     let sense = obj.map_or(HighsSense::Minimise, |o| sense_of(o.sense));
     let (obj_by_id, obj_constant, hessian_cols) = match obj {
-        Some(o) => objective_terms(kind, &prepared, o.expr, vars)?,
+        Some(o) => objective_terms(kind, prepared, o.expr, vars)?,
         None => (vec![0.0; vars.len()], 0.0, Vec::new()),
     };
     let has_hessian = hessian_cols.iter().any(|col| !col.is_empty());
@@ -298,7 +305,7 @@ type ObjectiveTerms = (Vec<f64>, f64, HessianCols);
 /// (for QP) the Hessian columns. Only `QP` pays for quadratic extraction,
 /// LP/MILP keep the linear fast path. For non-QP kinds the returned column
 /// vector is empty.
-fn objective_terms(
+pub(crate) fn objective_terms(
     kind: ModelKind,
     prepared: &LoweringContext<'_>,
     obj_expr: ExprId,

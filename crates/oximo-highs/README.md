@@ -44,11 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 many times (parameter sweeps, sensitivity studies, column generation, rolling
 horizons, etc) build a resident handle with `Highs.persistent()` and call `solve` on it
 instead. `HighsPersistent` is a plain `Solver`, it keeps the HiGHS instance resident
-and, when only objective coefficients or variable bounds changed since the last call,
-pushes those deltas and warm-starts from the previous basis. Any structural change
-(new rows/columns, changed matrix coefficients or row bounds, flipped integrality or
-sense, or a quadratic objective) triggers a transparent rebuild, so results always
-match a cold solve.
+and pushes changed objective coefficients, variable bounds, and continuous-QP
+Hessians into that instance. Parameter dependencies avoid preparing unaffected
+rows. Matrix or row-bound edits, structural changes, and clearing a nonempty
+Hessian rebuild transparently. Results match a cold solve.
 
 ## Quadratic programs (QP)
 
