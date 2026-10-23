@@ -8,7 +8,10 @@ use mosek::{
     Boundkey, Dinfitem, Iinfitem, Liinfitem, Objsense, Prosta, Rescode, Solsta, Soltype,
     Streamtype, Task, TaskCB, Variabletype,
 };
-use oximo_core::{ConstraintId, Domain, Model, ModelKind, ObjectiveSense, Sense, SocConstraintId};
+use oximo_core::{
+    ConstraintId, Domain, IndicatorConstraintId, Model, ModelKind, ObjectiveSense, Sense,
+    SocConstraintId,
+};
 use oximo_expr::{LinearTerms, QuadraticTerms, VarId};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
@@ -20,10 +23,12 @@ use crate::MosekOptions;
 #[derive(Debug)]
 pub(crate) struct Meta {
     pub parameters: oximo_solver::ParameterSnapshot,
-    kind: ModelKind,
+    pub(crate) kind: ModelKind,
     row_by_constraint: Vec<Option<i32>>,
     explicit_accs: Vec<(SocConstraintId, i64, usize)>,
     psd_accs: Vec<(PsdConstraintId, i64, usize)>,
+    detected_accs: Vec<(ConstraintId, i64, usize)>,
+    indicator_afes: Vec<(IndicatorConstraintId, i64)>,
 }
 
 /// Reusable native upload buffers.
@@ -66,6 +71,14 @@ pub(crate) fn build_task(
         ));
     }
     let prepared = LoweringContext::new(model)?;
+    build_task_prepared(model, opts, &prepared)
+}
+
+pub(crate) fn build_task_prepared(
+    model: &Model,
+    opts: &MosekOptions,
+    prepared: &LoweringContext<'_>,
+) -> Result<(TaskCB, Meta), SolverError> {
     let kind = prepared.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
@@ -75,14 +88,14 @@ pub(crate) fn build_task(
     let task =
         Task::new().ok_or_else(|| SolverError::Backend("MOSEK: failed to create task".into()))?;
     let mut task = task.with_callbacks();
-    build_base(&model.name, &prepared, &mut task)?;
+    build_base(&model.name, prepared, &mut task)?;
     opts.apply_cb(&mut task)?;
 
     if opts.universal.verbose.unwrap_or(false) {
         task.put_stream_callback(Streamtype::LOG, |message| print!("{message}"))
             .map_err(backend)?;
     }
-    let meta = build_rows_and_cones(&prepared, kind, &mut task)?;
+    let meta = build_rows_and_cones(prepared, kind, &mut task)?;
 
     Ok((task, meta))
 }
@@ -165,6 +178,10 @@ fn build_base(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "native layout and source mapping are assembled together"
+)]
 fn build_rows_and_cones(
     prepared: &LoweringContext<'_>,
     kind: ModelKind,
@@ -222,8 +239,14 @@ fn build_rows_and_cones(
         ));
         next_acc += 1;
     }
+    let mut detected_accs = Vec::new();
     for (id, form) in detected {
-        append_soc(task, &form, &mut next_afe, &mut scratch)?;
+        let dim = append_soc(task, &form, &mut next_afe, &mut scratch)?;
+        detected_accs.push((
+            ConstraintId(u32::try_from(id).map_err(|_| overflow("row ID"))?),
+            next_acc,
+            dim,
+        ));
         task.put_acc_name(next_acc, &constraints[id].name).map_err(backend)?;
         next_acc += 1;
     }
@@ -265,7 +288,7 @@ fn build_rows_and_cones(
         next_acc += 1;
     }
 
-    append_indicators(prepared, task, &mut next_afe, &mut scratch)?;
+    let indicator_afes = append_indicators(prepared, task, &mut next_afe, &mut scratch)?;
 
     Ok(Meta {
         parameters: prepared.arena().parameter_snapshot(),
@@ -273,6 +296,8 @@ fn build_rows_and_cones(
         row_by_constraint,
         explicit_accs,
         psd_accs,
+        detected_accs,
+        indicator_afes,
     })
 }
 
@@ -281,15 +306,22 @@ fn append_indicators(
     task: &mut TaskCB,
     next_afe: &mut i64,
     scratch: &mut TaskScratch,
-) -> Result<(), SolverError> {
+) -> Result<Vec<(IndicatorConstraintId, i64)>, SolverError> {
     let constraints = prepared.constraints();
-    for (djc, indicator) in constraints.indicators().iter().filter(|c| c.active).enumerate() {
+    let mut result = Vec::new();
+    for (djc, (source, indicator)) in
+        constraints.indicators().iter().enumerate().filter(|(_, c)| c.active).enumerate()
+    {
         let djc = i64::try_from(djc).map_err(|_| overflow("DJC index"))?;
         let terms = prepared.require_linear(indicator.lhs, || {
             format!("indicator constraint {:?}", indicator.name)
         })?;
         let trigger_afe = *next_afe;
         let body_afe = trigger_afe + 1;
+        result.push((
+            IndicatorConstraintId(u32::try_from(source).map_err(|_| overflow("indicator ID"))?),
+            body_afe,
+        ));
         task.append_afes(2).map_err(backend)?;
         task.put_afe_f_entry(
             trigger_afe,
@@ -331,7 +363,7 @@ fn append_indicators(
         task.put_djc(djc, &domains, &afes, &shifts, &[active_domains, 1]).map_err(backend)?;
         task.put_djc_name(djc, &indicator.name).map_err(backend)?;
     }
-    Ok(())
+    Ok(result)
 }
 
 fn append_soc(
@@ -372,6 +404,185 @@ fn put_afe(
     fill_linear_buffers(terms.coeffs.as_ref(), scratch)?;
     task.put_afe_f_row(afe, &scratch.indices, &scratch.values).map_err(backend)?;
     task.put_afe_g(afe, terms.constant).map_err(backend)
+}
+
+#[expect(clippy::too_many_lines, reason = "one numeric update case per native source kind")]
+pub(crate) fn refresh_task(
+    prepared: &LoweringContext<'_>,
+    change: &oximo_solver::resident::PreparationChange,
+    task: &mut TaskCB,
+    meta: &mut Meta,
+) -> Result<bool, SolverError> {
+    use oximo_core::ParameterTarget;
+    use oximo_solver::resident::PreparationChange;
+    if matches!(change, PreparationChange::Full) {
+        return Ok(false);
+    }
+    let mut scratch = TaskScratch::default();
+    if let PreparationChange::Selected(targets) = change {
+        if !meta.detected_accs.is_empty()
+            && targets.iter().any(|t| matches!(t, ParameterTarget::VariableBound(_)))
+        {
+            return Ok(false);
+        }
+        for target in targets {
+            match target {
+                ParameterTarget::Objective => {
+                    let q = match prepared.objective() {
+                        Some(o) => {
+                            prepared.require_quadratic(o.expr, || "the objective".into())?.clone()
+                        }
+                        None => oximo_solver::prepare::Extracted::Owned(QuadraticTerms::default()),
+                    };
+                    let mut costs = vec![0.0; prepared.variables().len()];
+                    for &(id, c) in &q.linear {
+                        costs[id.index()] = c;
+                    }
+                    task.put_c_slice(0, index_i32(costs.len(), "variable count")?, &costs)
+                        .map_err(backend)?;
+                    task.put_cfix(q.constant).map_err(backend)?;
+                    fill_q_triplets(&q, &mut scratch)?;
+                    task.put_q_obj(&scratch.indices, &scratch.columns, &scratch.values)
+                        .map_err(backend)?;
+                }
+                ParameterTarget::VariableBound(id) => {
+                    let v = &prepared.variables()[id.index()];
+                    let (key, lower, upper) = bounds(v.lb, v.ub);
+                    task.put_var_bound(index_i32(id.index(), "variable")?, key, lower, upper)
+                        .map_err(backend)?;
+                }
+                ParameterTarget::Algebraic(id) => {
+                    let row = &prepared.constraints().algebraic()[id.index()];
+                    let q = prepared
+                        .require_quadratic(row.lhs, || format!("constraint {:?}", row.name))?;
+                    let form =
+                        oximo_core::__detect_soc_from_quadratic(prepared.variables(), row, &q);
+                    if let Some((_, acc, dim)) =
+                        meta.detected_accs.iter().find(|(source, _, _)| source == id)
+                    {
+                        let Some(form) = form else {
+                            return Ok(false);
+                        };
+                        if !refresh_soc(task, *acc, *dim, &form, &mut scratch)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        if form.is_some() {
+                            return Ok(false);
+                        }
+                        let Some(native) = meta.row_by_constraint[id.index()] else {
+                            return Ok(false);
+                        };
+                        put_linear_row(task, native, &q.linear, &mut scratch)?;
+                        let (key, lower, upper) =
+                            bounds(row.lower - q.constant, row.upper - q.constant);
+                        task.put_con_bound(native, key, lower, upper).map_err(backend)?;
+                        fill_q_triplets(&q, &mut scratch)?;
+                        task.put_q_con_k(
+                            native,
+                            &scratch.indices,
+                            &scratch.columns,
+                            &scratch.values,
+                        )
+                        .map_err(backend)?;
+                    }
+                }
+                ParameterTarget::SecondOrderCone(id) => {
+                    if !prepared.constraints().second_order_cones()[id.index()].active {
+                        continue;
+                    }
+                    let Some((_, acc, dim)) =
+                        meta.explicit_accs.iter().find(|(source, _, _)| source == id)
+                    else {
+                        return Ok(false);
+                    };
+                    {
+                        let form = prepared.explicit_soc(
+                            &prepared.constraints().second_order_cones()[id.index()],
+                        )?;
+                        if !refresh_soc(task, *acc, *dim, &form, &mut scratch)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                ParameterTarget::PositiveSemidefinite(id) => {
+                    if !prepared.constraints().positive_semidefinite()[id.index()].active {
+                        continue;
+                    }
+                    let Some((_, acc, side)) =
+                        meta.psd_accs.iter().find(|(source, _, _)| source == id)
+                    else {
+                        return Ok(false);
+                    };
+                    {
+                        let matrix = prepared.explicit_psd(
+                            &prepared.constraints().positive_semidefinite()[id.index()],
+                        )?;
+                        if matrix.side_dimension() != *side {
+                            return Ok(false);
+                        }
+                        let mut afes = vec![0; oximo_core::triangle_len(*side)];
+                        task.get_acc_afe_idx_list(*acc, &mut afes).map_err(backend)?;
+                        for (afe, (k, scale)) in afes
+                            .into_iter()
+                            .zip(svec_coordinates(*side, PsdTriangleOrder::LowerColumn))
+                        {
+                            let entry = &matrix.upper_triangle()[k];
+                            let scaled = LinearTerms {
+                                coeffs: entry
+                                    .coeffs
+                                    .iter()
+                                    .map(|&(id, c)| (id, scale * c))
+                                    .collect::<Vec<_>>()
+                                    .into(),
+                                constant: scale * entry.constant,
+                            };
+                            put_afe(task, afe, &scaled, &mut scratch)?;
+                        }
+                    }
+                }
+                ParameterTarget::Indicator(id) => {
+                    if !prepared.constraints().indicators()[id.index()].active {
+                        continue;
+                    }
+                    let Some((_, afe)) =
+                        meta.indicator_afes.iter().find(|(source, _)| source == id)
+                    else {
+                        return Ok(false);
+                    };
+                    {
+                        let row = &prepared.constraints().indicators()[id.index()];
+                        let terms = prepared
+                            .require_linear(row.lhs, || format!("indicator {:?}", row.name))?;
+                        put_afe(task, *afe, &terms, &mut scratch)?;
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+    }
+    meta.kind = prepared.kind();
+    meta.parameters = prepared.arena().parameter_snapshot();
+    Ok(true)
+}
+
+fn refresh_soc(
+    task: &mut TaskCB,
+    acc: i64,
+    dimension: usize,
+    form: &oximo_core::SocForm,
+    scratch: &mut TaskScratch,
+) -> Result<bool, SolverError> {
+    if dimension != form.terms.len() + 1 {
+        return Ok(false);
+    }
+    let mut afes = vec![0; dimension];
+    task.get_acc_afe_idx_list(acc, &mut afes).map_err(backend)?;
+    for (afe, terms) in afes.into_iter().zip(std::iter::once(&form.bound).chain(form.terms.iter()))
+    {
+        put_afe(task, afe, terms, scratch)?;
+    }
+    Ok(true)
 }
 
 fn put_linear_row(
@@ -824,5 +1035,27 @@ mod tests {
             map_status(Solsta::UNKNOWN, Prosta::PRIM_INFEAS_OR_UNBOUNDED, Rescode::OK),
             TerminationStatus::InfeasibleOrUnbounded
         );
+    }
+    #[test]
+    fn refresh_rebuilds_for_a_missing_active_soc_mapping() {
+        use oximo_core::prelude::*;
+        use oximo_solver::resident::PreparationChange;
+        let m = Model::new("missing active SOC mapping");
+
+        param!(m, p = 1.0);
+        variable!(m, -2.0 <= x <= 2.0);
+        param!(m, radius = 3.0);
+        soc_constraint!(m, cone, [p * x] <= radius);
+        objective!(m, Max, x);
+
+        let prepared = LoweringContext::new(&m).unwrap();
+        let change = PreparationChange::Selected(
+            vec![oximo_core::ParameterTarget::SecondOrderCone(oximo_core::SocConstraintId(0))]
+                .into(),
+        );
+        let (mut task, mut meta) =
+            build_task_prepared(&m, &MosekOptions::default(), &prepared).unwrap();
+        meta.explicit_accs.clear();
+        assert!(!refresh_task(&prepared, &change, &mut task, &mut meta).unwrap());
     }
 }

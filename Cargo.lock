@@ -2579,6 +2579,7 @@ dependencies = [
  "oximo-core",
  "oximo-expr",
  "rustc-hash",
+ "smallvec",
  "thiserror 2.0.18",
  "trybuild",
 ]

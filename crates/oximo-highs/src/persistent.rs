@@ -1,11 +1,14 @@
-use std::time::Instant;
+use std::{borrow::Cow, time::Instant};
 
 use highs::Model as HighsModel;
-use oximo_core::{Model, ModelKind};
-use oximo_solver::{Snapshot, Solver, SolverError, SolverResult, snapshot};
+use oximo_core::{Model, ModelKind, ParameterTarget};
+use oximo_solver::incremental::{refresh_snapshot, snapshot_prepared};
+use oximo_solver::prepare::LoweringContext;
+use oximo_solver::resident::PersistentPreparation;
+use oximo_solver::{Snapshot, Solver, SolverError, SolverResult};
 
 use crate::options::apply as apply_options;
-use crate::translate::{Meta, build_problem, extract_result, make_live};
+use crate::translate::{Meta, build_problem_prepared, extract_result, make_live, objective_terms};
 use crate::{HighsOptions, NAME};
 
 /// The resident HiGHS instance plus the [`Meta`] needed to read results and to drive
@@ -15,6 +18,7 @@ struct State {
     live: Option<HighsModel>,
     meta: Meta,
     snap: Option<Snapshot>,
+    hessian: Vec<Vec<(usize, f64)>>,
 }
 
 /// A stateful HiGHS solver handle that keeps the built model resident across solves.
@@ -23,8 +27,9 @@ struct State {
 /// When only objective coefficients or variable bounds changed since the last call
 /// it pushes those deltas and HiGHS warm-starts from the retained basis.
 /// Any structural change (new rows/columns, changed matrix coefficients or row bounds,
-/// flipped integrality or sense, or a quadratic objective) triggers a transparent
+/// flipped integrality or sense, or clearing a nonempty Hessian) triggers a transparent
 /// full rebuild, so every result matches a cold [`Highs::solve`](crate::Highs).
+/// Continuous QP Hessians can be uploaded to the resident instance.
 ///
 /// Options passed to each `solve` are applied to the resident instance and persist
 /// across calls. Changing a field takes effect on the next solve, but a field you
@@ -38,6 +43,7 @@ struct State {
 #[derive(Default)]
 pub struct HighsPersistent {
     state: Option<State>,
+    preparation: PersistentPreparation,
     #[cfg(test)]
     updates: usize,
 }
@@ -61,19 +67,31 @@ impl HighsPersistent {
     /// [`Highs::solve`](crate::Highs), regardless of earlier calls.
     pub fn reset(&mut self) {
         self.state = None;
+        self.preparation.clear();
     }
 
     /// Discard any resident instance and rebuild from the current model state.
-    fn rebuild(&mut self, model: &Model, opts: &HighsOptions) -> Result<(), SolverError> {
-        let (prob, meta) = build_problem(model)?;
+    fn rebuild(
+        &mut self,
+        model: &Model,
+        prepared: &LoweringContext<'_>,
+        opts: &HighsOptions,
+    ) -> Result<(), SolverError> {
+        let (prob, meta) = build_problem_prepared(model, prepared)?;
         let live = make_live(prob, opts)?;
         let has_semi = model.variables().iter().any(|v| v.domain.semi_threshold().is_some());
-        let snap = if matches!(model.kind(), ModelKind::LP | ModelKind::MILP) && !has_semi {
-            Some(snapshot(model)?)
+        let snap = if matches!(prepared.kind(), ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+            && !has_semi
+        {
+            Some(snapshot_prepared(model, prepared)?)
         } else {
             None
         };
-        self.state = Some(State { live: Some(live), meta, snap });
+        let hessian = match prepared.objective() {
+            Some(o) => objective_terms(prepared.kind(), prepared, o.expr, prepared.variables())?.2,
+            None => Vec::new(),
+        };
+        self.state = Some(State { live: Some(live), meta, snap, hessian });
         Ok(())
     }
 
@@ -84,36 +102,65 @@ impl HighsPersistent {
         model: &Model,
         opts: &HighsOptions,
     ) -> Result<SolverResult, SolverError> {
-        // The fast path is sound only for linear models (the snapshot extracts a
-        // linear objective) once a resident model exists. A quadratic objective or
-        // any structural change falls back to a full rebuild.
+        let prepared = self.preparation.prepare(model)?;
         let mut updated = false;
-        if matches!(model.kind(), ModelKind::LP | ModelKind::MILP)
+        if matches!(prepared.kind(), ModelKind::LP | ModelKind::MILP | ModelKind::QP)
             && let Some(st) = self.state.as_mut()
             && let Some(base) = st.snap.as_ref()
         {
-            let snap = snapshot(model)?;
-            if snap.fingerprint == base.fingerprint {
+            let snap = refresh_snapshot(model, &prepared, self.preparation.change(), base)?;
+            let hessian = if self.preparation.change().contains(ParameterTarget::Objective) {
+                match prepared.objective() {
+                    Some(o) => Cow::Owned(
+                        objective_terms(prepared.kind(), &prepared, o.expr, prepared.variables())?
+                            .2,
+                    ),
+                    None => Cow::Owned(Vec::new()),
+                }
+            } else {
+                Cow::Borrowed(&st.hessian)
+            };
+            let clearing_hessian = matches!(hessian, Cow::Owned(_))
+                && st.hessian.iter().any(|c| !c.is_empty())
+                && hessian.iter().all(Vec::is_empty);
+
+            // TODO: safe row/matrix mutation and an API that clears an
+            // empty Hessian; try_pass_hessian([]) leaves the old Hessian intact.
+            if snap.fingerprint == base.fingerprint && !clearing_hessian {
                 let live = st.live.as_mut().expect("live model present on fast path");
-                for i in 0..st.meta.cols.len() {
-                    if snap.obj_costs[i].to_bits() != base.obj_costs[i].to_bits() {
-                        live.change_column_cost(st.meta.cols[i], snap.obj_costs[i]);
-                    }
-                    if snap.lb[i].to_bits() != base.lb[i].to_bits()
-                        || snap.ub[i].to_bits() != base.ub[i].to_bits()
-                    {
-                        live.change_column_bounds(st.meta.cols[i], snap.lb[i]..=snap.ub[i]);
+                if matches!(hessian, Cow::Owned(_)) && hessian.as_ref() != &st.hessian {
+                    live.try_pass_hessian(
+                        highs::HessianFormat::Triangular,
+                        hessian.iter().map(|c| c.iter().copied()),
+                    )
+                    .map_err(|e| SolverError::Backend(format!("HiGHS Hessian update: {e}")))?;
+                }
+                if matches!(snap, Cow::Owned(_)) {
+                    for i in 0..st.meta.cols.len() {
+                        if snap.obj_costs[i].to_bits() != base.obj_costs[i].to_bits() {
+                            live.change_column_cost(st.meta.cols[i], snap.obj_costs[i]);
+                        }
+                        if snap.lb[i].to_bits() != base.lb[i].to_bits()
+                            || snap.ub[i].to_bits() != base.ub[i].to_bits()
+                        {
+                            live.change_column_bounds(st.meta.cols[i], snap.lb[i]..=snap.ub[i]);
+                        }
                     }
                 }
                 apply_options(live, opts)?;
                 st.meta.obj_constant = snap.obj_constant;
-                st.meta.parameters = snap.parameters.clone();
-                st.snap = Some(snap);
+                st.meta.parameters = prepared.arena().parameter_snapshot();
+                if let Cow::Owned(snap) = snap {
+                    st.snap = Some(snap);
+                }
+                if let Cow::Owned(hessian) = hessian {
+                    st.hessian = hessian;
+                }
                 updated = true;
             }
         }
         if !updated {
-            self.rebuild(model, opts)?;
+            self.rebuild(model, &prepared, opts)?;
         }
         #[cfg(test)]
         if updated {
@@ -161,9 +208,13 @@ impl Solver for HighsPersistent {
             return Err(SolverError::UnsupportedIndicator);
         }
         match self.solve_resident(model, opts) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(e) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(e)
             }
         }
@@ -176,6 +227,25 @@ mod tests {
     use oximo_solver::{PersistentSolver, Solver, TerminationStatus};
 
     use crate::{Highs, HighsOptions};
+
+    #[test]
+    fn qp_hessian_updates_and_empty_hessian_rebuild() {
+        let m = Model::new("resident Hessian");
+
+        param!(m, p = 1.0);
+        variable!(m,0.0<=x<=4.0);
+        objective!(m, Min, p * x * x - 2.0 * x);
+
+        let mut solver = Highs.persistent();
+        let opts = HighsOptions::default();
+        for value in [1.0, 2.0, 3.0, 0.0, 4.0] {
+            p.set_param_value(value).unwrap();
+            let resident = solver.solve(&m, &opts).unwrap();
+            let cold = Highs.solve(&m, &opts).unwrap();
+            assert!((resident.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-6);
+        }
+        assert_eq!(solver.updates, 3, "empty Hessian requires exactly one rebuild");
+    }
 
     #[test]
     fn persistent_parameter_snapshots_refresh_on_native_reuse() {

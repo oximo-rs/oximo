@@ -55,10 +55,10 @@ continuous duals and reduced costs, explicit SOC bound duals, MIP bound and
 relative gap, iteration counts, solve time, and the solver name when available.
 `raw_log` and solution pools are not populated.
 
-`Mosek` also implements `PersistentSolver`. Its persistent handle updates linear
-objective coefficients, objective constants, and variable bounds in place for
-LP/MILP models, allowing MOSEK to reuse warm-start information. Other model
-changes, and all quadratic or conic models for now, rebuild transparently.
+`Mosek` also implements `PersistentSolver`. Parameter changes update affected
+objectives, variable bounds, linear/quadratic rows, and fixed-layout SOC, PSD,
+and indicator data in place. Unaffected expressions retain their preparation.
+Changes to the native layout rebuild transparently.
 
 Every MOSEK 11.2 `Dparam`, `Iparam`, and `Sparam` has a snake-case builder.
 Double builders accept `f64`, integer builders accept `i32`, and string builders

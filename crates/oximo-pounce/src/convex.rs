@@ -212,6 +212,131 @@ pub(crate) struct Problem {
 }
 
 impl Problem {
+    pub(crate) fn refresh(
+        &self,
+        prepared: &LoweringContext<'_>,
+        opts: &PounceOptions,
+        change: &oximo_solver::resident::PreparationChange,
+    ) -> Result<Option<std::borrow::Cow<'_, Self>>, SolverError> {
+        use oximo_core::ParameterTarget;
+        use oximo_solver::resident::PreparationChange;
+        if matches!(change, PreparationChange::Full) {
+            return Ok(None);
+        }
+        if matches!(change, PreparationChange::Unchanged)
+            || matches!(change, PreparationChange::Selected(targets) if targets.is_empty())
+        {
+            return Ok(Some(std::borrow::Cow::Borrowed(self)));
+        }
+        if matches!(change,PreparationChange::Selected(targets) if targets.len() > prepared.constraints().algebraic().len().div_ceil(8).max(16))
+        {
+            // Reassemble dense changes in one streaming pass
+            return Ok(None);
+        }
+        let mut fresh = self.clone();
+        if let PreparationChange::Selected(targets) = change {
+            for target in targets {
+                match target {
+                    ParameterTarget::Objective => {
+                        fresh.qp.c.fill(0.0);
+                        fresh.qp.p_lower.clear();
+                        fresh.objective_constant = 0.0;
+                        if let Some(o) = prepared.objective() {
+                            let q =
+                                prepared.require_quadratic(o.expr, || "the objective".into())?;
+                            for &(id, c) in &q.linear {
+                                fresh.qp.c[id.index()] = fresh.sign * c;
+                            }
+                            fresh.qp.p_lower.extend(q.hessian.iter().map(|&(a, b, c)| {
+                                Triplet::new(a.index(), b.index(), fresh.sign * c)
+                            }));
+                            fresh.objective_constant = fresh.sign * q.constant;
+                        }
+                    }
+                    ParameterTarget::VariableBound(id) => {
+                        // Detected cones can depend on bound signs.
+                        if self.maps.iter().any(|m| matches!(m, ConstraintMap::None)) {
+                            return Ok(None);
+                        }
+                        let v = &prepared.variables()[id.index()];
+                        fresh.qp.lb[id.index()] = relaxed_lower(v.lb, opts);
+                        fresh.qp.ub[id.index()] = relaxed_upper(v.ub, opts);
+                    }
+                    ParameterTarget::Algebraic(id) => {
+                        let source = &prepared.constraints().algebraic()[id.index()];
+                        let Some(terms) = prepared.linear(source.lhs) else {
+                            return Ok(None);
+                        };
+                        match &self.maps[id.index()] {
+                            ConstraintMap::Eq(row) => {
+                                if !replace_triplet_row(&mut fresh.qp.a, *row, &terms, 1.0) {
+                                    return Ok(None);
+                                }
+                                fresh.qp.b[*row] = source.upper - terms.constant;
+                            }
+                            ConstraintMap::Ineq { upper, lower } => {
+                                if let Some(row) = upper {
+                                    if !replace_triplet_row(&mut fresh.qp.g, *row, &terms, 1.0) {
+                                        return Ok(None);
+                                    }
+                                    fresh.qp.h[*row] =
+                                        relaxed_row_upper(source.upper, opts) - terms.constant;
+                                }
+                                if let Some(row) = lower {
+                                    if !replace_triplet_row(&mut fresh.qp.g, *row, &terms, -1.0) {
+                                        return Ok(None);
+                                    }
+                                    fresh.qp.h[*row] =
+                                        -relaxed_row_lower(source.lower, opts) + terms.constant;
+                                }
+                            }
+                            ConstraintMap::None => return Ok(None),
+                        }
+                    }
+                    ParameterTarget::SecondOrderCone(id) => {
+                        if !fresh.refresh_soc(prepared, *id)? {
+                            return Ok(None);
+                        }
+                    }
+                    _ => return Ok(None),
+                }
+            }
+        }
+        Ok(Some(std::borrow::Cow::Owned(fresh)))
+    }
+
+    fn refresh_soc(
+        &mut self,
+        prepared: &LoweringContext<'_>,
+        id: oximo_core::SocConstraintId,
+    ) -> Result<bool, SolverError> {
+        let source = &prepared.constraints().second_order_cones()[id.index()];
+        if !source.active {
+            return Ok(true);
+        }
+        let Some(start) = self.explicit_soc_starts.get(id.index()).copied().flatten() else {
+            return Ok(false);
+        };
+        let form = prepared.explicit_soc(source)?;
+        let mut offset = 0;
+        let dimension = self.cones.iter().find_map(|cone| {
+            let dimension = cone.dim();
+            let matched = offset == start && matches!(cone, ConeSpec::SecondOrder(_));
+            offset += dimension;
+            matched.then_some(dimension)
+        });
+        if dimension != Some(form.terms.len() + 1) {
+            return Ok(false);
+        }
+        for (i, terms) in std::iter::once(&form.bound).chain(form.terms.iter()).enumerate() {
+            if !replace_triplet_row(&mut self.qp.g, start + i, terms, -1.0) {
+                return Ok(false);
+            }
+            self.qp.h[start + i] = terms.constant;
+        }
+        Ok(true)
+    }
+
     pub(crate) fn same_structure(&self, other: &Self) -> bool {
         fn triplets_same(left: &[Triplet], right: &[Triplet]) -> bool {
             left.len() == right.len()
@@ -231,6 +356,27 @@ impl Problem {
     pub(crate) const fn sign(&self) -> f64 {
         self.sign
     }
+}
+
+fn replace_triplet_row(
+    matrix: &mut [Triplet],
+    row: usize,
+    terms: &LinearTerms<'_>,
+    scale: f64,
+) -> bool {
+    // `build_problem` and `append_soc` emit triplets in increasing row order.
+    let start = matrix.partition_point(|v| v.row < row);
+    let end = start + matrix[start..].partition_point(|v| v.row == row);
+    let slots = &mut matrix[start..end];
+    if slots.len() != terms.coeffs.len()
+        || slots.iter().zip(terms.coeffs.iter()).any(|(slot, (id, _))| slot.col != id.index())
+    {
+        return false;
+    }
+    for (slot, (_, value)) in slots.iter_mut().zip(terms.coeffs.iter()) {
+        slot.val = scale * value;
+    }
+    true
 }
 
 fn push_row(out: &mut Vec<Triplet>, row: usize, terms: &LinearTerms<'_>, scale: f64) {
@@ -909,6 +1055,63 @@ mod tests {
     use oximo_core::{Model, constraint, objective, variable};
 
     #[test]
+    fn row_replacement_updates_only_the_requested_row() {
+        use oximo_expr::VarId;
+
+        let terms = LinearTerms::owned(vec![(VarId(0), 3.0), (VarId(2), 5.0)], 0.0);
+        for row in [0, 2, 4] {
+            let mut matrix = Vec::new();
+            for index in [0, 2, 4] {
+                matrix.extend([Triplet::new(index, 0, 1.0), Triplet::new(index, 2, 2.0)]);
+            }
+
+            assert!(replace_triplet_row(&mut matrix, row, &terms, -2.0));
+            let actual: Vec<_> = matrix.iter().map(|v| (v.row, v.col, v.val)).collect();
+            let expected: Vec<_> = [0, 2, 4]
+                .into_iter()
+                .flat_map(|index| {
+                    let values = if index == row { [-6.0, -10.0] } else { [1.0, 2.0] };
+                    [(index, 0, values[0]), (index, 2, values[1])]
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn row_replacement_rejects_structure_changes_without_mutation() {
+        use oximo_expr::VarId;
+
+        for coeffs in [
+            vec![],
+            vec![(VarId(0), 3.0)],
+            vec![(VarId(0), 3.0), (VarId(1), 5.0)],
+            vec![(VarId(0), 3.0), (VarId(2), 5.0), (VarId(3), 7.0)],
+        ] {
+            let mut matrix = [Triplet::new(2, 0, 1.0), Triplet::new(2, 2, 2.0)];
+            let terms = LinearTerms::owned(coeffs, 0.0);
+            assert!(!replace_triplet_row(&mut matrix, 2, &terms, -1.0));
+            assert_eq!(matrix.map(|v| (v.row, v.col, v.val)), [(2, 0, 1.0), (2, 2, 2.0)]);
+        }
+    }
+
+    #[test]
+    fn row_replacement_accepts_missing_rows_only_for_empty_coefficients() {
+        use oximo_expr::VarId;
+
+        let empty = LinearTerms::default();
+        let nonempty = LinearTerms::owned(vec![(VarId(0), 3.0)], 0.0);
+        for row in [0, 2, 4, usize::MAX] {
+            let mut matrix = [Triplet::new(1, 0, 1.0), Triplet::new(3, 0, 2.0)];
+            assert!(replace_triplet_row(&mut matrix, row, &empty, 1.0));
+            assert!(!replace_triplet_row(&mut matrix, row, &nonempty, 1.0));
+            assert_eq!(matrix.map(|v| (v.row, v.col, v.val)), [(1, 0, 1.0), (3, 0, 2.0)]);
+        }
+        assert!(replace_triplet_row(&mut [], 0, &empty, 1.0));
+        assert!(!replace_triplet_row(&mut [], 0, &nonempty, 1.0));
+    }
+
+    #[test]
     fn structural_routes_do_not_request_convexity_classification() {
         use PounceAlgorithm::{ActiveSetSqp, InteriorPoint};
         use PounceSolverSelection::{Auto, LpIpm, Nlp};
@@ -1026,5 +1229,36 @@ mod tests {
         let result = outcome(&problem, &PounceOptions::default(), Route::QpIpm, &solution);
         assert_eq!(result.termination, TerminationStatus::TimeLimit);
         assert_eq!(result.iterations, 2);
+    }
+    #[test]
+    fn refresh_rebuilds_for_a_missing_active_soc_mapping() {
+        use oximo_core::prelude::*;
+        use oximo_solver::resident::PreparationChange;
+        let m = Model::new("missing active SOC mapping");
+
+        param!(m, p = 1.0);
+        variable!(m, -2.0 <= x <= 2.0);
+        param!(m, radius = 3.0);
+        soc_constraint!(m, cone, [p * x] <= radius);
+        objective!(m, Max, x);
+
+        let prepared = LoweringContext::new(&m).unwrap();
+        let change = PreparationChange::Selected(
+            vec![oximo_core::ParameterTarget::SecondOrderCone(oximo_core::SocConstraintId(0))]
+                .into(),
+        );
+        let opts = PounceOptions::default();
+        let mut problem = build_problem(&prepared, &opts).unwrap();
+        assert!(matches!(
+            problem.refresh(&prepared, &opts, &PreparationChange::Unchanged).unwrap(),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
+
+        problem.explicit_soc_starts[0] = None;
+        assert!(problem.refresh(&prepared, &opts, &change).unwrap().is_none());
+
+        problem.explicit_soc_starts[0] = Some(0);
+        problem.cones[0] = ConeSpec::SecondOrder(3);
+        assert!(problem.refresh(&prepared, &opts, &change).unwrap().is_none());
     }
 }

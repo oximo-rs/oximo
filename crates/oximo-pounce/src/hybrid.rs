@@ -14,7 +14,6 @@ use oximo_autodiff::slot::{
     linear_gradient_add, linear_value, quadratic_gradient_add, quadratic_value,
 };
 use oximo_autodiff::sparsity::hessian_lagrangian_structure;
-use oximo_autodiff::tape::params_snapshot;
 use oximo_autodiff::{FunctionSlot, SlotKind};
 use oximo_core::{Model, ModelKind};
 use oximo_expr::ExprId;
@@ -102,7 +101,7 @@ fn jacobian_metadata(slots: &[FunctionSlot]) -> JacobianMetadata {
 pub(crate) struct HybridOracle {
     obj: FunctionSlot,
     cons: Vec<FunctionSlot>,
-    params: Vec<f64>,
+    params: oximo_expr::ParameterSnapshot,
     n_vars: usize,
     obj_expr: Option<ExprId>,
     con_exprs: Vec<ExprId>,
@@ -134,13 +133,30 @@ impl HybridOracle {
 
     fn new_with(model: &Model, parallel: bool) -> Self {
         let arena = model.arena();
+        Self::new_at(model, &arena, parallel)
+    }
+
+    pub(crate) fn new_prepared(
+        model: &Model,
+        prepared: &oximo_solver::prepare::LoweringContext<'_>,
+    ) -> Self {
+        Self::new_at(
+            model,
+            prepared.arena(),
+            should_parallelize_classification(
+                prepared.kind(),
+                prepared.constraints().algebraic().len(),
+            ),
+        )
+    }
+
+    fn new_at(model: &Model, arena: &oximo_expr::ExprArena, parallel: bool) -> Self {
         let obj_expr = model.objective().as_ref().map(|o| o.expr);
-        let obj = obj_expr.map_or_else(FunctionSlot::zero, |e| FunctionSlot::classify(&arena, e));
+        let obj = obj_expr.map_or_else(FunctionSlot::zero, |e| FunctionSlot::classify(arena, e));
         let con_exprs: Vec<ExprId> =
             model.constraints().algebraic().iter().map(|c| c.lhs).collect();
-        let arena_ref = &*arena;
-        let cons = classify_slots(arena_ref, &con_exprs, parallel);
-        let params = params_snapshot(&arena);
+        let cons = classify_slots(arena, &con_exprs, parallel);
+        let params = arena.parameter_snapshot();
         let mut oracle = Self {
             obj,
             cons,
@@ -163,6 +179,7 @@ impl HybridOracle {
 
     /// Whether `model` has the same variables and the same objective/constraint
     /// expressions this oracle was built from, so a [`Self::refresh`] suffices.
+    #[cfg(test)]
     pub(crate) fn matches(&self, model: &Model) -> bool {
         let model_constraints = model.constraints();
         let constraints = model_constraints.algebraic();
@@ -177,6 +194,7 @@ impl HybridOracle {
     /// `extract_linear`/`extract_quadratic` fold parameters into
     /// linear/quadratic coefficients, so a params-only refresh
     /// would serve stale derivatives after `set_param`.
+    #[cfg(test)]
     pub(crate) fn refresh(&mut self, model: &Model) {
         let arena = model.arena();
         if let Some(e) = self.obj_expr {
@@ -185,8 +203,58 @@ impl HybridOracle {
         for (slot, &e) in self.cons.iter_mut().zip(&self.con_exprs) {
             *slot = slot.reclassify(&arena, e);
         }
-        self.params = params_snapshot(&arena);
+        self.params = arena.parameter_snapshot();
         self.rebuild_structures();
+    }
+
+    pub(crate) fn refresh_snapshot(&mut self, arena: &oximo_expr::ExprArena) {
+        self.params = arena.parameter_snapshot();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parameter_snapshot(&self) -> &oximo_expr::ParameterSnapshot {
+        &self.params
+    }
+
+    pub(crate) fn refresh_selected(
+        &mut self,
+        arena: &oximo_expr::ExprArena,
+        targets: &[oximo_core::ParameterTarget],
+    ) -> bool {
+        if targets.iter().any(|target| {
+            !matches!(
+                target,
+                oximo_core::ParameterTarget::Objective
+                    | oximo_core::ParameterTarget::Algebraic(_)
+                    | oximo_core::ParameterTarget::VariableBound(_)
+            )
+        }) {
+            return false;
+        }
+        let mut reclassified = false;
+        for target in targets {
+            match target {
+                oximo_core::ParameterTarget::Objective => {
+                    if let Some(e) = self.obj_expr {
+                        self.obj = self.obj.reclassify(arena, e);
+                        reclassified = true;
+                    }
+                }
+                oximo_core::ParameterTarget::Algebraic(id) => {
+                    let i = id.index();
+                    self.cons[i] = self.cons[i].reclassify(arena, self.con_exprs[i]);
+                    reclassified = true;
+                }
+                oximo_core::ParameterTarget::VariableBound(_) => {}
+                _ => return false,
+            }
+        }
+        self.params = arena.parameter_snapshot();
+        // Reclassification can change coefficient order/support at zero.
+        if reclassified {
+            self.rebuild_structures();
+        }
+        true
     }
 
     /// Recompute the sparsity patterns, Hessian scatter, and scratch sizes
@@ -321,7 +389,7 @@ impl DerivativeOracle for HybridOracle {
     }
 
     fn eval_objective(&mut self, x: &[f64]) -> f64 {
-        slot_value(&self.obj, x, &self.params, &mut self.regs)
+        slot_value(&self.obj, x, self.params.values(), &mut self.regs)
     }
 
     fn eval_objective_gradient(&mut self, x: &[f64], grad: &mut [f64]) {
@@ -331,7 +399,7 @@ impl DerivativeOracle for HybridOracle {
 
     fn eval_constraints(&mut self, x: &[f64], g: &mut [f64]) {
         for (out, slot) in g.iter_mut().zip(&self.cons) {
-            *out = slot_value(slot, x, &self.params, &mut self.regs);
+            *out = slot_value(slot, x, self.params.values(), &mut self.regs);
         }
     }
 
@@ -867,5 +935,20 @@ mod tests {
             assert!(should_parallelize_classification(ModelKind::QCP, PAR_QCP_CLASSIFY_THRESHOLD));
             assert!(!should_parallelize_classification(ModelKind::QP, PAR_QCP_CLASSIFY_THRESHOLD));
         });
+    }
+    #[test]
+    fn unsupported_selected_targets_require_rebuild() {
+        use oximo_core::prelude::*;
+        let m = Model::new("unsupported derivative target");
+        variable!(m, x);
+        objective!(m, Min, x * x);
+        let mut oracle = HybridOracle::new(&m);
+        assert!(
+            !oracle.refresh_selected(
+                &m.arena(),
+                &[ParameterTarget::SecondOrderCone(SocConstraintId(0))]
+            )
+        );
+        assert!(oracle.refresh_selected(&m.arena(), &[ParameterTarget::VariableBound(VarId(0))]));
     }
 }

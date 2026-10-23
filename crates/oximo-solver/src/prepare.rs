@@ -80,11 +80,27 @@ impl<T> Deref for Extracted<T> {
 #[derive(Debug)]
 pub struct LoweringContext<'a> {
     expressions: PreparedExpressions,
-    variables: Vec<ResolvedVariable>,
+    variables: PreparedVariables,
     constraints: ModelConstraints<'a>,
     objective: Ref<'a, Option<Objective>>,
     kind: ModelKind,
     semantic: oximo_core::SemanticConstraints<'a>,
+}
+
+#[derive(Debug)]
+enum PreparedVariables {
+    Owned(Vec<ResolvedVariable>),
+    Shared(Arc<Vec<ResolvedVariable>>),
+}
+
+impl Deref for PreparedVariables {
+    type Target = [ResolvedVariable];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(v) => v,
+            Self::Shared(v) => v,
+        }
+    }
 }
 
 /// A shareable arena snapshot and bounded, reuse-admitted extraction caches.
@@ -101,6 +117,7 @@ pub struct PreparedExpressions {
     arena: ExprArena,
     linear: ExtractionCache<LinearTerms<'static>>,
     quadratic: ExtractionCache<QuadraticTerms>,
+    resident: Option<Arc<crate::resident::ResidentExpressions>>,
 }
 
 const CACHE_EXPRESSIONS: usize = 256;
@@ -223,12 +240,31 @@ impl<'a> LoweringContext<'a> {
         let kind = model.__kind_at(&arena, &variables);
         Ok(Self {
             expressions: PreparedExpressions::new((*arena).clone()),
-            variables,
+            variables: PreparedVariables::Owned(variables),
             constraints: model.constraints(),
             objective: model.objective(),
             kind,
             semantic: model.semantic_constraints_ref(),
         })
+    }
+
+    pub(crate) fn resident(
+        model: &'a Model,
+        arena: ExprArena,
+        variables: Arc<Vec<ResolvedVariable>>,
+        kind: ModelKind,
+        cache: Arc<crate::resident::ResidentExpressions>,
+    ) -> Self {
+        let mut expressions = PreparedExpressions::new(arena);
+        expressions.resident = Some(cache);
+        Self {
+            expressions,
+            variables: PreparedVariables::Shared(variables),
+            constraints: model.constraints(),
+            objective: model.objective(),
+            kind,
+            semantic: model.semantic_constraints_ref(),
+        }
     }
 
     pub fn semantic_constraints(&self) -> &oximo_core::SemanticConstraints<'a> {
@@ -324,6 +360,9 @@ impl<'a> LoweringContext<'a> {
         if let ExprNode::Linear { coeffs, constant } = self.arena.get(expr) {
             return Ok(LinearTerms::borrowed(coeffs, *constant));
         }
+        if self.expressions.resident.is_some() {
+            return self.require_linear(expr, location).map(AffineTerms::into_owned);
+        }
         extract_linear(&self.arena, expr).ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
@@ -401,7 +440,12 @@ impl Deref for PreparedExpressions {
 
 impl PreparedExpressions {
     pub fn new(arena: ExprArena) -> Self {
-        Self { arena, linear: ExtractionCache::default(), quadratic: ExtractionCache::default() }
+        Self {
+            arena,
+            linear: ExtractionCache::default(),
+            quadratic: ExtractionCache::default(),
+            resident: None,
+        }
     }
     pub fn arena(&self) -> &ExprArena {
         &self.arena
@@ -422,6 +466,15 @@ impl PreparedExpressions {
     // Keep cache admission out of the direct-affine hot loop in each adapter.
     #[inline(never)]
     fn compound_linear(&self, expr: ExprId) -> Option<AffineTerms<'_>> {
+        if let Some(cache) = &self.resident {
+            if !cache.admits(expr) {
+                return extract_linear(&self.arena, expr).map(AffineTerms::Borrowed);
+            }
+            return resident_extract(&cache.linear, expr, || {
+                extract_linear(&self.arena, expr).map(LinearTerms::into_owned)
+            })
+            .map(AffineTerms::Shared);
+        }
         self.linear
             .extract(
                 expr,
@@ -439,6 +492,15 @@ impl PreparedExpressions {
     /// # Panics
     /// Panics for an expression outside this arena or a poisoned cache.
     pub fn quadratic(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let Some(cache) = &self.resident {
+            if !cache.admits(expr) {
+                return extract_quadratic(&self.arena, expr).map(Extracted::Owned);
+            }
+            return resident_extract(&cache.quadratic, expr, || {
+                extract_quadratic(&self.arena, expr)
+            })
+            .map(Extracted::Shared);
+        }
         self.quadratic.extract(
             expr,
             || extract_quadratic(&self.arena, expr),
@@ -462,7 +524,7 @@ impl PreparedExpressions {
     /// Returns a backend error for invalid affine cone members.
     pub fn explicit_soc(&self, soc: &SocConstraint) -> Result<SocForm, SolverError> {
         let affine = |expr| {
-            extract_linear(&self.arena, expr).map(LinearTerms::into_owned).ok_or_else(|| {
+            self.linear(expr).map(AffineTerms::into_owned).ok_or_else(|| {
                 SolverError::Backend(format!(
                     "invalid affine expressions in SOC constraint {:?}",
                     soc.name
@@ -474,6 +536,19 @@ impl PreparedExpressions {
             bound: affine(soc.bound)?,
         })
     }
+}
+
+fn resident_extract<T>(
+    cache: &Mutex<FxHashMap<ExprId, Option<Arc<T>>>>,
+    expr: ExprId,
+    extract: impl FnOnce() -> Option<T>,
+) -> Option<Arc<T>> {
+    if let Some(value) = cache.lock().expect("resident cache poisoned").get(&expr) {
+        return value.clone();
+    }
+    // Fold outside the lock so independent dirty roots can run in parallel.
+    let value = extract().map(Arc::new);
+    cache.lock().expect("resident cache poisoned").entry(expr).or_insert(value).clone()
 }
 
 #[cfg(test)]

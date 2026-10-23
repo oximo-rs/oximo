@@ -83,10 +83,13 @@ let second = solver.solve(&model, &ScipOptions::default()).unwrap();
 ```
 
 An unchanged model is retained. Append-only variables, rows, SOS sets, and
-indicator constraints are appended to the resident original problem. Edits to
-existing coefficients, bounds, domains, objective expressions, or options
-rebuild automatically. A previous incumbent and declared initial values are
-submitted as partial starts.
+indicator constraints are appended to the resident original problem. Changes
+to sparse linear row coefficients update in place when the row bounds remain equal
+and the objective is not quadratic. Dense edits and QP row edits rebuild.
+Other row edits, variable bounds, domains, objectives, or options rebuild
+automatically.
+Unaffected formulas retain their preparation. A previous incumbent and declared
+initial values are submitted as partial starts.
 
 ## SCIP plugins
 

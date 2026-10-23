@@ -52,7 +52,7 @@ jobs:
         env:
           RUSTFLAGS: "-Zautodiff=Enable"
       - name: Test umbrella POUNCE tests with Enzyme
-        run: cargo test -p oximo --no-default-features --features pounce-enzyme --profile enzyme --test solve_pounce
+        run: cargo test -p oximo --no-default-features --features pounce-enzyme --profile enzyme --test solve_pounce --test persistent_parameters
         env:
           RUSTFLAGS: "-Zautodiff=Enable"
 

@@ -264,7 +264,7 @@ struct Scratch {
 #[derive(Debug)]
 pub struct NlpEvaluator {
     n_vars: usize,
-    params: Vec<f64>,
+    params: oximo_expr::ParameterSnapshot,
     /// `None` for a feasibility problem, whose objective is the constant zero.
     objective_expr: Option<ExprId>,
     constraint_exprs: Vec<ExprId>,
@@ -300,6 +300,12 @@ impl NlpEvaluator {
     /// objective nor a feasibility problem.
     pub fn new(model: &Model) -> Result<Self, AutodiffError> {
         let arena = model.arena();
+        Self::__new_at(model, &arena)
+    }
+
+    /// Build against the same immutable expression snapshot as native bounds.
+    #[doc(hidden)]
+    pub fn __new_at(model: &Model, arena: &oximo_expr::ExprArena) -> Result<Self, AutodiffError> {
         let n_vars = model.num_variables();
         model.ensure_objective_declared().map_err(|_| AutodiffError::NoObjective)?;
         let objective_expr: Option<ExprId> = model.objective().as_ref().map(|o| o.expr);
@@ -308,12 +314,12 @@ impl NlpEvaluator {
 
         let mut sparsity_workspace = SparsityWorkspace::default();
         let objective = match objective_expr {
-            Some(e) => FunctionSlot::classify_with_workspace(&arena, e, &mut sparsity_workspace),
+            Some(e) => FunctionSlot::classify_with_workspace(arena, e, &mut sparsity_workspace),
             None => FunctionSlot::zero(),
         };
         let constraints: Vec<FunctionSlot> = constraint_exprs
             .iter()
-            .map(|&e| FunctionSlot::classify_with_workspace(&arena, e, &mut sparsity_workspace))
+            .map(|&e| FunctionSlot::classify_with_workspace(arena, e, &mut sparsity_workspace))
             .collect();
 
         // Lagrangian tape over the nonlinear functions only.
@@ -331,10 +337,9 @@ impl NlpEvaluator {
                 nl_exprs.push(constraint_exprs[i]);
             }
         }
-        let lagrangian = Tape::compile_weighted(&arena, &nl_exprs);
+        let lagrangian = Tape::compile_weighted(arena, &nl_exprs);
 
-        let params = crate::tape::params_snapshot(&arena);
-        drop(arena);
+        let params = arena.parameter_snapshot();
 
         let jac_structure = jacobian_structure(&constraints);
         let (hess_structure, nl_pattern) =
@@ -411,7 +416,7 @@ impl NlpEvaluator {
     /// when the caller cannot guarantee representative parameters.
     pub fn refresh_params(&mut self, model: &Model) {
         let arena = model.arena();
-        self.params = crate::tape::params_snapshot(&arena);
+        self.params = arena.parameter_snapshot();
         if let Some(e) = self.objective_expr {
             self.objective = self.objective.reclassify(&arena, e);
         }
@@ -440,6 +445,25 @@ impl NlpEvaluator {
     /// Enables a resident/persistent solver to skip retaping across
     /// a parametric sweep while staying correct.
     pub fn try_refresh(&mut self, model: &Model) -> bool {
+        self.try_refresh_subset(model, None)
+    }
+
+    /// Refresh only parameter-dependent source slots after the caller has
+    /// checked that the registered model structure is unchanged.
+    #[doc(hidden)]
+    pub fn try_refresh_selected(
+        &mut self,
+        model: &Model,
+        targets: &[oximo_core::ParameterTarget],
+    ) -> bool {
+        self.try_refresh_subset(model, Some(targets))
+    }
+
+    fn try_refresh_subset(
+        &mut self,
+        model: &Model,
+        selected: Option<&[oximo_core::ParameterTarget]>,
+    ) -> bool {
         let arena = model.arena();
         if model.num_variables() != self.n_vars
             || model.objective().as_ref().map(|o| o.expr) != self.objective_expr
@@ -451,18 +475,66 @@ impl NlpEvaluator {
         if con_exprs != self.constraint_exprs {
             return false;
         }
+        self.__refresh_slots_at(&arena, selected)
+    }
 
+    /// Refresh parameter values without changing numeric derivative slots.
+    /// The caller must prove that no parameter used by a slot has changed.
+    #[doc(hidden)]
+    pub fn __refresh_snapshot_at(&mut self, arena: &oximo_expr::ExprArena) {
+        self.params = arena.parameter_snapshot();
+    }
+
+    /// Refresh an unchanged registered graph using a captured arena snapshot.
+    /// The caller must invalidate the evaluator after any model structure edit.
+    #[doc(hidden)]
+    pub fn __refresh_slots_at(
+        &mut self,
+        arena: &oximo_expr::ExprArena,
+        selected: Option<&[oximo_core::ParameterTarget]>,
+    ) -> bool {
+        if let Some(targets) = selected {
+            return self.refresh_selected_slots(arena, targets);
+        }
         let objective = match self.objective_expr {
-            Some(e) => self.objective.reclassify(&arena, e),
+            Some(e)
+                if selected.is_none_or(|targets| {
+                    targets.contains(&oximo_core::ParameterTarget::Objective)
+                }) =>
+            {
+                self.objective.reclassify(arena, e)
+            }
+            Some(_) => self.objective.clone(),
             None => FunctionSlot::zero(),
         };
         let constraints: Vec<FunctionSlot> = self
             .constraints
             .iter()
-            .zip(&con_exprs)
-            .map(|(s, &e)| s.reclassify(&arena, e))
+            .zip(&self.constraint_exprs)
+            .enumerate()
+            .map(|(i, (s, &e))| {
+                if selected.is_none_or(|targets| {
+                    targets.contains(&oximo_core::ParameterTarget::Algebraic(
+                        oximo_core::ConstraintId(u32::try_from(i).expect("row ID")),
+                    ))
+                }) {
+                    s.reclassify(arena, e)
+                } else {
+                    s.clone()
+                }
+            })
             .collect();
 
+        // The weighted Lagrangian tape owns the original nonlinear sources.
+        // Moving a source onto/off that tape requires rebuilding.
+        if objective.is_nonlinear() != self.objective.is_nonlinear()
+            || constraints
+                .iter()
+                .zip(&self.constraints)
+                .any(|(a, b)| a.is_nonlinear() != b.is_nonlinear())
+        {
+            return false;
+        }
         // A parameter can move a coefficient across zero and change the pattern.
         // Rebuild rather than evaluate against a stale structure.
         let jac = jacobian_structure(&constraints);
@@ -471,11 +543,43 @@ impl NlpEvaluator {
             return false;
         }
 
-        self.params = crate::tape::params_snapshot(&arena);
+        self.params = arena.parameter_snapshot();
         self.objective = objective;
         self.constraints = constraints;
         self.rebuild_quad_scatter();
         self.constraint_work = ConstraintWork::new(&self.constraints, self.n_vars);
+        true
+    }
+
+    fn refresh_selected_slots(
+        &mut self,
+        arena: &oximo_expr::ExprArena,
+        targets: &[oximo_core::ParameterTarget],
+    ) -> bool {
+        let Some(crate::refresh::SelectedSlots { objective, constraints }) =
+            crate::refresh::prepare_selected(
+                arena,
+                targets,
+                self.objective_expr,
+                &self.constraint_exprs,
+                &self.objective,
+                &self.constraints,
+                &self.hess_structure,
+            )
+        else {
+            return false;
+        };
+        if let Some(slot) = objective {
+            self.obj_hess_pos = quad_scatter_positions(&slot, &self.hess_structure);
+            self.objective = slot;
+        }
+        for (i, slot) in constraints {
+            self.con_hess_pos[i] = quad_scatter_positions(&slot, &self.hess_structure);
+            self.constraints[i] = slot;
+        }
+        // Support and nonlinear tapes are unchanged, so output offsets, seeds,
+        // and scratch sizes remain valid.
+        self.params = arena.parameter_snapshot();
         true
     }
 
@@ -512,7 +616,7 @@ impl NlpEvaluator {
     pub fn eval_objective(&self, x: &[f64]) -> f64 {
         assert_eq!(x.len(), self.n_vars, "point dimension");
         let scratch = &mut *self.scratch.borrow_mut();
-        slot_value(&self.objective, x, &self.params, &mut scratch.regs)
+        slot_value(&self.objective, x, self.params.values(), &mut scratch.regs)
     }
 
     /// Dense objective gradient at `x` into `grad` (overwritten).
@@ -528,7 +632,7 @@ impl NlpEvaluator {
         slot_gradient_into(
             &self.objective,
             x,
-            &self.params,
+            self.params.values(),
             &mut scratch.regs,
             &mut scratch.dregs,
             &mut scratch.basis,
@@ -556,7 +660,7 @@ impl NlpEvaluator {
     fn eval_constraint_serial(&self, x: &[f64], g: &mut [f64]) {
         let scratch = &mut *self.scratch.borrow_mut();
         for (out, slot) in g.iter_mut().zip(&self.constraints) {
-            *out = slot_value(slot, x, &self.params, &mut scratch.regs);
+            *out = slot_value(slot, x, self.params.values(), &mut scratch.regs);
         }
     }
 
@@ -569,7 +673,7 @@ impl NlpEvaluator {
         }
         let workspace = &mut *self.parallel.borrow_mut();
         workspace.prepare(count, self.constraint_work.max_regs, self.n_vars, false, false);
-        let (constraints, params) = (&self.constraints, self.params.as_slice());
+        let (constraints, params) = (&self.constraints, self.params.values());
         parallel_units(
             plan,
             0,
@@ -617,7 +721,7 @@ impl NlpEvaluator {
             slot_gradient_into(
                 slot,
                 x,
-                &self.params,
+                self.params.values(),
                 &mut scratch.regs,
                 &mut scratch.dregs,
                 &mut scratch.basis,
@@ -641,7 +745,7 @@ impl NlpEvaluator {
         }
         let workspace = &mut *self.parallel.borrow_mut();
         workspace.prepare(count, self.constraint_work.max_regs, self.n_vars, true, false);
-        let (constraints, params) = (&self.constraints, self.params.as_slice());
+        let (constraints, params) = (&self.constraints, self.params.values());
         parallel_units(
             plan,
             0,
@@ -741,7 +845,7 @@ impl NlpEvaluator {
                 &self.lagrangian,
                 x,
                 &scratch.dir,
-                &self.params,
+                self.params.values(),
                 &scratch.mults,
                 &mut scratch.regs[..n_regs],
                 &mut scratch.regs_t[..n_regs],
@@ -774,7 +878,7 @@ impl NlpEvaluator {
         workspace.prepare(count, n_regs, self.n_vars, true, true);
         grow(&mut workspace.hessian_values, *plan.offsets.last().unwrap());
         let (lagrangian, params, seeds, mults) =
-            (&self.lagrangian, self.params.as_slice(), &self.seeds, scratch.mults.as_slice());
+            (&self.lagrangian, self.params.values(), &self.seeds, scratch.mults.as_slice());
         parallel_units(
             plan,
             0,

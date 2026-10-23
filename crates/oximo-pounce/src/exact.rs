@@ -25,9 +25,31 @@ pub(crate) fn build(model: &Model) -> Result<Oracle, SolverError> {
     Ok(Rc::new(RefCell::new(eval)))
 }
 
+pub(crate) fn build_prepared(
+    model: &Model,
+    prepared: &oximo_solver::prepare::LoweringContext<'_>,
+) -> Result<Oracle, SolverError> {
+    let evaluator = NlpEvaluator::__new_at(model, prepared.arena())
+        .map_err(|e| SolverError::Backend(format!("autodiff: {e}")))?;
+    Ok(Rc::new(RefCell::new(evaluator)))
+}
+
 /// Reuse the resident evaluator for `model` when the structure is unchanged.
-pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
-    oracle.borrow_mut().try_refresh(model)
+pub(crate) fn try_reuse(
+    oracle: &Oracle,
+    arena: &oximo_expr::ExprArena,
+    change: &oximo_solver::resident::PreparationChange,
+) -> bool {
+    match change {
+        oximo_solver::resident::PreparationChange::Full => false,
+        oximo_solver::resident::PreparationChange::Selected(targets) => {
+            oracle.borrow_mut().__refresh_slots_at(arena, Some(targets))
+        }
+        oximo_solver::resident::PreparationChange::Unchanged => {
+            oracle.borrow_mut().__refresh_snapshot_at(arena);
+            true
+        }
+    }
 }
 
 pub(crate) fn supports_resident(_oracle: &Oracle) -> bool {

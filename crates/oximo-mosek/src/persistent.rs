@@ -1,8 +1,11 @@
 use mosek::{Streamtype, TaskCB};
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{Snapshot, Solver, SolverError, SolverResult, snapshot};
+use oximo_solver::incremental::{refresh_snapshot, snapshot_prepared};
+use oximo_solver::prepare::LoweringContext;
+use oximo_solver::resident::PersistentPreparation;
+use oximo_solver::{Snapshot, Solver, SolverError, SolverResult};
 
-use crate::translate::{Meta, build_task, solve_task};
+use crate::translate::{Meta, build_task_prepared, refresh_task, solve_task};
 use crate::{MosekOptions, NAME};
 
 /// The persistent MOSEK task and the information needed to update it safely.
@@ -18,11 +21,10 @@ struct State {
 /// Created by [`Mosek::persistent`](crate::Mosek). For LP and MILP models,
 /// changes limited to objective coefficients, the objective constant, and
 /// variable bounds are pushed directly into the retained MOSEK task. MOSEK can
-/// then reuse its available basis or incumbent information. Changes to rows,
-/// integrality, objective sense, initial values, or model dimensions rebuild the
-/// task transparently. Quadratic and conic models currently rebuild on every
-/// call, retaining the same correctness guarantee while leaving their native
-/// incremental update support for future work.
+/// then reuse its available basis or incumbent information. Parameter changes
+/// also update affected quadratic objectives/rows and fixed-layout conic data.
+/// Native layout changes, integrality, objective sense, and initial-value edits
+/// rebuild the task transparently.
 ///
 /// Options are applied before every optimization and persist on a resident task.
 /// If an option is omitted later it keeps its previous native value. Call
@@ -31,6 +33,7 @@ struct State {
 #[derive(Default)]
 pub struct MosekPersistent {
     state: Option<State>,
+    preparation: PersistentPreparation,
     #[cfg(test)]
     updates: usize,
 }
@@ -51,11 +54,17 @@ impl MosekPersistent {
     /// Discard the persistent MOSEK task. The next solve builds a fresh task.
     pub fn reset(&mut self) {
         self.state = None;
+        self.preparation.clear();
     }
 
-    fn rebuild(&mut self, model: &Model, opts: &MosekOptions) -> Result<(), SolverError> {
-        let (task, meta) = build_task(model, opts)?;
-        let snapshot = linear_snapshot(model)?;
+    fn rebuild(
+        &mut self,
+        model: &Model,
+        prepared: &LoweringContext<'_>,
+        opts: &MosekOptions,
+    ) -> Result<(), SolverError> {
+        let (task, meta) = build_task_prepared(model, opts, prepared)?;
+        let snapshot = linear_snapshot(model, prepared)?;
         let initial = initial_values(model);
         self.state = Some(State { task, meta, snapshot, initial });
         Ok(())
@@ -66,7 +75,51 @@ impl MosekPersistent {
         model: &Model,
         opts: &MosekOptions,
     ) -> Result<SolverResult, SolverError> {
-        let fresh = linear_snapshot(model)?;
+        if model.has_active_sos_constraints() {
+            return Err(SolverError::UnsupportedSos);
+        }
+        if !crate::psd_compatible(model) {
+            return Err(SolverError::UnsupportedConstraint(
+                "MOSEK PSD requires a continuous affine objective and linear/SOC rows",
+            ));
+        }
+        let prepared = self.preparation.prepare(model)?;
+        if !crate::supported(prepared.kind()) {
+            return Err(SolverError::UnsupportedKind(prepared.kind()));
+        }
+        if self.state.is_none() {
+            self.rebuild(model, &prepared, opts)?;
+            let state = self.state.as_mut().expect("resident state after rebuild");
+            return solve_task(model, &mut state.task, &state.meta);
+        }
+        if let Some(state) = self.state.as_mut()
+            && refresh_task(&prepared, self.preparation.change(), &mut state.task, &mut state.meta)?
+        {
+            opts.apply_cb(&mut state.task)?;
+            attach_verbose_stream(&mut state.task, opts)?;
+            // Avoid rebuilding its row fingerprint on sparse parameter updates.
+            let row_changes = matches!(self.preparation.change(),oximo_solver::resident::PreparationChange::Selected(targets)
+                if targets.iter().any(|target| !matches!(target,oximo_core::ParameterTarget::Objective | oximo_core::ParameterTarget::VariableBound(_))));
+            match &state.snapshot {
+                Some(base)
+                    if !row_changes
+                        && matches!(prepared.kind(), ModelKind::LP | ModelKind::MILP) =>
+                {
+                    if let std::borrow::Cow::Owned(snapshot) =
+                        refresh_snapshot(model, &prepared, self.preparation.change(), base)?
+                    {
+                        state.snapshot = Some(snapshot);
+                    }
+                }
+                _ => state.snapshot = None,
+            }
+            #[cfg(test)]
+            {
+                self.updates += 1;
+            }
+            return solve_task(model, &mut state.task, &state.meta);
+        }
+        let fresh = linear_snapshot(model, &prepared)?;
         let initial = initial_values(model);
         let mut updated = false;
 
@@ -82,12 +135,13 @@ impl MosekPersistent {
             opts.apply_cb(&mut state.task)?;
             attach_verbose_stream(&mut state.task, opts)?;
             state.meta.parameters = fresh.parameters.clone();
+            state.meta.kind = prepared.kind();
             state.snapshot = Some(fresh);
             updated = true;
         }
 
         if !updated {
-            self.rebuild(model, opts)?;
+            self.rebuild(model, &prepared, opts)?;
         }
         #[cfg(test)]
         if updated {
@@ -128,18 +182,25 @@ impl Solver for MosekPersistent {
 
     fn solve(&mut self, model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
         match self.solve_resident(model, opts) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(error) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(error)
             }
         }
     }
 }
 
-fn linear_snapshot(model: &Model) -> Result<Option<Snapshot>, SolverError> {
-    if matches!(model.kind(), ModelKind::LP | ModelKind::MILP) {
-        snapshot(model).map(Some)
+fn linear_snapshot(
+    model: &Model,
+    prepared: &LoweringContext<'_>,
+) -> Result<Option<Snapshot>, SolverError> {
+    if matches!(prepared.kind(), ModelKind::LP | ModelKind::MILP) {
+        snapshot_prepared(model, prepared).map(Some)
     } else {
         Ok(None)
     }

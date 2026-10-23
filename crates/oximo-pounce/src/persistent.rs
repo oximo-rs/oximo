@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use oximo_core::{Model, ModelKind};
 use oximo_solver::prepare::LoweringContext;
+use oximo_solver::resident::{PersistentPreparation, PreparationChange};
 use oximo_solver::{ParameterSnapshot, Solver, SolverError, SolverResult};
 
 use crate::convex::{self, Route};
@@ -28,6 +29,7 @@ struct NlpState {
 
 struct ConvexState {
     route: Route,
+    options: PounceOptions,
     problem: convex::Problem,
     warm: Option<pounce_rs::convex::QpWarmStart>,
     ipm: Option<convex::IpmPersistent>,
@@ -58,6 +60,7 @@ struct CachedValidation {
 #[derive(Default)]
 pub struct PouncePersistent {
     state: Option<State>,
+    preparation: PersistentPreparation,
     validation: Option<CachedValidation>,
 }
 
@@ -78,6 +81,7 @@ impl PouncePersistent {
     /// from scratch (and starts from the model's initial point).
     pub fn reset(&mut self) {
         self.state = None;
+        self.preparation.clear();
         self.validation = None;
     }
 
@@ -97,7 +101,7 @@ impl PouncePersistent {
         }
         reject_semi_domains(model)?;
 
-        let prepared = LoweringContext::new(model)?;
+        let prepared = self.preparation.prepare(model)?;
         let route = convex::route(&prepared, opts)?;
         if route == Route::Nlp {
             return self.solve_nlp(model, &prepared, opts);
@@ -125,14 +129,24 @@ impl PouncePersistent {
         let params = prepared.arena().parameter_snapshot();
         let mut params_changed = false;
         let state = match &mut self.state {
-            Some(State::Nlp(state)) if backend::try_reuse(&state.oracle, model) => {
-                params_changed = !state.params.same_bits(&params);
+            Some(State::Nlp(state))
+                if backend::try_reuse(
+                    &state.oracle,
+                    prepared.arena(),
+                    self.preparation.change(),
+                ) =>
+            {
+                params_changed = !matches!(self.preparation.change(), PreparationChange::Unchanged);
                 state.params = params;
                 state
             }
             slot => {
+                #[cfg(feature = "enzyme")]
+                let oracle = backend::build_prepared(model, prepared)?;
+                #[cfg(not(feature = "enzyme"))]
+                let oracle = backend::build_prepared(model, prepared);
                 *slot = Some(State::Nlp(Box::new(NlpState {
-                    oracle: backend::build(model)?,
+                    oracle,
                     warm: None,
                     resident: None,
                     params,
@@ -181,13 +195,27 @@ impl PouncePersistent {
         route: Route,
     ) -> Result<SolverResult, SolverError> {
         self.validate_convex_options(opts)?;
-        let problem = convex::build_problem(prepared, opts)?;
+        let refreshed = match &self.state {
+            Some(State::Convex(state)) if state.route == route && state.options == *opts => {
+                state.problem.refresh(prepared, opts, self.preparation.change())?
+            }
+            _ => None,
+        };
+        let problem = match refreshed {
+            Some(std::borrow::Cow::Borrowed(_)) => None,
+            Some(std::borrow::Cow::Owned(p)) => Some(p),
+            None => Some(convex::build_problem(prepared, opts)?),
+        };
         let started = Instant::now();
         let state = match &mut self.state {
             Some(State::Convex(state))
-                if state.route == route && state.problem.same_structure(&problem) =>
+                if state.route == route
+                    && problem.as_ref().is_none_or(|p| state.problem.same_structure(p)) =>
             {
-                state.problem = problem;
+                if let Some(problem) = problem {
+                    state.problem = problem;
+                }
+                state.options = opts.clone();
                 state
             }
             slot => {
@@ -195,7 +223,8 @@ impl PouncePersistent {
                 let active = (route == Route::QpActiveSet).then(convex::ActivePersistent::new);
                 *slot = Some(State::Convex(Box::new(ConvexState {
                     route,
-                    problem,
+                    options: opts.clone(),
+                    problem: problem.expect("new convex state requires a problem"),
                     warm: None,
                     ipm,
                     active,
@@ -276,9 +305,13 @@ impl Solver for PouncePersistent {
 
     fn solve(&mut self, model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
         match self.solve_resident(model, opts) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(e) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(e)
             }
         }
@@ -290,6 +323,39 @@ mod tests {
     use super::*;
     use crate::options::PounceSolverSelection;
     use oximo_core::{constraint, objective, param, variable};
+
+    #[test]
+    fn persistent_parameter_snapshots_refresh_on_native_reuse() {
+        let model = Model::new("oracle parameter registration");
+
+        param!(model, unused = 7.0);
+        variable!(model, 0.0 <= x <= 4.0, initial = 0.5);
+        objective!(model, Min, (x - 1.0).powi(2));
+
+        let opts = PounceOptions::default().solver_selection(PounceSolverSelection::Nlp);
+        let mut solver = PouncePersistent::new();
+        let first = solver.solve(&model, &opts).unwrap();
+        let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+        let oracle = std::rc::Rc::clone(&state.oracle);
+        unused.set_param_value(9.0).unwrap();
+        let second = solver.solve(&model, &opts).unwrap();
+        param!(model, added = 2.0);
+        let third = solver.solve(&model, &opts).unwrap();
+        assert_eq!(first.value_of(unused), Ok(Some(7.0)));
+        assert_eq!(second.value_of(unused), Ok(Some(9.0)));
+        assert_eq!(third.value_of(added), Ok(Some(2.0)));
+        assert_eq!(second.value_of(added), Ok(None));
+
+        let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+        assert!(std::rc::Rc::ptr_eq(&oracle, &state.oracle));
+
+        objective!(model, Min, (x - added).powi(2));
+        let fourth = solver.solve(&model, &opts).unwrap();
+        assert!((fourth.value_of(x).unwrap().unwrap() - 2.0).abs() < 1e-4);
+
+        let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+        assert!(!std::rc::Rc::ptr_eq(&oracle, &state.oracle));
+    }
 
     #[test]
     fn convex_validation_cache_tracks_options_and_errors() {
@@ -334,6 +400,7 @@ mod tests {
         assert!(first.has_solution());
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(!state.ipm.as_ref().unwrap().last_reused_transform());
+        let problem_storage = (state.problem.qp.c.as_ptr(), state.problem.qp.a.as_ptr());
 
         unused.set_param_value(9.0).unwrap();
         let second = solver.solve(&model, &opts).unwrap();
@@ -342,6 +409,7 @@ mod tests {
         assert_eq!(first.value_of(unused), Ok(Some(7.0)));
         let Some(State::Convex(state)) = &solver.state else { panic!("convex state") };
         assert!(state.ipm.as_ref().unwrap().last_reused_transform());
+        assert_eq!(problem_storage, (state.problem.qp.c.as_ptr(), state.problem.qp.a.as_ptr()));
 
         weight.set_param_value(2.0).unwrap();
         assert!(solver.solve(&model, &opts).unwrap().has_solution());

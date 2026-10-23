@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 
 enum CellStorage<T> {
     Owned(T),
@@ -14,12 +14,16 @@ enum CellStorage<T> {
 /// Ordinary construction has no reference counting or allocation.
 ///
 /// Forking promotes the registry to shared storage where its first write detaches only that registry.
-pub(crate) struct SharedCell<T>(RefCell<CellStorage<T>>);
+pub(crate) struct SharedCell<T>(RefCell<CellStorage<T>>, Cell<u64>);
 
 impl<T> SharedCell<T> {
     #[inline]
     pub(crate) fn new(value: T) -> Self {
-        Self(RefCell::new(CellStorage::Owned(value)))
+        Self(RefCell::new(CellStorage::Owned(value)), Cell::new(0))
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.1.get()
     }
 
     #[inline]
@@ -39,7 +43,9 @@ impl<T: Clone> SharedCell<T> {
 
     #[inline]
     fn borrow_mut_with(&self, clone: impl FnOnce(&T) -> T) -> RefMut<'_, T> {
-        RefMut::map(self.0.borrow_mut(), |storage| match storage {
+        let storage = self.0.borrow_mut();
+        self.1.set(self.1.get().checked_add(1).expect("registry revision overflow"));
+        RefMut::map(storage, |storage| match storage {
             CellStorage::Owned(value) => value,
             shared @ CellStorage::Shared(_) => detach_registry(shared, clone),
         })
@@ -100,7 +106,7 @@ impl<T: Clone + Default> Clone for SharedCell<T> {
             }
             CellStorage::Shared(value) => Arc::clone(value),
         };
-        Self(RefCell::new(CellStorage::Shared(shared)))
+        Self(RefCell::new(CellStorage::Shared(shared)), Cell::new(self.1.get()))
     }
 }
 

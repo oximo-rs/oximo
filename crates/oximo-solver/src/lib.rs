@@ -12,6 +12,8 @@ pub mod persistent;
 pub mod prepare;
 pub mod psd;
 pub mod reconstruct;
+#[doc(hidden)]
+pub mod resident;
 pub mod result;
 pub mod solver;
 pub mod status;

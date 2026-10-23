@@ -118,6 +118,26 @@ fn snapshot_bit_comparison_preserves_signed_zero_rejected_nonfinite_values_and_l
 }
 
 #[test]
+fn changed_parameter_ids_include_value_and_length_differences() {
+    let mut arena = ExprArena::new();
+    let p = arena.new_param(1.0);
+    let q = arena.new_param(-0.0);
+    let saved = arena.parameter_snapshot();
+    assert_eq!(saved.changed_parameters(&saved), Vec::new());
+
+    arena.set_param_value(p, 2.0).unwrap();
+    assert_eq!(saved.changed_parameters(&arena.parameter_snapshot()), vec![p]);
+
+    arena.set_param_value(p, 1.0).unwrap();
+    arena.set_param_value(q, 0.0).unwrap();
+    assert_eq!(saved.changed_parameters(&arena.parameter_snapshot()), vec![q]);
+
+    let added = arena.new_param(3.0);
+    assert_eq!(saved.changed_parameters(&arena.parameter_snapshot()), vec![q, added]);
+    assert_eq!(arena.parameter_snapshot().changed_parameters(&saved), vec![q, added]);
+}
+
+#[test]
 fn snapshot_equality_compares_bits_for_shared_and_independent_storage() {
     let capture = |values: &[f64]| {
         let mut arena = ExprArena::new();

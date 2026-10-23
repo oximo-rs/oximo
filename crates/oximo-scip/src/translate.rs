@@ -63,6 +63,23 @@ impl Body {
     }
 }
 
+fn representable_deltas(fresh: &[(VarId, f64)], previous: &[(VarId, f64)]) -> bool {
+    let mut values = rustc_hash::FxHashMap::<VarId, (f64, f64, f64)>::default();
+    for &(id, coefficient) in fresh {
+        let entry = values.entry(id).or_default();
+        entry.1 += coefficient;
+        entry.2 += coefficient;
+    }
+    for &(id, coefficient) in previous {
+        let entry = values.entry(id).or_default();
+        entry.0 += coefficient;
+        entry.2 -= coefficient;
+    }
+    values.values().all(|&(before, after, delta)| {
+        delta.is_finite() && (before + delta).to_bits() == after.to_bits()
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
     pub name: String,
@@ -129,7 +146,6 @@ impl Indicator {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Snapshot {
-    pub parameters: oximo_solver::ParameterSnapshot,
     pub name: String,
     pub columns: Vec<Column>,
     pub rows: Vec<Row>,
@@ -148,6 +164,13 @@ impl Snapshot {
             return Err(SolverError::UnsupportedConstraint("PSD"));
         }
         let p = LoweringContext::new(model)?;
+        Self::prepare_view(model, &p)
+    }
+
+    pub(crate) fn prepare_view(
+        model: &Model,
+        p: &LoweringContext<'_>,
+    ) -> Result<Self, SolverError> {
         let mut columns = Vec::new();
         for v in p.variables() {
             crate::check_name(&v.name)?;
@@ -174,7 +197,7 @@ impl Snapshot {
             check_bounds(c.lower, c.upper)?;
             rows.push(Row {
                 name: c.name.to_string(),
-                body: if c.active { Body::prepare(&p, c.lhs)? } else { Body::Linear(vec![], 0.0) },
+                body: if c.active { Body::prepare(p, c.lhs)? } else { Body::Linear(vec![], 0.0) },
                 lower: c.lower,
                 upper: c.upper,
                 active: c.active,
@@ -225,10 +248,9 @@ impl Snapshot {
             .constraints()
             .indicators()
             .iter()
-            .map(|c| Indicator::prepare(&p, c))
+            .map(|c| Indicator::prepare(p, c))
             .collect::<Result<_, SolverError>>()?;
         Ok(Self {
-            parameters: p.arena().parameter_snapshot(),
             name: model.name.to_string(),
             columns,
             rows,
@@ -237,10 +259,143 @@ impl Snapshot {
             indicators,
             objective: p
                 .objective()
-                .map_or(Ok(Body::Linear(vec![], 0.0)), |o| Body::prepare(&p, o.expr))?,
+                .map_or(Ok(Body::Linear(vec![], 0.0)), |o| Body::prepare(p, o.expr))?,
             sense: p.sense(),
             kind: p.kind(),
         })
+    }
+
+    pub(crate) fn refresh(
+        self: &std::sync::Arc<Self>,
+        model: &Model,
+        p: &LoweringContext<'_>,
+        change: &oximo_solver::resident::PreparationChange,
+    ) -> Result<std::sync::Arc<Self>, SolverError> {
+        use oximo_core::ParameterTarget;
+        use oximo_solver::resident::PreparationChange;
+        if matches!(change, PreparationChange::Full) {
+            return Self::prepare_view(model, p).map(std::sync::Arc::new);
+        }
+        if matches!(change, PreparationChange::Unchanged)
+            || matches!(change, PreparationChange::Selected(targets) if targets.is_empty())
+        {
+            return Ok(std::sync::Arc::clone(self));
+        }
+        let mut fresh = self.as_ref().clone();
+        fresh.kind = p.kind();
+        if let PreparationChange::Selected(targets) = change {
+            for target in targets {
+                match target {
+                    ParameterTarget::Objective => {
+                        fresh.objective = p
+                            .objective()
+                            .map_or(Ok(Body::Linear(vec![], 0.0)), |o| Body::prepare(p, o.expr))?;
+                    }
+                    ParameterTarget::VariableBound(id) => {
+                        let v = &p.variables()[id.index()];
+                        check_bounds(v.lb, v.ub)?;
+                        fresh.columns[id.index()].lb = v.lb;
+                        fresh.columns[id.index()].ub = v.ub;
+                    }
+                    ParameterTarget::Algebraic(id) => {
+                        let c = &p.constraints().algebraic()[id.index()];
+                        fresh.rows[id.index()].body = if c.active {
+                            Body::prepare(p, c.lhs)?
+                        } else {
+                            Body::Linear(vec![], 0.0)
+                        };
+                    }
+                    ParameterTarget::SecondOrderCone(id) => {
+                        let c = &p.constraints().second_order_cones()[id.index()];
+                        fresh.cones[id.index()].terms = if c.active {
+                            c.terms
+                                .iter()
+                                .map(|&e| Formula::prepare(p.arena(), e, p.variables().len()))
+                                .collect::<Result<_, _>>()?
+                        } else {
+                            vec![]
+                        };
+                        fresh.cones[id.index()].bound = if c.active {
+                            Some(Formula::prepare(p.arena(), c.bound, p.variables().len())?)
+                        } else {
+                            None
+                        };
+                    }
+                    ParameterTarget::Indicator(id) => {
+                        fresh.indicators[id.index()] =
+                            Indicator::prepare(p, &p.constraints().indicators()[id.index()])?;
+                    }
+                    _ => return Self::prepare_view(model, p).map(std::sync::Arc::new),
+                }
+            }
+        }
+        Ok(std::sync::Arc::new(fresh))
+    }
+
+    pub(crate) fn linear_edits_compatible(&self, old: &Self) -> bool {
+        self.name == old.name
+            && self.columns == old.columns
+            && self.objective == old.objective
+            && self.sense == old.sense
+            && self.cones == old.cones
+            && self.sets == old.sets
+            && self.indicators == old.indicators
+            && self.rows.len() == old.rows.len()
+            && self.rows.iter().zip(&old.rows).all(|(a, b)| {
+                if a == b {
+                    return true;
+                }
+                a.name == b.name
+                    && a.lower <= a.upper
+                    && a.lower.to_bits() == b.lower.to_bits()
+                    && a.upper.to_bits() == b.upper.to_bits()
+                    && a.active == b.active
+                    && match (&a.body, &b.body) {
+                        (Body::Linear(fresh, ac), Body::Linear(previous, bc)) => {
+                            ac.to_bits() == bc.to_bits() && representable_deltas(fresh, previous)
+                        }
+                        _ => false,
+                    }
+            })
+    }
+
+    pub(crate) fn update_linear_rows(
+        &self,
+        old: &Self,
+        native: &mut Native<ProblemCreated>,
+        mapping: &crate::ScipMapping,
+    ) -> Result<(), SolverError> {
+        for (index, (row, base)) in self.rows.iter().zip(&old.rows).enumerate() {
+            if row == base {
+                continue;
+            }
+            let (Body::Linear(fresh, _), Body::Linear(previous, _)) = (&row.body, &base.body)
+            else {
+                unreachable!("compatible linear rows");
+            };
+            let constraint = mapping.constraints[index]
+                .as_ref()
+                .ok_or_else(|| crate::backend("missing resident linear constraint"))?;
+            if !mapping.linear[index] {
+                return Err(crate::backend("resident constraint is not linear"));
+            }
+            let mut deltas = rustc_hash::FxHashMap::<VarId, f64>::default();
+            for &(id, c) in fresh {
+                *deltas.entry(id).or_default() += c;
+            }
+            for &(id, c) in previous {
+                *deltas.entry(id).or_default() -= c;
+            }
+            for (id, delta) in deltas {
+                if delta != 0.0 {
+                    let variable = mapping
+                        .variable(id)
+                        .ok_or_else(|| crate::backend("missing resident variable"))?;
+                    native.add_cons_coef(constraint, variable, delta);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn extends(&self, old: &Self) -> bool {

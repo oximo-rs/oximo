@@ -31,6 +31,7 @@ pub(crate) struct LoweringCtx<'a> {
     pub gurobi_vars: &'a [Var],
     pub aux_counter: u32,
     pub generated: Vec<GeneratedConstraint>,
+    pub generated_variables: Vec<Var>,
     quadratic_cache: HashMap<ExprId, Option<LoweredExpr>>,
     materialized: HashMap<ExprId, Var>,
     reference_counts: Vec<usize>,
@@ -43,6 +44,7 @@ impl<'a> LoweringCtx<'a> {
             gurobi_vars,
             aux_counter,
             generated: Vec::new(),
+            generated_variables: Vec::new(),
             quadratic_cache: HashMap::new(),
             materialized: HashMap::new(),
             reference_counts: Vec::new(),
@@ -57,7 +59,9 @@ impl<'a> LoweringCtx<'a> {
 
     fn new_aux(&mut self, tag: &str, lb: f64, ub: f64) -> Result<Var, gurobi_rs::Error> {
         let name = self.next_name(tag);
-        self.model.add_var(&name, Continuous, 0.0, lb, ub, [])
+        let variable = self.model.add_var(&name, Continuous, 0.0, lb, ub, [])?;
+        self.generated_variables.push(variable);
+        Ok(variable)
     }
 
     fn variable(&self, v: VarId) -> Result<Var, SolverError> {

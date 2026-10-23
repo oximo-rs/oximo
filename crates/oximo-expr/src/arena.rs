@@ -42,6 +42,33 @@ impl ParameterSnapshot {
             || (self.0.len() == other.0.len()
                 && self.0.iter().zip(other.0.iter()).all(|(a, b)| a.to_bits() == b.to_bits()))
     }
+
+    /// Parameter IDs whose exact values differ between two snapshots.
+    ///
+    /// A parameter present in only one snapshot is reported as changed. The
+    /// result is ordered by parameter ID. This compares values only.
+    ///
+    /// # Panics
+    /// Panics if a snapshot contains more parameters than a [`ParamId`] can
+    /// address.
+    pub fn changed_parameters(&self, newer: &Self) -> Vec<ParamId> {
+        if Arc::ptr_eq(&self.0, &newer.0) {
+            return Vec::new();
+        }
+
+        let len = self.0.len().max(newer.0.len());
+        let mut changed = Vec::new();
+
+        for index in 0..len {
+            let before = self.0.get(index).map(|value| value.to_bits());
+            let after = newer.0.get(index).map(|value| value.to_bits());
+            if before != after {
+                changed.push(ParamId(u32::try_from(index).expect("parameter count fits u32")));
+            }
+        }
+
+        changed
+    }
 }
 
 /// Stable identity shared by a model, its expression handles, and its results.

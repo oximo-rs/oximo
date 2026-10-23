@@ -54,7 +54,8 @@ pub use indicator::{
     RangeIndicatorConstraintHandles, RangeIndicatorConstraintIds,
 };
 pub use model::{
-    ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, display_index_key,
+    ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, ModelParameterSnapshot,
+    ParameterDependencies, ParameterTarget, display_index_key,
 };
 pub use objective::{Objective, ObjectiveFunction, ObjectiveSense, SemanticObjective};
 pub use oximo_expr::ModelError;
@@ -79,7 +80,7 @@ pub use set::{
 };
 pub use shared::SharedSlice;
 #[doc(hidden)]
-pub use soc::__detect_soc_from_quadratic;
+pub use soc::{__detect_soc_from_quadratic, __soc_bound_variable};
 pub use soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
@@ -89,8 +90,8 @@ pub use var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable, var_name
 // `oximo-expr` import.
 pub use oximo_expr::{
     AffineBuilder, Children, EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot,
-    ExprArenaWriteGuard, ExprId, ExprNode, ModelId, ModelMismatchError, ParamId, UnaryOp, VarId,
-    describe_nonlinear_term, dot, render_expr, render_linear_terms,
+    ExprArenaWriteGuard, ExprId, ExprNode, ModelId, ModelMismatchError, ParamId, ParameterSnapshot,
+    UnaryOp, VarId, describe_nonlinear_term, dot, render_expr, render_linear_terms,
 };
 
 pub use oximo_macros::{

@@ -70,8 +70,8 @@ pub(crate) fn collect(
     snapshot: &Snapshot,
     model: &Model,
     shared: &SharedState,
+    parameters: &oximo_solver::ParameterSnapshot,
 ) -> Result<ScipSolveOutput, SolverError> {
-    let parameters = &snapshot.parameters;
     let shared = shared.borrow();
     let status = termination(native.status());
     let infinity = native.real_param("numerics/infinity");

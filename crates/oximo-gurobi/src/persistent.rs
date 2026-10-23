@@ -1,11 +1,14 @@
 use gurobi_rs::prelude::*;
 use oximo_core::{Model, ModelKind, SosType};
-use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult, snapshot};
+use oximo_solver::incremental::{refresh_snapshot, snapshot_prepared};
+use oximo_solver::prepare::LoweringContext;
+use oximo_solver::resident::{PersistentPreparation, PreparationChange};
+use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult};
 
 use crate::GurobiOptions;
 use crate::options::apply as apply_options;
 use crate::translate::{
-    Built, build, compute_iis_resident, default_env, map_gurobi_err, run_and_collect,
+    Built, build_prepared, compute_iis_resident, default_env, map_gurobi_err, run_and_collect,
 };
 use crate::{Callback, CallbackMask};
 
@@ -21,9 +24,10 @@ struct State {
 /// Created by [`Gurobi::persistent`](crate::Gurobi). It is a plain [`Solver`]: call
 /// [`solve`](Solver::solve) on it repeatedly. When only objective coefficients or
 /// variable bounds changed since the last call it pushes those deltas through
-/// Gurobi's attribute API (`Obj`, `LB`, `UB`, `ObjCon`) and Gurobi warm-starts. Any
-/// structural change (new rows/columns, changed matrix coefficients or row bounds,
-/// flipped integrality or sense, or a quadratic/nonlinear objective) triggers a
+/// Gurobi's attribute API (`Obj`, `LB`, `UB`, `ObjCon`) and Gurobi warm-starts.
+/// Parameter changes also update linear rows and replace affected quadratic,
+/// nonlinear, conic, or indicator groups together with their owned auxiliaries.
+/// A structural change (new rows/columns or flipped integrality or sense) triggers a
 /// transparent full rebuild, so every result matches a cold [`Gurobi::solve`](crate::Gurobi).
 ///
 /// Options passed to `solve` are applied to the resident instance and persist across calls.
@@ -35,6 +39,8 @@ pub struct GurobiPersistent {
     /// a structural change doesn't create a fresh Gurobi environment.
     env: Option<Env>,
     state: Option<State>,
+    preparation: PersistentPreparation,
+    callback_state: bool,
     #[cfg(test)]
     updates: usize,
 }
@@ -56,6 +62,8 @@ impl GurobiPersistent {
     /// scratch, clearing any solver options carried on the Gurobi instance.
     pub fn reset(&mut self) {
         self.state = None;
+        self.preparation.clear();
+        self.callback_state = false;
     }
 
     /// Compute an irreducible infeasible subsystem for the resident model, reusing the
@@ -85,7 +93,12 @@ impl GurobiPersistent {
     }
 
     /// Discard any resident instance and rebuild from the current model state.
-    fn rebuild(&mut self, model: &Model, opts: &GurobiOptions) -> Result<(), SolverError> {
+    fn rebuild(
+        &mut self,
+        model: &Model,
+        prepared: &LoweringContext<'_>,
+        opts: &GurobiOptions,
+    ) -> Result<(), SolverError> {
         if model.has_active_psd_constraints() {
             return Err(SolverError::UnsupportedConstraint("PSD"));
         }
@@ -93,16 +106,18 @@ impl GurobiPersistent {
             Some(env) => env,
             None => self.env.insert(default_env()?),
         };
-        let built = build(model, opts, env)?;
+        let built = build_prepared(model, opts, env, prepared)?;
         // The fast path needs a linear snapshot and is unsafe for SC/SI variables
         // (whose Gurobi lower bound is the gap floor, not `Variable::lb`), so
         // those rebuild every solve.
-        let snap = if matches!(model.kind(), ModelKind::LP | ModelKind::MILP) && !built.has_semi {
-            Some(snapshot(model)?)
+        let snap = if matches!(prepared.kind(), ModelKind::LP | ModelKind::MILP) && !built.has_semi
+        {
+            Some(snapshot_prepared(model, prepared)?)
         } else {
             None
         };
         self.state = Some(State { built, snap });
+        self.callback_state = false;
         Ok(())
     }
 
@@ -113,13 +128,54 @@ impl GurobiPersistent {
         model: &Model,
         opts: &GurobiOptions,
     ) -> Result<SolverResult, SolverError> {
-        let kind = model.kind();
+        let kind = self.update_resident(model, opts)?;
+        let st = self.state.as_mut().expect("state present before solve");
+        run_and_collect(&mut st.built, kind, model)
+    }
+
+    fn update_resident(
+        &mut self,
+        model: &Model,
+        opts: &GurobiOptions,
+    ) -> Result<ModelKind, SolverError> {
+        if model.has_active_psd_constraints() {
+            return Err(SolverError::UnsupportedConstraint("PSD"));
+        }
+        let prepared = self.preparation.prepare(model)?;
+        let kind = prepared.kind();
+        let callback_rebuild = self.callback_state
+            && !matches!(self.preparation.change(), PreparationChange::Unchanged);
+        if !callback_rebuild
+            && let Some(st) = self.state.as_mut()
+            && st.built.refresh(&prepared, self.preparation.change())?
+        {
+            apply_options(&mut st.built.model, opts).map_err(map_gurobi_err)?;
+            st.built.model_id = model.id();
+            let row_changes = matches!(self.preparation.change(),PreparationChange::Selected(targets)
+                if targets.iter().any(|target| !matches!(target,oximo_core::ParameterTarget::Objective | oximo_core::ParameterTarget::VariableBound(_))));
+            match &st.snap {
+                Some(base) if !row_changes && matches!(kind, ModelKind::LP | ModelKind::MILP) => {
+                    if let std::borrow::Cow::Owned(snapshot) =
+                        refresh_snapshot(model, &prepared, self.preparation.change(), base)?
+                    {
+                        st.snap = Some(snapshot);
+                    }
+                }
+                _ => st.snap = None,
+            }
+            #[cfg(test)]
+            {
+                self.updates += 1;
+            }
+            return Ok(kind);
+        }
         let mut updated = false;
-        if matches!(kind, ModelKind::LP | ModelKind::MILP)
+        if !callback_rebuild
+            && matches!(kind, ModelKind::LP | ModelKind::MILP)
             && let Some(st) = self.state.as_mut()
             && let Some(base) = st.snap.as_ref()
         {
-            let snap = snapshot(model)?;
+            let snap = snapshot_prepared(model, &prepared)?;
             if snap.fingerprint == base.fingerprint {
                 push_deltas(&mut st.built, base, &snap, opts)?;
                 st.built.model_id = model.id();
@@ -129,15 +185,14 @@ impl GurobiPersistent {
             }
         }
         if !updated {
-            self.rebuild(model, opts)?;
+            self.rebuild(model, &prepared, opts)?;
         }
         #[cfg(test)]
         if updated {
             self.updates += 1;
         }
 
-        let st = self.state.as_mut().expect("state present before solve");
-        run_and_collect(&mut st.built, kind, model)
+        Ok(kind)
     }
 
     fn solve_resident_with_callback<F>(
@@ -150,28 +205,8 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
-        let kind = model.kind();
-        let mut updated = false;
-        if matches!(kind, ModelKind::LP | ModelKind::MILP)
-            && let Some(st) = self.state.as_mut()
-            && let Some(base) = st.snap.as_ref()
-        {
-            let snap = snapshot(model)?;
-            if snap.fingerprint == base.fingerprint {
-                push_deltas(&mut st.built, base, &snap, opts)?;
-                st.built.model_id = model.id();
-                st.built.parameters = snap.parameters.clone();
-                st.snap = Some(snap);
-                updated = true;
-            }
-        }
-        if !updated {
-            self.rebuild(model, opts)?;
-        }
-        #[cfg(test)]
-        if updated {
-            self.updates += 1;
-        }
+        let kind = self.update_resident(model, opts)?;
+        self.callback_state = true;
         let st = self.state.as_mut().expect("state present before solve");
         crate::translate::run_and_collect_with_callback(&mut st.built, kind, model, callback, mask)
     }
@@ -191,9 +226,13 @@ impl GurobiPersistent {
         F: Callback,
     {
         match self.solve_resident_with_callback(model, opts, callback, None) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(error) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(error)
             }
         }
@@ -215,9 +254,13 @@ impl GurobiPersistent {
         F: Callback,
     {
         match self.solve_resident_with_callback(model, opts, callback, Some(locations.into())) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(error) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(error)
             }
         }
@@ -253,9 +296,13 @@ impl Solver for GurobiPersistent {
         // stale. Drop the resident state on any error so the next solve rebuilds from
         // a clean slate, honoring the documented contract.
         match self.solve_resident(model, opts) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(e) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(e)
             }
         }
@@ -304,6 +351,52 @@ mod tests {
     use oximo_solver::{PersistentSolver, Solver};
 
     use crate::{Gurobi, GurobiOptions};
+
+    #[test]
+    fn switching_binary_to_integer_model_rebuilds_native_domain() {
+        let first = Model::new("domain");
+
+        let x = first.__var("x").domain(Domain::Binary).lb(0.0).ub(1.0).build();
+        first.__maximize(x);
+        let second = Model::new("domain");
+        let y = second.__var("x").domain(Domain::Integer).lb(0.0).ub(2.0).build();
+        second.__maximize(y);
+        let mut solver = Gurobi.persistent();
+        let opts = GurobiOptions::default();
+        assert_eq!(solver.solve(&first, &opts).unwrap().objective(), Some(1.0));
+        assert_eq!(solver.solve(&second, &opts).unwrap().objective(), Some(2.0));
+        assert_eq!(solver.updates, 0);
+    }
+
+    #[test]
+    fn replacing_nonlinear_and_range_groups_does_not_leak_auxiliaries() {
+        use gurobi_rs::attr;
+        let m = Model::new("owned groups");
+
+        param!(m, p = 1.0);
+        variable!(m,0.1<=x<=2.0);
+        constraint!(m, nonlinear, p * x.exp() <= 5.0);
+        constraint!(m,range,0.2<=p*x<=3.0);
+        objective!(m, Min, (p * x).exp());
+
+        let opts = GurobiOptions::default();
+        let mut solver = Gurobi.persistent();
+        let mut counts = None;
+        for value in [1.0, 1.2, 1.4, 1.1, 1.3, 1.0] {
+            p.set_param_value(value).unwrap();
+            let result = solver.solve(&m, &opts).unwrap();
+            let cold = Gurobi.solve(&m, &opts).unwrap();
+            assert!((result.objective().unwrap() - cold.objective().unwrap()).abs() < 1e-5);
+            let native = &solver.state.as_ref().unwrap().built.model;
+            let current = (
+                native.get_attr(attr::NumVars).unwrap(),
+                native.get_attr(attr::NumConstrs).unwrap(),
+                native.get_attr(attr::NumGenConstrs).unwrap(),
+            );
+            assert_eq!(*counts.get_or_insert(current), current, "native groups must stay bounded");
+        }
+        assert_eq!(solver.updates, 5);
+    }
 
     #[test]
     fn persistent_parameter_snapshots_refresh_on_native_reuse() {
