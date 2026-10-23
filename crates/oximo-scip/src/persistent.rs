@@ -4,27 +4,31 @@ use crate::{
     translate::Snapshot,
 };
 use oximo_core::{Model, ModelKind, SosType, VarId};
+use oximo_solver::resident::PersistentPreparation;
 use oximo_solver::{Solver, SolverError, SolverResult};
 use russcip::{Model as Native, ProblemCreated, ProblemOrSolving, Solved};
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 
 struct State {
     native: Native<Solved>,
     mapping: ScipMapping,
-    snapshot: Snapshot,
+    snapshot: Arc<Snapshot>,
     options: ScipOptions,
     shared: SharedState,
     incumbent: FxHashMap<VarId, f64>,
 }
 
 /// Reuses original SCIP problems on unchanged and append-only solves. Existing
-/// entry edits, option changes, and plugin-enabled solves rebuild. SCIP's
+/// linear coefficient edits update original rows. Other entry edits, option
+/// changes, and plugin-enabled solves rebuild. SCIP's
 /// transformed search tree and LP basis are not retained by `free_transform`.
 #[derive(Default)]
 pub struct ScipPersistent {
     solver: Scip,
     state: Option<State>,
+    preparation: PersistentPreparation,
     builds: u64,
     reuses: u64,
 }
@@ -46,6 +50,7 @@ impl ScipPersistent {
     }
     pub fn reset(&mut self) {
         self.state = None;
+        self.preparation.clear();
     }
     pub fn build_count(&self) -> u64 {
         self.builds
@@ -67,6 +72,9 @@ impl ScipPersistent {
         let result = crate::boundary(|| self.run(model, opts));
         if result.is_err() {
             self.state = None;
+            self.preparation.clear();
+        } else {
+            self.preparation.commit();
         }
         result
     }
@@ -74,10 +82,30 @@ impl ScipPersistent {
         if opts.concurrent && self.solver.factory.is_some() {
             return Err(crate::backend("concurrent solving cannot copy custom Rust plugins"));
         }
-        let snapshot = Snapshot::prepare(model)?;
+        crate::check_name(&model.name)?;
+        if model.has_active_psd_constraints() {
+            return Err(SolverError::UnsupportedConstraint("PSD"));
+        }
+        let prepared = self.preparation.prepare(model)?;
+        let snapshot = match &self.state {
+            Some(state) => state.snapshot.refresh(model, &prepared, self.preparation.change())?,
+            None => Arc::new(Snapshot::prepare_view(model, &prepared)?),
+        };
         let old = self.state.take();
+        let dense_edits = matches!(self.preparation.change(),oximo_solver::resident::PreparationChange::Selected(targets)
+            if targets.len() > snapshot.rows.len().div_ceil(8).max(16));
+
+        // On convex QP objectives, original-row coefficient mutation can make
+        // SCIP's subsequent presolve/optimization substantially slower than a
+        // cold build.
+        let coefficient_reuse =
+            !dense_edits && !matches!(snapshot.kind, ModelKind::QP | ModelKind::MIQP);
         let reusable = old.as_ref().is_some_and(|s| {
-            self.solver.factory.is_none() && s.options == *opts && snapshot.extends(&s.snapshot)
+            self.solver.factory.is_none()
+                && s.options == *opts
+                && (Arc::ptr_eq(&snapshot, &s.snapshot)
+                    || snapshot.extends(&s.snapshot)
+                    || (coefficient_reuse && snapshot.linear_edits_compatible(&s.snapshot)))
         });
         let previous = old
             .as_ref()
@@ -89,10 +117,18 @@ impl ScipPersistent {
             let mut native = s.native.free_transform();
             let mut mapping = s.mapping;
             *s.shared.borrow_mut() = Shared::default();
-            snapshot.append(&mut native, &mut mapping, Some(&s.snapshot))?;
+            if Arc::ptr_eq(&snapshot, &s.snapshot) {
+                // Identical numeric data already belongs to the resident model.
+            } else if snapshot.extends(&s.snapshot) {
+                snapshot.append(&mut native, &mut mapping, Some(&s.snapshot))?;
+            } else {
+                snapshot.update_linear_rows(&s.snapshot, &mut native, &mapping)?;
+            }
             self.reuses += 1;
             (native, mapping, s.shared)
         } else {
+            // TODO: russcip should expose safe original-problem bound/objective
+            // edits and nonlinear constraint deletion.
             drop(old);
             let (native, mapping) = snapshot.build(opts)?;
             self.builds += 1;
@@ -117,7 +153,14 @@ impl ScipPersistent {
         if let Some(error) = shared.borrow().error.as_ref() {
             return Err(crate::backend(error));
         }
-        let output = crate::result::collect(&solved, &mapping, &snapshot, model, &shared)?;
+        let output = crate::result::collect(
+            &solved,
+            &mapping,
+            &snapshot,
+            model,
+            &shared,
+            &prepared.arena().parameter_snapshot(),
+        )?;
         let incumbent = output.result.primal().cloned().unwrap_or_default();
         self.state = Some(State {
             native: solved,
@@ -194,4 +237,32 @@ fn add_start(
     }
     let _accepted = native.add_sol(sol);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximo_core::prelude::*;
+
+    #[test]
+    fn unused_parameter_updates_reuse_numeric_snapshot_and_preserve_result_snapshots() {
+        let m = Model::new("resident snapshot reuse");
+
+        param!(m, unused = 1.0);
+        variable!(m, 0.0 <= x <= 2.0);
+        objective!(m, Max, x);
+
+        let mut solver = ScipPersistent::new();
+        let opts = ScipOptions::default();
+        let first = solver.solve(&m, &opts).unwrap();
+        let snapshot = Arc::clone(&solver.state.as_ref().unwrap().snapshot);
+        for value in [2.0, 3.0] {
+            unused.set_param_value(value).unwrap();
+            let result = solver.solve(&m, &opts).unwrap();
+            assert_eq!(result.value_of(unused), Ok(Some(value)));
+            assert_eq!(first.value_of(unused), Ok(Some(1.0)));
+            assert!(Arc::ptr_eq(&snapshot, &solver.state.as_ref().unwrap().snapshot));
+        }
+        assert_eq!(solver.build_count(), 1);
+    }
 }
