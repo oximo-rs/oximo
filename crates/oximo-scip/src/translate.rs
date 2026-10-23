@@ -346,6 +346,7 @@ impl Snapshot {
                     return true;
                 }
                 a.name == b.name
+                    && a.lower <= a.upper
                     && a.lower.to_bits() == b.lower.to_bits()
                     && a.upper.to_bits() == b.upper.to_bits()
                     && a.active == b.active

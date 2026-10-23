@@ -245,6 +245,26 @@ mod tests {
     use oximo_core::prelude::*;
 
     #[test]
+    fn inverted_row_bounds_rebuild_after_coefficient_edits() {
+        let model = Model::new("inverted resident row");
+        param!(model, p = 1.0);
+        variable!(model, 0.0 <= x <= 3.0);
+        constraint!(model, inverted, 2.0 <= p * x <= 1.0);
+        objective!(model, Min, x);
+        let opts = ScipOptions::default();
+        let mut solver = ScipPersistent::new();
+
+        let first = solver.solve(&model, &opts).unwrap();
+        assert_eq!(first.termination, oximo_solver::TerminationStatus::Infeasible);
+        assert_eq!(solver.build_count(), 1);
+
+        p.set_param_value(2.0).unwrap();
+        let second = solver.solve(&model, &opts).unwrap();
+        assert_eq!(second.termination, oximo_solver::TerminationStatus::Infeasible);
+        assert_eq!(solver.build_count(), 2);
+    }
+
+    #[test]
     fn unused_parameter_updates_reuse_numeric_snapshot_and_preserve_result_snapshots() {
         let m = Model::new("resident snapshot reuse");
 
