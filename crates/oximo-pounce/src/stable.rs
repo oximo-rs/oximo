@@ -34,16 +34,29 @@ pub(crate) fn build(model: &Model) -> Result<Oracle, SolverError> {
     Ok(Rc::new(RefCell::new(HybridOracle::new(model))))
 }
 
+pub(crate) fn build_prepared(
+    model: &Model,
+    prepared: &oximo_solver::prepare::LoweringContext<'_>,
+) -> Oracle {
+    Rc::new(RefCell::new(HybridOracle::new_prepared(model, prepared)))
+}
+
 /// Reuse the resident oracle when the model's expression graph is unchanged,
 /// re-extracting the slots at the current parameter values.
-pub(crate) fn try_reuse(oracle: &Oracle, model: &Model) -> bool {
+pub(crate) fn try_reuse(
+    oracle: &Oracle,
+    arena: &oximo_expr::ExprArena,
+    change: &oximo_solver::resident::PreparationChange,
+) -> bool {
     let mut o = oracle.borrow_mut();
-    if o.matches(model) {
-        o.refresh(model);
-        true
-    } else {
-        false
+    match change {
+        oximo_solver::resident::PreparationChange::Full => return false,
+        oximo_solver::resident::PreparationChange::Selected(targets) => {
+            return o.refresh_selected(arena, targets);
+        }
+        oximo_solver::resident::PreparationChange::Unchanged => o.refresh_snapshot(arena),
     }
+    true
 }
 
 pub(crate) fn supports_resident(oracle: &Oracle) -> bool {
@@ -255,5 +268,37 @@ mod tests {
             other,
             SolverError::Backend(message) if message.starts_with("pounce builder:")
         ));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use oximo_core::prelude::*;
+    use oximo_solver::resident::PreparationChange;
+
+    #[test]
+    fn unchanged_reuse_refreshes_shared_oracle_parameters_without_reclassification() {
+        let m = Model::new("oracle snapshot");
+
+        param!(m, unused = 1.0);
+        variable!(m, x);
+        objective!(m, Min, x * x);
+
+        let oracle = build(&m).unwrap();
+        let before = oracle.borrow().parameter_snapshot().clone();
+        unused.set_param_value(2.0).unwrap();
+        param!(m, added = 3.0);
+        let arena = m.arena();
+        assert!(try_reuse(&oracle, &arena, &PreparationChange::Unchanged));
+
+        let current = arena.parameter_snapshot();
+        assert_eq!(oracle.borrow().parameter_snapshot(), &current);
+        assert_eq!(
+            oracle.borrow().parameter_snapshot().values().as_ptr(),
+            current.values().as_ptr()
+        );
+        assert_eq!(before.value(unused.param_id().unwrap()), Some(1.0));
+        assert_eq!(before.value(added.param_id().unwrap()), None);
     }
 }
