@@ -2,9 +2,10 @@ use std::time::Instant;
 
 use clarabel::solver::{DefaultSolver, IPSolver};
 use oximo_core::{Model, ModelKind};
+use oximo_solver::resident::PersistentPreparation;
 use oximo_solver::{Solver, SolverError, SolverResult};
 
-use crate::translate::{Problem, build_problem, build_settings, read_result};
+use crate::translate::{Problem, build_problem_prepared, build_settings, read_result};
 use crate::{ClarabelOptions, NAME};
 
 /// The resident Clarabel solver plus the [`Problem`] it was built from. The
@@ -45,6 +46,7 @@ struct State {
 #[derive(Default)]
 pub struct ClarabelPersistent {
     state: Option<State>,
+    preparation: PersistentPreparation,
     #[cfg(test)]
     updates: usize,
 }
@@ -67,6 +69,7 @@ impl ClarabelPersistent {
     /// [`Clarabel::solve`](crate::Clarabel).
     pub fn reset(&mut self) {
         self.state = None;
+        self.preparation.clear();
     }
 
     /// Translate the model, update the resident solver in place when the
@@ -76,8 +79,32 @@ impl ClarabelPersistent {
         model: &Model,
         opts: &ClarabelOptions,
     ) -> Result<SolverResult, SolverError> {
-        let new = build_problem(model)?;
+        if model.has_active_sos_constraints() {
+            return Err(SolverError::UnsupportedSos);
+        }
+        if model.has_active_indicator_constraints() {
+            return Err(SolverError::UnsupportedIndicator);
+        }
+        let prepared = self.preparation.prepare(model)?;
         let settings = build_settings(opts);
+
+        if let Some(state) = self.state.as_mut()
+            && let Some(delta) = state.problem.refresh(&prepared, self.preparation.change())?
+            && state.solver.update_settings(settings.clone()).is_ok()
+            && (delta.p.0.is_empty() || state.solver.update_P(&delta.p).is_ok())
+            && (delta.q.0.is_empty() || state.solver.update_q(&delta.q).is_ok())
+            && (delta.a.0.is_empty() || state.solver.update_A(&delta.a).is_ok())
+            && (delta.b.0.is_empty() || state.solver.update_b(&delta.b).is_ok())
+        {
+            #[cfg(test)]
+            {
+                self.updates += 1;
+            }
+            let started = Instant::now();
+            state.solver.solve();
+            return Ok(read_result(&state.solver, &state.problem.meta, model, started.elapsed()));
+        }
+        let new = build_problem_prepared(model, &prepared)?;
 
         // Fast path: same structure, and Clarabel accepts both the settings
         // update (no immutable setting changed) and the data update (structure
@@ -138,9 +165,13 @@ impl Solver for ClarabelPersistent {
         opts: &ClarabelOptions,
     ) -> Result<SolverResult, SolverError> {
         match self.solve_resident(model, opts) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                self.preparation.commit();
+                Ok(result)
+            }
             Err(e) => {
                 self.state = None;
+                self.preparation.clear();
                 Err(e)
             }
         }

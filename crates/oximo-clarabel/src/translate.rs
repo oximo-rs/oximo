@@ -131,9 +131,308 @@ pub(crate) struct Problem {
     pub(crate) b: Vec<f64>,
     pub(crate) cones: Vec<SupportedConeT<f64>>,
     pub(crate) meta: Meta,
+    slots: Option<UpdateSlots>,
+    bound_layout: Vec<(bool, bool, bool)>,
+    detected_layout: FxHashMap<ConstraintId, (usize, usize)>,
+}
+
+#[derive(Default)]
+struct UpdateSlots {
+    algebraic: Vec<Vec<(usize, f64)>>,
+    bounds: Vec<Vec<(usize, f64)>>,
+    bound_layout: Vec<(bool, bool, bool)>,
+    detected: FxHashMap<ConstraintId, (usize, usize)>,
+    matrix_rows: Vec<Vec<(usize, usize)>>,
+}
+
+#[derive(Default)]
+pub(crate) struct NumericUpdate {
+    pub p: (Vec<usize>, Vec<f64>),
+    pub q: (Vec<usize>, Vec<f64>),
+    pub a: (Vec<usize>, Vec<f64>),
+    pub b: (Vec<usize>, Vec<f64>),
+}
+
+fn replace_value(
+    buffer: &mut [f64],
+    updates: &mut (Vec<usize>, Vec<f64>),
+    slot: usize,
+    value: f64,
+) {
+    if buffer[slot].to_bits() != value.to_bits() {
+        buffer[slot] = value;
+        updates.0.push(slot);
+        updates.1.push(value);
+    }
+}
+
+fn bound_layout(v: &ResolvedVariable) -> (bool, bool, bool) {
+    (v.lb.is_finite(), v.ub.is_finite(), v.lb.is_finite() && v.lb.total_cmp(&v.ub).is_eq())
+}
+
+fn update_slots(
+    prepared: &LoweringContext<'_>,
+    a: &CscMatrix<f64>,
+    duals: &[Option<DualProjection<ConstraintId>>],
+    layouts: Vec<(bool, bool, bool)>,
+    detected: FxHashMap<ConstraintId, (usize, usize)>,
+) -> UpdateSlots {
+    let constraints = prepared.constraints().algebraic();
+    let mut slots = UpdateSlots {
+        algebraic: vec![Vec::new(); constraints.len()],
+        bounds: vec![Vec::new(); layouts.len()],
+        bound_layout: layouts,
+        detected,
+        matrix_rows: vec![Vec::new(); a.m],
+    };
+    for (row, projection) in duals.iter().enumerate() {
+        if let Some(p) = projection {
+            slots.algebraic[p.source.index()].push((row, -p.scale));
+        }
+    }
+    let equalities = duals
+        .iter()
+        .flatten()
+        .filter(|p| matches!(constraints[p.source.index()].as_single(), Some((Sense::Eq, _))))
+        .count();
+    let mut cursor = equalities;
+    for (index, layout) in slots.bound_layout.iter().enumerate() {
+        if layout.2 {
+            slots.bounds[index].push((cursor, 1.0));
+            cursor += 1;
+        }
+    }
+    cursor += duals.iter().filter(|p| p.is_some()).count() - equalities;
+    for (index, layout) in slots.bound_layout.iter().enumerate() {
+        if layout.2 {
+            continue;
+        }
+        if layout.1 {
+            slots.bounds[index].push((cursor, 1.0));
+            cursor += 1;
+        }
+        if layout.0 {
+            slots.bounds[index].push((cursor, -1.0));
+            cursor += 1;
+        }
+    }
+    for col in 0..a.n {
+        for slot in a.colptr[col]..a.colptr[col + 1] {
+            slots.matrix_rows[a.rowval[slot]].push((col, slot));
+        }
+    }
+    slots
 }
 
 impl Problem {
+    /// Update only the numeric slots belonging to dirty source entities.
+    #[expect(clippy::too_many_lines, reason = "one numeric update case per native source kind")]
+    pub(crate) fn refresh(
+        &mut self,
+        prepared: &LoweringContext<'_>,
+        change: &oximo_solver::resident::PreparationChange,
+    ) -> Result<Option<NumericUpdate>, SolverError> {
+        use oximo_core::ParameterTarget;
+        use oximo_solver::resident::PreparationChange;
+        if matches!(change, PreparationChange::Full) {
+            return Ok(None);
+        }
+        let mut delta = NumericUpdate::default();
+        if let PreparationChange::Selected(targets) = change {
+            if self.slots.is_none()
+                && targets.iter().any(|t| !matches!(t, ParameterTarget::Objective))
+            {
+                self.slots = Some(update_slots(
+                    prepared,
+                    &self.a_mat,
+                    &self.meta.row_duals,
+                    std::mem::take(&mut self.bound_layout),
+                    std::mem::take(&mut self.detected_layout),
+                ));
+            }
+            for target in targets {
+                match target {
+                    ParameterTarget::Objective => {
+                        let (sign, triplets, q, constant) = objective_data(prepared, self.q.len())?;
+                        let p = csc_from_triplets(self.q.len(), self.q.len(), triplets);
+                        if p.colptr != self.p_mat.colptr || p.rowval != self.p_mat.rowval {
+                            return Ok(None);
+                        }
+                        for (i, &v) in p.nzval.iter().enumerate() {
+                            replace_value(&mut self.p_mat.nzval, &mut delta.p, i, v);
+                        }
+                        for (i, &v) in q.iter().enumerate() {
+                            replace_value(&mut self.q, &mut delta.q, i, v);
+                        }
+                        self.meta.sign = sign;
+                        self.meta.obj_constant = constant;
+                    }
+                    ParameterTarget::VariableBound(id) => {
+                        let slots = self.slots.as_ref().expect("persistent slots");
+                        let v = &prepared.variables()[id.index()];
+
+                        // Detected cones may rely on bound signs for normalization.
+                        if slots.bound_layout[id.index()] != bound_layout(v)
+                            || !slots.detected.is_empty()
+                        {
+                            return Ok(None);
+                        }
+                        for &(row, scale) in &slots.bounds[id.index()] {
+                            let rhs =
+                                if bound_layout(v).2 || scale < 0.0 { scale * v.lb } else { v.ub };
+                            replace_value(&mut self.b, &mut delta.b, row, rhs);
+                        }
+                    }
+                    ParameterTarget::Algebraic(id) => {
+                        let row = &prepared.constraints().algebraic()[id.index()];
+                        let detected = self
+                            .slots
+                            .as_ref()
+                            .expect("persistent slots")
+                            .detected
+                            .get(id)
+                            .copied();
+                        if let Some((start, size)) = detected {
+                            let Some(form) = prepared.detected_soc(row) else {
+                                return Ok(None);
+                            };
+                            if !self.refresh_cone(start, size, &form, &mut delta) {
+                                return Ok(None);
+                            }
+                        } else {
+                            let Some(terms) = prepared.linear(row.lhs) else {
+                                return Ok(None);
+                            };
+                            let native = self.slots.as_ref().expect("persistent slots").algebraic
+                                [id.index()]
+                            .clone();
+                            for (slot, scale) in native {
+                                let rhs = if scale < 0.0 {
+                                    -row.lower + terms.constant
+                                } else {
+                                    row.upper - terms.constant
+                                };
+                                if !self.refresh_row(slot, &terms, scale, rhs, &mut delta) {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                    }
+                    ParameterTarget::SecondOrderCone(id) => {
+                        if !prepared.constraints().second_order_cones()[id.index()].active {
+                            continue;
+                        }
+                        let Some(block) =
+                            self.meta.explicit_soc_ids.iter().position(|source| source == id)
+                        else {
+                            return Ok(None);
+                        };
+                        let form = prepared.explicit_soc(
+                            &prepared.constraints().second_order_cones()[id.index()],
+                        )?;
+                        let start = self.meta.soc_block_starts[block];
+                        let Some(size) = self
+                            .cones
+                            .iter()
+                            .filter_map(|cone| match cone {
+                                SupportedConeT::SecondOrderConeT(n) => Some(*n),
+                                _ => None,
+                            })
+                            .nth(block)
+                        else {
+                            return Ok(None);
+                        };
+                        if !self.refresh_cone(start, size, &form, &mut delta) {
+                            return Ok(None);
+                        }
+                    }
+                    ParameterTarget::PositiveSemidefinite(id) => {
+                        if !prepared.constraints().positive_semidefinite()[id.index()].active {
+                            continue;
+                        }
+                        let Some(&(_, start, side)) =
+                            self.meta.psd_blocks.iter().find(|(source, _, _)| source == id)
+                        else {
+                            return Ok(None);
+                        };
+                        let matrix = prepared.explicit_psd(
+                            &prepared.constraints().positive_semidefinite()[id.index()],
+                        )?;
+                        if matrix.side_dimension() != side {
+                            return Ok(None);
+                        }
+
+                        // Upper-column svec uses sqrt(2) on off-diagonal entries.
+                        let mut k = 0;
+                        for col in 0..side {
+                            for row in 0..=col {
+                                let scale = if row == col { 1.0 } else { 2.0_f64.sqrt() };
+                                let entry = &matrix.upper_triangle()[k];
+                                if !self.refresh_row(
+                                    start + k,
+                                    entry,
+                                    -scale,
+                                    scale * entry.constant,
+                                    &mut delta,
+                                ) {
+                                    return Ok(None);
+                                }
+                                k += 1;
+                            }
+                        }
+                    }
+                    _ => return Ok(None),
+                }
+            }
+        }
+        self.meta.parameters = prepared.arena().parameter_snapshot();
+        Ok(Some(delta))
+    }
+
+    fn refresh_cone(
+        &mut self,
+        start: usize,
+        size: usize,
+        form: &SocForm,
+        delta: &mut NumericUpdate,
+    ) -> bool {
+        if size != form.terms.len() + 1 {
+            return false;
+        }
+        for (i, terms) in std::iter::once(&form.bound).chain(form.terms.iter()).enumerate() {
+            if !self.refresh_row(start + i, terms, -1.0, terms.constant, delta) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn refresh_row(
+        &mut self,
+        row: usize,
+        terms: &LinearTerms<'_>,
+        scale: f64,
+        rhs: f64,
+        delta: &mut NumericUpdate,
+    ) -> bool {
+        let slots = &self.slots.as_ref().expect("persistent slots").matrix_rows[row];
+        let mut desired =
+            terms.coeffs.iter().map(|(v, c)| (v.index(), scale * c)).collect::<Vec<_>>();
+        desired.sort_unstable_by_key(|(col, _)| *col);
+        // Extraction canonicalizes duplicate variable coefficients, 
+        // so CSC support must remain identical.
+        if slots.len() != desired.len()
+            || slots.iter().zip(&desired).any(|((col, _), (other, _))| col != other)
+        {
+            return false;
+        }
+        for ((_, slot), (_, value)) in slots.iter().zip(desired) {
+            replace_value(&mut self.a_mat.nzval, &mut delta.a, *slot, value);
+        }
+        replace_value(&mut self.b, &mut delta.b, row, rhs);
+        true
+    }
+
     /// True when `other` shares this problem's dimensions, cone layout, and
     /// `P`/`A` sparsity patterns.
     pub(crate) fn same_structure(&self, other: &Problem) -> bool {
@@ -209,6 +508,33 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
         ));
     }
     let prepared = LoweringContext::new(model)?;
+    build_problem_prepared_with(model, &prepared, parallel, false)
+}
+
+pub(crate) fn build_problem_prepared(
+    model: &Model,
+    prepared: &LoweringContext<'_>,
+) -> Result<Problem, SolverError> {
+    if model.has_active_sos_constraints() {
+        return Err(SolverError::UnsupportedSos);
+    }
+    if model.has_active_indicator_constraints() {
+        return Err(SolverError::UnsupportedIndicator);
+    }
+    if model.has_active_psd_constraints() && !cfg!(feature = "sdp") {
+        return Err(SolverError::UnsupportedConstraint(
+            "PSD (enable a clarabel-sdp BLAS provider feature)",
+        ));
+    }
+    build_problem_prepared_with(model, prepared, None, true)
+}
+
+fn build_problem_prepared_with(
+    _model: &Model,
+    prepared: &LoweringContext<'_>,
+    parallel: Option<bool>,
+    retain_slots: bool,
+) -> Result<Problem, SolverError> {
     let kind = prepared.kind();
     if !crate::supported(kind) {
         return Err(SolverError::UnsupportedKind(kind));
@@ -217,14 +543,14 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     reject_semi_domains(vars)?;
     let n = vars.len();
 
-    let (sign, p_trip, q, obj_constant) = objective_data(&prepared, n)?;
-    let rows = classify_rows(&prepared, parallel)?;
+    let (sign, p_trip, q, obj_constant) = objective_data(prepared, n)?;
+    let rows = classify_rows(prepared, parallel)?;
     let socs = prepared.constraints().second_order_cones();
     let direct = parallel.is_none().then(|| direct_soc_capacity(prepared.arena(), socs)).flatten();
     let explicit_forms =
-        if direct.is_some() { Vec::new() } else { explicit_soc_forms(&prepared, socs, parallel)? };
+        if direct.is_some() { Vec::new() } else { explicit_soc_forms(prepared, socs, parallel)? };
     let (mut row_capacity, mut nonzero_capacity, mut soc_capacity) =
-        translation_capacities(&prepared, &rows, &explicit_forms);
+        translation_capacities(prepared, &rows, &explicit_forms);
     if let Some((row_count, nonzeros, cones)) = direct {
         row_capacity += row_count;
         nonzero_capacity += nonzeros;
@@ -232,7 +558,7 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     }
 
     let acc = Rows::with_capacity(row_capacity, nonzero_capacity);
-    let (mut acc, m_zero, m_nonneg) = linear_rows(&prepared, &rows, acc);
+    let (mut acc, m_zero, m_nonneg) = linear_rows(prepared, &rows, acc);
     let (soc_sizes, soc_block_starts, n_explicit) = soc_blocks(
         &rows,
         &explicit_forms,
@@ -267,12 +593,32 @@ fn build_problem_with(model: &Model, parallel: Option<bool>) -> Result<Problem, 
     let m = b.len();
     let a_mat = csc_from_triplets(m, n, a_trip);
     let p_mat = csc_from_triplets(n, n, p_trip);
+    let mut detected_layout = FxHashMap::default();
+    if retain_slots {
+        let mut block = n_explicit;
+        for (index, row) in rows.iter().enumerate() {
+            if let Row::Soc(form) = row {
+                detected_layout.insert(
+                    ConstraintId(u32::try_from(index).expect("row ID")),
+                    (soc_block_starts[block], form.terms.len() + 1),
+                );
+                block += 1;
+            }
+        }
+    }
     let problem = Problem {
         p_mat,
         q,
         a_mat,
         b,
         cones,
+        slots: None,
+        bound_layout: if retain_slots {
+            prepared.variables().iter().map(bound_layout).collect()
+        } else {
+            Vec::new()
+        },
+        detected_layout,
         meta: Meta {
             num_variables: n,
             sign,
@@ -1487,5 +1833,26 @@ mod tests {
         let res = solve(&m, &ClarabelOptions::default().threads(2)).unwrap();
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!(close(res.objective().unwrap(), 11.0, 1e-6));
+    }
+    #[test]
+    fn refresh_rebuilds_for_a_missing_active_soc_mapping() {
+        use oximo_core::prelude::*;
+        use oximo_solver::resident::PreparationChange;
+        let m = Model::new("missing active SOC mapping");
+
+        param!(m, p = 1.0);
+        variable!(m, -2.0 <= x <= 2.0);
+        param!(m, radius = 3.0);
+        soc_constraint!(m, cone, [p * x] <= radius);
+        objective!(m, Max, x);
+
+        let prepared = LoweringContext::new(&m).unwrap();
+        let change = PreparationChange::Selected(
+            vec![oximo_core::ParameterTarget::SecondOrderCone(oximo_core::SocConstraintId(0))]
+                .into(),
+        );
+        let mut problem = build_problem_prepared(&m, &prepared).unwrap();
+        problem.meta.explicit_soc_ids.clear();
+        assert!(problem.refresh(&prepared, &change).unwrap().is_none());
     }
 }
