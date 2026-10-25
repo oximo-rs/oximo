@@ -907,25 +907,28 @@ fn str_value(opts: &PounceOptions, sought: &str) -> Option<String> {
 
 fn validate_convex_options(opts: &PounceOptions) -> Result<(), SolverError> {
     for (name, value) in &opts.extra {
-        let expected =
-            if matches!(name.as_str(), "qp_tau" | "qp_tau_max" | "qp_reg" | "qp_infeas_tol") {
-                Some("number")
-            } else if name == "qp_gondzio_corr" {
-                Some("integer")
-            } else if matches!(
-                name.as_str(),
-                "qp_hsde" | "qp_equilibrate" | "qp_crossover" | "qp_presolve"
-            ) {
-                Some("boolean")
-            } else {
-                None
-            };
+        let normalized = name.to_ascii_lowercase();
+        let expected = if matches!(
+            normalized.as_str(),
+            "qp_tau" | "qp_tau_max" | "qp_reg" | "qp_infeas_tol"
+        ) {
+            Some("number")
+        } else if normalized == "qp_gondzio_corr" {
+            Some("integer")
+        } else if matches!(
+            normalized.as_str(),
+            "qp_hsde" | "qp_equilibrate" | "qp_crossover" | "qp_presolve"
+        ) {
+            Some("boolean")
+        } else {
+            None
+        };
         let valid = match expected {
             Some("number") => matches!(value, PounceOptionValue::Num(_)),
             Some("integer") => matches!(value, PounceOptionValue::Int(_)),
             Some("boolean") => {
                 matches!(value, PounceOptionValue::Bool(_))
-                    || matches!(value, PounceOptionValue::Str(v) if matches!(v.as_str(), "yes" | "no" | "true" | "false" | "on" | "off"))
+                    || matches!(value, PounceOptionValue::Str(v) if ["yes", "no", "true", "false", "on", "off"].iter().any(|text| v.eq_ignore_ascii_case(text)))
             }
             _ => true,
         };
@@ -1214,6 +1217,55 @@ mod tests {
             validate_convex_options(&PounceOptions::default().set("qp_gondzio_corr", -1)).is_err()
         );
         validate_convex_options(&opts).unwrap();
+    }
+
+    #[test]
+    fn convex_option_names_ignore_case_when_validating_value_types() {
+        for (name, valid, invalid) in [
+            ("qp_tau", PounceOptionValue::Num(0.2), PounceOptionValue::Bool(true)),
+            ("qp_tau_max", PounceOptionValue::Num(0.8), PounceOptionValue::Int(1)),
+            ("qp_reg", PounceOptionValue::Num(1e-9), PounceOptionValue::from("1e-9")),
+            ("qp_infeas_tol", PounceOptionValue::Num(1e-6), PounceOptionValue::Bool(false)),
+            ("qp_gondzio_corr", PounceOptionValue::Int(3), PounceOptionValue::Num(3.0)),
+            ("qp_hsde", PounceOptionValue::Bool(true), PounceOptionValue::Int(1)),
+            ("qp_equilibrate", PounceOptionValue::Bool(false), PounceOptionValue::Num(0.0)),
+            ("qp_crossover", PounceOptionValue::Bool(true), PounceOptionValue::from("invalid")),
+            ("qp_presolve", PounceOptionValue::Bool(false), PounceOptionValue::Int(0)),
+        ] {
+            for name in [name.to_owned(), name.to_ascii_uppercase(), name.replacen("qp", "Qp", 1)] {
+                validate_convex_options(&PounceOptions::default().set(&name, valid.clone()))
+                    .unwrap();
+                assert!(
+                    validate_convex_options(&PounceOptions::default().set(&name, invalid.clone()))
+                        .is_err(),
+                    "{name} accepted {invalid:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn convex_boolean_strings_ignore_case() {
+        for name in ["qp_hsde", "qp_equilibrate", "qp_crossover", "qp_presolve"] {
+            for (value, expected) in [
+                ("yes", true),
+                ("true", true),
+                ("on", true),
+                ("no", false),
+                ("false", false),
+                ("off", false),
+            ] {
+                for value in [
+                    value.to_owned(),
+                    value.to_ascii_uppercase(),
+                    format!("{}{}", value[..1].to_ascii_uppercase(), &value[1..]),
+                ] {
+                    let opts = PounceOptions::default().set(name, value.as_str());
+                    validate_convex_options(&opts).unwrap();
+                    assert_eq!(bool_value(&opts, name), Some(expected));
+                }
+            }
+        }
     }
 
     #[test]

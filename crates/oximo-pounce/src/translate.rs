@@ -202,10 +202,10 @@ pub(crate) fn run_nlp_retries_after(
 fn effective_mu_is_adaptive(opts: &PounceOptions) -> bool {
     let mut adaptive = opts.mu_strategy == Some(crate::options::MuStrategy::Adaptive);
     for (name, value) in &opts.extra {
-        if name == "mu_strategy"
+        if name.eq_ignore_ascii_case("mu_strategy")
             && let PounceOptionValue::Str(value) = value
         {
-            adaptive = value == "adaptive";
+            adaptive = value.eq_ignore_ascii_case("adaptive");
         }
     }
     adaptive
@@ -543,7 +543,7 @@ fn set_bool(list: &mut OptionsList, name: &str, v: bool) -> Result<(), SolverErr
 
 pub(crate) fn convex_only_option(name: &str) -> bool {
     matches!(
-        name,
+        name.to_ascii_lowercase().as_str(),
         "qp_presolve"
             | "qp_tau"
             | "qp_tau_max"
@@ -653,6 +653,18 @@ mod retry_tests {
             .mu_strategy(MuStrategy::Monotone)
             .set("mu_strategy", "adaptive");
         assert!(effective_mu_is_adaptive(&adaptive));
+    }
+
+    #[test]
+    fn raw_mu_strategy_ignores_case_and_keeps_last_override() {
+        let adaptive = PounceOptions::default()
+            .mu_strategy(MuStrategy::Monotone)
+            .set("MU_STRATEGY", "AdApTiVe");
+        assert!(effective_mu_is_adaptive(&adaptive));
+
+        let monotone = adaptive.set("Mu_Strategy", "MONOTONE");
+        assert!(!effective_mu_is_adaptive(&monotone));
+        assert!(effective_mu_is_adaptive(&monotone.set("mu_strategy", "ADAPTIVE")));
     }
 
     #[test]
@@ -785,9 +797,12 @@ mod retry_tests {
             "qp_gondzio_corr",
         ] {
             assert!(convex_only_option(name), "{name}");
+            assert!(convex_only_option(&name.to_ascii_uppercase()), "{name}");
+            assert!(convex_only_option(&name.replacen("qp", "Qp", 1)), "{name}");
         }
         for name in ["solver_selection", "feral_infeasibility_scaling_retry", "sqp_qp_max_iter"] {
             assert!(!convex_only_option(name), "{name}");
+            assert!(!convex_only_option(&name.to_ascii_uppercase()), "{name}");
         }
     }
 
