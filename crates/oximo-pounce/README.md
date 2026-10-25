@@ -90,6 +90,44 @@ model to choose an engine. Forced convex routes and automatic routing with
 explicit SOC constraints retain the convexity checks needed for compatibility;
 forced NLP and LP routes use structural checks.
 
+## Multiple local optima
+
+`Pounce.solve` runs POUNCE's shared search driver when `PounceOptions::minima`
+is set to `Some(PounceMinimaOptions)`:
+
+```rust
+# #[cfg(not(feature = "enzyme"))]
+# {
+use oximo_core::{Model, objective, variable};
+use oximo_pounce::{Pounce, PounceMinimaMethod, PounceMinimaOptions, PounceOptions};
+use oximo_solver::Solver;
+
+let model = Model::new("two wells");
+
+variable!(model, -2.0 <= x <= 2.0, initial = -1.5);
+objective!(model, Min, (x.powi(2) - 1.0).powi(2) + 0.2 * x);
+
+let search = PounceMinimaOptions {
+    method: PounceMinimaMethod::Multistart,
+    n_minima: 2,
+    max_solves: Some(40),
+    seed: 0,
+    ..Default::default()
+};
+
+let found = Pounce.solve(&model, &PounceOptions::default().minima(search))?;
+for minimum in &found.solutions {
+    println!("x = {:?}, objective = {:?}", minimum.value_of(x)?, minimum.objective);
+}
+# }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The ordinary `SolverResult` contains all optima in `solutions`, ranked best first
+in the model's objective sense. Constraint duals and reduced costs describe solution zero.
+Persistent handles accept the same minima options. Each search clears resident
+state and starts a fresh search. Subsequent single solves rebuild their resident
+state.
 
 ## Licensing
 

@@ -243,6 +243,15 @@ fn typed_options_still_solve() {
         .barrier_tol_factor(10.0)
         .quality_function_max_section_steps(8)
         .feral_scaling("mc64")
+        .feral_ordering_preprocess("none")
+        .partitioned_structure("declared")
+        .kkt_block_detect("no")
+        .kkt_block_min_size(256)
+        .kkt_block_restoration("yes")
+        .block_structure_file("")
+        .objective_noise_wolfe(true)
+        .solve_quality_audit(true)
+        .square_system_recovery(true)
         .presolve(false);
 
     let res = Pounce.solve(&m, &opts).unwrap();

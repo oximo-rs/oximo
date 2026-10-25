@@ -5,7 +5,7 @@
 //! solve through [`run`], so warm starts, option handling, statistics, and log
 //! capture behave identically regardless of where derivatives come from.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::rc::Rc;
 
@@ -22,7 +22,8 @@ use pounce_rs::{
 
 use crate::options::{PounceAlgorithm, PounceOptions};
 use crate::translate::{
-    Outcome, Prepared, WarmStart, apply_options, map_status, selected_algorithm, set_str,
+    Outcome, POUNCE_INFINITY, Prepared, WarmStart, apply_options, map_status, selected_algorithm,
+    set_str,
 };
 
 /// A derivative source for [`OximoTnlp`].
@@ -371,11 +372,18 @@ fn session_outcome<O: DerivativeOracle>(
 
 /// The Ipopt-style end-of-solve report off the application's statistics
 /// (values are in POUNCE's minimization sense).
+pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnStatus) -> String {
+    let mut log = format_statistics(stats);
+    let _ = writeln!(log, "\nEXIT: {status:?}");
+
+    log
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the backend log intentionally mirrors POUNCE's complete end-of-solve report"
 )]
-pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnStatus) -> String {
+pub(crate) fn format_statistics(stats: &SolveStatistics) -> String {
     let mut log = String::new();
     let _ = writeln!(log, "Number of Iterations....: {}", stats.iteration_count);
     let _ =
@@ -455,7 +463,7 @@ pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnS
         for row in &stats.iterations {
             let _ = writeln!(
                 log,
-                "iter={} obj={:.9e} inf_pr={:.3e} inf_du={:.3e} mu={:.3e} alpha_pr={:.3e} alpha_du={:.3e} resto={}",
+                "iter={} obj={:.9e} inf_pr={:.3e} inf_du={:.3e} mu={:.3e} alpha_pr={:.3e} alpha_du={:.3e} resto={} inf_pr_internal={:.3e}",
                 row.iter,
                 row.objective,
                 row.inf_pr,
@@ -463,7 +471,8 @@ pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnS
                 row.mu,
                 row.alpha_primal,
                 row.alpha_dual,
-                row.alpha_primal_char == 'r'
+                row.phase == pounce_rs::IterPhase::Restoration,
+                row.inf_pr_internal
             );
         }
     }
@@ -477,7 +486,11 @@ pub(crate) fn format_raw_log(stats: &SolveStatistics, status: ApplicationReturnS
         "Total seconds (wallclock)                            = {:.3}",
         stats.total_wallclock_time_secs
     );
-    let _ = writeln!(log, "\nEXIT: {status:?}");
+
+    for warning in &stats.warnings {
+        let _ = writeln!(log, "WARNING: {warning}");
+    }
+
     log
 }
 
@@ -491,7 +504,7 @@ struct Captured {
 
 /// POUNCE `TNLP` backed by a shared derivative oracle.
 /// `sign` is `-1.0` for a Maximize model.
-struct OximoTnlp<O> {
+pub(crate) struct OximoTnlp<O> {
     oracle: Rc<RefCell<O>>,
     sign: f64,
     x_l: Vec<f64>,
@@ -502,10 +515,19 @@ struct OximoTnlp<O> {
     warm: Option<WarmStart>,
     fbbt_constraints: Vec<Option<FbbtTape>>,
     captured: Option<Captured>,
+    search_curvature: Option<Rc<SearchCurvature>>,
+}
+
+/// Distinguish local-solver Hessian evaluations from the search driver's
+/// objective-only curvature probes.
+#[derive(Debug, Default)]
+pub(crate) struct SearchCurvature {
+    pub local_solve: Cell<bool>,
+    pub skipped: Cell<bool>,
 }
 
 impl<O> OximoTnlp<O> {
-    fn new(oracle: Rc<RefCell<O>>, prep: &Prepared, warm: Option<WarmStart>) -> Self {
+    pub(crate) fn new(oracle: Rc<RefCell<O>>, prep: &Prepared, warm: Option<WarmStart>) -> Self {
         Self {
             oracle,
             sign: prep.sign,
@@ -517,7 +539,21 @@ impl<O> OximoTnlp<O> {
             warm,
             fbbt_constraints: Vec::new(),
             captured: None,
+            search_curvature: None,
         }
+    }
+
+    pub(crate) fn with_search_curvature(mut self, curvature: Rc<SearchCurvature>) -> Self {
+        self.search_curvature = Some(curvature);
+
+        self
+    }
+
+    fn near_variable_bound(&self, x: &[f64]) -> bool {
+        x.iter().zip(&self.x_l).zip(&self.x_u).any(|((&value, &lower), &upper)| {
+            let near = |bound: f64| (value - bound).abs() <= 1e-6 * bound.abs().max(1.0);
+            (lower > -POUNCE_INFINITY && near(lower)) || (upper < POUNCE_INFINITY && near(upper))
+        })
     }
 
     fn refresh(&mut self, prep: &Prepared) {
@@ -624,6 +660,16 @@ impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
         if !self.oracle.borrow().has_exact_hessian() {
             return false;
         }
+
+        if let Some(curvature) = &self.search_curvature
+            && !curvature.local_solve.get()
+            && (!self.g_l.is_empty() || x.is_some_and(|x| self.near_variable_bound(x)))
+        {
+            // Local solves still receive the exact Hessian, including at active bounds.
+            curvature.skipped.set(true);
+            return false;
+        }
+
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
                 let e = self.oracle.borrow();
@@ -658,6 +704,102 @@ impl<O: DerivativeOracle> TNLP for OximoTnlp<O> {
             reduced,
             obj: sol.obj_value,
         });
+    }
+}
+
+#[cfg(test)]
+mod search_curvature_tests {
+    use super::*;
+    use oximo_core::{objective, variable};
+    use oximo_solver::prepare::LoweringContext;
+
+    #[cfg(feature = "enzyme")]
+    use crate::exact as backend;
+    #[cfg(not(feature = "enzyme"))]
+    use crate::stable as backend;
+
+    #[test]
+    fn interior_curvature_and_exact_local_hessians_are_preserved() {
+        let model = Model::new("curvature probes");
+
+        variable!(model, -2.0 <= x <= 2.0);
+        objective!(model, Min, -x.powi(2));
+        let prepared = LoweringContext::new(&model).unwrap();
+        let prep = crate::translate::setup_prepared(&prepared, &PounceOptions::default()).unwrap();
+        let curvature = Rc::new(SearchCurvature::default());
+        let mut problem = OximoTnlp::new(backend::build(&model).unwrap(), &prep, None)
+            .with_search_curvature(Rc::clone(&curvature));
+
+        let mut values = [42.0];
+        assert!(problem.eval_h(
+            Some(&[0.0]),
+            true,
+            1.0,
+            Some(&[]),
+            true,
+            SparsityRequest::Values { values: &mut values },
+        ));
+        assert!((values[0] + 2.0).abs() < 1e-12);
+        assert!(!curvature.skipped.get());
+
+        values.fill(42.0);
+        assert!(!problem.eval_h(
+            Some(&[2.0]),
+            true,
+            1.0,
+            Some(&[]),
+            true,
+            SparsityRequest::Values { values: &mut values },
+        ));
+        assert!((values[0] - 42.0).abs() < 1e-12);
+        assert!(curvature.skipped.get());
+
+        curvature.local_solve.set(true);
+        assert!(problem.eval_h(
+            Some(&[2.0]),
+            true,
+            1.0,
+            Some(&[]),
+            true,
+            SparsityRequest::Values { values: &mut values },
+        ));
+        assert!((values[0] + 2.0).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn logs_use_the_iteration_phase_and_preserve_quality_warnings() {
+        let stats = SolveStatistics {
+            iterations: vec![
+                pounce_rs::IterRecord {
+                    iter: 1,
+                    alpha_primal_char: 'r',
+                    phase: pounce_rs::IterPhase::Main,
+                    ..Default::default()
+                },
+                pounce_rs::IterRecord {
+                    iter: 2,
+                    alpha_primal_char: 'f',
+                    phase: pounce_rs::IterPhase::Restoration,
+                    inf_pr_internal: 0.125,
+                    ..Default::default()
+                },
+            ],
+            warnings: vec!["objective_scale_small: objective needs rescaling".into()],
+            ..Default::default()
+        };
+        let log = format_raw_log(&stats, ApplicationReturnStatus::SolvedToAcceptableLevel);
+        let main = log.lines().find(|line| line.starts_with("iter=1 ")).unwrap();
+        let restoration = log.lines().find(|line| line.starts_with("iter=2 ")).unwrap();
+        assert!(main.contains("resto=false"));
+        assert!(restoration.contains("resto=true"));
+        assert!(restoration.contains("inf_pr_internal=1.250e-1"));
+        assert!(log.contains("WARNING: objective_scale_small: objective needs rescaling"));
+        assert!(log.contains("EXIT: SolvedToAcceptableLevel"));
     }
 }
 

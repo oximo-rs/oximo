@@ -3,6 +3,7 @@
 
 mod convex;
 mod fbbt;
+mod minima;
 mod options;
 mod persistent;
 mod tnlp;
@@ -19,6 +20,7 @@ mod stable;
 #[doc(hidden)]
 pub use hybrid::benchmark_support;
 
+pub use minima::{PounceMinimaMethod, PounceMinimaOptions};
 pub use options::{
     MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection,
 };
