@@ -18,6 +18,30 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-5 * a.abs().max(b.abs()).max(1.0)
 }
 
+#[test]
+fn multiple_minima_are_available_through_the_facade() {
+    let model = Model::new("facade minima");
+
+    variable!(model, -2.0 <= x <= 2.0, initial = -1.5);
+    objective!(model, Min, (x.powi(2) - 1.0).powi(2));
+
+    let search = PounceMinimaOptions {
+        method: PounceMinimaMethod::Multistart,
+        n_minima: 2,
+        max_solves: Some(40),
+        ..Default::default()
+    };
+    let result: SolverResult =
+        Pounce.solve(&model, &PounceOptions::default().minima(search)).unwrap();
+
+    assert_eq!(result.termination, TerminationStatus::SolutionLimit);
+    assert_eq!(result.solutions.len(), 2);
+
+    for minimum in result.solutions {
+        assert!((minimum.value_of(x).unwrap().unwrap().abs() - 1.0).abs() < 1e-5);
+    }
+}
+
 /// Hock-Schittkowski 071:
 /// min x1 x4 (x1 + x2 + x3) + x3 s.t. x1 x2 x3 x4 >= 25,
 /// x1^2 + x2^2 + x3^2 + x4^2 == 40, 1 <= x <= 5.

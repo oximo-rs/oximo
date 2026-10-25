@@ -93,6 +93,10 @@ pub(crate) fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    if let Some(search) = &opts.minima {
+        return crate::minima::solve(model, opts, search);
+    }
+
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
@@ -323,27 +327,27 @@ pub(crate) fn setup_prepared(
 /// Resolve the NLP algorithm after raw options (which apply last).
 pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm, SolverError> {
     let mut algorithm = opts.algorithm.unwrap_or_default();
+
     for (name, value) in &opts.extra {
-        match (name.as_str(), value) {
-            ("algorithm", PounceOptionValue::Str(value)) => {
-                algorithm = match value.as_str() {
-                    "interior-point" => PounceAlgorithm::InteriorPoint,
-                    "active-set-sqp" => PounceAlgorithm::ActiveSetSqp,
-                    other => {
-                        return Err(SolverError::Backend(format!(
-                            "pounce algorithm `{other}` is unsupported; use `interior-point` or `active-set-sqp`"
-                        )));
-                    }
-                };
-            }
-            ("algorithm", _) => {
+        if name.eq_ignore_ascii_case("algorithm") {
+            let PounceOptionValue::Str(value) = value else {
                 return Err(SolverError::Backend(
                     "pounce option `algorithm` must be a string".into(),
                 ));
-            }
-            _ => {}
+            };
+
+            algorithm = match value.to_ascii_lowercase().as_str() {
+                "interior-point" => PounceAlgorithm::InteriorPoint,
+                "active-set-sqp" => PounceAlgorithm::ActiveSetSqp,
+                _ => {
+                    return Err(SolverError::Backend(format!(
+                        "pounce algorithm `{value}` is unsupported; use `interior-point` or `active-set-sqp`"
+                    )));
+                }
+            };
         }
     }
+
     Ok(algorithm)
 }
 
@@ -351,7 +355,7 @@ pub(crate) fn selected_algorithm(opts: &PounceOptions) -> Result<PounceAlgorithm
 pub(crate) fn selected_solver(opts: &PounceOptions) -> Result<PounceSolverSelection, SolverError> {
     let mut selection = opts.solver_selection.unwrap_or_default();
     for (name, value) in &opts.extra {
-        if name == "solver_selection" {
+        if name.eq_ignore_ascii_case("solver_selection") {
             let PounceOptionValue::Str(value) = value else {
                 return Err(SolverError::Backend(
                     "pounce option `solver_selection` must be a string".into(),
@@ -712,11 +716,25 @@ mod retry_tests {
         assert_eq!(selected_algorithm(&options).unwrap(), PounceAlgorithm::InteriorPoint);
         assert_eq!(selected_solver(&options).unwrap(), PounceSolverSelection::QpActiveSet);
 
+        let mixed_case = PounceOptions::default()
+            .algorithm(PounceAlgorithm::ActiveSetSqp)
+            .solver_selection(PounceSolverSelection::QpIpm)
+            .set("ALGORITHM", "ACTIVE-SET-SQP")
+            .set("SOLVER_SELECTION", "QP-ACTIVE-SET")
+            .set("AlGoRiThM", "InTeRiOr-PoInT")
+            .set("SoLvEr_SeLeCtIoN", "nLp");
+        assert_eq!(selected_algorithm(&mixed_case).unwrap(), PounceAlgorithm::InteriorPoint);
+        assert_eq!(selected_solver(&mixed_case).unwrap(), PounceSolverSelection::Nlp);
+
         for options in [
             PounceOptions::default().set("algorithm", "invalid"),
             PounceOptions::default().set("algorithm", true),
             PounceOptions::default().set("solver_selection", "invalid"),
             PounceOptions::default().set("solver_selection", true),
+            PounceOptions::default().set("ALGORITHM", "INVALID"),
+            PounceOptions::default().set("AlGoRiThM", true),
+            PounceOptions::default().set("SOLVER_SELECTION", "INVALID"),
+            PounceOptions::default().set("SoLvEr_SeLeCtIoN", true),
         ] {
             assert!(matches!(
                 selected_algorithm(&options).and_then(|_| selected_solver(&options)),

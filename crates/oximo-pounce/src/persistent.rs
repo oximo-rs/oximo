@@ -56,6 +56,8 @@ struct CachedValidation {
 /// Also, the solve is warm-started from the previous iterate.
 /// Any structural change rebuilds.
 ///
+/// Multiple-minima search runs a fresh search and clears resident state.
+///
 /// A failed solve clears the resident state. The next call rebuilds from scratch.
 #[derive(Default)]
 pub struct PouncePersistent {
@@ -304,6 +306,12 @@ impl Solver for PouncePersistent {
     }
 
     fn solve(&mut self, model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+        if opts.minima.is_some() {
+            self.reset();
+
+            return crate::translate::solve(model, opts);
+        }
+
         match self.solve_resident(model, opts) {
             Ok(result) => {
                 self.preparation.commit();

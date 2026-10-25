@@ -1,3 +1,4 @@
+use crate::PounceMinimaOptions;
 use oximo_core::ModelKind;
 use oximo_solver::{HasUniversal, UniversalOptions};
 
@@ -15,9 +16,15 @@ use oximo_solver::{HasUniversal, UniversalOptions};
 ///     `verbose` -> `print_level` 5 (else 0) and captures the iteration log
 ///     into [`SolverResult::raw_log`](oximo_solver::SolverResult::raw_log),
 ///     `threads` is ignored.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct PounceOptions {
     pub universal: UniversalOptions,
+
+    /// Search for distinct local optima instead of performing a single solve.
+    /// Results are ranked best first in `SolverResult::solutions`.
+    /// `None` selects a single solve.
+    pub minima: Option<PounceMinimaOptions>,
+
     /// Desired convergence tolerance (`tol`).
     pub tol: Option<f64>,
     /// Iteration limit (`max_iter`).
@@ -40,6 +47,88 @@ pub struct PounceOptions {
     bool_opts: Vec<(&'static str, bool)>,
     /// Escape hatch: raw POUNCE options applied last.
     pub extra: Vec<(String, PounceOptionValue)>,
+}
+
+// MinimaOptions does not implement PartialEq.
+// Here we destructure all fields so an upstream addition cannot escape option-cache comparisons.
+macro_rules! minima_options_equal {
+    ($left:expr, $right:expr, $($field:ident),+ $(,)?) => {{
+        let PounceMinimaOptions { $($field: _),+ } = $left;
+
+        $( $left.$field == $right.$field )&&+
+    }};
+}
+
+impl PartialEq for PounceOptions {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            universal,
+            minima,
+            tol,
+            max_iter,
+            print_level,
+            mu_strategy,
+            algorithm,
+            solver_selection,
+            num_opts,
+            int_opts,
+            str_opts,
+            bool_opts,
+            extra,
+        } = self;
+
+        let same_minima = match (minima, &other.minima) {
+            (None, None) => true,
+            (Some(left), Some(right)) => minima_options_equal!(
+                left,
+                right,
+                method,
+                n_minima,
+                max_solves,
+                patience,
+                dedup,
+                psd_tol,
+                kkt_tol,
+                seed,
+                sobol,
+                sigma,
+                sigma_frac,
+                amplitude,
+                amp_margin,
+                eta,
+                power,
+                soft,
+                length,
+                length_frac,
+                gamma,
+                samples_per_round,
+                step,
+                temperature,
+                restart_jitter,
+                sigma_per_dim,
+                length_per_dim,
+                max_samples,
+                amp_bump,
+                amp_bump_cap,
+                amp_fallback,
+            ),
+            _ => false,
+        };
+
+        same_minima
+            && universal == &other.universal
+            && tol == &other.tol
+            && max_iter == &other.max_iter
+            && print_level == &other.print_level
+            && mu_strategy == &other.mu_strategy
+            && algorithm == &other.algorithm
+            && solver_selection == &other.solver_selection
+            && num_opts == &other.num_opts
+            && int_opts == &other.int_opts
+            && str_opts == &other.str_opts
+            && bool_opts == &other.bool_opts
+            && extra == &other.extra
+    }
 }
 
 /// `mu_strategy` values.
@@ -97,7 +186,7 @@ impl PounceSolverSelection {
     }
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
+        match value.to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Auto),
             "nlp" => Some(Self::Nlp),
             "lp-ipm" => Some(Self::LpIpm),
@@ -252,6 +341,7 @@ impl PounceOptions {
         (int, partitioned_block_size, "partitioned_block_size"),
         (num, partitioned_curvature_cap, "partitioned_curvature_cap"),
         (str, partitioned_elements, "partitioned_elements"),
+        (str, partitioned_structure, "partitioned_structure"),
         (int, partitioned_max_element, "partitioned_max_element"),
         (str, partitioned_update_type, "partitioned_update_type"),
         (bool, feral_increase_quality, "feral_increase_quality"),
@@ -313,13 +403,22 @@ impl PounceOptions {
         // FERAL backend (pure-Rust sparse symmetric linear solver).
         (str, linear_solver, "linear_solver"),
         (str, feral_ordering, "feral_ordering"),
+        (str, feral_ordering_preprocess, "feral_ordering_preprocess"),
         (str, feral_scaling, "feral_scaling"),
         (num, feral_pivtol, "feral_pivtol"),
         (bool, feral_refine, "feral_refine"),
         (bool, feral_cascade_break, "feral_cascade_break"),
         (bool, feral_fma, "feral_fma"),
         (num, feral_singular_pivot_floor, "feral_singular_pivot_floor"),
+        // Block-parallel KKT factorization (FERAL with an exact Hessian).
+        (str, block_structure_file, "block_structure_file"),
+        (str, kkt_block_detect, "kkt_block_detect"),
+        (int, kkt_block_min_size, "kkt_block_min_size"),
+        (str, kkt_block_restoration, "kkt_block_restoration"),
         // POUNCE convergence, restoration, scaling, and retry controls.
+        (bool, objective_noise_wolfe, "objective_noise_wolfe"),
+        (bool, solve_quality_audit, "solve_quality_audit"),
+        (bool, square_system_recovery, "square_system_recovery"),
         (num, acceptable_progress_kappa, "acceptable_progress_kappa"),
         (num, dual_inf_scale_kappa, "dual_inf_scale_kappa"),
         (num, feral_inertia_pivot_floor, "feral_inertia_pivot_floor"),
@@ -387,6 +486,20 @@ impl PounceOptions {
         self
     }
 
+    // TODO: Change this once pounce-rs v0.14 is released.
+
+    /// Enable multiple-minima search through [`oximo_solver::Solver::solve`].
+    ///
+    /// Uses the general NLP engine with `Auto` or `Nlp` routing.
+    /// The universal time limit covers local solves and dual recovery,
+    /// but upstream MLSL sampling and clustering cannot be interrupted.
+    /// FBBT is unsupported during search.
+    #[must_use]
+    pub fn minima(mut self, search: PounceMinimaOptions) -> Self {
+        self.minima = Some(search);
+        self
+    }
+
     /// Select POUNCE's structural solver route.
     #[must_use]
     pub fn solver_selection(mut self, selection: PounceSolverSelection) -> Self {
@@ -427,7 +540,7 @@ impl PounceOptions {
     ) -> Option<T> {
         let mut value = typed.filter(|(key, _)| *key == name).map(|(_, value)| value).last();
         for (key, raw) in &self.extra {
-            if key == name {
+            if key.eq_ignore_ascii_case(name) {
                 value = from_raw(raw);
             }
         }
@@ -457,12 +570,16 @@ impl PounceOptions {
             match raw {
                 PounceOptionValue::Bool(value) => Some(*value),
                 PounceOptionValue::Str(value)
-                    if matches!(value.as_str(), "yes" | "true" | "on") =>
+                    if ["yes", "true", "on"]
+                        .iter()
+                        .any(|text| value.eq_ignore_ascii_case(text)) =>
                 {
                     Some(true)
                 }
                 PounceOptionValue::Str(value)
-                    if matches!(value.as_str(), "no" | "false" | "off") =>
+                    if ["no", "false", "off"]
+                        .iter()
+                        .any(|text| value.eq_ignore_ascii_case(text)) =>
                 {
                     Some(false)
                 }
@@ -496,6 +613,22 @@ impl HasUniversal for PounceOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minima_configuration_participates_in_option_equality() {
+        let single = PounceOptions::default();
+        let search = single.clone().minima(PounceMinimaOptions::default());
+        assert_ne!(single, search);
+        assert_eq!(search, search.clone());
+
+        let mut changed = search.clone();
+        changed.minima.as_mut().unwrap().n_minima = 2;
+        assert_ne!(search, changed);
+
+        changed = search.clone();
+        changed.minima.as_mut().unwrap().sigma_per_dim = Some(vec![1.0, 2.0]);
+        assert_ne!(search, changed);
+    }
 
     #[test]
     fn typed_setters_push_onto_the_right_vecs() {
@@ -578,6 +711,7 @@ mod tests {
             ("socp", PounceSolverSelection::Socp),
         ] {
             assert_eq!(PounceSolverSelection::parse(text), Some(expected));
+            assert_eq!(PounceSolverSelection::parse(&text.to_ascii_uppercase()), Some(expected));
             assert_eq!(expected.as_str(), text);
         }
         assert_eq!(PounceSolverSelection::parse("unknown"), None);

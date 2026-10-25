@@ -93,7 +93,8 @@ pub use oximo_clarabel::ClarabelChordalMerge;
 #[cfg(feature = "pounce")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
 pub use oximo_pounce::{
-    MuStrategy, PounceAlgorithm, PounceOptionValue, PounceOptions, PounceSolverSelection,
+    MuStrategy, PounceAlgorithm, PounceMinimaMethod, PounceMinimaOptions, PounceOptionValue,
+    PounceOptions, PounceSolverSelection,
 };
 
 /// GAMS backend types: sub-solver selection and per-solver option structs.
@@ -106,11 +107,11 @@ pub mod gams {
 #[cfg(feature = "pounce")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
 pub mod pounce {
-    //! POUNCE backend options, algorithm selection, and persistent solver types.
+    //! POUNCE options, algorithm selection, multiple-minima search, and persistent solvers.
 
     pub use oximo_pounce::{
-        MuStrategy, Pounce, PounceAlgorithm, PounceOptionValue, PounceOptions, PouncePersistent,
-        PounceSolverSelection,
+        MuStrategy, Pounce, PounceAlgorithm, PounceMinimaMethod, PounceMinimaOptions,
+        PounceOptionValue, PounceOptions, PouncePersistent, PounceSolverSelection,
     };
 }
 
@@ -165,7 +166,8 @@ pub mod prelude {
     #[cfg(feature = "pounce")]
     #[cfg_attr(docsrs, doc(cfg(feature = "pounce")))]
     pub use oximo_pounce::{
-        Pounce, PounceAlgorithm, PounceOptions, PouncePersistent, PounceSolverSelection,
+        Pounce, PounceAlgorithm, PounceMinimaMethod, PounceMinimaOptions, PounceOptions,
+        PouncePersistent, PounceSolverSelection,
     };
 }
 

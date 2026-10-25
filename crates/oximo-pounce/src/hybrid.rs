@@ -6,9 +6,10 @@
 //! (LP/QP/QCP) this oracle serves exact gradients, Jacobian rows, and the
 //! constant Hessian of the Lagrangian through [`DerivativeOracle`], and the
 //! solve runs on POUNCE's low-level `TNLP` surface.
-//! A nonlinear function anywhere routes the solve to POUNCE's `builder`
-//! surface instead (see [`crate::stable`]), where POUNCE finite-differences
-//! whatever this oracle cannot fill exactly.
+//! Ordinary solves with nonlinear functions use POUNCE's `builder`
+//! (see [`crate::stable`]), which finite-differences the nonlinear parts.
+//! Multiple-minima searches use this oracle's sparse finite differences
+//! through `TNLP` so the search can augment the objective for its strategies.
 
 use oximo_autodiff::slot::{
     linear_gradient_add, linear_value, quadratic_gradient_add, quadratic_value,
@@ -122,6 +123,8 @@ pub(crate) struct HybridOracle {
     con_hess_pos: Vec<Vec<usize>>,
     /// Tape evaluation registers (max `n_regs` over all nonlinear slots).
     regs: Vec<f64>,
+    /// Reused perturbation point for the multiple-minima search's sparse differences.
+    fd_point: Vec<f64>,
 }
 
 impl HybridOracle {
@@ -172,6 +175,7 @@ impl HybridOracle {
             obj_hess_pos: Vec::new(),
             con_hess_pos: Vec::new(),
             regs: Vec::new(),
+            fd_point: Vec::new(),
         };
         oracle.rebuild_structures();
         oracle
@@ -354,6 +358,86 @@ fn slot_value(slot: &FunctionSlot, x: &[f64], params: &[f64], regs: &mut [f64]) 
     }
 }
 
+/// Central differences with a one-sided fallback at a function's domain boundary.
+#[expect(clippy::float_cmp, reason = "exact comparisons detect unrepresentable perturbations")]
+fn slot_difference(
+    slot: &FunctionSlot,
+    point: &mut [f64],
+    variable: usize,
+    params: &[f64],
+    regs: &mut [f64],
+) -> f64 {
+    let x = point[variable];
+    let relative_step = f64::EPSILON.cbrt();
+    let mut h = relative_step * x.abs().max(1.0);
+    let mut backtracked = false;
+    let mut base = None;
+    let mut one_sided: Option<(bool, f64)> = None;
+
+    loop {
+        let hi_x = x + h;
+        let lo_x = x - h;
+
+        if !x.is_finite() || (hi_x == x && lo_x == x) {
+            return f64::NAN;
+        }
+
+        point[variable] = hi_x;
+
+        let hi = slot_value(slot, point, params, regs);
+        point[variable] = lo_x;
+
+        let lo = slot_value(slot, point, params, regs);
+        point[variable] = x;
+
+        let forward = hi.is_finite() && hi_x != x;
+        let backward = lo.is_finite() && lo_x != x;
+
+        if forward && backward {
+            if backtracked {
+                // Since the first valid probe can still span much of the domain,
+                // we use its distance as the local scale for an accurate difference.
+                let refined = relative_step * h;
+
+                if x + refined != x || x - refined != x {
+                    h = refined;
+                    backtracked = false;
+                    continue;
+                }
+            }
+
+            return (hi - lo) / (hi_x - lo_x);
+        }
+
+        let base = *base.get_or_insert_with(|| slot_value(slot, point, params, regs));
+
+        if !base.is_finite() {
+            return f64::NAN;
+        }
+
+        if forward || backward {
+            let difference =
+                if forward { (hi - base) / (hi_x - x) } else { (base - lo) / (x - lo_x) };
+
+            if let Some((previous_forward, previous)) = one_sided
+                && previous_forward == forward
+                && difference.is_finite()
+                && (difference - previous).abs()
+                    <= f64::EPSILON.sqrt() * difference.abs().max(previous.abs()).max(1.0)
+            {
+                return difference;
+            }
+
+            one_sided = difference.is_finite().then_some((forward, difference));
+        } else {
+            one_sided = None;
+        }
+
+        h *= 0.5;
+        backtracked = true;
+    }
+}
+
 /// Add the closed-form slot's gradient at `x` into `out`, which must be
 /// zeroed on the slot's support beforehand. Entries off the support are never
 /// written.
@@ -394,7 +478,24 @@ impl DerivativeOracle for HybridOracle {
 
     fn eval_objective_gradient(&mut self, x: &[f64], grad: &mut [f64]) {
         grad.fill(0.0);
-        slot_gradient_add(&self.obj, x, grad);
+
+        if matches!(self.obj.kind, SlotKind::Nonlinear(_)) {
+            self.fd_point.clear();
+            self.fd_point.extend_from_slice(x);
+
+            for &variable in &self.obj.support {
+                let variable = variable as usize;
+                grad[variable] = slot_difference(
+                    &self.obj,
+                    &mut self.fd_point,
+                    variable,
+                    self.params.values(),
+                    &mut self.regs,
+                );
+            }
+        } else {
+            slot_gradient_add(&self.obj, x, grad);
+        }
     }
 
     fn eval_constraints(&mut self, x: &[f64], g: &mut [f64]) {
@@ -404,6 +505,11 @@ impl DerivativeOracle for HybridOracle {
     }
 
     fn eval_constraint_jacobian(&mut self, x: &[f64], vals: &mut [f64]) {
+        if !self.exact_hessian {
+            self.fd_point.clear();
+            self.fd_point.extend_from_slice(x);
+        }
+
         let mut k = 0;
         let mut linear_k = 0;
         let mut hessian_k = 0;
@@ -443,7 +549,15 @@ impl DerivativeOracle for HybridOracle {
                     hessian_k += terms.hessian.len();
                 }
                 SlotKind::Nonlinear(_) => {
-                    unreachable!("nonlinear slots are finite-differenced by POUNCE's builder")
+                    for (out, &variable) in row.iter_mut().zip(&slot.support) {
+                        *out = slot_difference(
+                            slot,
+                            &mut self.fd_point,
+                            variable as usize,
+                            self.params.values(),
+                            &mut self.regs,
+                        );
+                    }
                 }
             }
             k += row.len();
@@ -734,9 +848,148 @@ mod tests {
     }
 
     #[test]
+    fn search_derivatives_combine_sparse_differences_with_exact_rows() {
+        let model = Model::new("search derivatives");
+
+        param!(model, p = 2.0);
+        variable!(model, x);
+        variable!(model, y);
+        variable!(model, z);
+        objective!(model, Min, p * x.sin() + y.powi(2));
+        constraint!(model, nonlinear, x.powi(2) + z.exp() <= 3.0);
+        constraint!(model, linear, y + z >= 0.0);
+
+        let mut oracle = HybridOracle::new(&model);
+        let point = [0.7, 1.2, -0.3];
+        let mut gradient = [42.0; 3];
+        oracle.eval_objective_gradient(&point, &mut gradient);
+
+        for (actual, expected) in gradient.into_iter().zip([2.0 * 0.7_f64.cos(), 2.4, 0.0]) {
+            assert_close(actual, expected, 1e-8, "gradient");
+        }
+        assert_eq!(oracle.jacobian_structure(), &[(0, 0), (0, 2), (1, 1), (1, 2)]);
+
+        let mut jacobian = [42.0; 4];
+        oracle.eval_constraint_jacobian(&point, &mut jacobian);
+        for (actual, expected) in jacobian.into_iter().zip([1.4, (-0.3_f64).exp(), 1.0, 1.0]) {
+            assert_close(actual, expected, 1e-8, "Jacobian");
+        }
+
+        model.set_param(p, 3.0).unwrap();
+        oracle.refresh(&model);
+        oracle.eval_objective_gradient(&point, &mut gradient);
+        assert_close(gradient[0], 3.0 * 0.7_f64.cos(), 1e-8, "refreshed gradient");
+        assert!(!oracle.has_exact_hessian());
+    }
+
+    #[test]
+    fn search_derivatives_adapt_to_narrow_function_domains() {
+        for scale in [1e6, 1e12] {
+            let model = Model::new("narrow derivative domains");
+
+            variable!(model, x);
+            objective!(model, Min, (scale * x).asin());
+            constraint!(model, nonlinear, (scale * x).acos() <= 2.0);
+            let mut oracle = HybridOracle::new(&model);
+            let mut gradient = [0.0];
+            oracle.eval_objective_gradient(&[0.0], &mut gradient);
+            assert_close(gradient[0] / scale, 1.0, 1e-6, "narrow-domain gradient");
+
+            let mut jacobian = [0.0];
+            oracle.eval_constraint_jacobian(&[0.0], &mut jacobian);
+            assert_close(jacobian[0] / scale, -1.0, 1e-6, "narrow-domain Jacobian");
+        }
+    }
+
+    #[test]
+    fn search_derivatives_refine_probes_near_one_sided_domain_boundaries() {
+        for scale in [1e6, 1e8, 1e12] {
+            let model = Model::new("logarithmic derivative domain");
+
+            variable!(model, x);
+            objective!(model, Min, (scale * x).ln().powi(2));
+            constraint!(model, nonlinear, (scale * x).ln() <= 1.0);
+            let mut oracle = HybridOracle::new(&model);
+            for value in [0.5, 1.0, 2.0] {
+                let point = [value / scale];
+                let mut gradient = [0.0];
+                oracle.eval_objective_gradient(&point, &mut gradient);
+                assert_close(
+                    gradient[0] / scale,
+                    2.0 * value.ln() / value,
+                    1e-8,
+                    "logarithmic gradient",
+                );
+
+                let mut jacobian = [0.0];
+                oracle.eval_constraint_jacobian(&point, &mut jacobian);
+                assert_close(jacobian[0] / scale, 1.0 / value, 1e-8, "logarithmic Jacobian");
+            }
+        }
+    }
+
+    #[test]
+    fn search_derivatives_refine_one_sided_estimates_at_domain_boundaries() {
+        let model = Model::new("curved one-sided derivatives");
+
+        variable!(model, x);
+        objective!(model, Min, x.sqrt().sin().powi(2));
+        constraint!(model, nonlinear, (-x).sqrt().sin().powi(2) <= 1.0);
+        let mut oracle = HybridOracle::new(&model);
+        let mut gradient = [0.0];
+        oracle.eval_objective_gradient(&[0.0], &mut gradient);
+        assert_close(gradient[0], 1.0, 1e-7, "refined forward difference");
+
+        let mut jacobian = [0.0];
+        oracle.eval_constraint_jacobian(&[0.0], &mut jacobian);
+        assert_close(jacobian[0], -1.0, 1e-7, "refined backward difference");
+    }
+
+    #[test]
+    fn search_derivatives_use_the_valid_side_at_domain_boundaries() {
+        let model = Model::new("one-sided derivatives");
+
+        variable!(model, x);
+        objective!(model, Min, x.sqrt().powi(2));
+        constraint!(model, nonlinear, (-x).sqrt().powi(2) <= 1.0);
+        let mut oracle = HybridOracle::new(&model);
+        let mut gradient = [0.0];
+        oracle.eval_objective_gradient(&[0.0], &mut gradient);
+        assert_close(gradient[0], 1.0, 1e-10, "forward difference");
+
+        let mut jacobian = [0.0];
+        oracle.eval_constraint_jacobian(&[0.0], &mut jacobian);
+        assert_close(jacobian[0], -1.0, 1e-10, "backward difference");
+    }
+
+    #[test]
+    fn search_derivatives_preserve_invalid_base_points() {
+        let model = Model::new("invalid derivative point");
+
+        variable!(model, x);
+        objective!(model, Min, x.ln());
+        let mut oracle = HybridOracle::new(&model);
+        let mut gradient = [0.0];
+        oracle.eval_objective_gradient(&[-1.0], &mut gradient);
+        assert!(gradient[0].is_nan());
+    }
+
+    #[test]
+    fn search_derivatives_stop_without_a_representable_valid_probe() {
+        let model = Model::new("isolated valid point");
+
+        variable!(model, x);
+        objective!(model, Min, (-(x - 1.0).powi(2)).sqrt());
+        let mut oracle = HybridOracle::new(&model);
+        let mut gradient = [0.0];
+        oracle.eval_objective_gradient(&[1.0], &mut gradient);
+        assert!(gradient[0].is_nan());
+    }
+
+    #[test]
     fn closed_form_model_serves_exact_gradient_and_jacobian() {
-        // All-quadratic model: everything is analytic, no differencing.
         let m = Model::new("closed_form");
+
         variable!(m, -5.0 <= x <= 5.0);
         variable!(m, -5.0 <= y <= 5.0);
         objective!(m, Min, x.powi(2) + x * y + 3.0 * y);
@@ -763,6 +1016,7 @@ mod tests {
     #[test]
     fn builder_hooks_fill_exact_closed_form_parts() {
         let m = Model::new("nl_obj");
+
         variable!(m, 0.5 <= x <= 5.0);
         variable!(m, 0.5 <= y <= 5.0);
         variable!(m, 0.5 <= z <= 5.0);
@@ -791,6 +1045,7 @@ mod tests {
     #[test]
     fn quadratic_model_serves_exact_constant_hessian() {
         let m = Model::new("qp");
+
         variable!(m, -5.0 <= x <= 5.0);
         variable!(m, -5.0 <= y <= 5.0);
         objective!(m, Min, x.powi(2) + x * y + y.powi(2) + 3.0 * x);
@@ -799,8 +1054,7 @@ mod tests {
 
         let mut o = HybridOracle::new(&m);
         assert!(o.exact_hessian);
-        // Lower triangle of the union pattern: obj {(0,0),(1,0),(1,1)},
-        // ball {(0,0),(1,1)}, lin {}.
+        // Lower triangle of the union pattern
         assert_eq!(o.hess_structure, vec![(0, 0), (1, 0), (1, 1)]);
 
         // sigma * H_obj + lambda_0 * H_ball with H_obj = [[2,1],[1,2]],
@@ -815,6 +1069,7 @@ mod tests {
     #[test]
     fn feasibility_objective_is_the_zero_slot() {
         let m = Model::new("feas");
+
         variable!(m, 0.0 <= x <= 1.0);
         constraint!(m, half, x >= 0.5);
         objective!(m, Feasibility);
@@ -830,6 +1085,7 @@ mod tests {
     #[test]
     fn refresh_reextracts_folded_parameters() {
         let m = Model::new("fold");
+
         param!(m, w = 1.0);
         variable!(m, -5.0 <= x <= 5.0);
         objective!(m, Min, w * x.powi(2) + x);
@@ -837,12 +1093,14 @@ mod tests {
 
         let mut o = HybridOracle::new(&m);
         assert!(o.exact_hessian);
+
         let mut vals = vec![0.0; o.hess_structure.len()];
         o.eval_hessian_lagrangian(&[0.0], 1.0, &[0.0], &mut vals);
         assert_close(vals[0], 2.0, 1e-12, "H with w=1");
 
         w.set_param_value(3.0).unwrap();
         assert!(o.matches(&m), "same structure after set_param");
+
         o.refresh(&m);
         let mut vals = vec![0.0; o.hess_structure.len()];
         o.eval_hessian_lagrangian(&[0.0], 1.0, &[0.0], &mut vals);
@@ -856,6 +1114,7 @@ mod tests {
     #[test]
     fn refresh_rebuilds_jacobian_scatter_when_support_changes() {
         let m = Model::new("scatter_refresh");
+
         param!(m, w = 1.0);
         variable!(m, -5.0 <= x <= 5.0);
         objective!(m, Min, x);
@@ -863,6 +1122,7 @@ mod tests {
 
         let mut oracle = HybridOracle::new(&m);
         assert_eq!(oracle.jac_structure, vec![(0, 0)]);
+
         let mut jac = vec![0.0; oracle.jac_structure.len()];
         oracle.eval_constraint_jacobian(&[3.0], &mut jac);
         assert_eq!(jac, vec![6.0]);
@@ -870,6 +1130,7 @@ mod tests {
         w.set_param_value(0.0).unwrap();
         oracle.refresh(&m);
         assert_eq!(oracle.jac_structure, Vec::<(usize, usize)>::new());
+
         let mut jac = Vec::new();
         oracle.eval_constraint_jacobian(&[3.0], &mut jac);
         assert_eq!(jac, Vec::<f64>::new());
@@ -877,6 +1138,7 @@ mod tests {
         w.set_param_value(2.0).unwrap();
         oracle.refresh(&m);
         assert_eq!(oracle.jac_structure, vec![(0, 0)]);
+
         let mut jac = vec![0.0; oracle.jac_structure.len()];
         oracle.eval_constraint_jacobian(&[3.0], &mut jac);
         assert_eq!(jac, vec![12.0]);
@@ -884,10 +1146,12 @@ mod tests {
 
     fn repeated_model(rows: usize, nonlinear: bool) -> Model {
         let m = Model::new("repeated");
+
         variable!(m, -5.0 <= x <= 5.0);
         variable!(m, -5.0 <= y <= 5.0);
         variable!(m, -5.0 <= z <= 5.0);
         objective!(m, Min, x.powi(2) + y + z);
+
         for i in 0..rows {
             let lhs = if nonlinear {
                 (x * y * z + (i as f64 + 1.0) * x).erase()
@@ -940,6 +1204,7 @@ mod tests {
     fn unsupported_selected_targets_require_rebuild() {
         use oximo_core::prelude::*;
         let m = Model::new("unsupported derivative target");
+
         variable!(m, x);
         objective!(m, Min, x * x);
         let mut oracle = HybridOracle::new(&m);

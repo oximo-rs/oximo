@@ -66,7 +66,7 @@ highs            = "2.4"
 gurobi-rs        = { version = "1.0.0", features = ["gurobi13"] }
 mosek            = "11.2"
 clarabel         = "0.11"
-pounce-rs        = { version = "0.12", features = ["convex", "qp"] }
+pounce-rs        = { version = "0.13", features = ["convex", "qp", "minima"] }
 russcip = { version = "0.11.0", default-features = false }
 
 [workspace.lints.rust]

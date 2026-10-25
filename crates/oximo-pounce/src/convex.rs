@@ -60,6 +60,16 @@ pub(crate) fn validate_route(model: &Model, opts: &PounceOptions) -> Result<(), 
     let selection = selected_solver(opts)?;
     let has_explicit_soc = model.has_active_soc_constraints();
 
+    if opts.minima.is_some() {
+        crate::minima::validate_route(opts)?;
+
+        return if has_explicit_soc {
+            Err(incompatible("multiple-minima search", "explicit SOC constraints"))
+        } else {
+            Ok(())
+        };
+    }
+
     if selection == PounceSolverSelection::Auto && !has_explicit_soc {
         return Ok(());
     }
