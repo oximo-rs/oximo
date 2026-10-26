@@ -279,3 +279,58 @@ fn native_lowering_is_checked_even_when_the_source_signature_is_supported() {
     );
     assert!(diagnostic.reason.contains(oximo_core::SemanticType::of::<LessThan>().name()));
 }
+
+#[test]
+fn projection_defaults_cannot_restore_generated_alternative_lowerings() {
+    use oximo_solver::reconstruct::{SourceCoordinates, SourceProjection};
+
+    for interleaved in [false, true] {
+        for certified in [false, true] {
+            let model = Model::new("projected semantic defaults");
+
+            variable!(model, x);
+            let original = model.add_lowered_constraint(
+                "original",
+                Constraint::new(Scaled(x), LessThan(2.0)).into_ir(),
+            );
+            let coordinates = SourceCoordinates::capture(&model);
+            let generated = model.add_lowered_constraint(
+                "generated",
+                Constraint::new(Scaled(x), LessThan(3.0)).into_ir(),
+            );
+            let later = interleaved.then(|| {
+                model.add_lowered_constraint(
+                    "later",
+                    Constraint::new(Scaled(x), LessThan(4.0)).into_ir(),
+                )
+            });
+            let mut result = SolverResult::for_model(&model);
+
+            result.add_solution([(x.var_id().unwrap(), 1.0)].into_iter().collect(), Some(1.0));
+            if certified {
+                result.dual_status = DualStatus::FeasiblePoint;
+            }
+
+            result.dual.insert(original.row_id(), 0.5);
+            result.dual.insert(generated.row_id(), 7.0);
+            result.semantic_dual.clear();
+            result.semantic_dual.insert(generated.id(), Some(7.0));
+            let mut projection = SourceProjection::with_coordinates(&model, coordinates);
+            if let Some(later) = later {
+                result.dual.insert(later.row_id(), 0.5);
+                projection = projection.with_source_rows([original.row_id(), later.row_id()]);
+            }
+            let projected = projection.project(result).unwrap();
+            assert_eq!(projected.semantic_dual.get(&original.id()), Some(&None));
+            assert_eq!(projected.dual_of(original).unwrap(), None);
+            assert!(!projected.semantic_dual.contains_key(&generated.id()));
+            assert!(!projected.dual.contains_key(&generated.row_id()));
+            assert_eq!(projected.dual_of(generated).unwrap(), None);
+
+            if let Some(later) = later {
+                assert_eq!(projected.semantic_dual.get(&later.id()), Some(&None));
+                assert_eq!(projected.dual_of(later).unwrap(), None);
+            }
+        }
+    }
+}

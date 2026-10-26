@@ -125,33 +125,56 @@ fn scalar_ranges_return_named_and_anonymous_groups() {
     variable!(m, x);
     param!(m, lo = 0.0);
     let band: RangeConstraintHandles = constraint!(m, band, 0.0 <= x <= 4.0);
-    assert_eq!(band, RangeConstraintHandles::Interval(m.constraint_handle("band").unwrap()));
+    assert_eq!(
+        band,
+        RangeConstraintHandles::Interval(
+            m.require_scalar_dual_handle(m.constraint_handle("band").unwrap()).unwrap()
+        )
+    );
     let reversed = constraint!(m, name = format!("band_{}", 2), 4.0 >= x >= 0.0);
-    assert_eq!(reversed, RangeConstraintHandles::Interval(m.constraint_handle("band_2").unwrap()));
+    assert_eq!(
+        reversed,
+        RangeConstraintHandles::Interval(
+            m.require_scalar_dual_handle(m.constraint_handle("band_2").unwrap()).unwrap()
+        )
+    );
     let auto = constraint!(m, 0.0 <= x <= 4.0);
-    assert_eq!(auto, RangeConstraintHandles::Interval(m.constraint_handle("_c0").unwrap()));
+    assert_eq!(
+        auto,
+        RangeConstraintHandles::Interval(
+            m.require_scalar_dual_handle(m.constraint_handle("_c0").unwrap()).unwrap()
+        )
+    );
     let split = constraint!(m, symbolic, lo <= x <= 4.0);
     assert_eq!(
         split,
         RangeConstraintHandles::Split {
-            lower: m.constraint_handle("symbolic_lo").unwrap(),
-            upper: m.constraint_handle("symbolic_hi").unwrap(),
+            lower: m
+                .require_scalar_dual_handle(m.constraint_handle("symbolic_lo").unwrap())
+                .unwrap(),
+            upper: m
+                .require_scalar_dual_handle(m.constraint_handle("symbolic_hi").unwrap())
+                .unwrap(),
         }
     );
     let nonlinear = constraint!(m, name = "nonlinear".to_owned(), 4.0 >= x.powi(2) >= 0.0);
     assert_eq!(
         nonlinear,
         RangeConstraintHandles::Split {
-            lower: m.constraint_handle("nonlinear_lo").unwrap(),
-            upper: m.constraint_handle("nonlinear_hi").unwrap(),
+            lower: m
+                .require_scalar_dual_handle(m.constraint_handle("nonlinear_lo").unwrap())
+                .unwrap(),
+            upper: m
+                .require_scalar_dual_handle(m.constraint_handle("nonlinear_hi").unwrap())
+                .unwrap(),
         }
     );
     let auto_split = constraint!(m, lo <= x <= 4.0);
     assert_eq!(
         auto_split,
         RangeConstraintHandles::Split {
-            lower: m.constraint_handle("_c1").unwrap(),
-            upper: m.constraint_handle("_c2").unwrap(),
+            lower: m.require_scalar_dual_handle(m.constraint_handle("_c1").unwrap()).unwrap(),
+            upper: m.require_scalar_dual_handle(m.constraint_handle("_c2").unwrap()).unwrap(),
         }
     );
 }
@@ -187,7 +210,9 @@ fn range_family_can_mix_interval_and_split_entries() {
     assert_eq!(sparse.get("skip"), None);
     assert_eq!(
         sparse.get("first"),
-        Some(RangeConstraintHandles::Interval(m.constraint_handle("sparse[first]").unwrap()))
+        Some(RangeConstraintHandles::Interval(
+            m.require_scalar_dual_handle(m.constraint_handle("sparse[first]").unwrap()).unwrap()
+        ))
     );
 }
 

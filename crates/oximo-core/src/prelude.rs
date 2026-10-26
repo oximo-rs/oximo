@@ -75,8 +75,14 @@ pub use crate::psd::{
 };
 
 pub use crate::semantic::{
-    ConstraintOrigin, FunctionKind, FunctionRepresentationRef, ScalarFunctionData,
-    SemanticConstraintId, SemanticFunction, SemanticType, VariableVectorRef,
+    ConstraintOrigin, FunctionKind, FunctionRepresentationRef, ImmutableSemanticFunction,
+    ScalarFunctionData, SemanticConstraintId, SemanticFunction, SemanticType, VariableVectorRef,
 };
 
 pub use crate::objective::{ObjectiveFunction, SemanticObjective};
+
+pub use crate::{ScalarConstraintHandle, ScalarDualHandleError, ScalarDualQuery};
+
+pub use crate::reformulation::{
+    GeneratedConstraintId, GeneratedVarId, ReformulationProvenance, ReformulationVarId,
+};

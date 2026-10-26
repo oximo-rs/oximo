@@ -15,10 +15,9 @@ help: the following other types implement trait `IntoAffineMatrixEntry<'a>`
   |                         |
   |                         `Expr<'_, oximo_core::Affine>`
   |                         `Expr<'_, oximo_core::Constant>`
-  |                         `Expr<'_>`
 ...
-  | expression_entries!(Constant, Affine, Dynamic);
-  | ---------------------------------------------- in this macro invocation
+  | expression_entries!(Constant, Affine);
+  | ------------------------------------- in this macro invocation
   = note: required for `oximo_core::SymmetricMatrix<Expr<'_, oximo_core::Quadratic>>` to implement `IntoSymmetricAffineFunction<'_>`
 note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_psd_constraint_auto`
  --> src/model/constraints.rs

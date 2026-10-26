@@ -19,7 +19,15 @@ fn lp_range_duals_reduced_costs_and_maximization() {
     close(result.value_of(x).unwrap().unwrap(), 3.0);
     close(result.value_of(y).unwrap().unwrap(), 0.0);
     close(result.objective().unwrap(), 11.0);
-    close(result.dual_of(model.constraint_handle("band").unwrap()).unwrap().unwrap(), 3.0);
+    close(
+        result
+            .dual_of(
+                model.require_scalar_dual_handle(model.constraint_handle("band").unwrap()).unwrap(),
+            )
+            .unwrap()
+            .unwrap(),
+        3.0,
+    );
     close(*result.reduced_costs.get(&y.var_id().unwrap()).unwrap(), -2.0);
 }
 

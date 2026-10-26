@@ -503,6 +503,35 @@ impl Model {
             .map(|c| ConstraintHandle::new(c.id, self.id()))
     }
 
+    /// Recover a scalar view without claiming the erased function/set signature.
+    ///
+    /// # Errors
+    /// Returns an ownership error for a foreign handle.
+    /// Missing or non-scalar constraints return `None`, including an algebraic
+    /// row without a semantic record.
+    pub fn scalar_dual_handle<F, S>(
+        &self,
+        handle: ConstraintHandle<F, S>,
+    ) -> Result<Option<crate::ScalarConstraintHandle>, oximo_expr::ModelMismatchError> {
+        self.ensure_model_id(handle.model_id())?;
+        Ok((handle.try_row_id().is_some() && self.semantic_position_opt(handle.id()).is_some())
+            .then(|| handle.scalar_view()))
+    }
+
+    /// Require a registered algebraic scalar view of a semantic constraint.
+    ///
+    /// # Errors
+    /// Returns [`crate::ScalarDualHandleError::ModelMismatch`] for a foreign handle,
+    /// or [`crate::ScalarDualHandleError::MissingScalarView`] for a non-scalar
+    /// constraint or an algebraic row without a semantic record.
+    pub fn require_scalar_dual_handle<F, S>(
+        &self,
+        handle: ConstraintHandle<F, S>,
+    ) -> Result<crate::ScalarConstraintHandle, crate::ScalarDualHandleError> {
+        self.scalar_dual_handle(handle)?
+            .ok_or(crate::ScalarDualHandleError::MissingScalarView(handle.id()))
+    }
+
     /// Recover types by identity, independently of names shared by different registries.
     ///
     /// # Errors

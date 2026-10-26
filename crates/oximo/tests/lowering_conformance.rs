@@ -35,7 +35,16 @@ fn range_and_offset<S: Solver>(mut solver: S, opts: &S::Options, require_dual: b
             assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
             // Both the native interval and split-row representations must
             // return sensitivity in the original row and objective units.
-            close(result.dual_of(model.constraint_handle("band").unwrap()).unwrap(), slope / 2.0);
+            close(
+                result
+                    .dual_of(
+                        model
+                            .require_scalar_dual_handle(model.constraint_handle("band").unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                slope / 2.0,
+            );
         }
     }
 }

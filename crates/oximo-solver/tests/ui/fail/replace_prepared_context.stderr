@@ -1,0 +1,16 @@
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+  --> tests/ui/fail/replace_prepared_context.rs:17:19
+   |
+17 |     let _ = entry.translate(&AffineRowTranslator, &other);
+   |                   ^^^^^^^^^                       ------ unexpected argument #2 of type `&TranslationContext`
+   |
+note: method defined here
+  --> src/translation.rs
+   |
+   |     pub fn translate<T: TypedConstraintTranslator<F, S>>(
+   |            ^^^^^^^^^
+help: remove the extra argument
+   |
+17 -     let _ = entry.translate(&AffineRowTranslator, &other);
+17 +     let _ = entry.translate(&AffineRowTranslator);
+   |

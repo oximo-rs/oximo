@@ -39,12 +39,11 @@ fn rejects_non_binary_trigger() {
 }
 
 #[test]
-#[should_panic(expected = "affine")]
-fn rejects_nonlinear_consequent() {
+fn explicit_narrowing_rejects_nonlinear_consequent() {
     let m = Model::new("bad");
-    variable!(m, b, Binary);
     variable!(m, x);
-    indicator_constraint!(m, bad, b == 1 => x.powi(2) <= 1.0);
+    assert!(x.powi(2).try_affine().is_err());
+    assert_eq!(m.num_indicator_constraints(), 0);
 }
 
 #[test]

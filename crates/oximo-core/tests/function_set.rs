@@ -234,7 +234,7 @@ fn typed_and_macro_soc_share_the_registry() {
     let cones = m.soc_constraints();
     assert_eq!(cones[direct.index()].terms, cones[generated.index()].terms);
     assert_eq!(cones[direct.index()].bound, cones[generated.index()].bound);
-    let _ = x.powi(1).into_affine_function();
+    let _ = x.powi(1).try_affine().unwrap().into_affine_function();
 }
 
 #[test]
@@ -310,14 +310,7 @@ fn invalid_runtime_data_cannot_register_rows() {
         catch_unwind(AssertUnwindSafe(|| m.add_constraint("nan dynamic", x.erase().le(f64::NAN))))
             .is_err()
     );
-    assert!(
-        catch_unwind(AssertUnwindSafe(|| m.add_soc_constraint(
-            "nonlinear dynamic",
-            [x.square().erase()],
-            x.erase()
-        )))
-        .is_err()
-    );
+    assert!(x.square().erase().try_affine().is_err());
     assert!(
         catch_unwind(AssertUnwindSafe(|| m.add_constraint(
             "dimension",

@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 
 pub mod translation;
-pub use translation::{AffineRowTranslator, TranslationContext, TypedConstraintTranslator};
+pub use translation::{
+    AffineRowTranslator, PreparedConstraint, TranslationContext, TypedConstraintTranslator,
+};
 pub mod capability;
 pub use capability::{Capability, CapabilityDiagnostic, ConstraintSignature, ModelValidation};
 pub mod incremental;

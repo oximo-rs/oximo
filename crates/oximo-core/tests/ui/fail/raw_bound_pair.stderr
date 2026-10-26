@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `oximo_core::Bound: IntoBound<'_>` is not satisfied
+ --> tests/ui/fail/raw_bound_pair.rs:8:29
+  |
+8 |     model.__var("y").bounds(Bound::Constant(0.0), 1.0).build();
+  |                      ------ ^^^^^^^^^^^^^^^^^^^^ the trait `IntoBound<'_>` is not implemented for `oximo_core::Bound`
+  |                      |
+  |                      required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `IntoBound<'a>`:
+            `Expr<'a, oximo_core::Constant>` implements `IntoBound<'a>`
+            `f32` implements `IntoBound<'_>`
+            `f64` implements `IntoBound<'_>`
+            `i16` implements `IntoBound<'_>`
+            `i32` implements `IntoBound<'_>`
+            `i64` implements `IntoBound<'_>`
+            `i8` implements `IntoBound<'_>`
+            `isize` implements `IntoBound<'_>`
+          and $N others
+note: required by a bound in `VarBuilder::<'a>::bounds`
+ --> src/var.rs
+  |
+  |     pub fn bounds(mut self, lb: impl IntoBound<'a>, ub: impl IntoBound<'a>) -> Self {
+  |                                      ^^^^^^^^^^^^^ required by this bound in `VarBuilder::<'a>::bounds`

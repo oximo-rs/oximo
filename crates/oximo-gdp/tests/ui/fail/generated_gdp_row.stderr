@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/generated_gdp_row.rs:5:45
+  |
+5 |     let _ = model.constraint_handle_from_id(report.rows[0].constraints[0]);
+  |                   ------------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ConstraintId`, found `GeneratedConstraintId`
+  |                   |
+  |                   arguments to this method are incorrect
+  |
+note: method defined here
+ --> $WORKSPACE/crates/oximo-core/src/model/constraints.rs
+  |
+  |     pub fn constraint_handle_from_id(&self, id: ConstraintId) -> Option<ConstraintHandle> {
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^

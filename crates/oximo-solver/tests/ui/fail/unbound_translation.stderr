@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/unbound_translation.rs:15:43
+   |
+15 |     let _ = AffineRowTranslator.translate(&function);
+   |                                 --------- ^^^^^^^^^ expected `PreparedConstraint<'_, _, _>`, found `&ScalarFunctionData<Affine>`
+   |                                 |
+   |                                 arguments to this method are incorrect
+   |
+   = note: expected struct `PreparedConstraint<'_, ScalarFunctionData<Affine>, _>`
+           found reference `&ScalarFunctionData<Affine>`
+note: method defined here
+  --> src/translation.rs
+   |
+   |     fn translate(
+   |        ^^^^^^^^^

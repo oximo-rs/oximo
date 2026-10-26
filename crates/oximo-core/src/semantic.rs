@@ -91,6 +91,24 @@ pub trait SemanticFunction: Clone + Debug + Send + Sync + 'static {
     fn rebind_model(&mut self, model_id: ModelId);
 }
 
+/// Semantic data that stays immutable through shared access.
+///
+/// Implementors must keep their model identity, expression roots, representation,
+/// and all other translation-visible data unchanged for the duration of a shared
+/// borrow.
+/// Mutation requiring exclusive access is permitted.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not declare immutable translation semantics",
+    label = "bind an immutable semantic snapshot",
+    note = "custom translation functions must implement ImmutableSemanticFunction only when identity, expression roots, and translation-visible data stay unchanged through shared aliases and clones; otherwise expose an independent immutable snapshot before binding; Clone alone does not freeze shared mutable state"
+)]
+pub trait ImmutableSemanticFunction: SemanticFunction {}
+
+impl<D: Degree> ImmutableSemanticFunction for ScalarFunctionData<D> {}
+impl ImmutableSemanticFunction for VectorAffineData {}
+impl ImmutableSemanticFunction for SymmetricAffineData {}
+impl ImmutableSemanticFunction for VariableVectorData {}
+
 /// Owned scalar structure.
 #[derive(Clone, Debug)]
 pub struct ScalarFunctionData<D: Degree> {

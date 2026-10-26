@@ -32,7 +32,8 @@ pub mod var;
 
 pub use constraint::{
     AlgebraicConstraint, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
-    RangeConstraintIds, Relate, Sense,
+    RangeConstraintIds, Relate, ScalarConstraintHandle, ScalarDualHandleError, ScalarDualQuery,
+    Sense,
 };
 #[cfg(feature = "gdp")]
 pub use display::{
@@ -68,11 +69,11 @@ pub use reformulation::{
 pub use semantic::ScalarConstraintSource;
 pub use semantic::{
     ConstraintOrigin, ConstraintUpdateError, Erased, FunctionKind, FunctionRef,
-    FunctionRepresentationRef, FunctionValue, IndicatorFunctionData, IndicatorSet,
-    ScalarConstraintView, ScalarFunctionData, SemanticConstraint, SemanticConstraintId,
-    SemanticConstraintRef, SemanticFunction, SemanticPair, SemanticPairRef, SemanticType, SetRef,
-    SetValue, SpecialOrderedSet, SymmetricAffineData, VariableVectorData, VariableVectorRef,
-    VectorAffineData,
+    FunctionRepresentationRef, FunctionValue, ImmutableSemanticFunction, IndicatorFunctionData,
+    IndicatorSet, ScalarConstraintView, ScalarFunctionData, SemanticConstraint,
+    SemanticConstraintId, SemanticConstraintRef, SemanticFunction, SemanticPair, SemanticPairRef,
+    SemanticType, SetRef, SetValue, SpecialOrderedSet, SymmetricAffineData, VariableVectorData,
+    VariableVectorRef, VectorAffineData,
 };
 pub use set::{
     Axis, FromIndexKey, FromIndexKeyRef, IndexKey, IndexKeyRef, IndexTuple, KeyCat, ScalarKey, Set,
@@ -115,3 +116,7 @@ pub use psd::{
 };
 
 pub use model::SemanticConstraints;
+
+pub use crate::reformulation::{
+    GeneratedConstraintId, GeneratedVarId, ReformulationProvenance, ReformulationVarId,
+};

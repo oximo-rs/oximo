@@ -6,7 +6,7 @@ use oximo_expr::{Expr, ExprArena, ExprId, ExprNode, extract_linear};
 
 use super::helpers::{raw_effective_bounds, unique_constraint_name};
 use super::{ReformulatedModel, ReformulationError};
-use crate::constraint::{ConstraintId, Relate};
+use crate::constraint::Relate;
 use crate::indicator::{IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId};
 use crate::model::Model;
 use crate::var::ResolvedVariable;
@@ -35,7 +35,7 @@ impl IndicatorReformulationOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndicatorReformulationArtifacts {
     pub source: IndicatorConstraintId,
-    pub constraints: Vec<ConstraintId>,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
 #[derive(Clone, Debug)]
@@ -254,7 +254,13 @@ impl PlannedIndicator {
             );
         }
         model.indicator_constraints.borrow_mut()[self.source.index()].active = false;
-        IndicatorReformulationArtifacts { source: self.source, constraints: generated }
+        IndicatorReformulationArtifacts {
+            source: self.source,
+            constraints: generated
+                .into_iter()
+                .map(crate::GeneratedConstraintId::from_raw)
+                .collect(),
+        }
     }
 }
 

@@ -36,9 +36,8 @@
 //! # Modeling and validation
 //!
 //! Unsupported function/set pairs fail at compile time. SOC components and
-//! indicator consequents must be affine, since dynamic inputs are checked at
-//! runtime, while statically quadratic or nonlinear inputs require explicit
-//! narrowing.
+//! indicator consequents must be statically affine. Dynamic, quadratic and nonlinear
+//! inputs require explicit checked narrowing before construction.
 //!
 //! Lowering and registration panic for invalid numeric bounds, ownership,
 //! dimensions, duplicate names, or count overflow before registering a row.
@@ -63,7 +62,7 @@
 //! To request an alternative transformation, call [`Constraint::into_ir`] and
 //! register the result with [`Model::add_lowered_constraint`] or a scalar bulk API.
 
-use crate::{ConstraintHandle, Model, SocConstraintHandle};
+use crate::{Model, SocConstraintHandle};
 use oximo_expr::{
     Affine, Constant, Degree, Dynamic, Expr, ExprClass, ExprId, Nonlinear, Quadratic,
 };
@@ -262,7 +261,7 @@ impl<'a> From<Expr<'a, Dynamic>> for ScalarNonlinearFunction<'a> {
     }
 }
 
-/// Affine inputs accepted by the existing SOC syntax. Dynamic inputs are checked.
+/// Statically affine inputs. Narrow dynamic expressions explicitly with `try_affine`.
 pub trait IntoAffineFunction<'a> {
     fn into_affine_function(self) -> ScalarAffineFunction<'a>;
 }
@@ -282,18 +281,6 @@ impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
 impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
     fn into_affine_function(self) -> ScalarAffineFunction<'a> {
         self.into()
-    }
-}
-
-impl<'a> IntoAffineFunction<'a> for Expr<'a> {
-    fn into_affine_function(self) -> ScalarAffineFunction<'a> {
-        self.try_into().unwrap_or_else(|class| panic!("expression must be affine, got {class:?}"))
-    }
-}
-
-impl<'a> IntoAffineFunction<'a> for ScalarDynamicFunction<'a> {
-    fn into_affine_function(self) -> ScalarAffineFunction<'a> {
-        self.0.into_affine_function()
     }
 }
 
@@ -331,6 +318,8 @@ pub struct AnyScalarFunctionData {
     pub class: ExprClass,
 }
 
+impl crate::ImmutableSemanticFunction for AnyScalarFunctionData {}
+
 impl crate::semantic::SemanticFunction for AnyScalarFunctionData {
     fn model_id(&self) -> oximo_expr::ModelId {
         self.expression.model_id
@@ -350,12 +339,6 @@ impl crate::semantic::SemanticFunction for AnyScalarFunctionData {
 
     fn remap(&mut self, remap: oximo_expr::ExprIdRemap) {
         self.expression.expression = remap.apply(self.expression.expression);
-    }
-}
-
-impl<'a> IntoAffineFunction<'a> for AnyScalarFunction<'a> {
-    fn into_affine_function(self) -> ScalarAffineFunction<'a> {
-        self.expression().into_affine_function()
     }
 }
 
@@ -450,6 +433,7 @@ impl<'a, D: FunctionDegree> IntoFunction for Expr<'a, D> {
 pub(crate) mod sealed {
     pub trait Sealed {}
     pub trait ScalarSet {}
+    pub trait ScalarInput {}
 }
 
 /// Recognized lowering outputs. Sealed to the existing heterogeneous IR shapes.
@@ -505,7 +489,7 @@ pub struct AlgebraicConstraintIr<'a> {
 
 impl sealed::Sealed for AlgebraicConstraintIr<'_> {}
 impl ConstraintIr for AlgebraicConstraintIr<'_> {
-    type Handle = ConstraintHandle;
+    type Handle = crate::ScalarConstraintHandle;
 
     #[inline]
     fn from_constraint<F, S>(constraint: Constraint<F, S>) -> Self
@@ -571,11 +555,10 @@ where
     }
 }
 
-/// Indicator inputs: affine functions or explicitly dynamic functions checked at runtime.
-/// Statically quadratic/nonlinear constraints need explicit narrowing first.
+/// Statically affine indicator inputs. Other degrees require explicit narrowing first.
 pub trait IntoAffineConstraint<'a> {
     /// # Panics
-    /// Panics for invalid bounds or a non-affine dynamic consequent.
+    /// Panics for invalid bounds.
     fn into_affine_constraint(self) -> AffineConstraintIr<'a>;
 }
 impl<'a> IntoAffineConstraint<'a> for AffineConstraintIr<'a> {
@@ -878,13 +861,24 @@ impl PreparedScalarConstraint {
 
 /// Scalar registration input retaining its signature through indexed construction.
 /// Declared pairs use their representation; alternative transformations require `into_ir()`.
-pub trait ScalarConstraintInput {
+/// Sealed so downstream code cannot claim a different registry's handle types.
+/// Extend scalar modeling through `Function`, `FunctionInSet`, and `LowerConstraint`.
+pub trait ScalarConstraintInput: sealed::ScalarInput {
     type Function: 'static;
     type Set: 'static;
 
     #[doc(hidden)]
     fn into_scalar_input(self) -> PreparedScalarConstraint;
 }
+
+impl<F, S> sealed::ScalarInput for Constraint<F, S>
+where
+    S: ScalarConstraintSet,
+    F: FunctionInSet<S>,
+{
+}
+impl sealed::ScalarInput for AlgebraicConstraintIr<'_> {}
+impl sealed::ScalarInput for PreparedScalarConstraint {}
 
 impl<F, S> ScalarConstraintInput for Constraint<F, S>
 where
@@ -904,7 +898,8 @@ where
 }
 
 impl<'a> ScalarConstraintInput for AlgebraicConstraintIr<'a> {
-    type Function = crate::semantic::Erased;
+    // Preserve a scalar return view without claiming the source's semantic signature.
+    type Function = crate::constraint::ScalarHandleMarker;
     type Set = crate::semantic::Erased;
 
     #[inline]
@@ -926,7 +921,8 @@ impl<'a> ScalarConstraintInput for AlgebraicConstraintIr<'a> {
 }
 
 impl ScalarConstraintInput for PreparedScalarConstraint {
-    type Function = crate::semantic::Erased;
+    // As above, this is a return-handle marker.
+    type Function = crate::constraint::ScalarHandleMarker;
     type Set = crate::semantic::Erased;
 
     fn into_scalar_input(self) -> Self {

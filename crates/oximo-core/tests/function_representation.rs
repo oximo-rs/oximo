@@ -220,9 +220,9 @@ fn cone_lookup_handles_match_the_exact_semantic_signature() {
         ),
     );
     assert!(model.soc_constraint_handle("wrapped_soc").is_none());
-    assert!(model.soc_constraint_handle_from_id(soc.soc_id()).is_none());
+    assert!(model.soc_constraint_handle_from_id(soc.try_soc_id().unwrap()).is_none());
     assert!(model.psd_constraint_handle("wrapped_psd").is_none());
-    assert!(model.psd_constraint_handle_from_id(psd.psd_id()).is_none());
+    assert!(model.psd_constraint_handle_from_id(psd.try_psd_id().unwrap()).is_none());
     assert!(
         model.try_typed_handle::<VectorAffineData, SecondOrderCone>(soc.erase()).unwrap().is_none()
     );
@@ -248,14 +248,14 @@ fn cone_lookup_handles_match_the_exact_semantic_signature() {
         model.add_psd_constraint("native_psd", SymmetricMatrix::from_upper_fn(2, |_, _| t));
     for handle in [
         model.soc_constraint_handle("native_soc").unwrap(),
-        model.soc_constraint_handle_from_id(native_soc.soc_id()).unwrap(),
+        model.soc_constraint_handle_from_id(native_soc.try_soc_id().unwrap()).unwrap(),
     ] {
         assert_eq!(handle, native_soc);
         model.set_constraint_set(handle, SecondOrderCone { dimension: 2 }).unwrap();
     }
     for handle in [
         model.psd_constraint_handle("native_psd").unwrap(),
-        model.psd_constraint_handle_from_id(native_psd.psd_id()).unwrap(),
+        model.psd_constraint_handle_from_id(native_psd.try_psd_id().unwrap()).unwrap(),
     ] {
         assert_eq!(handle, native_psd);
         model.set_constraint_set(handle, PositiveSemidefiniteCone { side_dimension: 2 }).unwrap();

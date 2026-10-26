@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/scalar_psd_dual.rs:14:32
+   |
+14 |     let _ = result.psd_dual_of(row);
+   |                    ----------- ^^^ expected `ConstraintHandle<SymmetricAffineData, _>`, found `ConstraintHandle<_, _>`
+   |                    |
+   |                    arguments to this method are incorrect
+   |
+   = note: expected struct `ConstraintHandle<SymmetricAffineData, PositiveSemidefiniteCone>`
+              found struct `ConstraintHandle<ScalarFunctionData<oximo_core::Affine>, LessThan>`
+note: method defined here
+  --> src/result.rs
+   |
+   |     pub fn psd_dual_of(
+   |            ^^^^^^^^^^^

@@ -1,0 +1,28 @@
+error[E0277]: `MutableFunction` does not declare immutable translation semantics
+  --> tests/ui/fail/mutable_prepared_function.rs:37:26
+   |
+37 |     let _ = context.bind(&function, &LessThan(1.0));
+   |                     ---- ^^^^^^^^^ bind an immutable semantic snapshot
+   |                     |
+   |                     required by a bound introduced by this call
+   |
+help: the trait `ImmutableSemanticFunction` is not implemented for `MutableFunction`
+  --> tests/ui/fail/mutable_prepared_function.rs:10:1
+   |
+10 | struct MutableFunction {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   = note: custom translation functions must implement ImmutableSemanticFunction only when identity, expression roots, and translation-visible data stay unchanged through shared aliases and clones; otherwise expose an independent immutable snapshot before binding; Clone alone does not freeze shared mutable state
+   = help: the following other types implement trait `ImmutableSemanticFunction`:
+             AnyScalarFunctionData
+             ScalarFunctionData<D>
+             SymmetricAffineData
+             VariableVectorData
+             VectorAffineData
+note: required by a bound in `TranslationContext::bind`
+  --> src/translation.rs
+   |
+   |     pub fn bind<'ctx, F, S>(
+   |            ---- required by a bound in this associated function
+...
+   |         F: ImmutableSemanticFunction + oximo_core::FunctionInSet<S>,
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TranslationContext::bind`

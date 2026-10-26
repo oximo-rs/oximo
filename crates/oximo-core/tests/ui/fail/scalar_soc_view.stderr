@@ -1,0 +1,10 @@
+error[E0599]: no method named `soc_id` found for struct `ConstraintHandle<ScalarFunctionData<oximo_core::Affine>, LessThan>` in the current scope
+ --> tests/ui/fail/scalar_soc_view.rs:9:17
+  |
+9 |     let _ = row.soc_id();
+  |                 ^^^^^^
+  |
+help: there is a method `try_soc_id` with a similar name
+  |
+9 |     let _ = row.try_soc_id();
+  |                 ++++

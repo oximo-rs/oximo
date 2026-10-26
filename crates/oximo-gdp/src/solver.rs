@@ -53,7 +53,8 @@ impl<S: Solver> GdpSolver<S> {
     ///
     /// The returned result carries only source variables plus the generated
     /// Hull activation variables that [`crate::GdpResultExt`] queries while
-    /// other generated variables, rows, and multipliers are dropped. The
+    /// other generated variables, rows, and multipliers from GDP, SOS, and indicator
+    /// reformulations are dropped. Later user declarations remain source coordinates. The
     /// transformation report remains available through
     /// `model.gdp_reformulations()`, so activation handles stay valid.
     ///
@@ -74,7 +75,10 @@ impl<S: Solver> GdpSolver<S> {
         // Without any in-place reformulation there are no generated
         // coordinates to remove, so the backend result is already in source
         // coordinates.
-        if model.gdp_reformulations().is_empty() {
+        if model.gdp_reformulations().is_empty()
+            && model.sos_reformulations().is_empty()
+            && model.indicator_reformulations().is_empty()
+        {
             return Ok(self.solver.solve(model, opts)?);
         }
 
@@ -103,6 +107,8 @@ impl<S: Solver> GdpSolver<S> {
 struct SourceKey {
     model: ModelId,
     reports: usize,
+    sos_reports: usize,
+    indicator_reports: usize,
     variables: usize,
     algebraic_constraints: usize,
     soc_constraints: usize,
@@ -114,6 +120,8 @@ impl SourceKey {
         Self {
             model: model.id(),
             reports: model.gdp_reformulations().len(),
+            sos_reports: model.sos_reformulations().len(),
+            indicator_reports: model.indicator_reformulations().len(),
             variables: model.num_variables(),
             algebraic_constraints: model.constraints().algebraic().len(),
             soc_constraints: model.num_soc_constraints(),
@@ -122,13 +130,14 @@ impl SourceKey {
     }
 }
 
-/// Derive source membership once from complete append-only GDP ranges.
+/// Derive original declaration membership from every registered reformulation.
 fn source_plan(model: &Model) -> SourceProjectionPlan {
     let reports = model.gdp_reformulations();
     let total_variables = model.num_variables();
     let total_rows = model.constraints().algebraic().len();
-    let variable_ranges = || reports.iter().map(|report| report.generated_variables.clone());
-    let row_ranges = || reports.iter().map(|report| report.generated_rows.clone());
+    let provenance = oximo_core::ReformulationProvenance::capture(model);
+    let variable_ranges = || provenance.variable_ranges().iter().cloned();
+    let row_ranges = || provenance.row_ranges().iter().cloned();
     let variables = total_variables - variable_ranges().map(|range| range.len()).sum::<usize>();
     let rows = total_rows - row_ranges().map(|range| range.len()).sum::<usize>();
     let mut plan = SourceProjectionPlan::new(SourceCoordinates {
@@ -153,7 +162,7 @@ fn source_plan(model: &Model) -> SourceProjectionPlan {
         report
             .hull_variables
             .iter()
-            .map(|copy| copy.activation_kind.variable())
+            .filter_map(|copy| copy.activation_kind.variable().generated())
             .chain(report.hull_patterns.iter().map(|pattern| pattern.weight))
             .chain(report.hull_branch_sums.iter().map(|sum| sum.weight))
     }))

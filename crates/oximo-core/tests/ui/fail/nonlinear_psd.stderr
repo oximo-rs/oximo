@@ -1,0 +1,30 @@
+error[E0277]: the trait bound `Expr<'_, oximo_core::Nonlinear>: IntoAffineMatrixEntry<'_>` is not satisfied
+ --> tests/ui/fail/nonlinear_psd.rs:8:28
+  |
+8 |     psd_constraint!(model, SymmetricMatrix::from_upper_triangle(1, [x.sin()]));
+  |     -----------------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
+  |     |                      |
+  |     |                      the trait `IntoAffineMatrixEntry<'_>` is not implemented for `Expr<'_, oximo_core::Nonlinear>`
+  |     required by a bound introduced by this call
+  |
+help: the following other types implement trait `IntoAffineMatrixEntry<'a>`
+ --> src/psd.rs
+  |
+  |     ($($d:ty),*) => { $(impl<'a> IntoAffineMatrixEntry<'a> for Expr<'a, $d> {
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                         |
+  |                         `Expr<'_, oximo_core::Affine>`
+  |                         `Expr<'_, oximo_core::Constant>`
+...
+  | expression_entries!(Constant, Affine);
+  | ------------------------------------- in this macro invocation
+  = note: required for `oximo_core::SymmetricMatrix<Expr<'_, oximo_core::Nonlinear>>` to implement `IntoSymmetricAffineFunction<'_>`
+note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_psd_constraint_auto`
+ --> src/model/constraints.rs
+  |
+  |     pub fn __add_psd_constraint_auto<'a>(
+  |            ------------------------- required by a bound in this associated function
+  |         &'a self,
+  |         matrix: impl IntoSymmetricAffineFunction<'a>,
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::constraints::<impl Model>::__add_psd_constraint_auto`
+  = note: this error originates in the macro `expression_entries` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -116,8 +116,14 @@ fn explicit_opaque_and_custom_set_lowerings_validate_and_solve_in_native_coordin
     {
         assert!((result.value_of(x).unwrap().unwrap() - 2.0).abs() < 1e-6);
         assert!((result.value_of(y).unwrap().unwrap() - 2.0).abs() < 1e-6);
-        assert_eq!(result.dual_of(opaque).unwrap(), None);
-        assert_eq!(result.dual_of(custom).unwrap(), None);
+        assert_eq!(
+            result.dual_of(model.require_scalar_dual_handle(opaque).unwrap()).unwrap(),
+            None
+        );
+        assert_eq!(
+            result.dual_of(model.require_scalar_dual_handle(custom).unwrap()).unwrap(),
+            None
+        );
     }
     assert!(
         model

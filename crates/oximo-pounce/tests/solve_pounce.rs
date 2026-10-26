@@ -812,7 +812,10 @@ fn detected_socp_routes_to_conic_ipm() {
     assert!(result.has_solution(), "{:?}", result.termination);
     assert_close(result.value_of(t).unwrap().unwrap(), 5.0, 1e-5, "t");
     assert!(
-        result.dual_of(m.constraint_handle("cone").unwrap()).unwrap().is_none(),
+        result
+            .dual_of(m.require_scalar_dual_handle(m.constraint_handle("cone").unwrap()).unwrap())
+            .unwrap()
+            .is_none(),
         "detected cones do not retain the original quadratic multiplier scaling"
     );
 }
@@ -830,7 +833,10 @@ fn ranged_linear_constraint_maps_both_sides_and_dual() {
     assert_close(result.value_of(y).unwrap().unwrap(), 0.0, 1e-5, "y");
     assert_close(result.objective().unwrap(), 11.0, 1e-5, "objective");
     assert_close(
-        result.dual_of(m.constraint_handle("band").unwrap()).unwrap().unwrap(),
+        result
+            .dual_of(m.require_scalar_dual_handle(m.constraint_handle("band").unwrap()).unwrap())
+            .unwrap()
+            .unwrap(),
         3.0,
         1e-5,
         "band dual",

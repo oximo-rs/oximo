@@ -1,0 +1,30 @@
+error[E0277]: the trait bound `Expr<'_>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/unchecked_dynamic_indicator_range.rs:9:51
+  |
+9 |     indicator_constraint!(model, b == 1 => 0.0 <= x.erase() <= 1.0);
+  |     ----------------------------------------------^^^^^^^^^--------
+  |     |                                             |
+  |     |                                             the trait `IntoAffineFunction<'_>` is not implemented for `Expr<'_>`
+  |     required by a bound introduced by this call
+  |
+help: the following other types implement trait `IntoAffineFunction<'a>`
+ --> src/function_set.rs
+  |
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Affine>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
+note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_indicator_range_auto`
+ --> src/model/constraints.rs
+  |
+  |     pub fn __add_indicator_range_auto<'a, B1: IntoRhs<'a>, B2: IntoRhs<'a>>(
+  |            -------------------------- required by a bound in this associated function
+...
+  |         mid: impl IntoAffineFunction<'a>,
+  |                   ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::constraints::<impl Model>::__add_indicator_range_auto`
+help: consider removing this method call, as the receiver has type `Expr<'_, oximo_core::Affine>` and `Expr<'_, oximo_core::Affine>: IntoAffineFunction<'_>` trivially holds
+  |
+9 -     indicator_constraint!(model, b == 1 => 0.0 <= x.erase() <= 1.0);
+9 +     indicator_constraint!(model, b == 1 => 0.0 <= x <= 1.0);
+  |

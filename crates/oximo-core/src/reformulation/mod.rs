@@ -6,6 +6,10 @@
 //! IDs.
 
 mod error;
+mod ids;
+mod provenance;
+pub use ids::{GeneratedConstraintId, GeneratedVarId, ReformulationVarId};
+pub use provenance::ReformulationProvenance;
 pub(crate) mod helpers;
 mod indicator;
 mod model;

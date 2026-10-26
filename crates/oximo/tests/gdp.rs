@@ -297,3 +297,35 @@ fn ill_scaled_big_m_is_rejected_and_tighter_bounds_preserve_the_active_optimum()
         assert!((result.objective().unwrap() - expected).abs() < 1e-9);
     }
 }
+
+#[cfg(feature = "highs")]
+#[test]
+fn sos_then_hull_solve_preserves_original_values_without_leaking_auxiliaries() {
+    use oximo::{HighsOptions, solvers::Highs};
+    let model = Model::new("SOS and Hull source values");
+
+    variable!(model, 0.0 <= x <= 4.0);
+    variable!(model, 0.0 <= y <= 4.0);
+    model.add_sos_constraint("choice", SosType::Sos1, [(x, 1.0), (y, 2.0)]);
+    let sos = model.reformulate_sos(SosReformulationOptions::default()).unwrap();
+    variable!(model, later, lb = 1.0, ub = 1.0);
+    boolean_variable!(model, left);
+    boolean_variable!(model, right);
+    disjunct_constraint!(model, left, x + y <= 3.0);
+    disjunct_constraint!(model, right, x + y <= 2.0);
+    disjunction!(model, [left, right]);
+    objective!(model, Max, x + y + later);
+
+    let mut solver = Highs.with_gdp(Hull::default());
+    for _ in 0..2 {
+        let result = solver.solve(&model, &HighsOptions::default()).unwrap();
+        assert_eq!(result.termination, oximo::TerminationStatus::Optimal);
+        assert!((result.objective().unwrap() - 4.0).abs() < 1e-6);
+        assert!((result.value_of(x + y).unwrap().unwrap() - 3.0).abs() < 1e-6);
+        assert_eq!(result.primal().unwrap().len(), 5);
+
+        for id in &sos[0].variables {
+            assert!(result.value(id.raw_id()).is_none());
+        }
+    }
+}

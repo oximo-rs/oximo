@@ -135,8 +135,8 @@ fn baron_iis_pinpoints_conflicting_constraints() {
     let opts = BaronOptions::default().time_limit(Duration::from_secs(30));
     let iis = Baron::new().compute_iis(&m, &opts).expect("compute_iis");
     assert!(!iis.is_empty());
-    assert!(iis.constraints.contains(&floor.id()), "floor missing from IIS: {iis:?}");
-    assert!(iis.constraints.contains(&ceil.id()), "ceil missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&floor.row_id()), "floor missing from IIS: {iis:?}");
+    assert!(iis.constraints.contains(&ceil.row_id()), "ceil missing from IIS: {iis:?}");
 
     let report = iis.report(&m).to_string();
     assert!(report.contains("floor") && report.contains("ceil"), "{report}");

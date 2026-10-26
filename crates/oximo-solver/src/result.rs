@@ -381,11 +381,21 @@ impl SolverResult {
     /// # Panics
     /// Panics if `model` does not own this result.
     #[inline]
-    pub fn with_semantic_dual_defaults(mut self, model: &Model) -> Self {
+    pub fn with_semantic_dual_defaults(self, model: &Model) -> Self {
+        self.with_semantic_dual_defaults_filtered(model, |_| true)
+    }
+
+    pub(crate) fn with_semantic_dual_defaults_filtered(
+        mut self,
+        model: &Model,
+        mut include: impl FnMut(oximo_core::SemanticConstraintId) -> bool,
+    ) -> Self {
         assert_eq!(self.model_id, model.id(), "dual provenance belongs to a different model");
 
         model.visit_alternative_lowerings(|id| {
-            self.semantic_dual.entry(id).or_insert(None);
+            if include(id) {
+                self.semantic_dual.entry(id).or_insert(None);
+            }
         });
 
         self
@@ -679,10 +689,11 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `constraint` belongs to another model.
     #[inline]
-    pub fn dual_of<F, S>(
+    pub fn dual_of(
         &self,
-        constraint: ConstraintHandle<F, S>,
+        constraint: impl oximo_core::ScalarDualQuery,
     ) -> Result<Option<f64>, ModelMismatchError> {
+        let constraint = constraint.scalar_handle();
         ensure_model_id(self.model_id, constraint.model_id())?;
         Ok(self.semantic_multiplier(constraint.id()))
     }

@@ -726,7 +726,7 @@ fn no_op_reformulation_validates_options_and_preserves_pending_lifecycle() {
     assert!(model.has_unreformulated_gdp());
     assert!(!transformed.has_unreformulated_gdp());
     let first = model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
-    assert_eq!(first.logical_constraints[0].constraints, [] as [oximo_core::ConstraintId; 0]);
+    assert_eq!(first.logical_constraints[0].constraints, [] as [GeneratedConstraintId; 0]);
     assert!(!model.has_unreformulated_gdp());
     let before = (model.arena().len(), model.gdp_reformulations().len());
     let empty = model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
@@ -1358,7 +1358,7 @@ fn logical_auxiliary_bounds_remain_binary_and_preserve_truth_tables() {
     logical_constraint!(model, exactly(2, [!(a & b), c.into()]));
     let report = model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
     assert_eq!(report.variables.len(), 1);
-    let auxiliary = report.variables[0];
+    let auxiliary = report.variables[0].raw_id();
     for (lower, upper) in [(-1.0, 1.0), (0.0, 2.0)] {
         assert!(model.unfix_var(auxiliary, lower, upper).is_err());
     }

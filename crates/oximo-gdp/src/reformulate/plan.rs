@@ -551,7 +551,7 @@ impl PlanBuilder {
         let id = VarId(u32::try_from(index).map_err(|_| GdpError::Capacity)?);
         let name = model.__gdp_unique_variable_name(&format!("__oximo_gdp_aux{index}"));
         self.variables.push((id, name, domain, lower, upper));
-        self.report.variables.push(id);
+        self.report.variables.push(oximo_core::GeneratedVarId::from_raw(id));
 
         Ok(id)
     }

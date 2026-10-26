@@ -267,14 +267,21 @@ fn typed_translation_checks_snapshot_ownership_and_numeric_data() {
     let function = Function::semantic_data(&(p * x + 1.0).into_function());
     let context = TranslationContext::new(&m).unwrap();
     p.set_param_value(4.0).unwrap();
-    let row = context.translate(&AffineRowTranslator, &function, &LessThan(5.0)).unwrap();
+    let row =
+        context.bind(&function, &LessThan(5.0)).unwrap().translate(&AffineRowTranslator).unwrap();
     assert_eq!(row.terms.coeffs[0].1, 2.0);
     assert_eq!(row.upper, 4.0);
-    assert!(context.translate(&AffineRowTranslator, &function, &LessThan(f64::NAN)).is_err());
+    assert!(
+        context
+            .bind(&function, &LessThan(f64::NAN))
+            .unwrap()
+            .translate(&AffineRowTranslator)
+            .is_err()
+    );
 
     let other = m.fork();
     let foreign = Function::semantic_data(&other.__constant(1.0).into_function());
-    assert!(context.translate(&AffineRowTranslator, &foreign, &LessThan(1.0)).is_err());
+    assert!(context.bind(&foreign, &LessThan(1.0)).is_err());
 }
 
 #[test]
@@ -284,11 +291,11 @@ fn newer_function_roots_require_a_fresh_translation_context() {
     variable!(model, x);
     let context = TranslationContext::new(&model).unwrap();
     let function = Function::semantic_data(&(2.0 * x + 1.0).into_function());
-    let error = context.translate(&AffineRowTranslator, &function, &LessThan(5.0)).unwrap_err();
+    let error = context.bind(&function, &LessThan(5.0)).unwrap_err();
     assert!(error.to_string().contains("refresh TranslationContext"));
 
     let fresh = TranslationContext::new(&model).unwrap();
-    assert!(fresh.translate(&AffineRowTranslator, &function, &LessThan(5.0)).is_ok());
+    assert!(fresh.bind(&function, &LessThan(5.0)).unwrap().translate(&AffineRowTranslator).is_ok());
 }
 
 #[derive(Debug)]
@@ -348,4 +355,80 @@ fn validation_preserves_capability_reasons() {
     assert!(validation.into_result().unwrap_err().to_string().contains(detail));
 
     assert!(!RestrictedRows(Capability::Unsupported).validate_model(&model, &()).is_supported());
+}
+
+#[test]
+fn prepared_entries_keep_their_snapshot_when_parameters_and_contexts_change() {
+    let model = Model::new("prepared entries");
+
+    variable!(model, x);
+    param!(model, coefficient = 2.0);
+    let function = ScalarFunctionData::from_expression(coefficient * x);
+    let set = LessThan(10.0);
+    let old = TranslationContext::new(&model).unwrap();
+    let entry = old.bind(&function, &set).unwrap();
+
+    coefficient.set_param_value(4.0).unwrap();
+    let fresh = TranslationContext::new(&model).unwrap();
+    let old_row = entry.translate(&AffineRowTranslator).unwrap();
+    let fresh_row = fresh.bind(&function, &set).unwrap().translate(&AffineRowTranslator).unwrap();
+    assert_eq!(old_row.terms.coeffs.as_ref(), [(x.var_id().unwrap(), 2.0)]);
+    assert_eq!(fresh_row.terms.coeffs.as_ref(), [(x.var_id().unwrap(), 4.0)]);
+}
+
+#[test]
+fn scalar_view_checks_preserve_identity_and_reject_foreign_or_conic_handles() {
+    let model = Model::new("scalar views");
+
+    variable!(model, x);
+    let row = constraint!(model, x <= 1.0);
+    let cone = soc_constraint!(model, [x] <= x);
+    let checked = model.require_scalar_dual_handle(row.erase()).unwrap();
+    assert_eq!(checked.id(), row.id());
+    assert_eq!(checked.model_id(), model.id());
+    assert!(model.scalar_dual_handle(cone).unwrap().is_none());
+    assert_eq!(
+        model.require_scalar_dual_handle(cone),
+        Err(oximo_core::ScalarDualHandleError::MissingScalarView(cone.id()))
+    );
+
+    let other = Model::new("foreign scalar view");
+    let error = other.scalar_dual_handle(row).unwrap_err();
+    assert_eq!(error, oximo_core::ModelMismatchError::new(other.id(), model.id()));
+    assert_eq!(
+        other.require_scalar_dual_handle(row),
+        Err(oximo_core::ScalarDualHandleError::ModelMismatch(error))
+    );
+    let foreign_result = SolverResult::for_model(&other);
+    assert!(foreign_result.dual_of(checked).is_err());
+}
+
+// Plain owned data explicitly opts into the shared-access immutability contract.
+impl oximo_core::ImmutableSemanticFunction for CustomData {}
+impl FunctionInSet<LessThan> for CustomData {}
+
+#[derive(Debug)]
+struct CustomRootTranslator;
+
+impl oximo_solver::TypedConstraintTranslator<CustomData, LessThan> for CustomRootTranslator {
+    type Output = ExprId;
+
+    fn translate(
+        &self,
+        entry: oximo_solver::PreparedConstraint<'_, CustomData, LessThan>,
+    ) -> Result<Self::Output, SolverError> {
+        Ok(entry.function().root)
+    }
+}
+
+#[test]
+fn immutable_custom_functions_remain_supported_by_prepared_translation() {
+    let model = Model::new("immutable custom function");
+
+    variable!(model, x);
+    let function = CustomData { model: model.id(), root: x.id() };
+    let set = LessThan(1.0);
+    let context = TranslationContext::new(&model).unwrap();
+    let entry = context.bind(&function, &set).unwrap();
+    assert_eq!(entry.translate(&CustomRootTranslator).unwrap(), x.id());
 }

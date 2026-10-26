@@ -116,7 +116,7 @@ fn range_constraint_solves_as_single_row() {
     assert_eq!(r.termination, TerminationStatus::Optimal);
     assert!((r.objective().unwrap() - 4.0).abs() < 1e-6);
     assert!((r.value_of(x).unwrap().unwrap() - 4.0).abs() < 1e-6);
-    let band = m.constraint_handle("band").unwrap();
+    let band = m.require_scalar_dual_handle(m.constraint_handle("band").unwrap()).unwrap();
     assert!(r.dual_of(band).unwrap().is_some());
 }
 

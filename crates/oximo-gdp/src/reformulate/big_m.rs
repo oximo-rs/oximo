@@ -548,7 +548,10 @@ impl PlanBuilder {
 
             self.report.rows.push(GdpRowArtifacts {
                 source,
-                constraints,
+                constraints: constraints
+                    .into_iter()
+                    .map(oximo_core::GeneratedConstraintId::from_raw)
+                    .collect(),
                 lower_m,
                 upper_m,
                 hierarchical_m,
@@ -597,7 +600,10 @@ impl PlanBuilder {
             let ids = self.row_ids(start)?;
             self.report.disjunctions.push(GdpDisjunctionArtifacts {
                 source: DisjunctionId(u32::try_from(i).map_err(|_| GdpError::Capacity)?),
-                constraints: ids,
+                constraints: ids
+                    .into_iter()
+                    .map(oximo_core::GeneratedConstraintId::from_raw)
+                    .collect(),
                 method: GdpMethodKind::BigM,
             });
         }

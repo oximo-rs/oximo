@@ -32,12 +32,12 @@
 //!
 //! [`SymmetricAffineFunction`] pairs with [`PositiveSemidefiniteCone`] in the
 //! [`crate::Constraint`] API. Numeric entries and constant/affine expressions
-//! convert through [`IntoSymmetricAffineFunction`] while dynamic expressions
-//! receive a runtime affine check. Statically quadratic or nonlinear entries
-//! are excluded. All expression entries must belong to the registering model.
+//! convert through [`IntoSymmetricAffineFunction`]. Other expression degrees
+//! require explicit checked narrowing.
+//! All expression entries must belong to the registering model.
 //! The cone dimension must match the matrix side dimension.
 
-use oximo_expr::{Affine, Constant, Dynamic, Expr, ExprArenaCell, ExprId};
+use oximo_expr::{Affine, Constant, Expr, ExprArenaCell, ExprId};
 use smol_str::SmolStr;
 
 use crate::function_set::{
@@ -98,7 +98,7 @@ macro_rules! expression_entries {
         }
     })* };
 }
-expression_entries!(Constant, Affine, Dynamic);
+expression_entries!(Constant, Affine);
 macro_rules! numeric_entries {
     ($($t:ty),*) => { $(impl<'a> IntoAffineMatrixEntry<'a> for $t {
         fn into_affine_matrix_entry(self, arena: &'a ExprArenaCell) -> Expr<'a, Affine> {
