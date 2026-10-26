@@ -116,3 +116,7 @@ pub use psd::{
 };
 
 pub use model::SemanticConstraints;
+
+pub use crate::reformulation::{
+    GeneratedConstraintId, GeneratedVarId, ReformulationProvenance, ReformulationVarId,
+};

@@ -21,23 +21,49 @@ fn borrowed_plan_preserves_interleaved_source_rows_and_reuses_membership() {
     let x_id = x.var_id().unwrap();
     let z_id = z.var_id().unwrap();
     let generated_id = generated.var_id().unwrap();
+    let cone = soc_constraint!(source, [x] <= z);
+    let scalar_handle = |id| {
+        source.require_scalar_dual_handle(source.constraint_handle_from_id(id).unwrap()).unwrap()
+    };
     let plan = SourceProjectionPlan::new(SourceCoordinates::capture(&source))
         .with_source_variables([x_id, z_id, x_id])
         .with_source_rows([first, last, first])
-        .retain_variables([generated_id]);
+        .retain_variables([oximo_core::GeneratedVarId::from_raw(generated_id)]);
     let projection = SourceProjection::with_plan(&source, &plan);
     let mut result = SolverResult::for_model(&source);
     result.dual_status = DualStatus::FeasiblePoint;
     result
         .add_solution([(x_id, 1.0), (z_id, 2.0), (generated_id, 0.5)].into_iter().collect(), None);
     result.dual = [(first, 1.0), (generated_row, 9.0), (last, 2.0)].into_iter().collect();
+    result.semantic_dual = [
+        (SemanticConstraintId::Algebraic(first), Some(5.0)),
+        (SemanticConstraintId::Algebraic(generated_row), Some(7.0)),
+        (SemanticConstraintId::Algebraic(last), None),
+        (cone.id(), Some(3.0)),
+    ]
+    .into_iter()
+    .collect();
     result.reduced_costs = [(x_id, 1.0), (generated_id, 9.0), (z_id, 2.0)].into_iter().collect();
-    for _ in 0..3 {
+    for generated_multiplier in [Some(7.0), None, Some(7.0)] {
+        result
+            .semantic_dual
+            .insert(SemanticConstraintId::Algebraic(generated_row), generated_multiplier);
         let projected = projection.project(result.clone()).unwrap();
         assert_eq!(projected.primal().unwrap().len(), 3);
         assert_eq!(projected.dual.len(), 2);
         assert_eq!(projected.dual.get(&last), Some(&2.0));
         assert!(!projected.dual.contains_key(&generated_row));
+        assert!(
+            !projected.semantic_dual.contains_key(&SemanticConstraintId::Algebraic(generated_row))
+        );
+        assert_eq!(projected.dual_of(scalar_handle(generated_row)).unwrap(), None);
+        assert_eq!(projected.dual_of(scalar_handle(first)).unwrap(), Some(5.0));
+        assert_eq!(
+            projected.semantic_dual.get(&SemanticConstraintId::Algebraic(last)),
+            Some(&None)
+        );
+        assert_eq!(projected.dual_of(scalar_handle(last)).unwrap(), None);
+        assert_eq!(projected.semantic_dual.get(&cone.id()), Some(&Some(3.0)));
         assert_eq!(projected.reduced_costs.len(), 2);
         assert!(!projected.reduced_costs.contains_key(&generated_id));
     }
@@ -78,8 +104,8 @@ fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
 
     let history = transformed.sos_reformulations();
     let artifacts = &history[0];
-    let generated_variable = artifacts.variables[0];
-    let generated_constraint = artifacts.constraints[0];
+    let generated_variable = artifacts.variables[0].raw_id();
+    let generated_constraint = artifacts.constraints[0].raw_id();
     let sos_id = artifacts.source;
 
     let solve_parameters = transformed.arena().parameter_snapshot();
@@ -94,6 +120,8 @@ fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
 
     result.dual.insert(capacity.row_id(), 1.0);
     result.dual.insert(generated_constraint, 9.0);
+    result.semantic_dual.insert(capacity.id(), Some(5.0));
+    result.semantic_dual.insert(SemanticConstraintId::Algebraic(generated_constraint), Some(7.0));
     result.reduced_costs.insert(x.var_id().unwrap(), 0.5);
     result.reduced_costs.insert(generated_variable, 9.0);
 
@@ -111,6 +139,12 @@ fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
     assert_eq!(projected.solutions[0].primal[&x.var_id().unwrap()], 0.5);
 
     assert_eq!(projected.dual.get(&capacity.row_id()), Some(&1.0));
+    assert_eq!(projected.dual_of(capacity).unwrap(), Some(5.0));
+    assert!(
+        !projected
+            .semantic_dual
+            .contains_key(&SemanticConstraintId::Algebraic(generated_constraint))
+    );
     assert!(!projected.dual.contains_key(&generated_constraint));
     assert!(!projected.reduced_costs.contains_key(&generated_variable));
 
@@ -204,8 +238,8 @@ fn in_place_reformulation_projects_without_cloning() {
 
     let history = source.sos_reformulations();
     let artifacts = &history[0];
-    let generated_variable = artifacts.variables[0];
-    let generated_constraint = artifacts.constraints[0];
+    let generated_variable = artifacts.variables[0].raw_id();
+    let generated_constraint = artifacts.constraints[0].raw_id();
 
     let mut result = SolverResult::for_model(&source);
     result.dual_status = DualStatus::FeasiblePoint;
@@ -285,8 +319,10 @@ fn projection_retains_explicitly_requested_generated_variables() {
         Some(0.0),
     );
 
-    let projected =
-        SourceProjection::capture(&source).retain_variables([retained]).project(result).unwrap();
+    let projected = SourceProjection::capture(&source)
+        .retain_variables([oximo_core::GeneratedVarId::from_raw(retained)])
+        .project(result)
+        .unwrap();
 
     let primal = projected.primal().unwrap();
     assert_eq!(primal.len(), 3);
@@ -306,8 +342,10 @@ fn projection_drops_non_finite_retained_values() {
     let mut result = SolverResult::for_model(&source);
     result.add_solution([(x_id, 1.0), (retained, f64::NAN)].into_iter().collect(), Some(0.0));
 
-    let projected =
-        SourceProjection::capture(&source).retain_variables([retained]).project(result).unwrap();
+    let projected = SourceProjection::capture(&source)
+        .retain_variables([oximo_core::GeneratedVarId::from_raw(retained)])
+        .project(result)
+        .unwrap();
 
     let primal = projected.primal().unwrap();
     assert_eq!(primal.len(), 1);
@@ -326,8 +364,10 @@ fn projection_still_requires_every_source_variable_when_retaining() {
         Some(0.0),
     );
 
-    let projected =
-        SourceProjection::capture(&source).retain_variables([VarId(2)]).project(result).unwrap();
+    let projected = SourceProjection::capture(&source)
+        .retain_variables([oximo_core::GeneratedVarId::from_raw(VarId(2))])
+        .project(result)
+        .unwrap();
 
     assert!(projected.solutions.is_empty());
     assert_eq!(projected.primal_status, PrimalStatus::NoSolution);
@@ -421,23 +461,76 @@ fn projection_filters_generated_cone_duals() {
     assert_eq!(coordinates.soc_constraints, 1);
     assert_eq!(coordinates.psd_constraints, 1);
 
-    let mut result = SolverResult::for_model(&source);
-    result.dual_status = DualStatus::FeasiblePoint;
-    result.add_solution(
-        [(x.var_id().unwrap(), 1.0), (t.var_id().unwrap(), 2.0), (z.var_id().unwrap(), 3.0)]
-            .into_iter()
-            .collect(),
-        Some(0.0),
-    );
-    result.soc_dual.insert(cone.soc_id(), 2.0);
-    result.soc_dual.insert(SocConstraintId(1), 9.0);
-    result.psd_dual.insert(positivity.psd_id(), SymmetricMatrix::from_upper_triangle(1, [4.0]));
-    result.psd_dual.insert(PsdConstraintId(1), SymmetricMatrix::from_upper_triangle(1, [9.0]));
+    let generated_cone = soc_constraint!(source, [x] <= t);
+    let generated_positivity =
+        psd_constraint!(source, SymmetricMatrix::from_upper_triangle(1, [z]));
+    let projection = SourceProjection::with_coordinates(&source, coordinates);
 
-    let projected = SourceProjection::capture(&source).project(result).unwrap();
+    for generated_multiplier in [Some(7.0), None] {
+        let mut result = SolverResult::for_model(&source);
+        result.dual_status = DualStatus::FeasiblePoint;
+        result.add_solution(
+            [(x.var_id().unwrap(), 1.0), (t.var_id().unwrap(), 2.0), (z.var_id().unwrap(), 3.0)]
+                .into_iter()
+                .collect(),
+            Some(0.0),
+        );
+        result.soc_dual.insert(cone.soc_id(), 2.0);
+        result.soc_dual.insert(generated_cone.soc_id(), 9.0);
+        result.psd_dual.insert(positivity.psd_id(), SymmetricMatrix::from_upper_triangle(1, [4.0]));
+        result
+            .psd_dual
+            .insert(generated_positivity.psd_id(), SymmetricMatrix::from_upper_triangle(1, [9.0]));
+        result.semantic_dual.insert(cone.id(), Some(3.0));
+        result.semantic_dual.insert(positivity.id(), None);
+        result.semantic_dual.insert(generated_cone.id(), generated_multiplier);
+        result.semantic_dual.insert(generated_positivity.id(), generated_multiplier);
 
-    assert_eq!(projected.soc_dual.len(), 1);
-    assert_eq!(projected.soc_dual.get(&cone.soc_id()), Some(&2.0));
-    assert_eq!(projected.psd_dual.len(), 1);
-    assert!(projected.psd_dual.contains_key(&positivity.psd_id()));
+        let projected = projection.project(result).unwrap();
+
+        assert_eq!(projected.soc_dual.len(), 1);
+        assert_eq!(projected.soc_dual.get(&cone.soc_id()), Some(&2.0));
+        assert_eq!(projected.psd_dual.len(), 1);
+        assert!(projected.psd_dual.contains_key(&positivity.psd_id()));
+        assert_eq!(projected.semantic_dual.get(&cone.id()), Some(&Some(3.0)));
+        assert_eq!(projected.semantic_dual.get(&positivity.id()), Some(&None));
+        assert!(!projected.semantic_dual.contains_key(&generated_cone.id()));
+        assert!(!projected.semantic_dual.contains_key(&generated_positivity.id()));
+    }
+}
+
+#[test]
+fn projection_without_source_rows_preserves_non_algebraic_semantic_mappings() {
+    let model = Model::new("cone semantics without scalar source rows");
+
+    variable!(model, x);
+    variable!(model, t);
+    let cone = soc_constraint!(model, [x] <= t);
+    let coordinates = SourceCoordinates::capture(&model);
+    let generated = constraint!(model, x <= 2.0);
+    let projection = SourceProjection::with_coordinates(&model, coordinates);
+
+    for source_multiplier in [Some(3.0), Some(f64::NAN), None] {
+        let mut result = SolverResult::for_model(&model);
+        result.dual_status = DualStatus::FeasiblePoint;
+        result.add_solution(
+            [(x.var_id().unwrap(), 1.0), (t.var_id().unwrap(), 2.0)].into_iter().collect(),
+            Some(0.0),
+        );
+
+        result.dual.insert(generated.row_id(), 7.0);
+        result.semantic_dual.insert(generated.id(), Some(7.0));
+        result.semantic_dual.insert(cone.id(), source_multiplier);
+        result.soc_dual.insert(cone.soc_id(), 2.0);
+
+        let projected = projection.project(result).unwrap();
+        assert!(projected.dual.is_empty());
+        assert!(!projected.semantic_dual.contains_key(&generated.id()));
+        assert_eq!(projected.dual_of(generated).unwrap(), None);
+        assert_eq!(
+            projected.semantic_dual.get(&cone.id()),
+            Some(&source_multiplier.filter(|value| value.is_finite()))
+        );
+        assert_eq!(projected.soc_dual_of(cone).unwrap(), Some(2.0));
+    }
 }

@@ -553,12 +553,12 @@ pub enum GdpHullActivation {
     },
     Pattern {
         disjunction: DisjunctionId,
-        weight: VarId,
+        weight: crate::GeneratedVarId,
     },
     /// Sum of branches that do not use this coordinate in a flat exactly-one group.
     BranchSum {
         disjunction: DisjunctionId,
-        weight: VarId,
+        weight: crate::GeneratedVarId,
     },
 }
 
@@ -568,10 +568,14 @@ impl GdpHullActivation {
     /// Indicator and complement activations read the source Boolean's binary
     /// variable; pattern and branch-sum activations read a generated weight.
     #[must_use]
-    pub const fn variable(self) -> VarId {
+    pub const fn variable(self) -> crate::ReformulationVarId {
         match self {
-            Self::Indicator { binary, .. } | Self::Complement { binary, .. } => binary,
-            Self::Pattern { weight, .. } | Self::BranchSum { weight, .. } => weight,
+            Self::Indicator { binary, .. } | Self::Complement { binary, .. } => {
+                crate::ReformulationVarId::Source(binary)
+            }
+            Self::Pattern { weight, .. } | Self::BranchSum { weight, .. } => {
+                crate::ReformulationVarId::Generated(weight)
+            }
         }
     }
 
@@ -581,7 +585,7 @@ impl GdpHullActivation {
         match self {
             Self::Indicator { binary, .. } => value(binary),
             Self::Complement { binary, .. } => value(binary).map(|v| 1.0 - v),
-            Self::Pattern { weight, .. } | Self::BranchSum { weight, .. } => value(weight),
+            Self::Pattern { weight, .. } | Self::BranchSum { weight, .. } => value(weight.raw_id()),
         }
     }
 }
@@ -614,8 +618,8 @@ impl GdpHullActivationHandle {
 #[derive(Clone, Debug)]
 pub struct GdpHullVariableMapping {
     /// Source coordinate, which may be another generated child copy or pattern weight.
-    pub source: VarId,
-    pub generated: VarId,
+    pub source: crate::ReformulationVarId,
+    pub generated: crate::GeneratedVarId,
     pub disjunction: Option<DisjunctionId>,
     /// Branch owning an indicator activation.
     /// `None` for complements, patterns, and combined unused branches.
@@ -630,7 +634,7 @@ pub struct GdpHullVariableMapping {
     pub bounds: [f64; 2],
     /// Bound artifacts constraining this copy, including their transformations
     /// by enclosing Hull scopes.
-    pub constraints: Vec<ConstraintId>,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
 /// Activation shared by unused branches of a flat exactly-one group.
@@ -640,7 +644,7 @@ pub struct GdpHullVariableMapping {
 pub struct GdpHullBranchSumMapping {
     pub source: DisjunctionId,
     pub excluded: Vec<BooleanId>,
-    pub weight: VarId,
+    pub weight: crate::GeneratedVarId,
 }
 
 /// A nonempty inclusive activation pattern.
@@ -650,7 +654,7 @@ pub struct GdpHullBranchSumMapping {
 pub struct GdpHullPatternMapping {
     pub source: DisjunctionId,
     pub selected: Vec<BooleanId>,
-    pub weight: VarId,
+    pub weight: crate::GeneratedVarId,
 }
 
 /// Logical decision and its algebraic binary counterpart in a report.
@@ -664,7 +668,7 @@ pub struct GdpBooleanMapping {
 #[derive(Clone, Debug)]
 pub struct GdpDisjunctionArtifacts {
     pub source: DisjunctionId,
-    pub constraints: Vec<ConstraintId>,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
     pub method: GdpMethodKind,
 }
 
@@ -672,7 +676,7 @@ pub struct GdpDisjunctionArtifacts {
 #[derive(Clone, Debug)]
 pub struct GdpLogicalArtifacts {
     pub source: LogicalConstraintId,
-    pub constraints: Vec<ConstraintId>,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
 /// Origin of the nonnegative M used for one side of a conditional row.
@@ -701,7 +705,7 @@ pub struct GdpBigMTerm {
 #[derive(Clone, Debug)]
 pub struct GdpRowArtifacts {
     pub source: DisjunctConstraintId,
-    pub constraints: Vec<ConstraintId>,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
     pub lower_m: Option<BigMSide>,
     pub upper_m: Option<BigMSide>,
     /// Actual child and ancestor relaxation amounts when a side was
@@ -796,7 +800,7 @@ pub struct GdpReformulationReportData {
     /// All registered Boolean decisions, including previously transformed ones.
     pub booleans: Vec<GdpBooleanMapping>,
     /// Auxiliary variables created by this call. Boolean counterparts are in `booleans`.
-    pub variables: Vec<VarId>,
+    pub variables: Vec<crate::GeneratedVarId>,
     pub rows: Vec<GdpRowArtifacts>,
     pub disjunctions: Vec<GdpDisjunctionArtifacts>,
     /// Rows newly emitted for each assertion.

@@ -1,0 +1,13 @@
+error[E0271]: type mismatch resolving `<[GeneratedVarId; 1] as IntoIterator>::Item == VarId`
+  --> tests/ui/fail/generated_source_projection.rs:14:32
+   |
+14 |         .with_source_variables([GeneratedVarId::from_raw(VarId(0))]);
+   |          --------------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `VarId`, found `GeneratedVarId`
+   |          |
+   |          required by a bound introduced by this call
+   |
+note: required by a bound in `SourceProjection::<'a>::with_source_variables`
+  --> src/reconstruct.rs
+   |
+   |     pub fn with_source_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
+   |                                                                         ^^^^^^^^^^^^ required by this bound in `SourceProjection::<'a>::with_source_variables`

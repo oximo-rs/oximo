@@ -228,8 +228,8 @@ fn sos2_reformulation_uses_weight_order_and_adjacent_intervals() {
     assert_eq!(artifacts.variables.len(), 2, "one binary per adjacent interval");
     assert_eq!(artifacts.constraints.len(), 4, "selection plus one upper gate per member");
 
-    let interval_0 = artifacts.variables[0];
-    let interval_1 = artifacts.variables[1];
+    let interval_0 = artifacts.variables[0].raw_id();
+    let interval_1 = artifacts.variables[1].raw_id();
     let arena = transformed.arena();
     let model_constraints = transformed.constraints();
     let rows = model_constraints.algebraic();
@@ -467,7 +467,7 @@ fn reformulated_clone_rejects_source_handles_even_when_numeric_ids_collide() {
     // The independently mutable source allocates the same raw slot next. Its
     // model-bound handle must not be allowed to mutate the generated auxiliary.
     let late_source_variable = source.__var("late").build();
-    assert_eq!(late_source_variable.var_id(), Some(auxiliary));
+    assert_eq!(late_source_variable.var_id(), Some(auxiliary.raw_id()));
     assert_eq!(
         transformed.set_initial(late_source_variable, 0.75),
         Err(ModelMismatchError::new(transformed.id(), source.id()).into())

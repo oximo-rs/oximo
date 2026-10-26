@@ -200,6 +200,12 @@ impl Solver for DualSolver {
             .enumerate()
             .map(|(i, _)| (oximo_gdp::core::ConstraintId(u32::try_from(i).unwrap()), 1.0))
             .collect();
+        result.semantic_dual.extend(
+            result
+                .dual
+                .keys()
+                .map(|&row| (oximo_core::SemanticConstraintId::Algebraic(row), Some(7.0))),
+        );
         Ok(result)
     }
 }
@@ -363,9 +369,9 @@ fn solve_projects_results_and_keeps_hull_activations_queryable() {
         let retained: rustc_hash::FxHashSet<VarId> = report
             .hull_variables
             .iter()
-            .map(|copy| copy.activation_kind.variable())
-            .chain(report.hull_patterns.iter().map(|pattern| pattern.weight))
-            .chain(report.hull_branch_sums.iter().map(|sum| sum.weight))
+            .map(|copy| copy.activation_kind.variable().raw_id())
+            .chain(report.hull_patterns.iter().map(|pattern| pattern.weight.raw_id()))
+            .chain(report.hull_branch_sums.iter().map(|sum| sum.weight.raw_id()))
             .filter(|id| id.index() >= source_variables)
             .collect();
         (retained, report.hull_activations().collect::<Vec<_>>())
@@ -426,16 +432,16 @@ fn solve_after_adding_gdp_and_source_variables_keeps_the_source_set_queryable() 
 
     let reports = model.gdp_reformulations();
     let generated: rustc_hash::FxHashSet<VarId> =
-        reports.iter().flat_map(|report| report.variables.iter().copied()).collect();
+        reports.iter().flat_map(|report| report.variables.iter().map(|id| id.raw_id())).collect();
     let retained: rustc_hash::FxHashSet<VarId> = reports
         .iter()
         .flat_map(|report| {
             report
                 .hull_variables
                 .iter()
-                .map(|copy| copy.activation_kind.variable())
-                .chain(report.hull_patterns.iter().map(|pattern| pattern.weight))
-                .chain(report.hull_branch_sums.iter().map(|sum| sum.weight))
+                .map(|copy| copy.activation_kind.variable().raw_id())
+                .chain(report.hull_patterns.iter().map(|pattern| pattern.weight.raw_id()))
+                .chain(report.hull_branch_sums.iter().map(|sum| sum.weight.raw_id()))
         })
         .collect();
 
@@ -458,6 +464,146 @@ fn solve_after_adding_gdp_and_source_variables_keeps_the_source_set_queryable() 
     for report in reports.iter() {
         for handle in report.hull_activations() {
             assert!(result.hull_activation_value_of(handle).unwrap().is_some());
+        }
+    }
+}
+
+#[test]
+fn sos_then_gdp_projects_only_original_declarations_and_refreshes_after_more_sos() {
+    let model = Model::new("SOS then GDP projection");
+
+    variable!(model, 0.0 <= x <= 4.0);
+    variable!(model, 0.0 <= y <= 4.0);
+    let original = constraint!(model, original, x + y <= 4.0);
+    model.add_sos_constraint("first SOS", SosType::Sos1, [(x, 1.0), (y, 2.0)]);
+    let first = model.reformulate_sos(SosReformulationOptions::default()).unwrap();
+    assert_ne!(first[0].variables, [] as [GeneratedVarId; 0]);
+
+    variable!(model, 0.0 <= later <= 3.0);
+    boolean_variable!(model, active);
+    disjunct_constraint!(model, active, later <= 2.0);
+
+    let mut solver = DualSolver.with_gdp(Hull::default());
+    for _ in 0..2 {
+        let result = solver.solve(&model, &()).unwrap();
+        assert_eq!(result.primal().unwrap().len(), 4);
+        for variable in [x, y, later, active.binary()] {
+            assert!(result.value_of(variable).unwrap().is_some());
+        }
+        for id in &first[0].variables {
+            assert!(!result.primal().unwrap().contains_key(&id.raw_id()));
+        }
+        assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+        assert_eq!(result.semantic_dual.len(), 1);
+        assert_eq!(result.dual_of(original).unwrap(), Some(7.0));
+    }
+
+    model.add_sos_constraint("second SOS", SosType::Sos2, [(x, 1.0), (y, 2.0)]);
+    model.reformulate_sos(SosReformulationOptions::default()).unwrap();
+    let result = solver.solve(&model, &()).unwrap();
+    assert_eq!(result.primal().unwrap().len(), 4);
+    assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    assert_eq!(result.semantic_dual.len(), 1);
+    assert_eq!(result.dual_of(original).unwrap(), Some(7.0));
+}
+
+#[test]
+fn indicator_then_gdp_drops_generated_indicator_rows() {
+    let model = Model::new("indicator then GDP projection");
+
+    variable!(model, 0.0 <= x <= 4.0);
+    variable!(model, trigger, Bin);
+    let original = constraint!(model, original, x <= 4.0);
+    indicator_constraint!(model, trigger == 1 => x <= 2.0);
+
+    let artifacts = model.reformulate_indicators(IndicatorReformulationOptions::default()).unwrap();
+    assert_ne!(artifacts[0].constraints, [] as [GeneratedConstraintId; 0]);
+
+    boolean_variable!(model, active);
+    disjunct_constraint!(model, active, x <= 3.0);
+
+    let result = DualSolver.with_gdp(BigM::default()).solve(&model, &()).unwrap();
+    assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    assert_eq!(result.primal().unwrap().len(), 3);
+}
+
+#[test]
+fn nested_gdp_projection_keeps_declared_booleans_and_explicit_activation_weights() {
+    let model = Model::new("nested GDP source projection");
+
+    variable!(model, 0.0 <= x <= 4.0);
+    let original = constraint!(model, original, x <= 4.0);
+    boolean_variable!(model, parent);
+    boolean_variable!(model, sibling);
+    boolean_variable!(model, child);
+    boolean_variable!(model, other_child);
+    disjunct_constraint!(model, parent, x <= 3.0);
+    disjunct_constraint!(model, child, x >= 1.0);
+    disjunct_constraint!(model, other_child, x <= 2.0);
+    disjunction!(model, [parent, sibling], AtLeastOne);
+    disjunction!(model, [child, other_child], parent = parent);
+    let hull =
+        Hull::default().with_inclusive_policy(HullInclusivePolicy::Enumerate { max_patterns: 3 });
+    let mut solver = DualSolver.with_gdp(hull);
+
+    for _ in 0..2 {
+        let result = solver.solve(&model, &()).unwrap();
+        let primal = result.primal().unwrap();
+        for variable in [x, parent.binary(), sibling.binary(), child.binary(), other_child.binary()]
+        {
+            assert!(result.value_of(variable).unwrap().is_some());
+        }
+        let reports = model.gdp_reformulations();
+        let retained: rustc_hash::FxHashSet<_> = reports
+            .iter()
+            .flat_map(|report| {
+                report
+                    .hull_variables
+                    .iter()
+                    .filter_map(|copy| copy.activation_kind.variable().generated())
+                    .chain(report.hull_patterns.iter().map(|pattern| pattern.weight))
+                    .chain(report.hull_branch_sums.iter().map(|sum| sum.weight))
+            })
+            .collect();
+        assert!(!retained.is_empty());
+        assert_eq!(primal.len(), 5 + retained.len());
+
+        for report in reports.iter() {
+            for activation in report.hull_activations() {
+                assert!(result.hull_activation_value_of(activation).unwrap().is_some());
+            }
+            for id in &report.variables {
+                assert_eq!(primal.contains_key(&id.raw_id()), retained.contains(id));
+            }
+        }
+        assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    }
+}
+
+#[test]
+fn sos_only_history_is_projected_even_without_a_gdp_report() {
+    let model = Model::new("SOS-only projection");
+
+    variable!(model, 0.0 <= x <= 4.0);
+    variable!(model, 0.0 <= y <= 4.0);
+    let original = constraint!(model, original, x + y <= 4.0);
+    model.add_sos_constraint("SOS", SosType::Sos1, [(x, 1.0), (y, 2.0)]);
+    model.reformulate_sos(SosReformulationOptions::default()).unwrap();
+    assert!(model.gdp_reformulations().is_empty());
+    let result = DualSolver.with_gdp(BigM::default()).solve(&model, &()).unwrap();
+    assert_eq!(result.primal().unwrap().len(), 2);
+    assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    assert_eq!(result.dual_of(original).unwrap(), Some(7.0));
+
+    for report in model.sos_reformulations().iter() {
+        for row in &report.constraints {
+            let raw = row.raw_id();
+            let handle = model
+                .require_scalar_dual_handle(model.constraint_handle_from_id(raw).unwrap())
+                .unwrap();
+            assert!(!result.dual.contains_key(&raw));
+            assert!(!result.semantic_dual.contains_key(&handle.id()));
+            assert_eq!(result.dual_of(handle).unwrap(), None);
         }
     }
 }

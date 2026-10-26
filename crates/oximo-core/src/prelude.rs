@@ -82,3 +82,7 @@ pub use crate::semantic::{
 pub use crate::objective::{ObjectiveFunction, SemanticObjective};
 
 pub use crate::{ScalarConstraintHandle, ScalarDualHandleError, ScalarDualQuery};
+
+pub use crate::reformulation::{
+    GeneratedConstraintId, GeneratedVarId, ReformulationProvenance, ReformulationVarId,
+};

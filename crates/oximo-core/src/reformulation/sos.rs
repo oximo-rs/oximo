@@ -37,8 +37,8 @@ impl SosReformulationOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SosReformulationArtifacts {
     pub source: SosConstraintId,
-    pub variables: Vec<VarId>,
-    pub constraints: Vec<ConstraintId>,
+    pub variables: Vec<crate::GeneratedVarId>,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
 impl ReformulatedModel {
@@ -369,8 +369,14 @@ impl PlannedSos {
         model.sos_constraints.borrow_mut()[self.source.index()].active = false;
         SosReformulationArtifacts {
             source: self.source,
-            variables: generated_variables,
-            constraints: generated_constraints,
+            variables: generated_variables
+                .into_iter()
+                .map(crate::GeneratedVarId::from_raw)
+                .collect(),
+            constraints: generated_constraints
+                .into_iter()
+                .map(crate::GeneratedConstraintId::from_raw)
+                .collect(),
         }
     }
 }

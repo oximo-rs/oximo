@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
 
-use oximo_core::{ConstraintId, Model, ModelId, VarId};
+use oximo_core::{ConstraintId, Model, ModelId, SemanticConstraintId, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationStatus};
@@ -33,6 +33,7 @@ pub fn finalize_result(
         model,
         &SourceIndices::Prefix(num_variables),
         &FxHashSet::default(),
+        None,
     )
 }
 
@@ -74,14 +75,36 @@ impl SourceIndices {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ProjectionCoordinates<'a> {
+    rows: &'a SourceIndices,
+    soc: usize,
+    psd: usize,
+}
+
+impl ProjectionCoordinates<'_> {
+    fn includes_semantic(self, id: SemanticConstraintId) -> bool {
+        match id {
+            SemanticConstraintId::Algebraic(row) => self.rows.contains(row.index()),
+            SemanticConstraintId::SecondOrderCone(cone) => cone.index() < self.soc,
+            SemanticConstraintId::PositiveSemidefinite(cone) => cone.index() < self.psd,
+            SemanticConstraintId::SpecialOrderedSet(_) | SemanticConstraintId::Indicator(_) => true,
+        }
+    }
+}
+
 #[inline]
 fn finalize_result_retaining(
     result: SolverResult,
     model: &oximo_core::Model,
     variables: &SourceIndices,
     retained: &FxHashSet<VarId>,
+    projection: Option<ProjectionCoordinates<'_>>,
 ) -> SolverResult {
-    normalize_result(result, variables, retained).with_semantic_dual_defaults(model)
+    let result = normalize_result(result, variables, retained, projection);
+    result.with_semantic_dual_defaults_filtered(model, |id| {
+        projection.is_none_or(|coordinates| coordinates.includes_semantic(id))
+    })
 }
 
 /// One native row's contribution to an original multiplier. Store `None` in
@@ -195,6 +218,7 @@ fn normalize_result(
     mut result: SolverResult,
     source_variables: &SourceIndices,
     retained: &FxHashSet<VarId>,
+    projection: Option<ProjectionCoordinates<'_>>,
 ) -> SolverResult {
     for (index, point) in result.solutions.iter().enumerate() {
         assert!(
@@ -252,22 +276,8 @@ fn normalize_result(
         result.dual_status = DualStatus::Unknown;
         result.gap = None;
     }
-    if result.dual_status != DualStatus::FeasiblePoint {
-        result.semantic_dual.clear();
-        result.dual.clear();
-        result.soc_dual.clear();
-        result.psd_dual.clear();
-        result.reduced_costs.clear();
-    }
-    for value in result.semantic_dual.values_mut() {
-        if value.is_some_and(|v| !v.is_finite()) {
-            *value = None;
-        }
-    }
-    result.dual.retain(|_, v| v.is_finite());
-    result.soc_dual.retain(|_, v| v.is_finite() && *v >= 0.0);
-    result.psd_dual.retain(|_, matrix| matrix.upper_triangle().iter().all(|v| v.is_finite()));
-    result.reduced_costs.retain(|_, v| v.is_finite());
+
+    normalize_duals(&mut result, source_variables, projection);
     result.best_bound = result.best_bound.filter(|v| v.is_finite());
     if result.primal_status == PrimalStatus::OptimalPoint && result.best_bound.is_none() {
         result.best_bound = result.objective();
@@ -277,6 +287,92 @@ fn normalize_result(
         result.gap = None;
     }
     result
+}
+
+/// Normalize dual evidence and project coordinates together.
+fn normalize_duals(
+    result: &mut SolverResult,
+    source_variables: &SourceIndices,
+    projection: Option<ProjectionCoordinates<'_>>,
+) {
+    if result.dual_status != DualStatus::FeasiblePoint {
+        result.semantic_dual.clear();
+        result.dual.clear();
+        result.soc_dual.clear();
+        result.psd_dual.clear();
+        result.reduced_costs.clear();
+        return;
+    }
+
+    if let Some(coordinates) = projection {
+        match coordinates.rows {
+            SourceIndices::Prefix(count) => {
+                normalize_projected_duals(result, source_variables, coordinates, |row| {
+                    row.index() < *count
+                });
+            }
+            SourceIndices::Explicit { ids, .. } => {
+                normalize_projected_duals(result, source_variables, coordinates, |row| {
+                    ids.contains(&row.index())
+                });
+            }
+        }
+    } else {
+        result.semantic_dual.values_mut().for_each(normalize_semantic_multiplier);
+        result.dual.retain(|_, value| value.is_finite());
+        result.soc_dual.retain(|_, value| value.is_finite() && *value >= 0.0);
+        result.psd_dual.retain(|_, matrix| matrix.upper_triangle().iter().all(|v| v.is_finite()));
+        result.reduced_costs.retain(|_, value| value.is_finite());
+    }
+}
+
+#[inline]
+fn normalize_semantic_multiplier(value: &mut Option<f64>) {
+    if value.is_some_and(|v| !v.is_finite()) {
+        *value = None;
+    }
+}
+
+fn normalize_projected_duals(
+    result: &mut SolverResult,
+    source_variables: &SourceIndices,
+    coordinates: ProjectionCoordinates<'_>,
+    keep_row: impl Fn(ConstraintId) -> bool,
+) {
+    let keep_semantic = |id| match id {
+        SemanticConstraintId::Algebraic(row) => keep_row(row),
+        _ => coordinates.includes_semantic(id),
+    };
+    // Without scalar source rows, an all-algebraic map is entirely generated.
+    // Check for preserved non-algebraic mappings before clearing in bulk.
+    if coordinates.rows.len() == 0
+        && result.semantic_dual.keys().all(|id| matches!(id, SemanticConstraintId::Algebraic(_)))
+    {
+        result.semantic_dual.clear();
+    } else {
+        result.semantic_dual.retain(|id, value| {
+            if !keep_semantic(*id) {
+                return false;
+            }
+            normalize_semantic_multiplier(value);
+            true
+        });
+    }
+    if coordinates.rows.len() == 0 {
+        result.dual.clear();
+    } else {
+        result.dual.retain(|id, value| keep_row(*id) && value.is_finite());
+    }
+
+    result
+        .soc_dual
+        .retain(|id, value| id.index() < coordinates.soc && value.is_finite() && *value >= 0.0);
+    result.psd_dual.retain(|id, matrix| {
+        id.index() < coordinates.psd && matrix.upper_triangle().iter().all(|v| v.is_finite())
+    });
+    result
+        .reduced_costs
+        .retain(|id, value| source_variables.contains(id.index()) && value.is_finite());
 }
 
 /// Coordinate counts captured from a source model before a reformulation.
@@ -359,8 +455,11 @@ impl SourceProjectionPlan {
 
     /// Keep additional generated primal coordinates, without their reduced costs.
     #[must_use]
-    pub fn retain_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
-        self.retained.extend(variables);
+    pub fn retain_variables(
+        mut self,
+        variables: impl IntoIterator<Item = oximo_core::GeneratedVarId>,
+    ) -> Self {
+        self.retained.extend(variables.into_iter().map(oximo_core::GeneratedVarId::raw_id));
         self
     }
 
@@ -466,8 +565,14 @@ impl<'a> SourceProjection<'a> {
     /// activation variables. Only primal values are retained; generated rows,
     /// duals, SOC/PSD multipliers, and reduced costs are still dropped.
     #[must_use]
-    pub fn retain_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
-        self.plan.to_mut().retained.extend(variables);
+    pub fn retain_variables(
+        mut self,
+        variables: impl IntoIterator<Item = oximo_core::GeneratedVarId>,
+    ) -> Self {
+        self.plan
+            .to_mut()
+            .retained
+            .extend(variables.into_iter().map(oximo_core::GeneratedVarId::raw_id));
         self
     }
 
@@ -534,10 +639,6 @@ impl<'a> SourceProjection<'a> {
                     .retain(|id, _| source_variables.contains(id.index()) || retained.contains(id));
             }
         }
-        result.dual.retain(|id, _| rows.contains(id.index()));
-        result.soc_dual.retain(|id, _| id.index() < coordinates.soc_constraints);
-        result.psd_dual.retain(|id, _| id.index() < coordinates.psd_constraints);
-        result.reduced_costs.retain(|id, _| source_variables.contains(id.index()));
 
         // Restore objective units on the native certificate.
         for point in &mut result.solutions {
@@ -554,7 +655,17 @@ impl<'a> SourceProjection<'a> {
             }
         }
 
-        Ok(finalize_result_retaining(result, source, source_variables, retained))
+        Ok(finalize_result_retaining(
+            result,
+            source,
+            source_variables,
+            retained,
+            Some(ProjectionCoordinates {
+                rows,
+                soc: coordinates.soc_constraints,
+                psd: coordinates.psd_constraints,
+            }),
+        ))
     }
 }
 

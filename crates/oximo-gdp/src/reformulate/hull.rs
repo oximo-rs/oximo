@@ -22,7 +22,9 @@ use oximo_core::gdp::{
     DisjunctionKind, GdpDisjunctionArtifacts, GdpHullActivation, GdpHullBranchSumMapping,
     GdpHullPatternMapping, GdpHullVariableMapping, GdpMethodKind, GdpRowArtifacts, GdpSnapshot,
 };
-use oximo_core::{Domain, ExprArena, ExprId, ExprNode, Model, VarId};
+use oximo_core::{
+    Domain, ExprArena, ExprId, ExprNode, GeneratedConstraintId, GeneratedVarId, Model, VarId,
+};
 use oximo_expr::{
     EvalContext, LinearTerms, ParamId, SignedExpr, evaluate, extract_linear, split_linear,
 };
@@ -320,6 +322,7 @@ struct Compiler<'a> {
     references: FxHashMap<VarId, f64>,
     binary_booleans: FxHashMap<VarId, BooleanId>,
     local_origins: FxHashMap<VarId, BooleanId>,
+    provenance: oximo_core::ReformulationProvenance,
     enter: Vec<usize>,
     leave: Vec<usize>,
     enumeration_above: Vec<bool>,
@@ -391,6 +394,7 @@ impl PlanBuilder {
                 .map(|(i, b)| (b.binary, BooleanId(u32::try_from(i).expect("Boolean ID"))))
                 .collect(),
             local_origins: FxHashMap::default(),
+            provenance: oximo_core::ReformulationProvenance::capture(model),
             enter: vec![0; data.booleans.len()],
             leave: vec![0; data.booleans.len()],
             enumeration_above: vec![false; data.booleans.len()],
@@ -625,14 +629,14 @@ impl Compiler<'_> {
         let patterns = &self.plan.report.hull_patterns[pattern_start..];
         if !patterns.is_empty() {
             let sum = patterns.iter().fold(Linear::constant(-1.0), |sum, pattern| {
-                sum.add(Linear::variable(pattern.weight))
+                sum.add(Linear::variable(pattern.weight.raw_id()))
             });
             equations.push((sum, true));
 
             for &b in &d.branches {
                 let sum = patterns.iter().filter(|pattern| pattern.selected.contains(&b)).fold(
                     Linear::variable(self.data.booleans[b.index()].binary).scaled(-1.0),
-                    |sum, pattern| sum.add(Linear::variable(pattern.weight)),
+                    |sum, pattern| sum.add(Linear::variable(pattern.weight.raw_id())),
                 );
                 equations.push((sum, true));
             }
@@ -844,7 +848,9 @@ impl Compiler<'_> {
     fn row_is_local_to(&self, row: &Row, branch: Option<BooleanId>) -> bool {
         match row.enforcement.local_activation() {
             Some(GdpHullActivation::Indicator { binary, .. }) => self.is_local(binary, branch),
-            Some(GdpHullActivation::Pattern { weight, .. }) => self.is_local(weight, branch),
+            Some(GdpHullActivation::Pattern { weight, .. }) => {
+                self.is_local(weight.raw_id(), branch)
+            }
             // A complementary on/off branch belongs to a standalone block.
             _ => false,
         }
@@ -925,11 +931,12 @@ impl Compiler<'_> {
             )?,
         };
 
+        let generated = GeneratedConstraintId::from_raw(id);
         for origin in row.origins {
             match origin {
-                Origin::Numeric(i) => self.row_reports[i].constraints.push(id),
-                Origin::Disjunction(i) => self.disjunction_reports[i].constraints.push(id),
-                Origin::Bounds(i) => self.plan.report.hull_variables[i].constraints.push(id),
+                Origin::Numeric(i) => self.row_reports[i].constraints.push(generated),
+                Origin::Disjunction(i) => self.disjunction_reports[i].constraints.push(generated),
+                Origin::Bounds(i) => self.plan.report.hull_variables[i].constraints.push(generated),
             }
         }
 
@@ -998,8 +1005,8 @@ impl Compiler<'_> {
 
         let mapping = self.plan.report.hull_variables.len();
         self.plan.report.hull_variables.push(GdpHullVariableMapping {
-            source,
-            generated: copy,
+            source: self.provenance.variable_origin(source),
+            generated: GeneratedVarId::from_raw(copy),
             disjunction: disjunction
                 .map(|i| DisjunctionId(u32::try_from(i).expect("disjunction ID"))),
             indicator,
@@ -1058,13 +1065,13 @@ impl Compiler<'_> {
                 GdpHullActivation::Indicator { indicator, binary: variable }
             }
         } else if let Some(&disjunction) = self.branch_sum_weights.get(&variable) {
-            GdpHullActivation::BranchSum { disjunction, weight: variable }
+            GdpHullActivation::BranchSum { disjunction, weight: GeneratedVarId::from_raw(variable) }
         } else {
             GdpHullActivation::Pattern {
                 disjunction: DisjunctionId(
                     u32::try_from(disjunction.expect("pattern scope")).expect("disjunction ID"),
                 ),
-                weight: variable,
+                weight: GeneratedVarId::from_raw(variable),
             }
         }
     }
@@ -1135,7 +1142,7 @@ impl Compiler<'_> {
                         self.plan.report.hull_branch_sums.push(GdpHullBranchSumMapping {
                             source,
                             excluded: used.clone(),
-                            weight,
+                            weight: GeneratedVarId::from_raw(weight),
                         });
 
                         Linear::variable(weight)
@@ -1640,7 +1647,7 @@ impl Compiler<'_> {
             self.plan.report.hull_patterns.push(GdpHullPatternMapping {
                 source: DisjunctionId(u32::try_from(index).expect("disjunction ID")),
                 selected,
-                weight,
+                weight: GeneratedVarId::from_raw(weight),
             });
 
             inputs.push((

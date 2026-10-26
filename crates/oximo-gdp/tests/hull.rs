@@ -186,13 +186,13 @@ fn paper_nested_links_use_parent_copies() {
     let parent = report
         .hull_variables
         .iter()
-        .find(|c| c.source == x.var_id().unwrap() && c.indicator == Some(y1.id()))
+        .find(|c| c.source.raw_id() == x.var_id().unwrap() && c.indicator == Some(y1.id()))
         .unwrap()
         .generated;
     let child_vars: Vec<_> = report
         .hull_variables
         .iter()
-        .filter(|c| c.source == x.var_id().unwrap() && c.disjunction == Some(child.id()))
+        .filter(|c| c.source.raw_id() == x.var_id().unwrap() && c.disjunction == Some(child.id()))
         .map(|c| c.generated)
         .collect();
     let rows = model.constraints();
@@ -205,8 +205,8 @@ fn paper_nested_links_use_parent_copies() {
         let Some(terms) = oximo_expr::extract_linear(&arena, r.lhs) else {
             return false;
         };
-        terms.coeffs.contains(&(parent, -1.0))
-            && child_vars.iter().all(|v| terms.coeffs.contains(&(*v, 1.0)))
+        terms.coeffs.contains(&(parent.raw_id(), -1.0))
+            && child_vars.iter().all(|v| terms.coeffs.contains(&(v.raw_id(), 1.0)))
             && !terms.coeffs.iter().any(|(v, _)| *v == x.var_id().unwrap())
     }));
 }
@@ -366,6 +366,14 @@ fn inclusive_ancestor_recombines_nested_selectors_and_copies() {
             );
 
             let report = model.reformulate_gdp(options).unwrap();
+            if outer_hull {
+                assert!(
+                    report
+                        .hull_variables
+                        .iter()
+                        .any(|copy| matches!(copy.source, ReformulationVarId::Generated(_)))
+                );
+            }
             for bits in 0..64 {
                 let flags: Vec<_> = (0..6).map(|i| f64::from(bits & (1 << i) != 0)).collect();
                 let (av, bv, cv, dv, ev, fv) =
@@ -443,7 +451,10 @@ fn copy_lifecycle_and_unconditional_tightening_remain_atomic() {
     assert!(report.hull_variables.iter().all(|v| v.bounds[0] <= -2.0 && v.bounds[1] >= 5.0));
 
     let after = (model.num_variables(), model.num_constraints(), model.arena().len());
-    assert_eq!(model.reformulate_gdp(Hull::default()).unwrap().variables, [] as [VarId; 0]);
+    assert_eq!(
+        model.reformulate_gdp(Hull::default()).unwrap().variables,
+        [] as [GeneratedVarId; 0]
+    );
     assert_eq!(after, (model.num_variables(), model.num_constraints(), model.arena().len()));
     boolean_variable!(model, fresh);
     logical_constraint!(model, fresh);
@@ -622,7 +633,7 @@ fn nonlinear_parameter_snapshots_and_clone_locks_are_isolated() {
     assert!(transformed.fix_var(VarId(0), 0.0).is_err());
 
     let generated = transformed.gdp_reformulations()[0].hull_variables[0].generated;
-    assert!(transformed.fix_var(generated, 0.0).is_err());
+    assert!(transformed.fix_var(generated.raw_id(), 0.0).is_err());
 
     let clone = transformed.to_reformulated_gdp_model(Hull::default()).unwrap();
 
@@ -730,12 +741,20 @@ fn enumeration_uses_zero_references_for_local_descendants() {
     let report = model.reformulate_gdp(options).unwrap();
     let selector = grandchild.binary().var_id().unwrap();
 
-    assert!(report.hull_variables.iter().any(|v| v.source == selector));
+    assert!(report.hull_variables.iter().any(|v| v.source.raw_id() == selector));
     assert!(
-        report.hull_variables.iter().filter(|v| v.source == selector).all(|v| v.reference == 0.0)
+        report
+            .hull_variables
+            .iter()
+            .filter(|v| v.source.raw_id() == selector)
+            .all(|v| v.reference == 0.0)
     );
     assert!(
-        report.hull_variables.iter().filter(|v| v.source == VarId(0)).all(|v| v.reference == 1.0)
+        report
+            .hull_variables
+            .iter()
+            .filter(|v| v.source.raw_id() == VarId(0))
+            .all(|v| v.reference == 1.0)
     );
 
     for bits in 0..64 {
@@ -1475,4 +1494,38 @@ fn reused_affine_scratch_preserves_cancellation_and_changing_row_supports() {
             }
         }
     }
+}
+
+#[test]
+fn incremental_hull_distinguishes_historical_copies_from_later_source_variables() {
+    let model = Model::new("incremental Hull provenance");
+
+    variable!(model, 0.0 <= x <= 4.0);
+    boolean_variable!(model, first);
+    boolean_variable!(model, second);
+    disjunct_constraint!(model, first, x <= 1.0);
+    disjunct_constraint!(model, second, x >= 2.0);
+    disjunction!(model, [first, second]);
+    let initial = model.reformulate_gdp(Hull::default()).unwrap();
+    let historical = initial.hull_variables[0].generated;
+    let copy = model.variable_handle(historical.raw_id());
+
+    variable!(model, 0.0 <= later <= 3.0);
+    boolean_variable!(model, low);
+    boolean_variable!(model, high);
+    disjunct_constraint!(model, low, copy + later <= 2.0);
+    disjunct_constraint!(model, high, copy + later >= 1.0);
+    disjunction!(model, [low, high]);
+    let next = model.reformulate_gdp(Hull::default()).unwrap();
+
+    assert!(
+        next.hull_variables
+            .iter()
+            .any(|mapping| mapping.source == ReformulationVarId::Generated(historical))
+    );
+    assert!(
+        next.hull_variables
+            .iter()
+            .any(|mapping| mapping.source == ReformulationVarId::Source(later.var_id().unwrap()))
+    );
 }

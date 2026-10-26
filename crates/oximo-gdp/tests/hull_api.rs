@@ -26,7 +26,7 @@ fn indexed_reference_coordinates_shift_affine_copies_and_last_value_wins() {
 
     let report = model.reformulate_gdp(options).unwrap();
     for copy in &report.hull_variables {
-        let reference = if copy.source == x[1].var_id().unwrap() { 2.0 } else { 1.0 };
+        let reference = if copy.source.raw_id() == x[1].var_id().unwrap() { 2.0 } else { 1.0 };
         assert_eq!(copy.reference, reference);
         assert_eq!(copy.bounds, [1.0, 4.0]);
         let generated = &model.resolved_variables()[copy.generated.index()];
@@ -282,7 +282,11 @@ fn typed_activations_query_fractional_values_without_an_expression_arena() {
     let report = inclusive.reformulate_gdp(hull).unwrap();
     let point = SolutionPoint {
         model_id: inclusive.id(),
-        primal: report.hull_patterns.iter().map(|pattern| (pattern.weight, 0.375)).collect(),
+        primal: report
+            .hull_patterns
+            .iter()
+            .map(|pattern| (pattern.weight.raw_id(), 0.375))
+            .collect(),
         objective: None,
         parameters: inclusive.arena().parameter_snapshot(),
     };
@@ -480,7 +484,7 @@ fn branch_sum_activations_query_fractional_weight_values() {
     let activation = report.hull_activations().find(|a| a.kind() == kind).unwrap();
     let point = SolutionPoint {
         model_id: model.id(),
-        primal: [(sum.weight, 0.375)].into_iter().collect(),
+        primal: [(sum.weight.raw_id(), 0.375)].into_iter().collect(),
         objective: None,
         parameters: model.arena().parameter_snapshot(),
     };

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/generated_value.rs:13:26
+   |
+13 |     let _ = result.value(GeneratedVarId::from_raw(VarId(0)));
+   |                    ----- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `VarId`, found `GeneratedVarId`
+   |                    |
+   |                    arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/result.rs
+   |
+   |     pub fn value(&self, id: VarId) -> Option<f64> {
+   |            ^^^^^

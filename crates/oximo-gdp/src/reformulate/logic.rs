@@ -60,7 +60,10 @@ impl PlanBuilder {
             let ids = self.row_ids(start)?;
             self.report.logical_constraints.push(GdpLogicalArtifacts {
                 source: LogicalConstraintId(u32::try_from(i).map_err(|_| GdpError::Capacity)?),
-                constraints: ids,
+                constraints: ids
+                    .into_iter()
+                    .map(oximo_core::GeneratedConstraintId::from_raw)
+                    .collect(),
             });
         }
 

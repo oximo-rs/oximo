@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/fail/generated_row_handle.rs:9:45
+  |
+9 |     let _ = model.constraint_handle_from_id(id);
+  |                   ------------------------- ^^ expected `ConstraintId`, found `GeneratedConstraintId`
+  |                   |
+  |                   arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/model/constraints.rs
+  |
+  |     pub fn constraint_handle_from_id(&self, id: ConstraintId) -> Option<ConstraintHandle> {
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^
