@@ -1,0 +1,31 @@
+error[E0277]: `ConstraintHandle<VariableVectorData, oximo_core::SpecialOrderedSet>` does not provide an algebraic scalar dual view
+  --> tests/ui/fail/sos_scalar_dual.rs:14:28
+   |
+14 |     let _ = result.dual_of(row);
+   |                    ------- ^^^ a checked scalar constraint handle is required
+   |                    |
+   |                    required by a bound introduced by this call
+   |
+   = help: the trait `ScalarDualQuery` is not implemented for `ConstraintHandle<VariableVectorData, oximo_core::SpecialOrderedSet>`
+   = note: for erased or custom handles, call model.scalar_dual_handle(handle) or model.require_scalar_dual_handle(handle); use soc_dual_of for SOC and psd_dual_of for PSD; SOS and indicator handles have no scalar dual accessor
+help: the following other types implement trait `ScalarDualQuery`
+  --> $WORKSPACE/crates/oximo-core/src/constraint.rs
+   |
+   |   impl ScalarDualQuery for ScalarConstraintHandle {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ConstraintHandle<oximo_core::constraint::ScalarHandleMarker>`
+...
+   | / impl<D: crate::Degree, S: crate::function_set::ScalarConstraintSet> ScalarDualQuery
+   | |     for ConstraintHandle<crate::ScalarFunctionData<D>, S>
+   | |_________________________________________________________^ `ConstraintHandle<ScalarFunctionData<D>, S>`
+...
+   | / impl<S: crate::function_set::ScalarConstraintSet> ScalarDualQuery
+   | |     for ConstraintHandle<crate::AnyScalarFunctionData, S>
+   | |_________________________________________________________^ `ConstraintHandle<AnyScalarFunctionData, S>`
+note: required by a bound in `SolverResult::dual_of`
+  --> src/result.rs
+   |
+   |     pub fn dual_of(
+   |            ------- required by a bound in this associated function
+   |         &self,
+   |         constraint: impl oximo_core::ScalarDualQuery,
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SolverResult::dual_of`

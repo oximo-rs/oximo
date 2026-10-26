@@ -416,7 +416,7 @@ impl Model {
         &self,
         name: SmolStr,
         ir: AlgebraicConstraintIr<'_>,
-    ) -> ConstraintHandle {
+    ) -> crate::ScalarConstraintHandle {
         self.__add_constraint(name, ir)
     }
 
@@ -665,11 +665,11 @@ impl Model {
             );
             let upper = self
                 .__add_constraint(format!("{name}_hi"), Constraint::new(function, LessThan(upper)));
-            RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
+            RangeConstraintHandles::Split { lower: lower.scalar_view(), upper: upper.scalar_view() }
         } else {
             let lower = self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
             let upper = self.__add_constraint(format!("{name}_hi"), mid.le(hi));
-            RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
+            RangeConstraintHandles::Split { lower: lower.scalar_view(), upper: upper.scalar_view() }
         };
 
         let origin_name = name.to_owned();
@@ -716,18 +716,21 @@ impl Model {
                         self.next_auto_name(),
                         Constraint::new(function, Interval { lower, upper }),
                     )
-                    .erase(),
+                    .scalar_view(),
                 )
             } else {
                 let lower =
                     self.__add_constraint_auto(Constraint::new(function, GreaterThan(lower)));
                 let upper = self.__add_constraint_auto(Constraint::new(function, LessThan(upper)));
-                RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
+                RangeConstraintHandles::Split {
+                    lower: lower.scalar_view(),
+                    upper: upper.scalar_view(),
+                }
             }
         } else {
             let lower = self.__add_constraint_auto(mid.ge(lo));
             let upper = self.__add_constraint_auto(mid.le(hi));
-            RangeConstraintHandles::Split { lower: lower.erase(), upper: upper.erase() }
+            RangeConstraintHandles::Split { lower: lower.scalar_view(), upper: upper.scalar_view() }
         };
 
         let origin_name = format!("anonymous_range_{}", self.auto_seq.get());
@@ -793,7 +796,7 @@ impl Model {
     /// Register an explicitly symmetric affine matrix in the real PSD cone.
     ///
     /// # Panics
-    /// Panics for invalid ownership, non-affine dynamic entries, duplicate names, or count overflow.
+    /// Panics for invalid ownership, duplicate names, or count overflow.
     pub fn add_psd_constraint<'a>(
         &'a self,
         name: impl Into<SmolStr>,
@@ -1447,7 +1450,7 @@ impl Model {
     /// Register `trigger == active_value => consequent`.
     ///
     /// # Panics
-    /// Panics for invalid triggers, non-affine dynamic consequents, invalid bounds,
+    /// Panics for invalid triggers or bounds,
     /// foreign ownership, duplicate names, or count overflow.
     pub fn add_indicator_constraint<'a>(
         &'a self,
@@ -1604,7 +1607,7 @@ impl Model {
         hi: B2,
     ) -> RangeIndicatorConstraintHandles {
         let trigger: Expr = trigger.into();
-        let mid = mid.into_affine_function().expression().erase();
+        let mid = mid.into_affine_function().expression();
         let name = self.next_auto_indicator_name();
         self.__add_indicator_range(&name, trigger, active_value, mid, lo, hi)
     }

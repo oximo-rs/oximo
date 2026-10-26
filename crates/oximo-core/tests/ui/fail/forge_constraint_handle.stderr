@@ -1,0 +1,11 @@
+error[E0451]: fields `id`, `model_id` and `marker` of struct `oximo_core::ConstraintHandle` are private
+  --> tests/ui/fail/forge_constraint_handle.rs:9:9
+   |
+ 8 |     let _ = ConstraintHandle::<ScalarFunctionData<Affine>, LessThan> {
+   |             -------------------------------------------------------- in this type
+ 9 |         id: SemanticConstraintId::Algebraic(ConstraintId(0)),
+   |         ^^ private field
+10 |         model_id: model.id(),
+   |         ^^^^^^^^ private field
+11 |         marker: std::marker::PhantomData,
+   |         ^^^^^^ private field

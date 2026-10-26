@@ -181,7 +181,10 @@ fn alternative_lowering_duals_do_not_inherit_native_row_coordinates() {
             assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
             assert!((result.dual_of(direct).unwrap().unwrap() - coefficient).abs() < 1e-9);
             assert_eq!(result.dual_of(scaled).unwrap(), None);
-            assert_eq!(result.dual_of(erased).unwrap(), None);
+            assert_eq!(
+                result.dual_of(model.require_scalar_dual_handle(erased).unwrap()).unwrap(),
+                None
+            );
             assert!((result.dual[&scaled.row_id()] - coefficient / 2.0).abs() < 1e-9);
 
             let report = result.report(&model).unwrap().to_string();

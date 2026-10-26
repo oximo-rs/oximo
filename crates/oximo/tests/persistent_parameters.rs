@@ -219,11 +219,7 @@ fn mosek() {
     let m = Model::new("PSD updates");
     param!(m, p = 1.0);
     variable!(m,0.0<=t<=5.0);
-    psd_constraint!(
-        m,
-        psd,
-        SymmetricMatrix::from_upper_triangle(2, [t.erase(), p.erase(), t.erase()])
-    );
+    psd_constraint!(m, psd, SymmetricMatrix::from_upper_triangle(2, [t, p.into(), t]));
     objective!(m, Min, t);
 
     let mut cold = oximo_mosek::Mosek;

@@ -1330,7 +1330,7 @@ fn scalar_ir_conversions_preserve_sources_and_reject_unmapped_edits() {
         assert_eq!(model.constraints().algebraic()[handle.index()].upper, 4.0);
 
         let typed = model
-            .try_typed_handle::<ScalarFunctionData<Affine>, LessThan>(handle)
+            .try_typed_handle::<ScalarFunctionData<Affine>, LessThan>(handle.erase())
             .unwrap()
             .unwrap();
         assert!(matches!(

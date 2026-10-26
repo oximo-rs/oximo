@@ -1,0 +1,22 @@
+error[E0277]: the trait bound `Expr<'_, oximo_core::Nonlinear>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/nonlinear_soc.rs:8:35
+  |
+8 |     soc_constraint!(model, cone, [x.sin()] <= x);
+  |     ------------------------------^^^^^^^-------
+  |     |                             |
+  |     |                             the trait `IntoAffineFunction<'_>` is not implemented for `Expr<'_, oximo_core::Nonlinear>`
+  |     required by a bound introduced by this call
+  |
+help: the following other types implement trait `IntoAffineFunction<'a>`
+ --> src/function_set.rs
+  |
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Affine>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
+help: consider removing this method call, as the receiver has type `Expr<'_, oximo_core::Affine>` and `Expr<'_, oximo_core::Affine>: IntoAffineFunction<'_>` trivially holds
+  |
+8 -     soc_constraint!(model, cone, [x.sin()] <= x);
+8 +     soc_constraint!(model, cone, [x] <= x);
+  |

@@ -38,11 +38,11 @@ fn sample(case: &str, size: usize) -> u128 {
     for key in [0, size - 1] {
         match family.get(key).unwrap() {
             RangeConstraintHandles::Interval(id) => {
-                assert_eq!(model.constraint_handle(&format!("r[{key}]")), Some(id));
+                assert_eq!(model.constraint_handle(&format!("r[{key}]")), Some(id.erase()));
             }
             RangeConstraintHandles::Split { lower, upper } => {
-                assert_eq!(model.constraint_handle(&format!("r[{key}]_lo")), Some(lower));
-                assert_eq!(model.constraint_handle(&format!("r[{key}]_hi")), Some(upper));
+                assert_eq!(model.constraint_handle(&format!("r[{key}]_lo")), Some(lower.erase()));
+                assert_eq!(model.constraint_handle(&format!("r[{key}]_hi")), Some(upper.erase()));
             }
         }
     }

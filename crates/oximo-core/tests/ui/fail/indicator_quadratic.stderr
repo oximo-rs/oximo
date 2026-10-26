@@ -4,13 +4,17 @@ error[E0277]: the trait bound `ScalarQuadraticFunction<'_>: IntoAffineFunction<'
 6 |     indicator_constraint!(m, bad, b == 1 => x.square() <= 1.0);
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarQuadraticFunction<'_>`
   |
-  = help: the following other types implement trait `IntoAffineFunction<'a>`:
-            AnyScalarFunction<'a>
-            Expr<'a, oximo_core::Affine>
-            Expr<'a, oximo_core::Constant>
-            Expr<'a>
-            ScalarAffineFunction<'a>
-            ScalarDynamicFunction<'a>
+help: the following other types implement trait `IntoAffineFunction<'a>`
+ --> src/function_set.rs
+  |
+  | impl<'a> IntoAffineFunction<'a> for ScalarAffineFunction<'a> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ScalarAffineFunction<'a>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, oximo_core::Affine>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, oximo_core::Constant>`
   = note: required for `Constraint<ScalarQuadraticFunction<'_>, LessThan>` to implement `IntoAffineConstraint<'_>`
 note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_indicator_constraint`
  --> src/model/constraints.rs

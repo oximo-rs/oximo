@@ -10,7 +10,11 @@ fn checked_affine_powers_solve_as_soc_and_keep_parameters_live() {
     param!(m, p = 2.0);
     m.fix(x, 2.0).unwrap();
     objective!(m, Min, t);
-    soc_constraint!(m, cone, [p.powi(2) * x.powi(1), x.powi(0)] <= t);
+    soc_constraint!(
+        m,
+        cone,
+        [(p.powi(2) * x.powi(1)).try_affine().unwrap(), x.powi(0).try_affine().unwrap()] <= t
+    );
     for parameter in [2.0_f64, 3.0] {
         m.set_param(p, parameter).unwrap();
         let result = oximo_clarabel::solve(&m, &ClarabelOptions::default()).unwrap();

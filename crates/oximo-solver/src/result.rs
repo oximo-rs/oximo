@@ -679,10 +679,11 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `constraint` belongs to another model.
     #[inline]
-    pub fn dual_of<F, S>(
+    pub fn dual_of(
         &self,
-        constraint: ConstraintHandle<F, S>,
+        constraint: impl oximo_core::ScalarDualQuery,
     ) -> Result<Option<f64>, ModelMismatchError> {
+        let constraint = constraint.scalar_handle();
         ensure_model_id(self.model_id, constraint.model_id())?;
         Ok(self.semantic_multiplier(constraint.id()))
     }

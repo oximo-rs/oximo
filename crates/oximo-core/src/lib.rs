@@ -32,7 +32,8 @@ pub mod var;
 
 pub use constraint::{
     AlgebraicConstraint, ConstraintHandle, ConstraintId, IntoRhs, RangeConstraintHandles,
-    RangeConstraintIds, Relate, Sense,
+    RangeConstraintIds, Relate, ScalarConstraintHandle, ScalarDualHandleError, ScalarDualQuery,
+    Sense,
 };
 #[cfg(feature = "gdp")]
 pub use display::{

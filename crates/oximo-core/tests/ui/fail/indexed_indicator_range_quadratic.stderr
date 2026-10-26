@@ -12,9 +12,6 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
-...
-  | impl<'a> IntoAffineFunction<'a> for Expr<'a> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_>`
 note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_indicator_ranges_over`
  --> src/model/indexed.rs
   |

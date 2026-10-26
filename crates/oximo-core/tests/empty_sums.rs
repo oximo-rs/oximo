@@ -133,7 +133,7 @@ fn indexed_sums_work_with_serial_and_parallel_arena_forks() {
                     implicit.get(i).unwrap().erase(),
                     explicit.get(i).unwrap().erase(),
                     aliased.get(i).unwrap().erase(),
-                    range,
+                    range.erase(),
                 ] {
                     let terms =
                         extract_linear(&arena, constraints.algebraic()[id.index()].lhs).unwrap();

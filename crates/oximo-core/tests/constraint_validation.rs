@@ -92,13 +92,13 @@ fn soc_checks_dimensions_and_dynamic_degree_before_registering() {
         || m.add_constraint("cone", Constraint::new(vector, SecondOrderCone { dimension: 1 })),
         "at least two",
     );
-    assert_panics_with(|| soc_constraint!(m, cone, [x.square().erase()] <= t), "affine");
+    assert!(x.square().erase().try_affine().is_err());
     assert_panics_with(
         || m.add_soc_constraint("cone", std::iter::empty::<Expr<'_, Affine>>(), t),
         "at least two",
     );
     assert_eq!(m.num_soc_constraints(), 0);
-    let cone = soc_constraint!(m, cone, [x.powi(1)] <= t);
+    let cone = soc_constraint!(m, cone, [x.powi(1).try_affine().unwrap()] <= t);
     assert_eq!(cone.index(), 0);
     assert_panics_with(|| soc_constraint!(m, cone, [x] <= t), "already registered");
     assert_eq!(m.num_soc_constraints(), 1);
@@ -158,10 +158,7 @@ fn indicator_inputs_are_checked_before_registration() {
     assert_panics_with(|| indicator_constraint!(m, row, x == 1 => x <= 1.0), "binary");
     assert_panics_with(|| indicator_constraint!(m, row, b == 1 => y <= 1.0), "model");
     assert_panics_with(|| indicator_constraint!(m, row, y == 1 => x <= 1.0), "model");
-    assert_panics_with(
-        || indicator_constraint!(m, row, b == 1 => x.square().erase() <= 1.0),
-        "affine",
-    );
+    assert!(x.square().erase().try_affine().is_err());
     assert_panics_with(|| indicator_constraint!(m, row, b == 1 => x <= f64::NEG_INFINITY), "bound");
     assert_eq!(m.num_indicator_constraints(), 0);
     let checked = x.nonlinear().try_affine().unwrap();

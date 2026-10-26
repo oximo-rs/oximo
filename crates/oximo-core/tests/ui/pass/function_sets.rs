@@ -12,7 +12,7 @@ fn main() {
     constraint!(m, x.powi(2) <= 4.0);
     variable!(m, b, Binary);
     indicator_constraint!(m, b == 1 => x <= 4.0);
-    indicator_constraint!(m, b == 0 => x.erase() >= 0.0);
+    indicator_constraint!(m, b == 0 => x.erase().try_affine().unwrap() >= 0.0);
     let checked = x.nonlinear().try_affine().unwrap();
     indicator_constraint!(m, checked_row, b == 1 => checked <= 1.0);
 }

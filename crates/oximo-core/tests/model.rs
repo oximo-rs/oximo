@@ -147,12 +147,12 @@ fn explicit_soc_with_nonlinear_constraint_is_nlp() {
 }
 
 #[test]
-#[should_panic(expected = "expression must be affine, got Quadratic")]
-fn add_soc_constraint_rejects_quadratic_term() {
+fn dynamic_quadratic_soc_term_requires_successful_narrowing() {
     let m = Model::new("bad_soc");
     variable!(m, x);
     variable!(m, t >= 0.0);
-    m.add_soc_constraint("cone", [(x * x).erase()], t);
+    assert!((x * x).erase().try_affine().is_err());
+    assert!(t.erase().try_affine().is_ok());
 }
 
 #[test]

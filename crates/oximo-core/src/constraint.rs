@@ -129,18 +129,97 @@ impl<F, S> ConstraintHandle<F, S> {
             _ => None,
         }
     }
+}
+
+mod sealed {
+    pub trait Scalar {}
+}
+
+/// A scalar constraint view accepted by scalar dual queries.
+/// Erased handles must first be checked with [`crate::Model::scalar_dual_handle`].
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not provide an algebraic scalar dual view",
+    label = "a checked scalar constraint handle is required",
+    note = "for erased or custom handles, call model.scalar_dual_handle(handle) or model.require_scalar_dual_handle(handle); use soc_dual_of for SOC and psd_dual_of for PSD; SOS and indicator handles have no scalar dual accessor"
+)]
+pub trait ScalarDualQuery: sealed::Scalar + Copy {
+    #[doc(hidden)]
+    fn scalar_handle(self) -> ConstraintHandle;
+}
+
+/// Marker retaining a checked scalar view without claiming a function/set signature.
+// This marker only preserves the scalar return-handle type for sealed scalar
+// registration inputs.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct ScalarHandleMarker;
+
+/// A model-bound scalar view with an erased function/set signature.
+/// Its fields and constructors are private, just like [`ConstraintHandle`].
+pub type ScalarConstraintHandle = ConstraintHandle<ScalarHandleMarker>;
+
+/// A required scalar dual view could not be recovered from a semantic handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScalarDualHandleError {
+    #[error(transparent)]
+    ModelMismatch(#[from] oximo_expr::ModelMismatchError),
+    #[error("constraint {0:?} has no registered algebraic scalar view")]
+    MissingScalarView(crate::SemanticConstraintId),
+}
+
+impl sealed::Scalar for ScalarConstraintHandle {}
+impl ScalarDualQuery for ScalarConstraintHandle {
+    fn scalar_handle(self) -> ConstraintHandle {
+        self.erase()
+    }
+}
+
+impl<D: crate::Degree, S: crate::function_set::ScalarConstraintSet> sealed::Scalar
+    for ConstraintHandle<crate::ScalarFunctionData<D>, S>
+{
+}
+impl<D: crate::Degree, S: crate::function_set::ScalarConstraintSet> ScalarDualQuery
+    for ConstraintHandle<crate::ScalarFunctionData<D>, S>
+{
+    fn scalar_handle(self) -> ConstraintHandle {
+        self.erase()
+    }
+}
+impl<S: crate::function_set::ScalarConstraintSet> sealed::Scalar
+    for ConstraintHandle<crate::AnyScalarFunctionData, S>
+{
+}
+impl<S: crate::function_set::ScalarConstraintSet> ScalarDualQuery
+    for ConstraintHandle<crate::AnyScalarFunctionData, S>
+{
+    fn scalar_handle(self) -> ConstraintHandle {
+        self.erase()
+    }
+}
+
+impl<F, S> ConstraintHandle<F, S> {
+    pub(crate) fn scalar_view(self) -> ScalarConstraintHandle {
+        assert!(self.try_row_id().is_some(), "constraint has no scalar view");
+        ConstraintHandle::new(self.id, self.model_id)
+    }
 
     /// Return the ID of the algebraic row backing this constraint.
     ///
     /// # Panics
     /// Panics when the constraint has no algebraic row.
-    pub const fn row_id(self) -> ConstraintId {
+    pub const fn row_id(self) -> ConstraintId
+    where
+        Self: ScalarDualQuery,
+    {
         match self.id {
             crate::semantic::SemanticConstraintId::Algebraic(id) => id,
             _ => panic!("constraint has no algebraic row"),
         }
     }
+}
 
+impl crate::SocConstraintHandle {
     /// Return the ID of this constraint in the explicit SOC registry.
     ///
     /// # Panics
@@ -151,7 +230,9 @@ impl<F, S> ConstraintHandle<F, S> {
             _ => panic!("constraint has no SOC view"),
         }
     }
+}
 
+impl crate::SosConstraintHandle {
     /// Return the ID of this constraint in the SOS registry.
     ///
     /// # Panics
@@ -162,7 +243,9 @@ impl<F, S> ConstraintHandle<F, S> {
             _ => panic!("constraint has no SOS view"),
         }
     }
+}
 
+impl crate::IndicatorConstraintHandle {
     /// Return the ID of this constraint in the indicator registry.
     ///
     /// # Panics
@@ -173,7 +256,9 @@ impl<F, S> ConstraintHandle<F, S> {
             _ => panic!("constraint has no indicator view"),
         }
     }
+}
 
+impl crate::PsdConstraintHandle {
     /// Return the ID of this constraint in the PSD registry.
     ///
     /// # Panics
@@ -199,8 +284,8 @@ pub enum RangeConstraintIds {
 /// Model-bound handles produced by a two-sided range declaration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RangeConstraintHandles {
-    Interval(ConstraintHandle),
-    Split { lower: ConstraintHandle, upper: ConstraintHandle },
+    Interval(ScalarConstraintHandle),
+    Split { lower: ScalarConstraintHandle, upper: ScalarConstraintHandle },
 }
 
 impl RangeConstraintHandles {

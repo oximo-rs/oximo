@@ -80,3 +80,5 @@ pub use crate::semantic::{
 };
 
 pub use crate::objective::{ObjectiveFunction, SemanticObjective};
+
+pub use crate::{ScalarConstraintHandle, ScalarDualHandleError, ScalarDualQuery};

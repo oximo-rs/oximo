@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `Expr<'_>: IntoAffineMatrixEntry<'_>` is not satisfied
+ --> tests/ui/fail/indexed_dynamic_psd.rs:8:5
+  |
+8 |     psd_constraint!(model, cones[i in 0..2], SymmetricMatrix::from_upper_triangle(1, [x.powi(i as i32)]));
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineMatrixEntry<'_>` is not implemented for `Expr<'_>`
+  |
+help: the following other types implement trait `IntoAffineMatrixEntry<'a>`
+ --> src/psd.rs
+  |
+  |     ($($d:ty),*) => { $(impl<'a> IntoAffineMatrixEntry<'a> for Expr<'a, $d> {
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                         |
+  |                         `Expr<'_, oximo_core::Affine>`
+  |                         `Expr<'_, oximo_core::Constant>`
+...
+  | expression_entries!(Constant, Affine);
+  | ------------------------------------- in this macro invocation
+  = note: required for `oximo_core::SymmetricMatrix<Expr<'_>>` to implement `IntoSymmetricAffineFunction<'_>`
+note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_psd_constraints_over`
+ --> src/model/indexed.rs
+  |
+  |     pub fn __add_psd_constraints_over<'a, K, M, F>(&'a self, prefix: &str, set: &Set<K>, rule: F)
+  |            -------------------------- required by a bound in this associated function
+...
+  |         M: IntoSymmetricAffineFunction<'a>,
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_psd_constraints_over`
+  = note: this error originates in the macro `psd_constraint` which comes from the expansion of the macro `expression_entries` (in Nightly builds, run with -Z macro-backtrace for more info)

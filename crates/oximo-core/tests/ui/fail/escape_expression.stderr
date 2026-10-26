@@ -1,0 +1,12 @@
+error[E0597]: `model` does not live long enough
+  --> tests/ui/fail/escape_expression.rs:9:9
+   |
+ 8 |         let model = Model::new("temporary");
+   |             ----- binding `model` declared here
+ 9 |         variable!(model, x);
+   |         ^^^^^^^^^^^^^^^^^^^ borrowed value does not live long enough
+10 |         escaped = x;
+11 |     }
+   |     - `model` dropped here while still borrowed
+12 |     let _ = escaped + 1.0;
+   |             ------- borrow later used here

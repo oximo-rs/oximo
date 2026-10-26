@@ -1,0 +1,27 @@
+error[E0277]: the trait bound `ScalarDynamicFunction<'_>: IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/indexed_dynamic_indicator.rs:9:5
+  |
+9 |     indicator_constraint!(model, rows[i in 0..2], b == 1 => x.powi(i as i32) <= 1.0);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarDynamicFunction<'_>`
+  |
+help: the following other types implement trait `IntoAffineFunction<'a>`
+ --> src/function_set.rs
+  |
+  | impl<'a> IntoAffineFunction<'a> for ScalarAffineFunction<'a> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ScalarAffineFunction<'a>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, oximo_core::Affine>`
+...
+  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, oximo_core::Constant>`
+  = note: required for `Constraint<ScalarDynamicFunction<'_>, LessThan>` to implement `IntoAffineConstraint<'_>`
+note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_indicator_constraints_over`
+ --> src/model/indexed.rs
+  |
+  |     pub fn __add_indicator_constraints_over<'a, K, F, C, D: Degree>(
+  |            -------------------------------- required by a bound in this associated function
+...
+  |         C: IntoAffineConstraint<'a>,
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_indicator_constraints_over`
+  = note: this error originates in the macro `indicator_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)

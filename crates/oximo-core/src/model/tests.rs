@@ -408,8 +408,14 @@ fn indexed_constraint_handles_match_in_serial_and_parallel() {
                     assert_eq!(classify(&model.arena(), row.lhs), ExprClass::Linear);
                 }
                 RangeConstraintHandles::Split { lower, upper } => {
-                    assert_eq!(model.constraint_handle(&format!("r[{key}]_lo")), Some(lower));
-                    assert_eq!(model.constraint_handle(&format!("r[{key}]_hi")), Some(upper));
+                    assert_eq!(
+                        model.constraint_handle(&format!("r[{key}]_lo")),
+                        Some(lower.erase())
+                    );
+                    assert_eq!(
+                        model.constraint_handle(&format!("r[{key}]_hi")),
+                        Some(upper.erase())
+                    );
                     let rows = model.constraints.borrow();
                     assert_eq!(rows[lower.index()].lower.to_bits(), 0.0_f64.to_bits());
                     assert_eq!(rows[upper.index()].upper.to_bits(), 10.0_f64.to_bits());
@@ -605,4 +611,26 @@ fn parallel_callback_panic_does_not_mutate_model_or_arena() {
 
     model.__add_constraint("after", x.le(2.0));
     assert_eq!(model.constraint_id("after"), Some(ConstraintId(0)));
+}
+
+#[test]
+fn scalar_dual_recovery_requires_a_semantic_record_even_for_an_existing_row() {
+    let model = Model::new("raw row without semantics");
+
+    let root = model.__constant(0.0).id();
+    model.constraints.borrow_mut().push(crate::AlgebraicConstraint {
+        name: "raw".into(),
+        lhs: root,
+        lower: 0.0,
+        upper: 1.0,
+        active: true,
+        signature: None,
+    });
+
+    let handle = model.constraint_handle_from_id(ConstraintId(0)).unwrap();
+    assert!(model.scalar_dual_handle(handle).unwrap().is_none());
+    assert_eq!(
+        model.require_scalar_dual_handle(handle),
+        Err(crate::ScalarDualHandleError::MissingScalarView(handle.id()))
+    );
 }
