@@ -1,15 +1,23 @@
-error[E0308]: mismatched types
- --> tests/ui/fail/quadratic_affine_translator.rs:7:74
-  |
-7 |     TranslationContext::new(&m).unwrap().translate(&AffineRowTranslator, &quadratic, &LessThan(1.0)).unwrap();
-  |                                          ---------                       ^^^^^^^^^^ expected `&ScalarFunctionData<Affine>`, found `&ScalarFunctionData<Quadratic>`
-  |                                          |
-  |                                          arguments to this method are incorrect
-  |
-  = note: expected reference `&ScalarFunctionData<oximo_core::Affine>`
-             found reference `&ScalarFunctionData<oximo_core::Quadratic>`
-note: method defined here
- --> src/translation.rs
-  |
-  |     pub fn translate<
-  |            ^^^^^^^^^
+error[E0277]: the trait bound `AffineRowTranslator: TypedConstraintTranslator<ScalarFunctionData<oximo_core::Quadratic>, oximo_core::LessThan>` is not satisfied
+  --> tests/ui/fail/quadratic_affine_translator.rs:11:20
+   |
+11 |         .translate(&AffineRowTranslator)
+   |          --------- ^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |          |
+   |          required by a bound introduced by this call
+   |
+help: the trait `TypedConstraintTranslator<ScalarFunctionData<oximo_core::Quadratic>, LessThan>` is not implemented for `AffineRowTranslator`
+      but trait `TypedConstraintTranslator<ScalarFunctionData<oximo_core::Affine>, LessThan>` is implemented for it
+  --> src/translation.rs
+   |
+   | / impl<S: ScalarBoundSet> TypedConstraintTranslator<ScalarFunctionData<Affine>, S>
+   | |     for AffineRowTranslator
+   | | where
+   | |     ScalarFunctionData<Affine>: oximo_core::FunctionInSet<S>,
+   | |_____________________________________________________________^
+   = help: for that trait implementation, expected `oximo_core::Affine`, found `oximo_core::Quadratic`
+note: required by a bound in `PreparedConstraint::<'_, F, S>::translate`
+  --> src/translation.rs
+   |
+   |     pub fn translate<T: TypedConstraintTranslator<F, S>>(
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `PreparedConstraint::<'_, F, S>::translate`

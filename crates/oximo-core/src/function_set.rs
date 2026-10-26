@@ -318,6 +318,8 @@ pub struct AnyScalarFunctionData {
     pub class: ExprClass,
 }
 
+impl crate::ImmutableSemanticFunction for AnyScalarFunctionData {}
+
 impl crate::semantic::SemanticFunction for AnyScalarFunctionData {
     fn model_id(&self) -> oximo_expr::ModelId {
         self.expression.model_id

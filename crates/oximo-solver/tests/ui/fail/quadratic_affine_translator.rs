@@ -4,5 +4,10 @@ fn main() {
     let m = Model::new("typed translation");
     variable!(m, x);
     let quadratic = Function::semantic_data(&x.square().into_function());
-    TranslationContext::new(&m).unwrap().translate(&AffineRowTranslator, &quadratic, &LessThan(1.0)).unwrap();
+    TranslationContext::new(&m)
+        .unwrap()
+        .bind(&quadratic, &LessThan(1.0))
+        .unwrap()
+        .translate(&AffineRowTranslator)
+        .unwrap();
 }

@@ -2,8 +2,8 @@
 
 use oximo_core::function_set::Set;
 use oximo_core::{
-    Affine, EqualTo, GreaterThan, Interval, LessThan, Model, ModelId, ScalarFunctionData,
-    SemanticFunction,
+    Affine, EqualTo, GreaterThan, ImmutableSemanticFunction, Interval, LessThan, Model, ModelId,
+    ScalarFunctionData, SemanticFunction,
 };
 
 use crate::SolverError;
@@ -40,25 +40,23 @@ impl TranslationContext {
         &self.expressions
     }
 
-    /// Validate the function's model identity and expression roots, then translate
-    /// the function/set pair using the supplied translator and this snapshot.
-    /// A missing trait implementation rejects unsupported typed translations at compile time.
+    /// Bind an immutable semantic function/set pair to this expression snapshot.
+    /// Custom functions must implement [`ImmutableSemanticFunction`], guaranteeing
+    /// their translation-visible data cannot change through shared access.
     ///
     /// # Errors
-    /// Returns an ownership, numeric validation, or translator error.
-    pub fn translate<
-        F: SemanticFunction + oximo_core::FunctionInSet<S>,
+    /// Returns an ownership error or an error for roots newer than this snapshot.
+    pub fn bind<'ctx, F, S>(
+        &'ctx self,
+        function: &'ctx F,
+        set: &'ctx S,
+    ) -> Result<PreparedConstraint<'ctx, F, S>, SolverError>
+    where
+        F: ImmutableSemanticFunction + oximo_core::FunctionInSet<S>,
         S: Set,
-        T: TypedConstraintTranslator<F, S>,
-    >(
-        &self,
-        translator: &T,
-        function: &F,
-        set: &S,
-    ) -> Result<T::Output, SolverError> {
+    {
         self.validate_function(function)?;
-
-        translator.translate(function, set, self)
+        Ok(PreparedConstraint { function, set, context: self })
     }
 
     /// Check that the function belongs to this model and its expression roots
@@ -88,8 +86,59 @@ impl TranslationContext {
     }
 }
 
+/// A validated function/set pair borrowing its immutable translation snapshot.
+/// Construct through [`TranslationContext::bind`].
+#[derive(Debug)]
+pub struct PreparedConstraint<'ctx, F, S> {
+    function: &'ctx F,
+    set: &'ctx S,
+    context: &'ctx TranslationContext,
+}
+
+impl<'ctx, F, S> Copy for PreparedConstraint<'ctx, F, S> {}
+impl<F, S> Clone for PreparedConstraint<'_, F, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'ctx, F, S> PreparedConstraint<'ctx, F, S> {
+    pub fn function(&self) -> &'ctx F {
+        self.function
+    }
+
+    pub fn set(&self) -> &'ctx S {
+        self.set
+    }
+
+    pub fn context(&self) -> &'ctx TranslationContext {
+        self.context
+    }
+}
+
+impl<F, S> PreparedConstraint<'_, F, S>
+where
+    F: ImmutableSemanticFunction + oximo_core::FunctionInSet<S>,
+    S: Set,
+{
+    /// Translate using the snapshot that validated this pair.
+    ///
+    /// # Errors
+    /// Returns a numeric validation or translator error.
+    pub fn translate<T: TypedConstraintTranslator<F, S>>(
+        self,
+        translator: &T,
+    ) -> Result<T::Output, SolverError> {
+        translator.translate(self)
+    }
+}
+
 /// Translate a supported function/set pair into a solver representation.
-pub trait TypedConstraintTranslator<F: SemanticFunction + oximo_core::FunctionInSet<S>, S: Set> {
+pub trait TypedConstraintTranslator<
+    F: ImmutableSemanticFunction + oximo_core::FunctionInSet<S>,
+    S: Set,
+>
+{
     type Output;
 
     /// Build the output representation from the function, set, and expression snapshot.
@@ -98,9 +147,7 @@ pub trait TypedConstraintTranslator<F: SemanticFunction + oximo_core::FunctionIn
     /// Returns a numeric validation or unsupported representation error.
     fn translate(
         &self,
-        function: &F,
-        set: &S,
-        context: &TranslationContext,
+        constraint: PreparedConstraint<'_, F, S>,
     ) -> Result<Self::Output, SolverError>;
 }
 
@@ -165,11 +212,11 @@ where
     /// extraction, invalid bounds, non-finite coefficients, or finite-bound overflow.
     fn translate(
         &self,
-        function: &ScalarFunctionData<Affine>,
-        set: &S,
-        context: &TranslationContext,
+        constraint: PreparedConstraint<'_, ScalarFunctionData<Affine>, S>,
     ) -> Result<AffineRow, SolverError> {
-        context.validate_function(function)?;
+        let function = constraint.function();
+        let set = constraint.set();
+        let context = constraint.context();
 
         let (lower, upper) = set.bounds();
         check_bounds(lower, upper)?;

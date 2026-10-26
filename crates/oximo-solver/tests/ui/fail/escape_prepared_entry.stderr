@@ -1,0 +1,11 @@
+error[E0597]: `context` does not live long enough
+  --> tests/ui/fail/escape_prepared_entry.rs:17:17
+   |
+16 |         let context = TranslationContext::new(&model).unwrap();
+   |             ------- binding `context` declared here
+17 |         entry = context.bind(&function, &set).unwrap();
+   |                 ^^^^^^^ borrowed value does not live long enough
+18 |     }
+   |     - `context` dropped here while still borrowed
+19 |     let _ = entry.translate(&AffineRowTranslator);
+   |             ----- borrow later used here

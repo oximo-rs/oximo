@@ -89,15 +89,15 @@ where
 
     fn translate(
         &self,
-        function: &oximo_core::ScalarFunctionData<oximo_core::Affine>,
-        set: &S,
-        context: &oximo_solver::TranslationContext,
+        constraint: oximo_solver::PreparedConstraint<
+            '_,
+            oximo_core::ScalarFunctionData<oximo_core::Affine>,
+            S,
+        >,
     ) -> Result<Self::Output, oximo_solver::SolverError> {
         oximo_solver::TypedConstraintTranslator::translate(
             &oximo_solver::AffineRowTranslator,
-            function,
-            set,
-            context,
+            constraint,
         )
     }
 }
