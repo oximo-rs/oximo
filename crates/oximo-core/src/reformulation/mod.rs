@@ -5,8 +5,10 @@
 //! on an independent clone. Both forms preserve existing variable and constraint
 //! IDs.
 
+mod display;
 mod error;
 mod ids;
+pub(crate) mod inspection;
 mod provenance;
 pub use ids::{GeneratedConstraintId, GeneratedVarId, ReformulationVarId};
 pub use provenance::ReformulationProvenance;
@@ -15,6 +17,7 @@ mod indicator;
 mod model;
 mod sos;
 
+pub use display::ReformulationDisplay;
 pub use error::ReformulationError;
 pub use indicator::{IndicatorReformulationArtifacts, IndicatorReformulationOptions};
 pub use model::ReformulatedModel;

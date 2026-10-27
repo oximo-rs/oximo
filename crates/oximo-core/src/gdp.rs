@@ -755,6 +755,42 @@ impl GdpReformulationReport {
         self.1
     }
 
+    /// Display every generated variable and algebraic row using this model's names.
+    /// `Display` on the report itself prints a compact count summary.
+    ///
+    /// # Panics
+    /// Panics for a foreign model. Formatting panics for unknown IDs or conflicting
+    /// mutable registry or arena borrows. Unbound reports trust the supplied model.
+    #[must_use]
+    pub fn display<'a>(
+        &'a self,
+        model: &'a crate::Model,
+    ) -> crate::reformulation::ReformulationDisplay<'a> {
+        self.assert_model(model);
+        crate::reformulation::ReformulationDisplay::gdp(self, model)
+    }
+
+    /// Borrow every auxiliary variable created by this call in registry order.
+    /// Source Boolean counterparts are excluded.
+    /// The iterator and yielded entries borrow the registry immutably until dropped.
+    ///
+    /// # Panics
+    /// Panics for a foreign model, an unknown variable ID, or a mutably borrowed registry.
+    pub fn generated_variables<'model>(
+        &self,
+        model: &'model crate::Model,
+    ) -> impl ExactSizeIterator<Item = Ref<'model, crate::Variable>> + use<'model> {
+        self.assert_model(model);
+        crate::reformulation::inspection::variables(model, self.0.generated_variables.clone())
+    }
+
+    fn assert_model(&self, model: &crate::Model) {
+        assert!(
+            self.model_id().is_none_or(|owner| owner == model.id()),
+            "reformulation report belongs to a different model"
+        );
+    }
+
     /// Checked activation handle for a copy at this index in `hull_variables`.
     /// Returns `None` for an invalid index or an unbound report.
     pub fn hull_activation(&self, index: usize) -> Option<GdpHullActivationHandle> {

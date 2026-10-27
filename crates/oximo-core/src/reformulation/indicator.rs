@@ -38,6 +38,18 @@ pub struct IndicatorReformulationArtifacts {
     pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
+impl IndicatorReformulationArtifacts {
+    /// Display the source indicator and generated algebraic rows.
+    /// `Display` on the report itself prints a compact count summary.
+    ///
+    /// # Panics
+    /// Formatting panics for unknown IDs or conflicting mutable registry or arena borrows.
+    #[must_use]
+    pub fn display<'a>(&'a self, model: &'a Model) -> super::ReformulationDisplay<'a> {
+        super::ReformulationDisplay::indicator(self, model)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PlannedIndicator {
     source: IndicatorConstraintId,

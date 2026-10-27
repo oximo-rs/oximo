@@ -321,6 +321,26 @@ solver.solve(&m, &options)?;
 The `to_reformulated_*` methods produce an independent model.
 `reformulate*` methods modify the source model.
 
+Print a report with `println!("{report}")` for a compact summary. Include model
+names, generated variable bounds, and algebraic rows with `report.display(&model)`:
+
+```rust
+use oximo_core::prelude::*;
+
+let model = Model::new("inspect SOS reformulation");
+
+variable!(model, 0.0 <= x <= 2.0);
+variable!(model, 0.0 <= y <= 3.0);
+sos_constraint!(model, SOS1, [x, y]);
+
+let reports = model.reformulate_sos(SosReformulationOptions::default()).unwrap();
+for report in &reports {
+    println!("{}", report.display(&model));
+}
+```
+
+For programmatic variable inspection, use `report.generated_variables(&model)`.
+
 All forms preserve original IDs, append binary variables and linear rows,
 and retain the source SOS entries as inactive provenance. Finite variable bounds
 are used as member-specific Big-M values. An infinite bound is an error unless
