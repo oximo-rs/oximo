@@ -41,6 +41,30 @@ pub struct SosReformulationArtifacts {
     pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
+impl SosReformulationArtifacts {
+    /// Display the source SOS, generated variable bounds, and algebraic rows.
+    /// `Display` on the report itself prints a compact count summary.
+    ///
+    /// # Panics
+    /// Formatting panics for unknown IDs or conflicting mutable registry or arena borrows.
+    #[must_use]
+    pub fn display<'a>(&'a self, model: &'a Model) -> super::ReformulationDisplay<'a> {
+        super::ReformulationDisplay::sos(self, model)
+    }
+
+    /// Borrow generated variable metadata in report order.
+    /// The iterator and yielded entries borrow the registry immutably until dropped.
+    ///
+    /// # Panics
+    /// Panics if a variable ID is not registered or the registry is mutably borrowed.
+    pub fn generated_variables<'model>(
+        &self,
+        model: &'model Model,
+    ) -> impl ExactSizeIterator<Item = Ref<'model, crate::Variable>> {
+        super::inspection::variables(model, self.variables.iter().map(|id| id.index()))
+    }
+}
+
 impl ReformulatedModel {
     /// Complete SOS reformulation history carried by this transformed model.
     /// The returned guard dereferences to a slice of artifacts.

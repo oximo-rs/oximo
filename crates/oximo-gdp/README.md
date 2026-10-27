@@ -249,6 +249,16 @@ ranges. The row range includes Hull copy bounds and aggregation rows even when
 they have no individual source-row mapping. Boolean binary counterparts are source
 variables and are excluded from the generated-variable range.
 
+Print the report directly for a compact summary, or include model names, variable
+bounds, and generated algebraic rows with `report.display(&model)`:
+
+```rust,ignore
+println!("{report}");
+println!("{}", report.display(&model));
+```
+
+For programmatic variable inspection, use `report.generated_variables(&model)`.
+
 Read a Hull activation with `result.hull_activation_value_of(handle)?`, obtaining
 the handle from `report.hull_activation(copy_index)` or `report.hull_activations()`
 in copy order.

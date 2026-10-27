@@ -63,7 +63,7 @@ pub use oximo_expr::ModelError;
 pub use param::Parameter;
 pub use reformulation::{
     IndicatorReformulationArtifacts, IndicatorReformulationOptions, ReformulatedModel,
-    ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
+    ReformulationDisplay, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
 #[doc(hidden)]
 pub use semantic::ScalarConstraintSource;
