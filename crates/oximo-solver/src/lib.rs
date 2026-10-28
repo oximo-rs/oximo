@@ -17,6 +17,11 @@ pub mod reconstruct;
 #[doc(hidden)]
 pub mod resident;
 pub mod result;
+pub mod solution_values;
+pub use solution_values::{
+    SolutionIndexError, SolutionIter, SolutionKeys, SolutionValueId, SolutionValues,
+    SolutionValuesIter,
+};
 pub mod solver;
 pub mod status;
 
