@@ -363,6 +363,8 @@ impl Model {
     /// Complete indicator reformulation history retained by this model.
     #[must_use]
     pub fn indicator_reformulations(&self) -> Ref<'_, [IndicatorReformulationArtifacts]> {
-        Ref::map(self.indicator_reformulations.borrow(), Vec::as_slice)
+        Ref::map(self.indicator_reformulations.borrow(), |value| {
+            value.as_deref().map_or(&[][..], Vec::as_slice)
+        })
     }
 }

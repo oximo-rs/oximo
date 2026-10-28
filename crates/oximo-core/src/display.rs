@@ -289,7 +289,7 @@ impl fmt::Display for Model {
             }
         }
 
-        if self.is_feasibility() || self.semantic_objective.borrow().is_some() {
+        if self.is_feasibility() || self.objective.borrow().is_some() {
             writeln!(f, "{}", self.display_objective())?;
         }
         #[cfg(feature = "gdp")]

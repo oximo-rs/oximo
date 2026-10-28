@@ -10,6 +10,108 @@ use oximo_expr::{ExprClass, ModelMismatchError, classify, extract_linear};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[test]
+fn plain_scalar_families_keep_cold_metadata_absent_through_reads_and_forks() {
+    use crate::prelude::*;
+    rayon::ThreadPoolBuilder::new().num_threads(6).build().unwrap().install(|| {
+        for parallel in [false, true] {
+            let model = Model::new("lazy scalar metadata");
+            variable!(model, x);
+            let keys = Set::range(0..2048);
+            model.add_constraints_over_with(
+                "rows",
+                &keys,
+                &|i: usize| x.le(i as f64),
+                Some(parallel),
+            );
+            objective!(model, Min, x);
+            assert!(model.implicit_scalars.get());
+            assert_eq!(model.scalar_declarations.get(), keys.len());
+            let key = model.__update_key();
+            assert_eq!(model.semantic_constraints_ref().iter().count(), keys.len());
+            model.visit_alternative_lowerings(|_| panic!("unexpected lowering"));
+            assert!(model.alternative_lowering_view(ConstraintId(0).into()).is_none());
+            assert!(model.sos_reformulations().is_empty());
+            assert!(model.indicator_reformulations().is_empty());
+            let _dependencies = model.parameter_dependencies();
+            assert_eq!(model.__update_key(), key);
+            assert!(model.semantics.borrow().is_none());
+            assert!(model.alternative_scalar_views.borrow().is_none());
+            assert!(model.inactive_scalar_views.borrow().is_none());
+            assert!(model.sos_reformulations.borrow().is_none());
+            assert!(model.indicator_reformulations.borrow().is_none());
+            assert!(model.semantic_objective.borrow().is_none());
+
+            let views = model.semantic_constraints_ref();
+            let fork = model.fork();
+            assert!(fork.semantics.borrow().is_none());
+            assert!(fork.semantic_objective.borrow().is_none());
+            assert_eq!(views.len(), fork.num_constraints());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    model.set_constraint_origin(
+                        ConstraintId(0).into(),
+                        crate::ConstraintOrigin::Range("test".into()),
+                    );
+                }))
+                .is_err()
+            );
+            drop(views);
+            assert_eq!(model.__update_key(), key);
+        }
+    });
+}
+
+#[test]
+fn objective_cache_reads_preserve_update_keys_and_forks_rebind_lazily() {
+    use crate::prelude::*;
+    let model = Model::new("objective cache");
+    variable!(model, x);
+    param!(model, p = 2.0);
+    objective!(model, Min, p * x);
+    let key = model.__update_key();
+    let snapshot = model.semantic_objective();
+    assert_eq!(snapshot.as_ref().unwrap().function.model_id(), model.id());
+    assert_eq!(model.__update_key(), key);
+    assert!(catch_unwind(AssertUnwindSafe(|| model.__maximize(x))).is_err());
+    assert_eq!(model.__update_key(), key);
+    let fork = model.fork();
+    assert!(fork.semantic_objective.borrow().is_none());
+    assert_eq!(fork.semantic_objective().as_ref().unwrap().function.model_id(), fork.id());
+    drop(snapshot);
+
+    let native = model.objective();
+    assert!(catch_unwind(AssertUnwindSafe(|| model.__feasibility())).is_err());
+    assert_eq!(model.__update_key(), key);
+    assert!(!model.is_feasibility());
+    drop(native);
+
+    objective!(model, Max, x.square());
+    assert!(model.semantic_objective.borrow().is_none());
+    assert_ne!(model.__update_key(), key);
+    let key = model.__update_key();
+    assert!(
+        model
+            .semantic_objective()
+            .as_ref()
+            .unwrap()
+            .function
+            .signature()
+            .is::<crate::ScalarFunctionData<Quadratic>>()
+    );
+    p.set_param_value(4.0).unwrap();
+    assert_eq!(model.__update_key(), key);
+    objective!(model, Feasibility);
+    let key = model.__update_key();
+    assert!(model.is_feasibility());
+    assert!(model.semantic_objective().is_none());
+    assert_eq!(model.__update_key(), key);
+    assert!(model.fork().semantic_objective.borrow().is_none());
+    objective!(model, Min, x);
+    assert!(!model.is_feasibility());
+    assert!(model.semantic_objective().is_some());
+}
+
+#[test]
 fn update_key_ignores_parameter_registration_and_names_but_tracks_new_uses() {
     use crate::prelude::*;
     let m = Model::new("parameter metadata");

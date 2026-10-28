@@ -26,6 +26,11 @@ impl<T> SharedCell<T> {
         self.1.get()
     }
 
+    /// Preflight coupled writes without detaching storage or advancing its revision.
+    pub(crate) fn assert_mutable(&self) {
+        drop(self.0.borrow_mut());
+    }
+
     #[inline]
     pub(crate) fn borrow(&self) -> Ref<'_, T> {
         Ref::map(self.0.borrow(), |storage| match storage {
@@ -107,6 +112,62 @@ impl<T: Clone + Default> Clone for SharedCell<T> {
             CellStorage::Shared(value) => Arc::clone(value),
         };
         Self(RefCell::new(CellStorage::Shared(shared)), Cell::new(self.1.get()))
+    }
+}
+
+pub(crate) struct LazySharedCell<T> {
+    value: RefCell<Option<Arc<T>>>,
+    revision: Cell<u64>,
+}
+
+impl<T> Default for LazySharedCell<T> {
+    fn default() -> Self {
+        Self { value: RefCell::new(None), revision: Cell::new(0) }
+    }
+}
+
+impl<T> LazySharedCell<T> {
+    pub(crate) fn borrow(&self) -> Ref<'_, Option<Arc<T>>> {
+        self.value.borrow()
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
+    /// Initialize a read cache without recording a logical model mutation.
+    pub(crate) fn borrow_or_init(&self, init: impl FnOnce() -> T) -> Ref<'_, T> {
+        if self.value.borrow().is_none() {
+            *self.value.borrow_mut() = Some(Arc::new(init()));
+        }
+        Ref::map(self.value.borrow(), |value| value.as_deref().expect("initialized registry"))
+    }
+
+    fn mark_changed(&self) {
+        self.revision.set(self.revision.get().checked_add(1).expect("registry revision overflow"));
+    }
+
+    pub(crate) fn clear(&self) {
+        let mut value = self.value.borrow_mut();
+        self.mark_changed();
+        *value = None;
+    }
+}
+
+impl<T: Clone + Default> LazySharedCell<T> {
+    pub(crate) fn borrow_mut(&self) -> RefMut<'_, T> {
+        let value = self.value.borrow_mut();
+        self.mark_changed();
+        RefMut::map(value, |value| Arc::make_mut(value.get_or_insert_with(Arc::default)))
+    }
+}
+
+impl<T> Clone for LazySharedCell<T> {
+    fn clone(&self) -> Self {
+        Self {
+            value: RefCell::new(self.value.borrow().clone()),
+            revision: Cell::new(self.revision.get()),
+        }
     }
 }
 

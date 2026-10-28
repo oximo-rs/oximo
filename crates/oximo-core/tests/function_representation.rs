@@ -201,6 +201,57 @@ impl<F: SemanticFunction> SemanticFunction for Wrapped<F> {
 impl FunctionInSet<SecondOrderCone> for Wrapped<VectorAffineData> {}
 impl FunctionInSet<PositiveSemidefiniteCone> for Wrapped<SymmetricAffineData> {}
 
+impl<F: SemanticFunction> ObjectiveFunction for Wrapped<F> {}
+
+#[test]
+fn custom_objective_payloads_survive_guarded_forks_and_builtin_replacement() {
+    let model = Model::new("custom objective");
+
+    variable!(model, x);
+    param!(model, p = 2.0);
+    let function = Wrapped(ScalarFunctionData::from_expression(p * x));
+    model.minimize(function);
+    let key = model.__update_key();
+    let semantic = model.semantic_objective();
+    assert!(
+        semantic.as_ref().unwrap().function.signature().is::<Wrapped<ScalarFunctionData<Affine>>>()
+    );
+
+    let fork = model.fork();
+    let copied = fork.semantic_objective();
+    assert!(
+        copied.as_ref().unwrap().function.signature().is::<Wrapped<ScalarFunctionData<Affine>>>()
+    );
+    assert_eq!(copied.as_ref().unwrap().function.model_id(), fork.id());
+    assert_eq!(semantic.as_ref().unwrap().function.model_id(), model.id());
+    assert_eq!(model.__update_key(), key);
+    assert_eq!(
+        model.parameter_dependencies().parameters_for(oximo_core::ParameterTarget::Objective),
+        &[p.param_id().unwrap()]
+    );
+
+    drop(copied);
+    drop(semantic);
+    objective!(model, Max, x);
+    assert!(
+        model
+            .semantic_objective()
+            .as_ref()
+            .unwrap()
+            .function
+            .signature()
+            .is::<ScalarFunctionData<Affine>>()
+    );
+    assert!(
+        fork.semantic_objective()
+            .as_ref()
+            .unwrap()
+            .function
+            .signature()
+            .is::<Wrapped<ScalarFunctionData<Affine>>>()
+    );
+}
+
 #[test]
 fn cone_lookup_handles_match_the_exact_semantic_signature() {
     let model = Model::new("cone handle signatures");

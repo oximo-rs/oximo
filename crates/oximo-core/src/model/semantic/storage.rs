@@ -105,171 +105,183 @@ impl SemanticEntry {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SemanticRun {
+    first: SemanticEntry,
+    start: usize,
+    len: usize,
+}
+
 #[derive(Clone, Debug, Default)]
-enum SemanticEntries {
-    #[default]
-    Empty,
-    Scalars {
-        len: usize,
-        origin: u32,
-        tail: Vec<SemanticEntry>,
-    },
-    Uniform {
-        first: SemanticEntry,
-        len: usize,
-    },
-    Dense(Vec<SemanticEntry>),
+struct SemanticEntries {
+    runs: smallvec::SmallVec<[SemanticRun; 1]>,
+    overrides: rustc_hash::FxHashMap<usize, SemanticEntry>,
+    len: usize,
 }
 
 impl SemanticEntries {
-    /// Count entries across compact prefixes and explicitly stored declarations.
-    fn len(&self) -> usize {
-        match self {
-            Self::Empty => 0,
-            Self::Scalars { len, tail, .. } => *len + tail.len(),
-            Self::Uniform { len, .. } => *len,
-            Self::Dense(entries) => entries.len(),
+    fn base(&self, position: usize) -> Option<SemanticEntry> {
+        if position >= self.len {
+            return None;
         }
+        let run = &self.runs[self.runs.partition_point(|run| run.start <= position) - 1];
+        run.first.offset(position - run.start)
     }
 
-    /// Read one declaration entry without expanding compact storage.
     fn get(&self, position: usize) -> Option<SemanticEntry> {
-        match self {
-            Self::Empty => None,
-            Self::Scalars { len, origin, tail } => {
-                if position < *len {
-                    Some(SemanticEntry {
-                        id: crate::ConstraintId(u32::try_from(position).expect("registered ID"))
-                            .into(),
-                        representation: Representation::Scalar,
-                        origin: *origin,
-                    })
-                } else {
-                    tail.get(position - len).copied()
-                }
-            }
-            Self::Uniform { first, len } => {
-                (position < *len).then(|| first.offset(position)).flatten()
-            }
-            Self::Dense(entries) => entries.get(position).copied(),
-        }
+        self.overrides.get(&position).copied().or_else(|| self.base(position))
     }
 
-    /// Expand compact entries into a mutable vector.
-    fn materialize(&mut self) -> &mut Vec<SemanticEntry> {
-        if matches!(self, Self::Scalars { .. }) {
-            *self = Self::Dense(
-                (0..self.len())
-                    .map(|position| self.get(position).expect("registered position"))
-                    .collect(),
-            );
-        } else if let Self::Uniform { first, len } = *self {
-            *self = Self::Dense(
-                (0..len).map(|offset| first.offset(offset).expect("registered ID")).collect(),
-            );
-        } else if matches!(self, Self::Empty) {
-            *self = Self::Dense(Vec::new());
-        }
-
-        let Self::Dense(entries) = self else { unreachable!("materialized entries") };
-        entries
-    }
-
-    /// Append an entry while retaining compact scalar or uniform runs when possible.
     #[inline]
     fn push(&mut self, entry: SemanticEntry) {
-        if let (SemanticConstraintId::Algebraic(id), Representation::Scalar) =
-            (entry.id, entry.representation)
+        if let Some(last) = self.runs.last_mut()
+            && entry.follows(last.first, last.len)
         {
-            match self {
-                Self::Empty if id.index() == 0 => {
-                    *self = Self::Scalars { len: 1, origin: entry.origin, tail: Vec::new() };
-                    return;
-                }
-                Self::Scalars { len, origin, tail }
-                    if tail.is_empty() && *origin == entry.origin && id.index() == *len =>
-                {
-                    *len += 1;
-                    return;
-                }
-                _ => {}
-            }
+            last.len += 1;
+        } else {
+            self.runs.push(SemanticRun { first: entry, start: self.len, len: 1 });
         }
-
-        match self {
-            Self::Empty => *self = Self::Uniform { first: entry, len: 1 },
-            Self::Scalars { tail, .. } => tail.push(entry),
-            Self::Uniform { first, len } if entry.follows(*first, *len) => *len += 1,
-            _ => self.materialize().push(entry),
-        }
+        self.len += 1;
     }
 
-    /// Replace one entry, expanding compact storage only when needed.
     fn replace(&mut self, position: usize, entry: SemanticEntry) {
-        if let Self::Scalars { len, tail, .. } = self
-            && position >= *len
-        {
-            tail[position - *len] = entry;
-            return;
-        }
-
-        if let Self::Scalars { origin, .. } = self
-            && entry.origin == *origin
-            && matches!(entry.id, SemanticConstraintId::Algebraic(id) if id.index() == position)
-            && let Representation::Scalar = entry.representation
-        {
-            return;
-        }
-
-        if self.get(position) != Some(entry) {
-            if let Self::Scalars { len, tail, .. } = self
-                && position.checked_add(1) == Some(*len)
-            {
-                *len -= 1;
-                tail.insert(0, entry);
-                return;
-            }
-            self.materialize()[position] = entry;
-        }
-    }
-
-    /// Reserve existing entry buffers without expanding compact runs.
-    fn reserve(&mut self, additional: usize) {
-        match self {
-            Self::Scalars { tail, .. } if !tail.is_empty() => tail.reserve(additional),
-            Self::Dense(entries) => entries.reserve(additional),
-            _ => {}
-        }
-    }
-
-    /// Count scalar entries stored as an implicit prefix.
-    fn scalar_prefix(&self) -> usize {
-        match self {
-            Self::Scalars { len, .. } => *len,
-            _ => 0,
+        let base = self.base(position).expect("registered position");
+        debug_assert_eq!(base.id, entry.id);
+        if base == entry {
+            self.overrides.remove(&position);
+        } else {
+            self.overrides.insert(position, entry);
         }
     }
 }
+
+#[derive(Clone)]
+pub(super) struct SemanticEntryIter<'a> {
+    entries: Option<&'a SemanticEntries>,
+    front: usize,
+    back: usize,
+    front_run: usize,
+    back_run: usize,
+}
+
+impl SemanticEntryIter<'_> {
+    pub(super) fn implicit(len: usize) -> Self {
+        Self { entries: None, front: 0, back: len, front_run: 0, back_run: 0 }
+    }
+
+    #[inline]
+    fn at(&self, position: usize, run: usize) -> SemanticEntry {
+        self.entries.map_or_else(
+            || SemanticRegistry::declared_scalar(position),
+            |entries| {
+                entries.overrides.get(&position).copied().unwrap_or_else(|| {
+                    let run = &entries.runs[run];
+                    run.first.offset(position - run.start).expect("registered ID")
+                })
+            },
+        )
+    }
+}
+
+impl Iterator for SemanticEntryIter<'_> {
+    type Item = SemanticEntry;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            return None;
+        }
+        if let Some(entries) = self.entries {
+            let run = &entries.runs[self.front_run];
+            if self.front == run.start + run.len {
+                self.front_run += 1;
+            }
+        }
+        let result = self.at(self.front, self.front_run);
+        self.front += 1;
+        Some(result)
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        if n >= self.len() {
+            self.front = self.back;
+            return None;
+        }
+        if n != 0 {
+            self.front += n;
+            if let Some(entries) = self.entries {
+                self.front_run = entries.runs.partition_point(|run| run.start <= self.front) - 1;
+            }
+        }
+        self.next()
+    }
+
+    fn last(mut self) -> Option<Self::Item> {
+        self.next_back()
+    }
+
+    fn count(self) -> usize {
+        self.len()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.back - self.front;
+        (len, Some(len))
+    }
+}
+
+impl DoubleEndedIterator for SemanticEntryIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            return None;
+        }
+        self.back -= 1;
+        if let Some(entries) = self.entries
+            && self.back < entries.runs[self.back_run].start
+        {
+            self.back_run -= 1;
+        }
+        Some(self.at(self.back, self.back_run))
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        if n >= self.len() {
+            self.back = self.front;
+            return None;
+        }
+        if n != 0 {
+            self.back -= n;
+            if let Some(entries) = self.entries {
+                self.back_run = entries.runs.partition_point(|run| run.start < self.back) - 1;
+            }
+        }
+        self.next_back()
+    }
+}
+
+impl ExactSizeIterator for SemanticEntryIter<'_> {}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SemanticRegistry {
-    positions: Option<Box<super::positions::SemanticPositions>>,
+    positions: super::positions::SemanticPositions,
     entries: SemanticEntries,
     pub(crate) extensions: Vec<SemanticConstraint>,
     origins: Vec<ConstraintOrigin>,
+    origin_overrides: rustc_hash::FxHashMap<SemanticConstraintId, ConstraintOrigin>,
 }
 
 impl SemanticRegistry {
-    /// Initialize metadata for scalar rows already registered in native storage.
+    /// Initialize the existing scalar prefix in constant space and time.
     pub(super) fn initialize_scalar_prefix(&mut self, len: usize) {
         debug_assert_eq!(self.len(), 0);
-
         if len != 0 {
-            self.entries = SemanticEntries::Scalars { len, origin: DECLARED, tail: Vec::new() };
+            let first = Self::declared_scalar(0);
+            self.entries.runs.push(SemanticRun { first, start: 0, len });
+            self.entries.len = len;
+            self.positions.insert_run(first.id, 0, len);
         }
     }
 
-    /// Build metadata for a declared scalar row at its native index.
     pub(super) fn declared_scalar(position: usize) -> SemanticEntry {
         SemanticEntry {
             id: crate::ConstraintId(u32::try_from(position).expect("registered ID")).into(),
@@ -278,78 +290,32 @@ impl SemanticRegistry {
         }
     }
 
-    /// Return the number of semantic entries.
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len
     }
 
-    /// Read declaration metadata by its position.
     pub(crate) fn entry(&self, position: usize) -> Option<SemanticEntry> {
         self.entries.get(position)
     }
 
-    /// Find an ID's declaration position using compact runs or the position index.
+    pub(super) fn iter(&self) -> SemanticEntryIter<'_> {
+        SemanticEntryIter {
+            entries: Some(&self.entries),
+            front: 0,
+            back: self.len(),
+            front_run: 0,
+            back_run: self.entries.runs.len().saturating_sub(1),
+        }
+    }
+
     pub(crate) fn position(&self, id: SemanticConstraintId) -> Option<usize> {
-        match &self.entries {
-            SemanticEntries::Scalars { len, .. } => match id {
-                SemanticConstraintId::Algebraic(id) if id.index() < *len => Some(id.index()),
-                _ => self.positions.as_ref()?.get(id),
-            },
-            SemanticEntries::Uniform { first, len }
-                if std::mem::discriminant(&id) == std::mem::discriminant(&first.id) =>
-            {
-                id.index().checked_sub(first.id.index()).filter(|&offset| offset < *len)
-            }
-            SemanticEntries::Empty | SemanticEntries::Uniform { .. } => None,
-            SemanticEntries::Dense(_) => self.positions.as_ref()?.get(id),
-        }
+        self.positions.get(id)
     }
 
-    /// Build the ID-to-position index for entries outside the implicit scalar prefix.
-    fn index_dense(&mut self) {
-        let start = self.entries.scalar_prefix();
-
-        if self.positions.is_none()
-            && start < self.len()
-            && matches!(self.entries, SemanticEntries::Dense(_) | SemanticEntries::Scalars { .. })
-        {
-            let mut positions = Box::<super::positions::SemanticPositions>::default();
-
-            for position in start..self.len() {
-                let entry = self.entries.get(position).expect("registered position");
-                positions.insert(entry.id, position);
-            }
-            self.positions = Some(positions);
-        }
-    }
-
-    /// Append metadata and update any required ID-to-position index.
     #[inline]
     fn push_entry(&mut self, entry: SemanticEntry) {
-        let position = self.len();
+        self.positions.insert_run(entry.id, self.len(), 1);
         self.entries.push(entry);
-
-        if position < self.entries.scalar_prefix() {
-            return;
-        }
-
-        if let Some(positions) = &mut self.positions {
-            positions.insert(entry.id, position);
-        } else if matches!(
-            self.entries,
-            SemanticEntries::Dense(_) | SemanticEntries::Scalars { .. }
-        ) {
-            self.index_dense();
-        }
-    }
-
-    /// Reserve entry and position-index space for additions to one registry.
-    pub(crate) fn reserve(&mut self, registry: SemanticConstraintId, additional: usize) {
-        self.entries.reserve(additional);
-
-        if let Some(positions) = &mut self.positions {
-            positions.reserve(registry, additional);
-        }
     }
 
     /// Store native metadata when possible, otherwise retain the full semantic record.
@@ -430,20 +396,24 @@ impl SemanticRegistry {
         }
     }
 
-    /// Replace metadata and rebuild position indexes if the compact scalar prefix changes.
+    /// Retain isolated edits without expanding declaration runs or inverse indexes.
     fn replace_entry(&mut self, position: usize, entry: SemanticEntry) {
-        let prefix = self.entries.scalar_prefix();
         self.entries.replace(position, entry);
-
-        if prefix != self.entries.scalar_prefix() {
-            self.positions = None;
-        }
-
-        self.index_dense();
     }
 
     /// Recover provenance from an extension, a native row name, or the origin table.
     pub(crate) fn origin<'a>(
+        &'a self,
+        entry: &SemanticEntry,
+        name: &smol_str::SmolStr,
+    ) -> std::borrow::Cow<'a, ConstraintOrigin> {
+        if let Some(origin) = self.origin_overrides.get(&entry.id) {
+            return std::borrow::Cow::Borrowed(origin);
+        }
+        self.base_origin(entry, name)
+    }
+
+    fn base_origin<'a>(
         &'a self,
         entry: &SemanticEntry,
         name: &smol_str::SmolStr,
@@ -460,20 +430,38 @@ impl SemanticRegistry {
     }
 
     /// Change an entry's provenance while preserving its declaration position.
-    pub(crate) fn set_origin(&mut self, position: usize, origin: ConstraintOrigin) {
-        let mut entry = self.entries.get(position).expect("registered position");
+    pub(crate) fn set_origin(
+        &mut self,
+        position: usize,
+        origin: ConstraintOrigin,
+        name: &smol_str::SmolStr,
+    ) {
+        let entry = self.entry(position).expect("registered position");
 
         if let Representation::Extension(index) = entry.representation {
             self.extensions[index as usize].origin = origin;
         } else {
-            entry.origin = self.store_origin(origin);
-            self.replace_entry(position, entry);
+            let base = self.base_origin(&entry, name);
+            let equal = match (base.as_ref(), &origin) {
+                (ConstraintOrigin::Declared, ConstraintOrigin::Declared) => true,
+                (ConstraintOrigin::Range(a), ConstraintOrigin::Range(b)) => a == b,
+                (
+                    ConstraintOrigin::Generated { sources: a, transformation: at },
+                    ConstraintOrigin::Generated { sources: b, transformation: bt },
+                ) => a == b && at == bt,
+                _ => false,
+            };
+            if equal {
+                self.origin_overrides.remove(&entry.id);
+            } else {
+                self.origin_overrides.insert(entry.id, origin);
+            }
         }
     }
 
     /// Update a record, retaining native metadata or moving its payload to extension storage.
     pub(crate) fn replace_record(&mut self, position: usize, record: SemanticConstraint) {
-        let mut entry = self.entries.get(position).expect("registered position");
+        let mut entry = self.entry(position).expect("registered position");
 
         if let Representation::Extension(index) = entry.representation {
             self.extensions[index as usize] = record;
@@ -482,6 +470,7 @@ impl SemanticRegistry {
         } else {
             let index = u32::try_from(self.extensions.len()).expect("extension count overflow");
             entry.representation = Representation::Extension(index);
+            self.origin_overrides.remove(&entry.id);
             self.extensions.push(record);
         }
         self.replace_entry(position, entry);
@@ -492,5 +481,132 @@ impl SemanticRegistry {
         for record in &mut self.extensions {
             record.pair.function.rebind_model(model_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeking_matches_dense_iteration_across_runs_overrides_and_exhaustion() {
+        fn check(iter: SemanticEntryIter<'_>, expected: &[SemanticEntry]) {
+            for front in 0..=expected.len() {
+                for back in 0..=expected.len() - front {
+                    let mut remaining = iter.clone();
+                    for _ in 0..front {
+                        remaining.next();
+                    }
+                    for _ in 0..back {
+                        remaining.next_back();
+                    }
+                    let expected = &expected[front..expected.len() - back];
+                    assert_eq!(remaining.clone().count(), expected.len());
+                    assert_eq!(remaining.clone().last(), expected.last().copied());
+                    for n in (0..=expected.len()).chain([usize::MAX]) {
+                        let mut forward = remaining.clone();
+                        let mut backward = remaining.clone();
+                        let mut dense_forward = expected.iter().copied();
+                        let mut dense_backward = expected.iter().copied();
+                        assert_eq!(forward.nth(n), dense_forward.nth(n));
+                        assert_eq!(backward.nth_back(n), dense_backward.nth_back(n));
+                        assert_eq!(forward.len(), dense_forward.len());
+                        assert_eq!(backward.len(), dense_backward.len());
+                        assert_eq!(forward.clone().last(), dense_forward.clone().last());
+                        assert_eq!(backward.clone().last(), dense_backward.clone().last());
+                        assert_eq!(forward.next_back(), dense_forward.next_back());
+                        assert_eq!(backward.next(), dense_backward.next());
+                        assert_eq!(forward.collect::<Vec<_>>(), dense_forward.collect::<Vec<_>>());
+                        assert_eq!(
+                            backward.collect::<Vec<_>>(),
+                            dense_backward.collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut records = SemanticRegistry::default();
+        records.initialize_scalar_prefix(3);
+        for index in 0..2 {
+            records.push_declared(crate::SocConstraintId(index).into(), Representation::Soc);
+        }
+        for index in 3..7 {
+            records.push_row_range(crate::ConstraintId(index).into(), Representation::Scalar);
+        }
+        for position in [2, 3, 7] {
+            let mut entry = records.entry(position).unwrap();
+            entry.representation = Representation::Extension(0);
+            records.replace_entry(position, entry);
+        }
+        let expected: Vec<_> = (0..records.len()).map(|i| records.entry(i).unwrap()).collect();
+        check(records.iter(), &expected);
+
+        let implicit: Vec<_> = (0..9).map(SemanticRegistry::declared_scalar).collect();
+        check(SemanticEntryIter::implicit(implicit.len()), &implicit);
+        check(SemanticRegistry::default().iter(), &[]);
+    }
+
+    #[test]
+    fn sparse_origins_do_not_expand_a_million_scalar_declarations() {
+        let mut records = SemanticRegistry::default();
+        records.initialize_scalar_prefix(1_000_000);
+        for position in [0, 500_000, 999_999] {
+            records.set_origin(position, ConstraintOrigin::Range("edited".into()), &"row".into());
+        }
+        assert_eq!(records.entries.runs.len(), 1);
+        assert_eq!(records.entries.overrides.len(), 0);
+        assert_eq!(records.origin_overrides.len(), 3);
+        assert!(records.origins.is_empty());
+        for position in [0, 500_000, 999_999] {
+            assert_eq!(
+                records.position(crate::ConstraintId(position).into()),
+                Some(position as usize)
+            );
+            records.set_origin(position as usize, ConstraintOrigin::Declared, &"row".into());
+        }
+        assert!(records.origin_overrides.is_empty());
+        assert_eq!(records.entries.runs.len(), 1);
+    }
+
+    #[test]
+    fn mixed_runs_sparse_representations_and_bidirectional_iteration_keep_positions() {
+        let mut records = SemanticRegistry::default();
+        records.initialize_scalar_prefix(100_000);
+        records.push_declared(crate::SocConstraintId(0).into(), Representation::Soc);
+        for index in 100_000..200_000 {
+            records.push_row_range(crate::ConstraintId(index).into(), Representation::Scalar);
+        }
+        assert_eq!(records.entries.runs.len(), 3);
+        assert_eq!(records.positions.get(crate::ConstraintId(199_999).into()), Some(200_000));
+
+        let mut changed = records.entry(50_000).unwrap();
+        changed.representation = Representation::Extension(0);
+        records.replace_entry(50_000, changed);
+        assert_eq!(records.entries.overrides.len(), 1);
+        assert_eq!(records.entry(50_000), Some(changed));
+        records.replace_entry(50_000, SemanticRegistry::declared_scalar(50_000));
+        assert!(records.entries.overrides.is_empty());
+
+        let expected: Vec<_> = (0..records.len()).map(|i| records.entry(i).unwrap().id).collect();
+        assert_eq!(records.iter().map(|entry| entry.id).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            records.iter().rev().map(|entry| entry.id).collect::<Vec<_>>(),
+            expected.iter().rev().copied().collect::<Vec<_>>()
+        );
+        let mut iter = records.iter();
+        let mut front = 0;
+        let mut back = expected.len();
+        while front < back {
+            assert_eq!(iter.next().unwrap().id, expected[front]);
+            front += 1;
+            if front < back {
+                back -= 1;
+                assert_eq!(iter.next_back().unwrap().id, expected[back]);
+            }
+            assert_eq!(iter.len(), back - front);
+        }
+        assert!(iter.next().is_none());
+        assert!(iter.next_back().is_none());
     }
 }

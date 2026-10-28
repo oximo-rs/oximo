@@ -26,7 +26,7 @@ use crate::indicator::{IndicatorConstraint, IndicatorConstraintId};
 use crate::objective::{Objective, ObjectiveSense};
 use crate::param::Parameter;
 use crate::reformulation::{IndicatorReformulationArtifacts, SosReformulationArtifacts};
-use crate::shared::SharedCell;
+use crate::shared::{LazySharedCell, SharedCell};
 use crate::soc::{SocConstraint, SocConstraintId};
 use crate::sos::{SosConstraint, SosConstraintId};
 use crate::var::Variable;
@@ -114,24 +114,26 @@ pub struct Model {
     pub(crate) var_names: SharedCell<FxHashMap<SmolStr, VarId>>,
     pub(crate) parameters: SharedCell<Vec<Parameter>>,
     pub(crate) param_names: SharedCell<FxHashMap<SmolStr, ParamId>>,
-    pub(crate) semantics: SharedCell<semantic::SemanticRegistry>,
+    pub(crate) semantics: LazySharedCell<semantic::SemanticRegistry>,
     implicit_scalars: Cell<bool>,
     scalar_declarations: Cell<usize>,
-    pub(crate) alternative_scalar_views:
-        SharedCell<FxHashMap<crate::SemanticConstraintId, crate::semantic::ScalarConstraintView>>,
+    pub(crate) alternative_scalar_views: LazySharedCell<
+        FxHashMap<crate::SemanticConstraintId, crate::semantic::ScalarConstraintView>,
+    >,
     pub(crate) inactive_scalar_views:
-        SharedCell<FxHashMap<ConstraintId, crate::semantic::ScalarConstraintView>>,
+        LazySharedCell<FxHashMap<ConstraintId, crate::semantic::ScalarConstraintView>>,
     pub(crate) constraints: SharedCell<Vec<AlgebraicConstraint>>,
     pub(crate) semantic_names: SharedCell<semantic::ConstraintNames>,
     pub(crate) soc_constraints: SharedCell<Vec<SocConstraint>>,
     pub(crate) psd_constraints: SharedCell<Vec<PsdConstraint>>,
     pub(crate) sos_constraints: SharedCell<Vec<SosConstraint>>,
     pub(crate) indicator_constraints: SharedCell<Vec<IndicatorConstraint>>,
-    pub(crate) sos_reformulations: SharedCell<Vec<SosReformulationArtifacts>>,
-    pub(crate) indicator_reformulations: SharedCell<Vec<IndicatorReformulationArtifacts>>,
-    pub(crate) semantic_objective: SharedCell<Option<crate::objective::SemanticObjective>>,
+    pub(crate) sos_reformulations: LazySharedCell<Vec<SosReformulationArtifacts>>,
+    pub(crate) indicator_reformulations: LazySharedCell<Vec<IndicatorReformulationArtifacts>>,
+    pub(crate) semantic_objective: LazySharedCell<Option<crate::objective::SemanticObjective>>,
     pub(crate) objective: SharedCell<Option<Objective>>,
     objective_declared: Cell<bool>,
+    objective_signature: Cell<Option<semantic::storage::ScalarKind>>,
     cached_kind: Cell<Option<ModelKind>>,
     cached_kind_parameter_revision: Cell<u64>,
     /// Monotonic counter for auto-naming anonymous constraints registered via
@@ -280,19 +282,25 @@ impl Model {
             indicator_constraints: self.indicator_constraints.clone(),
             sos_reformulations: self.sos_reformulations.clone(),
             indicator_reformulations: self.indicator_reformulations.clone(),
-            semantic_objective: SharedCell::new(self.semantic_objective.borrow().clone()),
+            semantic_objective: LazySharedCell::default(),
             objective: SharedCell::new(self.objective.borrow().clone()),
             objective_declared: Cell::new(self.objective_declared.get()),
+            objective_signature: Cell::new(self.objective_signature.get()),
             cached_kind: Cell::new(self.cached_kind.get()),
             cached_kind_parameter_revision: Cell::new(self.cached_kind_parameter_revision.get()),
             auto_seq: Cell::new(self.auto_seq.get()),
         };
 
-        if let Some(objective) = cloned.semantic_objective.borrow_mut().as_mut() {
+        if self.objective_signature.get().is_none()
+            && let Some(source) =
+                self.semantic_objective.borrow().as_deref().and_then(Option::as_ref)
+        {
+            let mut objective = source.clone();
             objective.function.rebind_model(cloned.id());
+            *cloned.semantic_objective.borrow_mut() = Some(objective);
         }
 
-        if !cloned.semantics.borrow().extensions.is_empty() {
+        if cloned.semantics.borrow().as_deref().is_some_and(|s| !s.extensions.is_empty()) {
             cloned.semantics.borrow_mut().rebind_extensions(cloned.id());
         }
 
@@ -321,22 +329,23 @@ impl Model {
             var_names: SharedCell::new(FxHashMap::default()),
             parameters: SharedCell::new(Vec::new()),
             param_names: SharedCell::new(FxHashMap::default()),
-            semantics: SharedCell::new(semantic::SemanticRegistry::default()),
+            semantics: LazySharedCell::default(),
             implicit_scalars: Cell::new(true),
             scalar_declarations: Cell::new(0),
-            alternative_scalar_views: SharedCell::new(FxHashMap::default()),
-            inactive_scalar_views: SharedCell::new(FxHashMap::default()),
+            alternative_scalar_views: LazySharedCell::default(),
+            inactive_scalar_views: LazySharedCell::default(),
             constraints: SharedCell::new(Vec::new()),
             semantic_names: SharedCell::new(semantic::ConstraintNames::default()),
             soc_constraints: SharedCell::new(Vec::new()),
             psd_constraints: SharedCell::new(Vec::new()),
             sos_constraints: SharedCell::new(Vec::new()),
             indicator_constraints: SharedCell::new(Vec::new()),
-            sos_reformulations: SharedCell::new(Vec::new()),
-            indicator_reformulations: SharedCell::new(Vec::new()),
-            semantic_objective: SharedCell::new(None),
+            sos_reformulations: LazySharedCell::default(),
+            indicator_reformulations: LazySharedCell::default(),
+            semantic_objective: LazySharedCell::default(),
             objective: SharedCell::new(None),
             objective_declared: Cell::new(false),
+            objective_signature: Cell::new(None),
             cached_kind: Cell::new(None),
             cached_kind_parameter_revision: Cell::new(0),
             auto_seq: Cell::new(0),
@@ -426,7 +435,9 @@ impl Model {
     /// previously set objective. Not part of the stable public API.
     #[doc(hidden)]
     pub fn __feasibility(&self) {
-        *self.semantic_objective.borrow_mut() = None;
+        self.objective.assert_mutable();
+        self.semantic_objective.clear();
+        self.objective_signature.set(None);
         *self.objective.borrow_mut() = None;
         self.objective_declared.set(true);
         self.cached_kind.set(None);
@@ -443,8 +454,9 @@ impl Model {
         let function =
             crate::FunctionValue::new(crate::Function::semantic_data(&semantic_function));
         self.assert_expr_belongs(expr);
-        *self.semantic_objective.borrow_mut() =
-            Some(crate::objective::SemanticObjective { function, sense });
+        self.objective.assert_mutable();
+        self.semantic_objective.clear();
+        self.objective_signature.set(semantic::storage::ScalarKind::of(&function));
         *self.objective.borrow_mut() = Some(Objective { expr: expr.id, sense });
         self.objective_declared.set(true);
         self.cached_kind.set(None);
@@ -453,7 +465,7 @@ impl Model {
     /// Whether feasibility was declared explicitly via `objective!(m, Feasibility)`,
     /// as opposed to a model that simply has no objective set.
     pub fn is_feasibility(&self) -> bool {
-        self.objective_declared.get() && self.semantic_objective.borrow().is_none()
+        self.objective_declared.get() && self.objective.borrow().is_none()
     }
 
     /// Ensure the model has a solve direction declared: either an objective
@@ -482,8 +494,15 @@ impl Model {
 }
 
 impl Model {
+    /// Inspect the original objective function and direction.
     pub fn semantic_objective(&self) -> Ref<'_, Option<crate::objective::SemanticObjective>> {
-        self.semantic_objective.borrow()
+        self.semantic_objective.borrow_or_init(|| {
+            let kind = self.objective_signature.get()?;
+            self.objective.borrow().as_ref().map(|objective| crate::objective::SemanticObjective {
+                function: kind.function(self.id(), objective.expr),
+                sense: objective.sense,
+            })
+        })
     }
 
     pub fn minimize<F: crate::objective::ObjectiveFunction>(&self, function: F) {
@@ -514,9 +533,16 @@ impl Model {
                 "objective requires a scalar expression representation; opaque registration is deferred"
             ),
         };
+        self.objective.assert_mutable();
+        let kind = semantic::storage::ScalarKind::of(&function);
+        if kind.is_some() {
+            self.semantic_objective.clear();
+        } else {
+            *self.semantic_objective.borrow_mut() =
+                Some(crate::objective::SemanticObjective { function, sense });
+        }
+        self.objective_signature.set(kind);
         *self.objective.borrow_mut() = Some(view);
-        *self.semantic_objective.borrow_mut() =
-            Some(crate::objective::SemanticObjective { function, sense });
         self.objective_declared.set(true);
         self.invalidate_kind();
     }

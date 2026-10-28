@@ -511,10 +511,8 @@ impl Model {
         }
         constraints.reserve(count);
         names.reserve(count);
-        self.reserve_semantics(ConstraintId(0).into(), count);
         let mut ids = Vec::with_capacity(count);
-        let mut semantics = self.semantic_writer();
-        let mut alternatives = self.alternative_scalar_views.borrow_mut();
+        let mut semantics = None;
 
         for item in items {
             let id =
@@ -529,7 +527,7 @@ impl Model {
             });
 
             if item.alternative {
-                alternatives.insert(
+                self.alternative_scalar_views.borrow_mut().insert(
                     id.into(),
                     crate::semantic::ScalarConstraintView {
                         lhs: item.lhs,
@@ -538,7 +536,21 @@ impl Model {
                     },
                 );
             }
-            item.semantic.record(&mut semantics, id, &item.name, item.origin, item.alternative);
+            if semantics.is_none()
+                && self.implicit_scalars.get()
+                && matches!(item.semantic, PendingSemantic::Direct(_))
+                && matches!(item.origin, PendingOrigin::Declared)
+            {
+                self.record_declared_scalar(id);
+            } else {
+                item.semantic.record(
+                    semantics.get_or_insert_with(|| self.semantic_writer()),
+                    id,
+                    &item.name,
+                    item.origin,
+                    item.alternative,
+                );
+            }
             names.insert(item.name, id);
             ids.push(id);
         }
@@ -771,7 +783,7 @@ impl Model {
         if self.implicit_scalars.get() {
             self.scalar_declarations.get()
         } else {
-            self.semantics.borrow().len()
+            self.semantics.borrow().as_deref().map_or(0, super::semantic::SemanticRegistry::len)
         }
     }
 
@@ -968,7 +980,6 @@ impl Model {
         }
         constraints.reserve(count);
         names.reserve(count);
-        self.reserve_semantics(SocConstraintId(0).into(), count);
         let mut semantics = self.semantic_writer();
 
         for item in items {
@@ -1117,7 +1128,6 @@ impl Model {
         }
         constraints.reserve(count);
         names.reserve(count);
-        self.reserve_semantics(SosConstraintId(0).into(), count);
         let mut semantics = self.semantic_writer();
 
         for item in items {
@@ -1401,10 +1411,8 @@ impl Model {
 
         constraints.reserve(items.len());
         names.reserve(items.len());
-        self.reserve_semantics(IndicatorConstraintId(0).into(), items.len());
         let mut ids = Vec::with_capacity(items.len());
-        let mut semantics = self.semantic_writer();
-        let mut alternatives = self.alternative_scalar_views.borrow_mut();
+        let mut semantics = None;
 
         for item in items {
             let id = IndicatorConstraintId(
@@ -1412,7 +1420,7 @@ impl Model {
             );
 
             if item.alternative {
-                alternatives.insert(
+                self.alternative_scalar_views.borrow_mut().insert(
                     id.into(),
                     crate::semantic::ScalarConstraintView {
                         lhs: item.lhs,
@@ -1421,7 +1429,7 @@ impl Model {
                     },
                 );
             }
-            semantics.record_indicator(
+            semantics.get_or_insert_with(|| self.semantic_writer()).record_indicator(
                 id,
                 item.name.clone(),
                 self.id(),
