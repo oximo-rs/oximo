@@ -2,19 +2,61 @@ use std::cell::Ref;
 
 use rustc_hash::FxHashMap;
 
-use super::storage::{Representation, SemanticRegistry};
+use super::storage::{Representation, SemanticEntry, SemanticEntryIter, SemanticRegistry};
 use crate::semantic::{
     FunctionRef, ScalarConstraintView, SemanticConstraintRef, SemanticPairRef, SetRef,
 };
 use crate::{ConstraintId, Model, ModelConstraints, SemanticConstraintId};
 
+#[derive(Clone)]
+struct SemanticIter<'a, F> {
+    entries: SemanticEntryIter<'a>,
+    view: F,
+}
+
+impl<T, F: FnMut(SemanticEntry) -> T> Iterator for SemanticIter<'_, F> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next().map(&mut self.view)
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.entries.nth(n).map(&mut self.view)
+    }
+
+    fn last(mut self) -> Option<Self::Item> {
+        self.entries.last().map(&mut self.view)
+    }
+
+    fn count(self) -> usize {
+        self.entries.count()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
+impl<T, F: FnMut(SemanticEntry) -> T> DoubleEndedIterator for SemanticIter<'_, F> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.entries.next_back().map(&mut self.view)
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        self.entries.nth_back(n).map(&mut self.view)
+    }
+}
+
+impl<T, F: FnMut(SemanticEntry) -> T> ExactSizeIterator for SemanticIter<'_, F> {}
+
 /// A read guard over semantic declarations and their canonical native payloads.
 #[derive(Debug)]
 pub struct SemanticConstraints<'a> {
     model_id: crate::ModelId,
-    records: Ref<'a, SemanticRegistry>,
+    records: Ref<'a, Option<std::sync::Arc<SemanticRegistry>>>,
     native: ModelConstraints<'a>,
-    inactive: Ref<'a, FxHashMap<ConstraintId, ScalarConstraintView>>,
+    inactive: Ref<'a, Option<std::sync::Arc<FxHashMap<ConstraintId, ScalarConstraintView>>>>,
     implicit_len: Option<usize>,
 }
 
@@ -31,7 +73,8 @@ impl<'a> SemanticConstraints<'a> {
 
     /// Count all declarations, including inactive constraints.
     pub fn len(&self) -> usize {
-        self.implicit_len.unwrap_or_else(|| self.records.len())
+        self.implicit_len
+            .unwrap_or_else(|| self.records.as_deref().map_or(0, SemanticRegistry::len))
     }
 
     /// Return whether the model has no constraint declarations.
@@ -47,7 +90,7 @@ impl<'a> SemanticConstraints<'a> {
         &self,
     ) -> impl ExactSizeIterator<Item = SemanticConstraintId> + DoubleEndedIterator + Clone + '_
     {
-        (0..self.len()).map(|position| self.entry(position).expect("registered position").id)
+        SemanticIter { entries: self.entries(), view: |entry: SemanticEntry| entry.id }
     }
 
     /// Read metadata at a declaration position without expanding an implicit scalar prefix.
@@ -55,7 +98,7 @@ impl<'a> SemanticConstraints<'a> {
         if let Some(len) = self.implicit_len {
             (position < len).then(|| SemanticRegistry::declared_scalar(position))
         } else {
-            self.records.entry(position)
+            self.records.as_deref()?.entry(position)
         }
     }
 
@@ -66,7 +109,7 @@ impl<'a> SemanticConstraints<'a> {
     pub fn iter(
         &self,
     ) -> impl ExactSizeIterator<Item = SemanticConstraintRef<'_>> + DoubleEndedIterator {
-        (0..self.len()).map(|position| self.get(position).expect("registered position"))
+        SemanticIter { entries: self.entries(), view: |entry| self.view(entry) }
     }
 
     /// Build a semantic view at a declaration position, borrowing its registered payloads.
@@ -74,12 +117,24 @@ impl<'a> SemanticConstraints<'a> {
     /// # Panics
     /// Panics if declaration metadata or native constraint storage is inconsistent.
     pub fn get(&self, position: usize) -> Option<SemanticConstraintRef<'_>> {
+        Some(self.view(self.entry(position)?))
+    }
+
+    fn entries(&self) -> super::storage::SemanticEntryIter<'_> {
+        self.records.as_deref().filter(|_| self.implicit_len.is_none()).map_or_else(
+            || super::storage::SemanticEntryIter::implicit(self.implicit_len.unwrap_or(0)),
+            SemanticRegistry::iter,
+        )
+    }
+
+    #[inline]
+    fn view(&self, entry: super::storage::SemanticEntry) -> SemanticConstraintRef<'_> {
         use SemanticConstraintId as Id;
-        let entry = self.entry(position)?;
         let model_id = self.model_id;
         let (name, active, function, set) = match (entry.id, entry.representation) {
             (_, Representation::Extension(index)) => {
-                let source = &self.records.extensions[index as usize];
+                let source = &self.records.as_deref().expect("registered metadata").extensions
+                    [index as usize];
                 let mut view = source.as_ref();
                 view.active = match entry.id {
                     Id::Algebraic(id) => self.native.algebraic()[id.index()].active,
@@ -92,14 +147,15 @@ impl<'a> SemanticConstraints<'a> {
                     }
                     Id::Indicator(id) => self.native.indicators()[id.index()].active,
                 };
-                return Some(view);
+                return view;
             }
             (Id::Algebraic(id), Representation::Scalar) => {
                 let row = &self.native.algebraic()[id.index()];
                 let signature = row.signature.expect("canonical scalar signature");
                 let (root, lower, upper) = self
                     .inactive
-                    .get(&id)
+                    .as_deref()
+                    .and_then(|views| views.get(&id))
                     .map_or((row.lhs, row.lower, row.upper), |v| (v.lhs, v.lower, v.upper));
                 (
                     &row.name,
@@ -158,12 +214,50 @@ impl<'a> SemanticConstraints<'a> {
             _ => unreachable!("native representation must match its registry"),
         };
 
-        Some(SemanticConstraintRef {
+        SemanticConstraintRef {
             id: entry.id,
             name,
             active,
             pair: SemanticPairRef { function, set },
-            origin: self.records.origin(&entry, name),
-        })
+            origin: self.records.as_deref().map_or(
+                std::borrow::Cow::Borrowed(&crate::ConstraintOrigin::Declared),
+                |records| records.origin(&entry, name),
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn seeking_projects_only_returned_entries() {
+        let visits = Cell::new(0);
+        let make_iter = || SemanticIter {
+            entries: SemanticEntryIter::implicit(10),
+            view: |entry: SemanticEntry| {
+                visits.set(visits.get() + 1);
+                entry.id.index()
+            },
+        };
+        let mut iter = make_iter();
+        assert_eq!(iter.nth(3), Some(3));
+        assert_eq!(visits.get(), 1);
+        assert_eq!(iter.nth_back(2), Some(7));
+        assert_eq!(visits.get(), 2);
+        assert_eq!(iter.next(), Some(4));
+        assert_eq!(iter.next_back(), Some(6));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.last(), Some(5));
+        assert_eq!(visits.get(), 5);
+
+        assert_eq!(make_iter().count(), 10);
+        let mut empty = make_iter();
+        assert_eq!(empty.nth(usize::MAX), None);
+        assert_eq!(empty.last(), None);
+        assert_eq!(make_iter().nth_back(usize::MAX), None);
+        assert_eq!(visits.get(), 5);
     }
 }

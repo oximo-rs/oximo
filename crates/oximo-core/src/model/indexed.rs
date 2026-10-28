@@ -613,7 +613,6 @@ impl Model {
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOC_THRESHOLD) {
             self.soc_constraints.borrow_mut().reserve(keys.len());
             self.soc_names_mut().reserve(keys.len());
-            self.reserve_semantics(crate::SocConstraintId(0).into(), keys.len());
 
             for key in &keys {
                 let name: SmolStr = format_index_name_small(name_prefix, key);
@@ -690,7 +689,6 @@ impl Model {
         if !indexed_parallel(keys.len(), forced_parallel, PAR_INDEXED_SOS_THRESHOLD) {
             self.sos_constraints.borrow_mut().reserve(keys.len());
             self.sos_names_mut().reserve(keys.len());
-            self.reserve_semantics(crate::SosConstraintId(0).into(), keys.len());
 
             for key in &keys {
                 self.register_sos_one(sos_type, prepare(key));
@@ -1159,6 +1157,5 @@ impl Model {
     fn reserve_scalar_family(&self, count: usize) {
         self.constraints.borrow_mut().reserve(count);
         self.constraint_names_mut().reserve(count);
-        self.reserve_semantics(crate::ConstraintId(0).into(), count);
     }
 }

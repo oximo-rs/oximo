@@ -363,14 +363,16 @@ impl Model {
         if self
             .sos_reformulations
             .borrow()
-            .iter()
+            .as_deref()
+            .into_iter()
+            .flatten()
             .any(|a| sos[a.source.index()].members.iter().any(|m| m.variable == id))
         {
             return Err(ModelError::FrozenVariable(id));
         }
         let indicators = self.indicator_constraints.borrow();
         let arena = self.arena();
-        if self.indicator_reformulations.borrow().iter().any(|a| {
+        if self.indicator_reformulations.borrow().as_deref().into_iter().flatten().any(|a| {
             let c = &indicators[a.source.index()];
             id != c.trigger
                 && extract_linear(&arena, c.lhs)

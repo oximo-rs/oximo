@@ -170,7 +170,9 @@ impl Model {
     /// Their row multipliers require an explicit mapping to semantic coordinates.
     #[inline]
     pub fn visit_alternative_lowerings(&self, visitor: impl FnMut(SemanticConstraintId)) {
-        self.alternative_scalar_views.borrow().keys().copied().for_each(visitor);
+        if let Some(views) = self.alternative_scalar_views.borrow().as_deref() {
+            views.keys().copied().for_each(visitor);
+        }
     }
 
     /// Return the stored scalar row or indicator consequent selected by an explicit lowering.
@@ -179,13 +181,7 @@ impl Model {
         &self,
         id: SemanticConstraintId,
     ) -> Option<crate::ScalarConstraintView> {
-        self.alternative_scalar_views.borrow().get(&id).copied()
-    }
-
-    /// Reserve metadata space for additions to one native registry.
-    pub(super) fn reserve_semantics(&self, registry: SemanticConstraintId, additional: usize) {
-        let mut records = self.semantics.borrow_mut();
-        records.reserve(registry, additional);
+        self.alternative_scalar_views.borrow().as_deref().and_then(|views| views.get(&id).copied())
     }
 
     /// Record a function/set pair as an original model declaration.
@@ -418,7 +414,7 @@ impl Model {
                 _ => None,
             }
         } else {
-            self.semantics.borrow().position(id)
+            self.semantics.borrow().as_deref().and_then(|records| records.position(id))
         }
     }
 
@@ -454,13 +450,17 @@ impl Model {
             let Some(row) = rows.get(id.index()) else { return Ok(None) };
 
             if row.signature.is_some() {
-                return Ok(Some(self.inactive_scalar_views.borrow().get(&id).copied().unwrap_or(
-                    crate::ScalarConstraintView {
-                        lhs: row.lhs,
-                        lower: row.lower,
-                        upper: row.upper,
-                    },
-                )));
+                return Ok(Some(
+                    self.inactive_scalar_views
+                        .borrow()
+                        .as_deref()
+                        .and_then(|views| views.get(&id).copied())
+                        .unwrap_or(crate::ScalarConstraintView {
+                            lhs: row.lhs,
+                            lower: row.lower,
+                            upper: row.upper,
+                        }),
+                ));
             }
         }
 
@@ -575,7 +575,11 @@ impl Model {
                 let record = self.semantic_constraint(handle)?.expect("unknown semantic handle");
                 let (lhs, lower, upper) = if !active {
                     (self.__constant(0.0).id(), f64::NEG_INFINITY, f64::INFINITY)
-                } else if let Some(view) = self.alternative_scalar_views.borrow().get(&handle.id())
+                } else if let Some(view) = self
+                    .alternative_scalar_views
+                    .borrow()
+                    .as_deref()
+                    .and_then(|views| views.get(&handle.id()))
                 {
                     (view.lhs, view.lower, view.upper)
                 } else {
@@ -626,6 +630,8 @@ impl Model {
         } else {
             self.semantics
                 .borrow()
+                .as_deref()
+                .expect("registered metadata")
                 .entry(self.semantic_position(handle.id()))
                 .expect("registered position")
                 .representation
@@ -755,7 +761,10 @@ impl Model {
         let position = self.semantic_position(id);
 
         if !self.implicit_scalars.get() || !matches!(origin, ConstraintOrigin::Declared) {
-            self.semantic_writer().records.set_origin(position, origin);
+            let name = SmolStr::new(
+                self.semantic_constraints_ref().get(position).expect("registered position").name,
+            );
+            self.semantic_writer().records.set_origin(position, origin, &name);
         }
     }
 }
@@ -950,7 +959,12 @@ impl Model {
     ) -> Result<(), crate::ConstraintUpdateError> {
         self.ensure_constraint_not_reformulated(id)?;
 
-        if self.alternative_scalar_views.borrow().contains_key(&id) {
+        if self
+            .alternative_scalar_views
+            .borrow()
+            .as_deref()
+            .is_some_and(|views| views.contains_key(&id))
+        {
             return Err(crate::ConstraintUpdateError::AlternativeLowering(id));
         }
 
@@ -970,12 +984,20 @@ impl Model {
         }
 
         let reformulated = match id {
-            SemanticConstraintId::SpecialOrderedSet(id) => {
-                self.sos_reformulations.borrow().iter().any(|a| a.source == id)
-            }
-            SemanticConstraintId::Indicator(id) => {
-                self.indicator_reformulations.borrow().iter().any(|a| a.source == id)
-            }
+            SemanticConstraintId::SpecialOrderedSet(id) => self
+                .sos_reformulations
+                .borrow()
+                .as_deref()
+                .into_iter()
+                .flatten()
+                .any(|a| a.source == id),
+            SemanticConstraintId::Indicator(id) => self
+                .indicator_reformulations
+                .borrow()
+                .as_deref()
+                .into_iter()
+                .flatten()
+                .any(|a| a.source == id),
             _ => false,
         };
 

@@ -72,6 +72,7 @@ impl FunctionRef<'_> {
         }
     }
 
+    #[inline]
     pub fn visit_expressions(&self, visitor: &mut dyn FnMut(ExprId)) {
         match self {
             Self::Borrowed(value) => value.visit_expressions(visitor),

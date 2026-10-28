@@ -204,7 +204,9 @@ impl Model {
     /// [`Self::reformulate_sos`] is no longer available.
     #[must_use]
     pub fn sos_reformulations(&self) -> Ref<'_, [SosReformulationArtifacts]> {
-        Ref::map(self.sos_reformulations.borrow(), Vec::as_slice)
+        Ref::map(self.sos_reformulations.borrow(), |value| {
+            value.as_deref().map_or(&[][..], Vec::as_slice)
+        })
     }
 }
 

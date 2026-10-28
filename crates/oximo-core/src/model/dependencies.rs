@@ -291,7 +291,7 @@ impl Model {
             }
 
             let semantic = self.semantic_objective.borrow();
-            if let Some(objective) = semantic.as_ref() {
+            if let Some(objective) = semantic.as_deref().and_then(Option::as_ref) {
                 objective.function.visit_expressions(&mut |root| objective_roots.push(root));
             }
         }
@@ -319,7 +319,10 @@ impl Model {
 
             for (index, constraint) in constraints.algebraic().iter().enumerate() {
                 let id = ConstraintId(u32::try_from(index).expect("constraint count fits u32"));
-                let root = inactive.get(&id).map_or(constraint.lhs, |view| view.lhs);
+                let root = inactive
+                    .as_deref()
+                    .and_then(|views| views.get(&id))
+                    .map_or(constraint.lhs, |view| view.lhs);
                 let parameters = builder.parameters_for_roots([root]);
                 builder.add_target(ParameterTarget::Algebraic(id), parameters);
             }
