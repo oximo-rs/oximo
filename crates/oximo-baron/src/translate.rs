@@ -1,3 +1,4 @@
+use oximo_solver::SolutionValues;
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
 use oximo_solver::reconstruct::finalize_result;
 use std::borrow::Cow;
@@ -62,7 +63,7 @@ pub fn solve(
     let parameters = prepared.arena().parameter_snapshot();
     let (bar, var_order, con_order, soc_bounds) = build_bar_prepared(model, &prepared, opts)?;
     let run = run_baron(&bar, opts, exec)?;
-    let result = parse_solution(
+    let mut result = parse_solution(
         &run.tim,
         &run.res,
         sense,
@@ -75,7 +76,50 @@ pub fn solve(
         &parameters,
     );
 
+    debug_assert!(result.dual.slot_count() <= model.constraints().algebraic().len());
+    debug_assert!(result.soc_dual.slot_count() <= model.num_soc_constraints());
+    debug_assert!(result.reduced_costs.slot_count() <= var_order.len());
+
+    require_active_dual_evidence(
+        &mut result,
+        &con_order,
+        prepared.constraints().second_order_cones(),
+    );
     Ok(finalize_result(result, model, var_order.len()))
+}
+
+fn require_active_dual_evidence(
+    result: &mut SolverResult,
+    con_order: &[ConstraintId],
+    socs: &[SocConstraint],
+) {
+    if result.dual_status != DualStatus::FeasiblePoint {
+        return;
+    }
+    let missing_rows = !con_order.is_empty()
+        && (result.dual.is_empty()
+            || !con_order.iter().any(|&id| result.dual.get(id).is_some_and(f64::is_finite)));
+    let mut active_socs = socs.iter().enumerate().filter(|(_, soc)| soc.active).peekable();
+    let missing_socs = active_socs.peek().is_some()
+        && (result.soc_dual.is_empty()
+            || !active_socs.any(|(index, _)| {
+                result
+                    .soc_dual
+                    .get(SocConstraintId(u32::try_from(index).unwrap()))
+                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+            }));
+    if missing_rows || missing_socs {
+        result.dual_status = DualStatus::Unknown;
+        let log = result.raw_log.get_or_insert_with(String::new);
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        let group = if missing_rows { "algebraic" } else { "SOC" };
+        let _ = write!(
+            log,
+            "No multiplier captured for active {group} constraints; dual status is Unknown."
+        );
+    }
 }
 
 /// Build `model`, run BARON with IIS search enabled, and when BARON reports the
@@ -827,7 +871,7 @@ fn parse_solution(
     res: &str,
     sense: ObjectiveSense,
     elapsed: std::time::Duration,
-    raw_log: Option<String>,
+    mut raw_log: Option<String>,
     var_order: &[VarId],
     con_order: &[ConstraintId],
     soc_bounds: &[LinearTerms<'_>],
@@ -858,8 +902,9 @@ fn parse_solution(
         ObjectiveSense::Maximize => lower,
     };
 
+    let mut ignored_coordinates = 0;
     let mut solutions = if has_sol && nodeopt != Some(-3) {
-        parse_results(res, var_order, sense, parameters)
+        parse_results(res, var_order, sense, parameters, &mut ignored_coordinates)
     } else {
         Vec::new()
     };
@@ -870,7 +915,7 @@ fn parse_solution(
     if has_sol && solutions.is_empty() {
         solutions.push(SolutionPoint {
             model_id,
-            primal: FxHashMap::default(),
+            primal: SolutionValues::default(),
             objective,
             parameters: parameters.clone(),
         });
@@ -879,27 +924,36 @@ fn parse_solution(
     let (dual, reduced_costs, soc_prices) = if has_sol {
         parse_dual_solution(res, var_order, con_order)
     } else {
-        (FxHashMap::default(), FxHashMap::default(), FxHashMap::default())
+        (SolutionValues::default(), SolutionValues::default(), FxHashMap::default())
     };
 
     // Rescale each SOC squared-row price to the norm-form bound multiplier
     // using the bound's value at the best primal point.
-    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
-    if let Some(best) = solutions.first() {
+    let mut soc_dual = SolutionValues::default();
+    if let Some(best) = solutions.first().filter(|_| !soc_prices.is_empty()) {
+        soc_dual = SolutionValues::missing(soc_bounds.len());
         for (i, bound) in soc_bounds.iter().enumerate() {
             if let Some(price) = soc_prices.get(&i) {
                 let Some(b_val) = bound.coeffs.iter().try_fold(bound.constant, |acc, &(v, c)| {
-                    best.primal.get(&v).map(|value| acc + c * *value)
+                    best.primal.get(v).map(|value| acc + c * value)
                 }) else {
                     continue;
                 };
-                soc_dual.insert(
+                soc_dual.set(
                     SocConstraintId(u32::try_from(i).expect("SOC count overflow")),
-                    2.0 * b_val * price.abs(),
+                    Some(2.0 * b_val * price.abs()),
                 );
             }
         }
     }
+
+    let has_captured_multipliers = dual.values().chain(reduced_costs.values()).any(f64::is_finite)
+        || soc_dual.values().any(|value| value.is_finite() && value >= 0.0);
+    let dual_reported = has_sol && res.to_ascii_lowercase().contains("corresponding dual solution");
+    let empty_dual_section = dual_reported
+        && !has_captured_multipliers
+        && !(var_order.is_empty() && con_order.is_empty() && soc_bounds.is_empty());
+    record_readback_diagnostics(&mut raw_log, ignored_coordinates, empty_dual_section);
 
     let best_bound = match sense {
         ObjectiveSense::Minimize => lower,
@@ -907,8 +961,7 @@ fn parse_solution(
     };
     let raw_status = termination_banner(res)
         .map_or_else(|| format!("model_status={model_status}"), str::to_owned);
-    let dual_available =
-        has_sol && res.to_ascii_lowercase().contains("corresponding dual solution");
+    let dual_available = dual_reported && !empty_dual_section;
 
     SolverResult {
         semantic_dual: FxHashMap::default(),
@@ -937,6 +990,30 @@ fn parse_solution(
         solver_name: Some(crate::NAME.into()),
         solver_version: baron_version(res),
         parameters: parameters.clone(),
+    }
+}
+
+fn record_readback_diagnostics(raw_log: &mut Option<String>, ignored: usize, empty_duals: bool) {
+    if ignored == 0 && !empty_duals {
+        return;
+    }
+    let log = raw_log.get_or_insert_with(String::new);
+    if !log.is_empty() {
+        log.push('\n');
+    }
+    if ignored != 0 {
+        let _ = write!(
+            log,
+            "Ignored {ignored} solution coordinates outside captured slot counts; ignored primal records may leave a point incomplete."
+        );
+    }
+    if empty_duals {
+        if ignored != 0 {
+            log.push('\n');
+        }
+        log.push_str(
+            "Reported dual section captured no usable multipliers; dual status is Unknown.",
+        );
     }
 }
 
@@ -1082,10 +1159,11 @@ fn parse_results(
     var_order: &[VarId],
     sense: ObjectiveSense,
     parameters: &oximo_solver::ParameterSnapshot,
+    ignored: &mut usize,
 ) -> Vec<SolutionPoint> {
-    let mut pool = parse_solution_pool(res, var_order, parameters);
+    let mut pool = parse_solution_pool(res, var_order, parameters, ignored);
     if pool.is_empty() {
-        return parse_best_table(res, parameters).into_iter().collect();
+        return parse_best_table(res, parameters, var_order.len(), ignored).into_iter().collect();
     }
     pool.sort_by(|a, b| {
         let ord = match sense {
@@ -1117,6 +1195,7 @@ fn parse_solution_pool(
     res: &str,
     var_order: &[VarId],
     parameters: &oximo_solver::ParameterSnapshot,
+    ignored: &mut usize,
 ) -> Vec<SolutionPoint> {
     let Some(pos) = res.find("Normal completion") else {
         return Vec::new();
@@ -1136,7 +1215,7 @@ fn parse_solution_pool(
         {
             break;
         } else if t.starts_with("Corresponding solution vector") {
-            let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
+            let mut primal = SolutionValues::missing(var_order.len());
             while let Some(peek) = lines.peek() {
                 let p = strip(peek);
                 if p.is_empty()
@@ -1151,9 +1230,15 @@ fn parse_solution_pool(
                 if let (Some(k), Some(val)) = (
                     parts.first().and_then(|s| s.parse::<usize>().ok()),
                     parts.get(1).and_then(|s| parse_baron_float(s)),
-                ) && (1..=var_order.len()).contains(&k)
-                {
-                    primal.insert(var_order[k - 1], val);
+                ) {
+                    if let Some(&id) = k.checked_sub(1).and_then(|index| var_order.get(index)) {
+                        if primal.try_set(id, Some(val)).is_err() {
+                            *ignored += 1;
+                        }
+                    } else {
+                        // Untrusted pool positions outside the translation are ignored.
+                        *ignored += 1;
+                    }
                 }
             }
             if !primal.is_empty() {
@@ -1172,7 +1257,7 @@ fn parse_solution_pool(
 /// `(dual, reduced_costs, soc_prices)` parsed from BARON's dual section.
 /// `soc_prices` keys the raw price of each appended SOC quadratic row by cone
 /// index (its sign row is skipped).
-type DualParts = (FxHashMap<ConstraintId, f64>, FxHashMap<VarId, f64>, FxHashMap<usize, f64>);
+type DualParts = (SolutionValues<ConstraintId>, SolutionValues<VarId>, FxHashMap<usize, f64>);
 
 /// Parse the dual solution BARON prints
 ///
@@ -1186,15 +1271,17 @@ type DualParts = (FxHashMap<ConstraintId, f64>, FxHashMap<VarId, f64>, FxHashMap
 /// Returns empty maps when the section is absent (e.g. `WantDual` off, or
 /// BARON reported "No dual information is available").
 fn parse_dual_solution(res: &str, var_order: &[VarId], con_order: &[ConstraintId]) -> DualParts {
-    let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
-    let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
-    let mut soc_prices: FxHashMap<usize, f64> = FxHashMap::default();
     // BARON may print the dual vector more than once (e.g. for a solution
     // found during preprocessing and again after `*** Normal completion ***`);
     // the last block is the one for the final best point.
     let Some(pos) = res.rfind("Corresponding dual solution vector") else {
-        return (dual, reduced_costs, soc_prices);
+        return (SolutionValues::default(), SolutionValues::default(), FxHashMap::default());
     };
+    let mut dual = SolutionValues::missing(
+        con_order.iter().map(|id| id.index().saturating_add(1)).max().unwrap_or(0),
+    );
+    let mut reduced_costs = SolutionValues::missing(var_order.len());
+    let mut soc_prices: FxHashMap<usize, f64> = FxHashMap::default();
     let strip = |l: &str| l.trim_start().trim_start_matches(">>>").trim().to_string();
 
     // Marginals first, then prices once the `Constraint no. Price` header is
@@ -1224,7 +1311,7 @@ fn parse_dual_solution(res: &str, var_order: &[VarId], con_order: &[ConstraintId
         }
         if in_prices {
             if let Some(&id) = con_order.get(k - 1) {
-                *dual.entry(id).or_insert(0.0) += val;
+                let _ = oximo_solver::reconstruct::try_accumulate_dual(&mut dual, id, val, 1.0);
             } else {
                 // Past the ConstraintId rows: the appended SOC pairs, two
                 // rows per cone. Keep the quadratic row's price, skip the
@@ -1235,7 +1322,8 @@ fn parse_dual_solution(res: &str, var_order: &[VarId], con_order: &[ConstraintId
                 }
             }
         } else if k <= var_order.len() {
-            reduced_costs.insert(var_order[k - 1], val);
+            // Declaration order is bounded independently of the text position.
+            let _ = reduced_costs.try_set(var_order[k - 1], Some(val));
         }
     }
     (dual, reduced_costs, soc_prices)
@@ -1248,9 +1336,11 @@ fn parse_dual_solution(res: &str, var_order: &[VarId], con_order: &[ConstraintId
 fn parse_best_table(
     res: &str,
     parameters: &oximo_solver::ParameterSnapshot,
+    num_variables: usize,
+    ignored: &mut usize,
 ) -> Option<SolutionPoint> {
     let pos = res.find("The best solution found")?;
-    let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
+    let mut primal = SolutionValues::missing(num_variables);
     let mut objective = None;
     let mut started = false;
     for line in res[pos..].lines().skip(1) {
@@ -1262,7 +1352,12 @@ fn parse_best_table(
         if let (Some(&p0), Some(&p2)) = (parts.first(), parts.get(2))
             && let (Some(idx), Some(val)) = (extract_index(p0), parse_baron_float(p2))
         {
-            primal.insert(VarId(idx), val);
+            // Out-of-range text IDs deliberately remain missing.
+            if (idx as usize) < num_variables {
+                let _ = primal.try_set(VarId(idx), Some(val));
+            } else {
+                *ignored += 1;
+            }
             started = true;
             continue;
         }
@@ -1493,8 +1588,15 @@ mod tests {
     fn finalize_parsed(mut result: SolverResult, num_variables: usize) -> SolverResult {
         assert_eq!(result.model_id, ModelId::UNASSIGNED);
         let model = Model::new("parsed result fixture");
-        for index in 0..num_variables {
-            model.__var(format!("x{index}")).build();
+        let variables: Vec<_> =
+            (0..num_variables).map(|index| model.__var(format!("x{index}")).build()).collect();
+        if let Some(&x) = variables.first() {
+            for index in 0..result.dual.slot_count() {
+                model.add_constraint(format!("row{index}"), x.le(1.0));
+            }
+            for index in 0..result.soc_dual.slot_count() {
+                model.add_soc_constraint(format!("cone{index}"), [x], x);
+            }
         }
         for (index, &value) in result.parameters.values().iter().enumerate() {
             model.__param(format!("p{index}"), value);
@@ -2003,6 +2105,147 @@ mod tests {
     }
 
     #[test]
+    fn absent_dual_section_has_no_coordinate_buffers() {
+        let variables: Vec<_> = (0..1_000_000).map(VarId).collect();
+        let (dual, reduced, prices) = parse_dual_solution(
+            "No dual information is available",
+            &variables,
+            &[ConstraintId(999_999)],
+        );
+        assert_eq!(dual.slot_count(), 0);
+        assert_eq!(reduced.slot_count(), 0);
+        assert!(prices.is_empty());
+    }
+
+    #[test]
+    fn last_dual_banner_without_captured_multipliers_is_unknown() {
+        let parameters = oximo_solver::ParameterSnapshot::default();
+        let primal = "The best solution found is:\nx0 0 0 1\nThe above solution has an objective value of: 0\n";
+        let banner = "\n >>> Corresponding dual solution vector is:\n >>> Variable no. Marginal\n";
+        for blocks in [
+            format!("{banner}invalid\n"),
+            format!("{banner}1 0\n{banner}invalid\n"),
+            format!("{banner}1 inf\n"),
+        ] {
+            let parsed = parse_solution(
+                "m 0 1 0 0 0 0 1 1 0 0 0 0 0 0",
+                &format!("{primal}{blocks}"),
+                ObjectiveSense::Minimize,
+                std::time::Duration::ZERO,
+                Some("native log".into()),
+                &[VarId(0)],
+                &[],
+                &[],
+                ModelId::UNASSIGNED,
+                &parameters,
+            );
+            assert_eq!(parsed.dual_status, DualStatus::Unknown);
+            assert_eq!(parsed.value(VarId(0)), Some(0.0));
+            assert!(
+                parsed
+                    .raw_log
+                    .as_deref()
+                    .unwrap()
+                    .contains("native log\nReported dual section captured no usable multipliers")
+            );
+        }
+
+        let parsed = parse_solution(
+            "m 0 1 0 0 0 0 1 1 0 0 0 0 0 0",
+            &format!("{primal}{banner}1 0\n"),
+            ObjectiveSense::Minimize,
+            std::time::Duration::ZERO,
+            None,
+            &[VarId(0)],
+            &[],
+            &[],
+            ModelId::UNASSIGNED,
+            &parameters,
+        );
+        assert_eq!(parsed.dual_status, DualStatus::FeasiblePoint);
+        assert_eq!(parsed.reduced_costs.get(VarId(0)), Some(0.0));
+        assert!(parsed.raw_log.is_none());
+    }
+
+    #[test]
+    fn active_native_groups_require_their_own_multiplier_evidence() {
+        let model = Model::new("native evidence groups");
+        variable!(model, x);
+
+        let row = constraint!(model, row, x >= 0.0);
+        let cone = soc_constraint!(model, cone, [x] <= x);
+        for (row_active, soc_active, capture_row, capture_soc, expected) in [
+            (true, false, false, false, DualStatus::Unknown),
+            (false, true, false, false, DualStatus::Unknown),
+            (false, false, false, false, DualStatus::FeasiblePoint),
+            (true, false, true, false, DualStatus::FeasiblePoint),
+            (false, true, false, true, DualStatus::FeasiblePoint),
+            (true, true, true, false, DualStatus::Unknown),
+            (true, true, true, true, DualStatus::FeasiblePoint),
+        ] {
+            model.set_constraint_active(row, row_active).unwrap();
+            model.set_constraint_active(cone, soc_active).unwrap();
+            let mut result = SolverResult::for_model(&model);
+            result.add_solution([(VarId(0), 0.0)].into_iter().collect(), None);
+            result.dual_status = DualStatus::FeasiblePoint;
+            result.reduced_costs.insert(VarId(0), 0.0);
+            if capture_row {
+                result.dual.insert(row.row_id(), 0.0);
+            }
+            if capture_soc {
+                result.soc_dual.insert(cone.soc_id(), 0.0);
+            }
+            let con_order = if row_active { vec![row.row_id()] } else { Vec::new() };
+            require_active_dual_evidence(&mut result, &con_order, &model.soc_constraints());
+
+            let result = finalize_result(result, &model, 1);
+            assert_eq!(result.dual_status, expected);
+            assert!(result.has_solution());
+
+            if expected == DualStatus::Unknown {
+                assert!(result.reduced_costs.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn ignored_best_table_coordinates_warn_when_the_point_is_discarded() {
+        let text = "The best solution found is:\nx0 0 0 1\nx4294967295 0 9 10\nThe above solution has an objective value of: 0\n";
+        let parsed = parse_solution(
+            "m 0 2 0 0 0 0 1 1 0 0 0 0 0 0",
+            text,
+            ObjectiveSense::Minimize,
+            std::time::Duration::ZERO,
+            None,
+            &[VarId(0), VarId(1)],
+            &[],
+            &[],
+            ModelId::UNASSIGNED,
+            &oximo_solver::ParameterSnapshot::default(),
+        );
+        assert!(parsed.raw_log.as_deref().unwrap().contains("Ignored 1"));
+
+        let finalized = finalize_parsed(parsed, 2);
+        assert!(!finalized.has_solution());
+        assert!(
+            finalized
+                .raw_log
+                .as_deref()
+                .unwrap()
+                .contains("primal records may leave a point incomplete")
+        );
+    }
+
+    #[test]
+    fn best_table_ignores_out_of_range_ids_without_filling_missing_values() {
+        let point = parse_best_table("The best solution found is:\nx0 0 0 1\nx4294967295 0 9 10\nThe above solution has an objective value of: 0\n", &oximo_solver::ParameterSnapshot::default(), 2, &mut 0).unwrap();
+        assert_eq!(point.primal.slot_count(), 2);
+        assert_eq!(point.primal.len(), 1);
+        assert_eq!(point.value(VarId(0)), Some(0.0));
+        assert_eq!(point.value(VarId(1)), None);
+    }
+
+    #[test]
     fn parse_res_extracts_primal() {
         let mut arena = ExprArena::new();
         let p = arena.new_param(2.0);
@@ -2018,11 +2261,16 @@ The best solution found is:
 
 The above solution has an objective value of:    0.0
 ";
-        let blocks =
-            parse_results(res, &[VarId(0), VarId(1)], ObjectiveSense::Minimize, &parameters);
+        let blocks = parse_results(
+            res,
+            &[VarId(0), VarId(1)],
+            ObjectiveSense::Minimize,
+            &parameters,
+            &mut 0,
+        );
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].primal.get(&VarId(0)), Some(&1.25));
-        assert_eq!(blocks[0].primal.get(&VarId(1)), Some(&3.5));
+        assert_eq!(blocks[0].primal.get(VarId(0)), Some(1.25));
+        assert_eq!(blocks[0].primal.get(VarId(1)), Some(3.5));
         assert_eq!(blocks[0].parameters.value(p), Some(2.0));
         assert_eq!(blocks[0].parameters.values().as_ptr(), parameters.values().as_ptr());
     }
@@ -2060,13 +2308,18 @@ The best solution found is:
 
 The above solution has an objective value of:  0.0000000000000000000000
 ";
-        let blocks =
-            parse_results(res, &[VarId(0), VarId(1)], ObjectiveSense::Minimize, &parameters);
+        let blocks = parse_results(
+            res,
+            &[VarId(0), VarId(1)],
+            ObjectiveSense::Minimize,
+            &parameters,
+            &mut 0,
+        );
         assert_eq!(blocks.len(), 2, "expected two solution blocks: {blocks:?}");
-        assert!((blocks[0].primal[&VarId(0)] - 1.0).abs() < 1e-6);
-        assert!((blocks[0].primal[&VarId(1)] - 1.0).abs() < 1e-6);
-        assert!((blocks[1].primal[&VarId(0)] + 1.0).abs() < 1e-6);
-        assert!((blocks[1].primal[&VarId(1)] - 1.0).abs() < 1e-6);
+        assert!((blocks[0].primal.get(VarId(0)).unwrap() - 1.0).abs() < 1e-6);
+        assert!((blocks[0].primal.get(VarId(1)).unwrap() - 1.0).abs() < 1e-6);
+        assert!((blocks[1].primal.get(VarId(0)).unwrap() + 1.0).abs() < 1e-6);
+        assert!((blocks[1].primal.get(VarId(1)).unwrap() - 1.0).abs() < 1e-6);
         assert_eq!(blocks[1].objective, Some(0.0));
         for point in &blocks {
             assert_eq!(point.parameters.value(p), Some(2.0));
@@ -2103,10 +2356,10 @@ The above solution has an objective value of:    5.0
 ";
         let (dual, rc, _soc) =
             parse_dual_solution(res, &[VarId(0), VarId(1)], &[ConstraintId(0), ConstraintId(1)]);
-        assert_eq!(rc.get(&VarId(0)), Some(&0.0));
-        assert_eq!(rc.get(&VarId(1)), Some(&-0.5));
-        assert_eq!(dual.get(&ConstraintId(0)), Some(&2.0));
-        assert_eq!(dual.get(&ConstraintId(1)), Some(&-0.25));
+        assert_eq!(rc.get(VarId(0)), Some(0.0));
+        assert_eq!(rc.get(VarId(1)), Some(-0.5));
+        assert_eq!(dual.get(ConstraintId(0)), Some(2.0));
+        assert_eq!(dual.get(ConstraintId(1)), Some(-0.25));
         assert_eq!(dual.len(), 2);
         assert_eq!(rc.len(), 2);
     }
@@ -2144,8 +2397,8 @@ The above solution has an objective value of:    5.0
 The best solution found is:
 ";
         let (dual, rc, _soc) = parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0)]);
-        assert_eq!(rc.get(&VarId(0)), Some(&0.0));
-        assert_eq!(dual.get(&ConstraintId(0)), Some(&1.0));
+        assert_eq!(rc.get(VarId(0)), Some(0.0));
+        assert_eq!(dual.get(ConstraintId(0)), Some(1.0));
     }
 
     #[test]
@@ -2161,7 +2414,7 @@ The best solution found is:
         let (dual, _rc, _soc) =
             parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0), ConstraintId(0)]);
         assert_eq!(dual.len(), 1);
-        assert_eq!(dual.get(&ConstraintId(0)), Some(&1.5)); // 2.0 + (-0.5)
+        assert_eq!(dual.get(ConstraintId(0)), Some(1.5)); // 2.0 + (-0.5)
     }
 
     #[test]
@@ -2176,7 +2429,7 @@ The best solution found is:
  >>>       3             0.0000000000000000000000
 ";
         let (dual, _rc, soc) = parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0)]);
-        assert_eq!(dual.get(&ConstraintId(0)), Some(&2.0));
+        assert_eq!(dual.get(ConstraintId(0)), Some(2.0));
         assert_eq!(dual.len(), 1);
         assert_eq!(soc.get(&0), Some(&-0.75));
         assert_eq!(soc.len(), 1);
@@ -2284,8 +2537,8 @@ The above solution has an objective value of:  0.0
             2,
         );
         assert_eq!(r.result_count(), 2);
-        assert_eq!(r.reduced_costs.get(&VarId(1)), Some(&1.5));
-        assert_eq!(r.dual.get(&ConstraintId(0)), Some(&-3.0));
+        assert_eq!(r.reduced_costs.get(VarId(1)), Some(1.5));
+        assert_eq!(r.dual.get(ConstraintId(0)), Some(-3.0));
         assert_eq!(r.dual.len(), 1);
     }
 

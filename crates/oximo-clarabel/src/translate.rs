@@ -18,6 +18,7 @@
 //! readback metadata. SOC blocks and variable-bound rows carry no
 //! [`ConstraintId`]. Reduced costs are not reported.
 
+use oximo_solver::SolutionValues;
 // TODO: Add convex-QCP-to-SOC reformulation?
 
 use oximo_core::PsdConstraintId;
@@ -972,9 +973,10 @@ pub(crate) fn read_result(
     let has_point = status_has_point(native_status);
 
     let mut solutions = Vec::new();
-    let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
-    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
+    let mut dual = SolutionValues::default();
+    let mut soc_dual = SolutionValues::default();
     let mut psd_dual = FxHashMap::default();
+    let mut dual_mapping_valid = true;
     if has_point {
         let primal =
             oximo_solver::reconstruct::project_dense_primal(&solver.solution.x, meta.num_variables)
@@ -987,18 +989,25 @@ pub(crate) fn read_result(
             objective,
             parameters: meta.parameters.clone(),
         });
-
+    }
+    if native_status == SolverStatus::Solved {
+        dual = SolutionValues::missing(model.constraints().algebraic().len());
+        soc_dual = SolutionValues::missing(model.num_soc_constraints());
         for (r, &z) in solver.solution.z.iter().enumerate() {
-            if let Some(Some(projection)) = meta.row_duals.get(r) {
-                projection.accumulate(&mut dual, z, meta.sign);
+            if let Some(Some(projection)) = meta.row_duals.get(r)
+                && projection.try_accumulate(&mut dual, z, meta.sign).is_err()
+            {
+                dual_mapping_valid = false;
             }
         }
 
         for (&id, &start) in
             meta.explicit_soc_ids.iter().zip(&meta.soc_block_starts).take(meta.n_explicit)
         {
-            if let Some(&z0) = solver.solution.z.get(start) {
-                soc_dual.insert(id, z0);
+            if let Some(&z0) = solver.solution.z.get(start)
+                && soc_dual.try_set(id, Some(z0)).is_err()
+            {
+                dual_mapping_valid = false;
             }
         }
 
@@ -1023,7 +1032,7 @@ pub(crate) fn read_result(
             model_id,
             termination,
             primal_status,
-            dual_status: if native_status == SolverStatus::Solved {
+            dual_status: if native_status == SolverStatus::Solved && dual_mapping_valid {
                 DualStatus::FeasiblePoint
             } else if has_point {
                 DualStatus::Unknown
@@ -1034,14 +1043,14 @@ pub(crate) fn read_result(
             dual,
             soc_dual,
             psd_dual,
-            reduced_costs: FxHashMap::default(),
+            reduced_costs: SolutionValues::default(),
             best_bound,
             gap: None,
             solve_time: elapsed,
             iterations: u64::from(solver.info.iterations),
             node_count: None,
             raw_status: Some(format!("{native_status:?}").into()),
-            raw_log: None,
+            raw_log: (!dual_mapping_valid).then(|| "Ignored native multiplier coordinates outside captured slot counts; dual certificate unavailable.".to_owned()),
             solver_name: Some(crate::NAME.into()),
             solver_version: None,
             parameters: meta.parameters.clone(),
@@ -1314,6 +1323,44 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    #[test]
+    fn approximate_points_skip_duals_and_bad_mappings_withhold_only_duals() {
+        let model = Model::new("readback coordinate mismatch");
+
+        variable!(model, x >= 0.0);
+        variable!(model, y >= 0.0);
+        constraint!(model, row, x + y >= 1.0);
+        objective!(model, Min, x + y);
+
+        let mut problem = build_problem(&model).unwrap();
+        let mut solver = DefaultSolver::new(
+            &problem.p_mat,
+            &problem.q,
+            &problem.a_mat,
+            &problem.b,
+            &problem.cones,
+            build_settings(&ClarabelOptions::default().verbose(false)),
+        )
+        .unwrap();
+        solver.solve();
+        assert_eq!(solver.solution.status, SolverStatus::Solved);
+
+        problem.meta.row_duals.iter_mut().flatten().next().unwrap().source = ConstraintId(999);
+        let invalid = read_result(&solver, &problem.meta, &model, Duration::ZERO);
+        assert!(invalid.has_solution());
+        assert_eq!(invalid.dual_status, DualStatus::Unknown);
+        assert_eq!(invalid.dual.slot_count(), 0);
+        assert!(invalid.raw_log.as_deref().unwrap().contains("outside captured slot counts"));
+
+        solver.solution.status = SolverStatus::AlmostSolved;
+        let approximate = read_result(&solver, &problem.meta, &model, Duration::ZERO);
+        assert!(approximate.has_solution());
+        assert_eq!(approximate.dual_status, DualStatus::Unknown);
+        assert_eq!(approximate.dual.slot_count(), 0);
+        assert_eq!(approximate.soc_dual.slot_count(), 0);
+        assert!(approximate.raw_log.is_none(), "approximate points must not inspect dual mappings");
     }
 
     #[test]
@@ -1701,8 +1748,8 @@ mod tests {
         let reference = oximo_highs::solve(&m, &oximo_highs::HighsOptions::default()).unwrap();
         assert_eq!(ours.termination, TerminationStatus::Optimal);
         for (id, want) in &reference.dual {
-            let got = ours.dual.get(id).copied().unwrap_or(0.0);
-            assert!(close(got, *want, 1e-5), "dual {id:?}: clarabel {got} vs highs {want}");
+            let got = ours.dual.get(id).unwrap_or(0.0);
+            assert!(close(got, want, 1e-5), "dual {id:?}: clarabel {got} vs highs {want}");
         }
     }
 

@@ -28,7 +28,7 @@ fn lp_range_duals_reduced_costs_and_maximization() {
             .unwrap(),
         3.0,
     );
-    close(*result.reduced_costs.get(&y.var_id().unwrap()).unwrap(), -2.0);
+    close(result.reduced_costs.get(y.var_id().unwrap()).unwrap(), -2.0);
 }
 
 #[test]

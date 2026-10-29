@@ -61,7 +61,7 @@ fn gams_lp_duals_and_reduced_costs() {
     assert!((d.abs() - 1.0).abs() < 1e-6, "dual={d}");
 
     // Only one variable in the model -> VarId(0).
-    let rc = result.reduced_costs.get(&VarId(0)).copied().expect("reduced cost missing for x");
+    let rc = result.reduced_costs.get(VarId(0)).expect("reduced cost missing for x");
     assert!(rc.abs() < 1e-6, "reduced_cost(x)={rc}");
 }
 
@@ -90,7 +90,7 @@ fn gams_nlp_duals_at_local_point() {
 
     let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual.abs() - std::f64::consts::E).abs() < 1e-5, "dual={dual}");
-    let rc = result.reduced_costs.get(&VarId(0)).copied().expect("reduced cost missing for x");
+    let rc = result.reduced_costs.get(VarId(0)).expect("reduced cost missing for x");
     assert!(rc.abs() < 1e-5, "reduced_cost(x)={rc}");
 }
 

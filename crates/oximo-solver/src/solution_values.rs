@@ -157,7 +157,6 @@ impl<I: SolutionValueId> SolutionValues<I> {
     ///
     /// # Panics
     /// Panics if `id` is outside [`Self::slot_count`].
-    #[must_use]
     #[track_caller]
     pub fn set(&mut self, id: I, value: Option<f64>) -> Option<f64> {
         self.try_set(id, value).unwrap_or_else(|error| {
@@ -903,7 +902,7 @@ mod tests {
         for old in [0, 1, 63, 64, 65, 127, 128, 129] {
             let mut values = SolutionValues::<VarId>::from_dense(vec![2.0; old]);
             if old != 0 {
-                let _ = values.set(VarId(0), None);
+                values.set(VarId(0), None);
             }
             let last = u32::try_from(old + 70).unwrap();
             assert_eq!(values.try_insert(VarId(last), 4.0).unwrap(), None);
@@ -1097,7 +1096,7 @@ mod tests {
         assert_eq!(output[1].to_bits(), (-0.0_f64).to_bits());
 
         let mut partial = SolutionValues::<VarId>::from_dense(vec![1.0; 1_000_000]);
-        let _ = partial.set(VarId(0), None);
+        partial.set(VarId(0), None);
         let partial = partial.into_dense().unwrap_err();
         assert_eq!(partial.len(), 999_999);
 
@@ -1233,7 +1232,7 @@ mod tests {
         assert_eq!(values.iter().next_back(), Some((VarId(128), 2.0)));
 
         let mut cloned = values.clone();
-        let _ = cloned.set(VarId(64), Some(-0.0));
+        cloned.set(VarId(64), Some(-0.0));
         assert_eq!(values.get(VarId(64)), None);
         assert_eq!(cloned.get(VarId(64)).unwrap().to_bits(), (-0.0_f64).to_bits());
 
@@ -1252,7 +1251,7 @@ mod tests {
         assert!(values.is_empty());
 
         for index in [0, 63, 64, 129] {
-            let _ = values.set(ConstraintId(index), Some(f64::from(index)));
+            values.set(ConstraintId(index), Some(f64::from(index)));
         }
         let mut visited = Vec::new();
         values.retain(|id, _| {
@@ -1275,7 +1274,7 @@ mod tests {
         assert_eq!(values.slot_count(), 65);
         assert_eq!(values.values().count(), 0);
 
-        let _ = values.set(ConstraintId(64), Some(1.0));
+        values.set(ConstraintId(64), Some(1.0));
         values.truncate(64);
         assert!(values.is_empty());
 
@@ -1312,6 +1311,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "VarId(2) outside slot count 2")]
     fn writes_cannot_grow_storage() {
-        let _ = SolutionValues::<VarId>::missing(2).set(VarId(2), Some(1.0));
+        SolutionValues::<VarId>::missing(2).set(VarId(2), Some(1.0));
     }
 }

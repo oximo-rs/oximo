@@ -1,3 +1,4 @@
+use oximo_solver::SolutionValues;
 use oximo_solver::prepare::LoweringContext;
 use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use oximo_expr::{ExprId, QuadraticTerms};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::FxHashMap;
 
 use crate::HighsOptions;
 use crate::options::apply as apply_options;
@@ -267,7 +268,7 @@ pub(crate) fn extract_result(
             dual_status,
             solutions,
             dual,
-            soc_dual: FxHashMap::default(),
+            soc_dual: SolutionValues::default(),
             psd_dual: FxHashMap::default(),
             reduced_costs,
             best_bound,
@@ -350,28 +351,16 @@ fn collect_solution(
     dcols: &[f64],
     drows_full: &[f64],
     num_constraints: usize,
-) -> (FxHashMap<VarId, f64>, FxHashMap<VarId, f64>, FxHashMap<ConstraintId, f64>) {
+) -> (SolutionValues<VarId>, SolutionValues<VarId>, SolutionValues<ConstraintId>) {
     if !has_point {
-        return (FxHashMap::default(), FxHashMap::default(), FxHashMap::default());
+        return (SolutionValues::default(), SolutionValues::default(), SolutionValues::default());
     }
     let drows = &drows_full[..num_constraints.min(drows_full.len())];
-
-    let mut primal: FxHashMap<VarId, f64> =
-        FxHashMap::with_capacity_and_hasher(cols.len(), FxBuildHasher);
-    let mut reduced_costs: FxHashMap<VarId, f64> =
-        FxHashMap::with_capacity_and_hasher(dcols.len(), FxBuildHasher);
-    let mut dual: FxHashMap<ConstraintId, f64> =
-        FxHashMap::with_capacity_and_hasher(drows.len(), FxBuildHasher);
-    for (i, val) in cols.iter().enumerate() {
-        primal.insert(VarId(u32::try_from(i).unwrap()), *val);
-    }
-    for (i, val) in dcols.iter().enumerate() {
-        reduced_costs.insert(VarId(u32::try_from(i).unwrap()), *val);
-    }
-    for (i, val) in drows.iter().enumerate() {
-        dual.insert(ConstraintId(u32::try_from(i).unwrap()), *val);
-    }
-    (primal, reduced_costs, dual)
+    (
+        SolutionValues::from_dense(cols.to_vec()),
+        SolutionValues::from_dense(dcols.to_vec()),
+        SolutionValues::from_dense(drows.to_vec()),
+    )
 }
 
 /// Total solver iterations, summed across HiGHS' per-algorithm counters.

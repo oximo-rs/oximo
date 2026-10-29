@@ -104,7 +104,7 @@ fn lp_duals_match_lp_convention() {
     assert_close(res.dual_of(material).unwrap().unwrap(), 10.0, 1e-3, "material dual");
 
     let z_id = m.variable_id("z").unwrap();
-    assert_close(res.reduced_costs[&z_id], -30.0, 1e-3, "z reduced cost");
+    assert_close(res.reduced_costs.get(z_id).unwrap(), -30.0, 1e-3, "z reduced cost");
     assert!(res.iterations > 0, "iteration count should be reported");
 }
 
@@ -666,7 +666,12 @@ fn persistent_conic_ipm_reuses_bound_expanded_warm_start() {
         assert_eq!(warm.reduced_costs.len(), 3);
         for variable in [x, y, t] {
             let id = variable.var_id().unwrap();
-            assert_close(warm.reduced_costs[&id], cold.reduced_costs[&id], 1e-4, "reduced cost");
+            assert_close(
+                warm.reduced_costs.get(id).unwrap(),
+                cold.reduced_costs.get(id).unwrap(),
+                1e-4,
+                "reduced cost",
+            );
         }
     }
 }

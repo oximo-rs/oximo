@@ -58,7 +58,7 @@ fn baron_lp_duals_and_reduced_costs() {
     let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual - 1.0).abs() < 1e-6, "dual={dual}");
 
-    let rc = |v: Expr<'_, Affine>| result.reduced_costs.get(&v.var_id().unwrap()).copied();
+    let rc = |v: Expr<'_, Affine>| result.reduced_costs.get(v.var_id().unwrap());
     let rcx = rc(x).expect("reduced cost missing for x");
     let rcy = rc(y).expect("reduced cost missing for y");
     assert!(rcx.abs() < 1e-6, "reduced_cost(x)={rcx}");

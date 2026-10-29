@@ -4,10 +4,11 @@ use crate::{
     translate::{Body, Snapshot},
 };
 use oximo_core::{Model, ModelKind, ObjectiveSense, VarId};
-use oximo_expr::{EvalContext, ParamId, WithParameters, evaluate};
+use oximo_expr::{WithParameters, evaluate};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
+use oximo_solver::{SolutionValueId, SolutionValues};
 use russcip::{Model as Native, ModelWithProblem, Solved, Status, WithSolutions, WithSolvingStats};
 use rustc_hash::FxHashMap;
 use std::time::Duration;
@@ -40,26 +41,16 @@ pub(crate) fn termination(status: Status) -> TerminationStatus {
         Status::Unknown => T::NotSolved,
     }
 }
-struct Values<'a>(&'a FxHashMap<VarId, f64>);
-impl EvalContext for Values<'_> {
-    fn var(&self, id: VarId) -> Option<f64> {
-        self.0.get(&id).copied()
-    }
-    fn param(&self, _: ParamId) -> Option<f64> {
-        None
-    }
-}
-
 fn objective_at(
     model: &Model,
-    primal: &FxHashMap<VarId, f64>,
+    primal: &SolutionValues<VarId>,
     parameters: &oximo_solver::ParameterSnapshot,
 ) -> Result<f64, SolverError> {
     model
         .objective()
         .as_ref()
         .map_or(Ok(0.0), |o| {
-            evaluate(&model.arena(), o.expr, &WithParameters::new(&Values(primal), parameters))
+            evaluate(&model.arena(), o.expr, &WithParameters::new(primal, parameters))
         })
         .map_err(crate::backend)
 }
@@ -84,13 +75,9 @@ pub(crate) fn collect(
         generated_names.insert(ScipGeneratedVarId(i), g.name.clone());
     }
     for sol in native.get_sols().unwrap_or_default() {
-        let primal = mapping
-            .variables
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (VarId(u32::try_from(i).expect("variable id")), sol.val(v)))
-            .collect::<FxHashMap<_, _>>();
-        if !primal.values().all(|v| v.is_finite()) {
+        let primal =
+            SolutionValues::from_dense(mapping.variables.iter().map(|v| sol.val(v)).collect());
+        if !primal.values().all(f64::is_finite) {
             continue;
         }
         let mut generated = FxHashMap::default();
@@ -149,6 +136,16 @@ pub(crate) fn collect(
         parameters: parameters.clone(),
         ..Default::default()
     };
+    recover_prices(snapshot, &mut result, &shared);
+    Ok(ScipSolveOutput {
+        result: result.with_semantic_dual_defaults(model),
+        generated_solutions,
+        generated_names,
+        statistics_json: native.stats_json(),
+    })
+}
+
+fn recover_prices(snapshot: &Snapshot, result: &mut SolverResult, shared: &crate::plugins::Shared) {
     // Require a complete valid original LP certificate. A presolved-away row
     // or a node relaxation must not be presented as an original-model dual.
     if snapshot.kind == ModelKind::LP
@@ -158,21 +155,44 @@ pub(crate) fn collect(
         && let Some(point) = result.best()
     {
         for sign in [1.0, -1.0] {
-            if valid_prices(snapshot, point, &shared, sign) {
-                result.dual = shared.dual.iter().map(|(&id, &v)| (id, sign * v)).collect();
-                result.reduced_costs =
-                    shared.reduced.iter().map(|(&id, &v)| (id, sign * v)).collect();
+            if valid_prices(snapshot, point, shared, sign) {
+                let (dual, skipped_rows) = scaled_prices(snapshot.rows.len(), &shared.dual, sign);
+                let (reduced, skipped_columns) =
+                    scaled_prices(snapshot.columns.len(), &shared.reduced, sign);
+                result.dual = dual;
+                result.reduced_costs = reduced;
+                if skipped_rows + skipped_columns != 0 {
+                    result.raw_log = Some(format!(
+                        "Ignored {} native price coordinates outside captured slot counts; known coordinates passed certificate checks.",
+                        skipped_rows + skipped_columns
+                    ));
+                }
                 result.dual_status = DualStatus::FeasiblePoint;
                 break;
             }
         }
     }
-    Ok(ScipSolveOutput {
-        result: result.with_semantic_dual_defaults(model),
-        generated_solutions,
-        generated_names,
-        statistics_json: native.stats_json(),
-    })
+}
+
+fn scaled_prices<I: SolutionValueId>(
+    slot_count: usize,
+    prices: &FxHashMap<I, f64>,
+    sign: f64,
+) -> (SolutionValues<I>, usize) {
+    let mut values = SolutionValues::default();
+    let mut ignored = 0;
+    for (&id, &value) in prices {
+        // Native/plugin prices may contain coordinates outside this snapshot.
+        if id.index() >= slot_count {
+            ignored += 1;
+            continue;
+        }
+        if values.slot_count() == 0 {
+            values = SolutionValues::missing(slot_count);
+        }
+        let _ = values.try_set(id, Some(sign * value));
+    }
+    (values, ignored)
 }
 
 fn valid_prices(
@@ -184,14 +204,17 @@ fn valid_prices(
     let Body::Linear(costs, _) = &snapshot.objective else {
         return false;
     };
-    if s.lp_objective.is_none() || s.reduced.len() != snapshot.columns.len() {
+    if s.lp_objective.is_none_or(|value| !value.is_finite()) {
         return false;
     }
     let tol = 1e-6;
     let sense = if snapshot.sense == ObjectiveSense::Minimize { 1.0 } else { -1.0 };
     let mut residual = vec![0.0; snapshot.columns.len()];
     for &(id, c) in costs {
-        residual[id.index()] += c;
+        let Some(entry) = residual.get_mut(id.index()) else {
+            return false;
+        };
+        *entry += c;
     }
     for (i, row) in snapshot.rows.iter().enumerate() {
         if !row.active {
@@ -204,7 +227,17 @@ fn valid_prices(
             return false;
         };
         let price = sign * price;
-        let activity = k + cs.iter().map(|(v, c)| point.primal[v] * c).sum::<f64>();
+        if !price.is_finite() {
+            return false;
+        }
+        let Some(activity) =
+            cs.iter().try_fold(*k, |sum, &(v, c)| point.primal.get(v).map(|x| sum + x * c))
+        else {
+            return false;
+        };
+        if !activity.is_finite() {
+            return false;
+        }
         if price * sense > tol && (!row.lower.is_finite() || (activity - row.lower).abs() > tol) {
             return false;
         }
@@ -212,13 +245,23 @@ fn valid_prices(
             return false;
         }
         for &(v, c) in cs {
-            residual[v.index()] -= price * c;
+            let Some(entry) = residual.get_mut(v.index()) else {
+                return false;
+            };
+            *entry -= price * c;
         }
     }
     for c in &snapshot.columns {
-        let x = point.primal[&c.id];
-        let rc = sign * s.reduced[&c.id];
-        if s.lp_values.get(&c.id).is_none_or(|v| (x - v).abs() > tol) {
+        let (Some(x), Some(&reduced), Some(&stationarity)) =
+            (point.primal.get(c.id), s.reduced.get(&c.id), residual.get(c.id.index()))
+        else {
+            return false;
+        };
+        let rc = sign * reduced;
+        if !x.is_finite() || !rc.is_finite() || !stationarity.is_finite() {
+            return false;
+        }
+        if s.lp_values.get(&c.id).is_none_or(|v| !v.is_finite() || (x - v).abs() > tol) {
             return false;
         }
         if rc * sense > tol && (x - c.lb).abs() > tol {
@@ -227,9 +270,54 @@ fn valid_prices(
         if rc * sense < -tol && (x - c.ub).abs() > tol {
             return false;
         }
-        if (residual[c.id.index()] - rc).abs() > tol * (1.0 + rc.abs()) {
+        if (stationarity - rc).abs() > tol * (1.0 + rc.abs()) {
             return false;
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximo_core::prelude::*;
+
+    #[test]
+    fn native_extra_prices_are_skipped_and_missing_values_reject_certificates() {
+        let model = Model::new("native price boundaries");
+
+        variable!(model, x >= 0.0);
+        let row = constraint!(model, row, x >= 0.0);
+        objective!(model, Min, x);
+
+        let snapshot = Snapshot::prepare(&model).unwrap();
+        let point = SolutionPoint::new(&model, SolutionValues::from_dense(vec![0.0]), Some(0.0));
+        let id = x.var_id().unwrap();
+        let mut shared = crate::plugins::Shared::default();
+        shared.lp_objective = Some(0.0);
+        shared.lp_values.insert(id, 0.0);
+        shared.reduced.insert(id, 0.0);
+        shared.reduced.insert(VarId(999), 8.0);
+        shared.dual.insert(row.row_id(), 1.0);
+        shared.dual.insert(oximo_core::ConstraintId(999), 9.0);
+        assert!(valid_prices(&snapshot, &point, &shared, 1.0));
+
+        let mut result = SolverResult::for_model(&model);
+        result.termination = TerminationStatus::Optimal;
+        result.solutions.push(point.clone());
+        recover_prices(&snapshot, &mut result, &shared);
+        assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
+        assert_eq!(result.dual.get(row.row_id()), Some(1.0));
+        assert_eq!(result.reduced_costs.get(id), Some(0.0));
+        assert!(!result.dual.contains(oximo_core::ConstraintId(999)));
+        assert!(!result.reduced_costs.contains(VarId(999)));
+        assert!(result.raw_log.as_deref().unwrap().contains("Ignored 2"));
+
+        let mut incomplete = point.clone();
+        incomplete.primal.clear();
+        assert!(!valid_prices(&snapshot, &incomplete, &shared, 1.0));
+
+        shared.reduced.remove(&id);
+        assert!(!valid_prices(&snapshot, &point, &shared, 1.0));
+    }
 }

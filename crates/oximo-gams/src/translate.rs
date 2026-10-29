@@ -1,5 +1,6 @@
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
 use oximo_solver::reconstruct::finalize_result;
+use oximo_solver::{SolutionValueId, SolutionValues};
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
@@ -184,19 +185,30 @@ pub fn solve(
             elapsed,
             raw_log,
             &parameters,
+            (vars.len(), constraints.len()),
         );
         // If a sub-solver wrote a solution pool (e.g. CPLEX `solnpool`), surface
         // every pooled point. The model itself emits no GDX, so any pool GDX in
         // the run directory came from the user's option file.
         if result.solutions.first().is_some_and(|point| {
-            point
-                .primal
-                .iter()
-                .filter(|(id, value)| id.index() < vars.len() && value.is_finite())
-                .count()
-                == vars.len()
+            point.primal.len() == vars.len()
+                && point
+                    .primal
+                    .as_dense()
+                    .is_some_and(|values| values.iter().all(|value| value.is_finite()))
         }) {
-            let pool = read_solution_pool(&tmp_dir, gams_exec, sense, &parameters);
+            let (pool, ignored) =
+                read_solution_pool(&tmp_dir, gams_exec, sense, &parameters, vars.len());
+            if ignored != 0 {
+                let log = result.raw_log.get_or_insert_with(String::new);
+                if !log.is_empty() {
+                    log.push('\n');
+                }
+                let _ = write!(
+                    log,
+                    "Ignored {ignored} pool variable coordinates outside captured slot counts; affected points may be incomplete."
+                );
+            }
 
             if !pool.is_empty() {
                 result.solutions = pool;
@@ -220,7 +232,52 @@ pub fn solve(
     let _ = fs::remove_dir_all(&tmp_dir);
     result.solver_name = Some(gams_solver_label(opts));
     result.model_id = model.id();
+    require_active_dual_evidence(&mut result, constraints, socs);
     Ok(finalize_result(result, model, vars.len()))
+}
+
+fn require_active_dual_evidence(
+    result: &mut SolverResult,
+    rows: &[AlgebraicConstraint],
+    socs: &[SocConstraint],
+) {
+    if result.dual_status != DualStatus::FeasiblePoint {
+        return;
+    }
+    let mut active_rows = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.active && (row.lower.is_finite() || row.upper.is_finite()))
+        .peekable();
+    let missing_rows = active_rows.peek().is_some()
+        && (result.dual.is_empty()
+            || !active_rows.any(|(index, _)| {
+                result
+                    .dual
+                    .get(ConstraintId(u32::try_from(index).unwrap()))
+                    .is_some_and(f64::is_finite)
+            }));
+    let mut active_socs = socs.iter().enumerate().filter(|(_, soc)| soc.active).peekable();
+    let missing_socs = active_socs.peek().is_some()
+        && (result.soc_dual.is_empty()
+            || !active_socs.any(|(index, _)| {
+                result
+                    .soc_dual
+                    .get(SocConstraintId(u32::try_from(index).unwrap()))
+                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+            }));
+    if missing_rows || missing_socs {
+        result.dual_status = DualStatus::Unknown;
+        let log = result.raw_log.get_or_insert_with(String::new);
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        let group = if missing_rows { "algebraic" } else { "SOC" };
+        let _ = write!(
+            log,
+            "No multiplier captured for active {group} constraints; dual status is Unknown."
+        );
+    }
 }
 
 /// Backend label for the result: `GAMS/<sub-solver>` when a sub-solver is
@@ -332,8 +389,9 @@ fn parseoximo_solution(
     soc_bounds: &[LinearTerms<'_>],
     mixed_integer: bool,
     elapsed: std::time::Duration,
-    raw_log: Option<String>,
+    mut raw_log: Option<String>,
     parameters: &oximo_solver::ParameterSnapshot,
+    counts: (usize, usize),
 ) -> SolverResult {
     let mut modelstat: Option<i32> = None;
     let mut solvestat: Option<i32> = None;
@@ -343,10 +401,6 @@ fn parseoximo_solution(
     let mut marginals: Option<bool> = None;
     let mut solver_version: Option<Cow<'static, str>> = None;
     let mut iterations: u64 = 0;
-    let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
-    let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
-    let mut soc_marginals: FxHashMap<u32, f64> = FxHashMap::default();
-    let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
 
     for line in content.lines() {
         let line = line.trim();
@@ -372,38 +426,10 @@ fn parseoximo_solution(
             if !version.is_empty() {
                 solver_version = Some(version.to_owned().into());
             }
-        } else if let Some(rest) = line.strip_prefix("ITER=") {
-            if let Some(n) = parse_gams_u64(rest) {
-                iterations = n;
-            }
-        } else if let Some(rest) = line.strip_prefix('R') {
-            if let Some(eq) = rest.find('=')
-                && let Ok(idx) = rest[..eq].parse::<u32>()
-                && let Some(val) = parse_gams_float(rest[eq + 1..].trim())
-            {
-                reduced_costs.insert(VarId(idx), val);
-            }
-        } else if let Some(rest) = line.strip_prefix('D') {
-            if let Some(eq) = rest.find('=')
-                && let Ok(idx) = rest[..eq].parse::<u32>()
-                && let Some(val) = parse_gams_float(rest[eq + 1..].trim())
-            {
-                dual.insert(ConstraintId(idx), val);
-            }
-        } else if let Some(rest) = line.strip_prefix('Z') {
-            if let Some(eq) = rest.find('=')
-                && let Ok(idx) = rest[..eq].parse::<u32>()
-                && let Some(val) = parse_gams_float(rest[eq + 1..].trim())
-            {
-                soc_marginals.insert(idx, val);
-            }
-        } else if let Some(eq) = line.find('=') {
-            let key = line[..eq].trim();
-            if let Ok(idx) = key.parse::<u32>()
-                && let Some(val) = parse_gams_float(line[eq + 1..].trim())
-            {
-                primal.insert(VarId(idx), val);
-            }
+        } else if let Some(rest) = line.strip_prefix("ITER=")
+            && let Some(n) = parse_gams_u64(rest)
+        {
+            iterations = n;
         }
     }
 
@@ -412,21 +438,102 @@ fn parseoximo_solution(
     let termination = map_status(modelstat, solvestat);
     let has_sol = modelstat_has_solution(modelstat);
 
+    let has_duals = has_sol && marginals == Some(true);
+    let mut primal = SolutionValues::default();
+    let mut dual = SolutionValues::default();
+    let mut reduced_costs = SolutionValues::default();
+    let mut soc_marginals = SolutionValues::default();
+    let mut ignored = [0; 4];
+    if has_sol {
+        for line in content.lines().map(str::trim) {
+            let (kind, record) = if let Some(rest) = line.strip_prefix('R') {
+                (1, rest)
+            } else if let Some(rest) = line.strip_prefix('D') {
+                (2, rest)
+            } else if let Some(rest) = line.strip_prefix('Z') {
+                (3, rest)
+            } else {
+                (0, line)
+            };
+            let Some((name, text)) = record.split_once('=') else {
+                continue;
+            };
+            let (Ok(index), Some(value)) =
+                (name.trim().parse::<u32>(), parse_gams_float(text.trim()))
+            else {
+                continue;
+            };
+            match kind {
+                0 => set_put_value(&mut primal, counts.0, VarId(index), value, &mut ignored[0]),
+                1 if has_duals => {
+                    set_put_value(
+                        &mut reduced_costs,
+                        counts.0,
+                        VarId(index),
+                        value,
+                        &mut ignored[1],
+                    );
+                }
+                2 if has_duals => {
+                    set_put_value(&mut dual, counts.1, ConstraintId(index), value, &mut ignored[2]);
+                }
+                3 if has_duals => set_put_value(
+                    &mut soc_marginals,
+                    soc_bounds.len(),
+                    SocConstraintId(index),
+                    value,
+                    &mut ignored[3],
+                ),
+                _ => {}
+            }
+        }
+    }
+    let ignored_total: usize = ignored.iter().sum();
+    if ignored_total != 0 {
+        let log = raw_log.get_or_insert_with(String::new);
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        let _ = write!(
+            log,
+            "Ignored {ignored_total} solution coordinates outside captured slot counts (primal: {}, reduced costs: {}, algebraic duals: {}, SOC duals: {}).",
+            ignored[0], ignored[1], ignored[2], ignored[3],
+        );
+        if ignored[0] != 0 {
+            log.push_str(" Primal points may be incomplete.");
+        }
+    }
+
     // Rescale each lowered SOC row's marginal to the norm-form bound
     // multiplier using the bound's value at the primal point.
-    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
-    if has_sol {
+    let mut soc_dual = SolutionValues::default();
+    if has_duals && !soc_marginals.is_empty() {
+        soc_dual = SolutionValues::missing(soc_bounds.len());
         for (i, bound) in soc_bounds.iter().enumerate() {
             let idx = u32::try_from(i).expect("SOC count overflow");
-            if let Some(m) = soc_marginals.get(&idx) {
+            if let Some(m) = soc_marginals.get(SocConstraintId(idx)) {
                 let Some(b_val) = bound.coeffs.iter().try_fold(bound.constant, |sum, &(v, c)| {
-                    primal.get(&v).map(|value| sum + c * value)
+                    primal.get(v).map(|value| sum + c * value)
                 }) else {
                     continue;
                 };
-                soc_dual.insert(SocConstraintId(idx), 2.0 * b_val * m.abs());
+                soc_dual.set(SocConstraintId(idx), Some(2.0 * b_val * m.abs()));
             }
         }
+    }
+
+    let has_captured_multipliers = dual.values().chain(reduced_costs.values()).any(f64::is_finite)
+        || soc_dual.values().any(|value| value.is_finite() && value >= 0.0);
+    let empty_dual_section =
+        has_duals && !has_captured_multipliers && (counts != (0, 0) || !soc_bounds.is_empty());
+    if empty_dual_section {
+        let log = raw_log.get_or_insert_with(String::new);
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        log.push_str(
+            "Reported dual section captured no usable multipliers; dual status is Unknown.",
+        );
     }
 
     // The PUT solution file holds only the incumbent. `solve` augments this with
@@ -445,13 +552,14 @@ fn parseoximo_solution(
         model_id: ModelId::UNASSIGNED,
         solutions,
         semantic_dual: FxHashMap::default(),
-        dual: if has_sol { dual } else { FxHashMap::default() },
+        dual: if has_sol { dual } else { SolutionValues::default() },
         soc_dual,
         psd_dual: FxHashMap::default(),
-        reduced_costs: if has_sol { reduced_costs } else { FxHashMap::default() },
+        reduced_costs: if has_sol { reduced_costs } else { SolutionValues::default() },
         termination,
         primal_status: PrimalStatus::NoSolution,
         dual_status: match marginals {
+            Some(true) if empty_dual_section => DualStatus::Unknown,
             Some(true) if has_sol => DualStatus::FeasiblePoint,
             Some(_) => DualStatus::NoSolution,
             None => DualStatus::Unknown,
@@ -476,6 +584,23 @@ fn parseoximo_solution(
     }
 }
 
+fn set_put_value<I: SolutionValueId>(
+    values: &mut SolutionValues<I>,
+    slot_count: usize,
+    id: I,
+    value: f64,
+    ignored: &mut usize,
+) {
+    if id.index() >= slot_count {
+        *ignored += 1;
+        return;
+    }
+    if values.slot_count() == 0 {
+        *values = SolutionValues::missing(slot_count);
+    }
+    let _ = values.try_set(id, Some(value));
+}
+
 /// Read a sub-solver solution pool from the GAMS run directory.
 ///
 /// A sub-solver `solnpool` option (CPLEX/Gurobi/Xpress) writes each alternative
@@ -483,18 +608,21 @@ fn parseoximo_solution(
 /// no GDX of its own, so every `*.gdx` in `tmp_dir` belongs to the pool. Each is
 /// dumped with `gdxdump` and parsed for the model's `v{i}` variable levels.
 ///
-/// Returns the points best-first by `sense`, empty when no pool was written.
+/// Returns the points best-first by `sense` and the number of out-of-range
+/// numeric variable symbols, including symbols from discarded members.
 fn read_solution_pool(
     tmp_dir: &Path,
     gams_exec: &str,
     sense: ObjectiveSense,
     parameters: &oximo_solver::ParameterSnapshot,
-) -> Vec<SolutionPoint> {
+    num_variables: usize,
+) -> (Vec<SolutionPoint>, usize) {
     let gdxdump = gdxdump_path(gams_exec);
     let Ok(entries) = fs::read_dir(tmp_dir) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let mut members: Vec<SolutionPoint> = Vec::new();
+    let mut ignored = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("gdx") {
@@ -507,7 +635,7 @@ fn read_solution_pool(
             continue;
         }
         let dump = String::from_utf8_lossy(&out.stdout);
-        if let Some(pt) = parse_pool_member(&dump, parameters) {
+        if let Some(pt) = parse_pool_member(&dump, parameters, num_variables, &mut ignored) {
             members.push(pt);
         }
     }
@@ -518,7 +646,7 @@ fn read_solution_pool(
         };
         ord.unwrap_or(std::cmp::Ordering::Equal)
     });
-    members
+    (members, ignored)
 }
 
 /// `gdxdump` lives beside the `gams` executable.
@@ -536,12 +664,16 @@ fn gdxdump_path(gams_exec: &str) -> PathBuf {
 /// Each model variable is dumped as `<type> Variable v{i} /L <level> /;` (or an
 /// empty record `/ /` for a default-zero level). The objective variable `v_obj`
 /// carries the point's objective. Returns `None` for a GDX with no `v{i}`
-/// symbols (e.g. the pool index file).
+/// symbols in range (e.g. the pool index file). Out-of-range numeric `v{i}`
+/// symbols increment `ignored` even if the member is discarded. Other foreign
+/// symbols are unrelated to the model's variable coordinates and are ignored.
 fn parse_pool_member(
     dump: &str,
     parameters: &oximo_solver::ParameterSnapshot,
+    num_variables: usize,
+    ignored: &mut usize,
 ) -> Option<SolutionPoint> {
-    let mut primal: FxHashMap<VarId, f64> = FxHashMap::default();
+    let mut primal = SolutionValues::missing(num_variables);
     let mut objective: Option<f64> = None;
     for line in dump.lines() {
         let Some(pos) = line.find("Variable ") else {
@@ -553,7 +685,11 @@ fn parse_pool_member(
         if name == "v_obj" {
             objective = Some(parse_gdx_level(line));
         } else if let Some(idx) = name.strip_prefix('v').and_then(|d| d.parse::<u32>().ok()) {
-            primal.insert(VarId(idx), parse_gdx_level(line));
+            if (idx as usize) < primal.slot_count() {
+                primal.set(VarId(idx), Some(parse_gdx_level(line)));
+            } else {
+                *ignored += 1;
+            }
         }
     }
     if primal.is_empty() {
@@ -1663,8 +1799,15 @@ mod tests {
     fn finalize_parsed(mut result: SolverResult, num_variables: usize) -> SolverResult {
         assert_eq!(result.model_id, ModelId::UNASSIGNED);
         let model = Model::new("parsed result fixture");
-        for index in 0..num_variables {
-            model.__var(format!("x{index}")).build();
+        let variables: Vec<_> =
+            (0..num_variables).map(|index| model.__var(format!("x{index}")).build()).collect();
+        if let Some(&x) = variables.first() {
+            for index in 0..result.dual.slot_count() {
+                model.add_constraint(format!("row{index}"), x.le(1.0));
+            }
+            for index in 0..result.soc_dual.slot_count() {
+                model.add_soc_constraint(format!("cone{index}"), [x], x);
+            }
         }
         for (index, &value) in result.parameters.values().iter().enumerate() {
             model.__param(format!("p{index}"), value);
@@ -1791,6 +1934,229 @@ mod tests {
     }
 
     #[test]
+    fn parsed_ids_are_bounded_and_pool_absence_differs_from_default_zero() {
+        let parameters = oximo_solver::ParameterSnapshot::default();
+        let result = parseoximo_solution(
+            "STATUS=1\nSOLVESTAT=1\n0=0\n4294967295=7\nR4294967295=9\nD4294967295=8\n",
+            &[],
+            false,
+            std::time::Duration::ZERO,
+            None,
+            &parameters,
+            (2, 1),
+        );
+
+        let primal = result.primal().unwrap();
+        assert_eq!(primal.slot_count(), 2);
+        assert_eq!(primal.len(), 1);
+        assert_eq!(primal.get(VarId(0)), Some(0.0));
+        assert_eq!(primal.get(VarId(1)), None);
+        assert!(result.dual.is_empty());
+        assert_eq!(result.dual.slot_count(), 0);
+        assert!(result.reduced_costs.is_empty());
+        assert!(result.raw_log.as_deref().unwrap().contains("outside captured slot counts"));
+
+        let point = parse_pool_member(
+            "Variable v0 / /;\nVariable v4294967295 /L 9 /;\n",
+            &parameters,
+            2,
+            &mut 0,
+        )
+        .unwrap();
+        assert_eq!(point.primal.slot_count(), 2);
+        assert_eq!(point.value(VarId(0)), Some(0.0));
+        assert_eq!(point.value(VarId(1)), None);
+    }
+
+    #[test]
+    fn reported_marginals_need_captured_values_for_nonempty_problems() {
+        let parameters = oximo_solver::ParameterSnapshot::default();
+        for prices in ["", "D9=1\nR9=1\nZ9=1\n", "D0=invalid\n", "R0=INF\nD0=NaN\n"] {
+            let text = format!("STATUS=1\nSOLVESTAT=1\nMARGINALS=1\n0=0\n{prices}");
+            let result = parseoximo_solution(
+                &text,
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                Some("native log".into()),
+                &parameters,
+                (1, 1),
+            );
+            assert_eq!(result.dual_status, DualStatus::Unknown);
+            assert_eq!(result.value(VarId(0)), Some(0.0));
+
+            let log = result.raw_log.as_deref().unwrap();
+            assert!(log.starts_with("native log\n"));
+            assert!(log.contains("captured no usable multipliers"));
+            assert!(!log.contains("primal points are discarded"));
+
+            if prices.starts_with("D9") {
+                assert!(log.contains("Ignored 3"));
+            }
+        }
+        for (counts, records) in [((1, 1), "0=0\nR0=0\n"), ((0, 0), "")] {
+            let result = parseoximo_solution(
+                &format!("STATUS=1\nSOLVESTAT=1\nMARGINALS=1\n{records}"),
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &parameters,
+                counts,
+            );
+            assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
+            assert!(result.raw_log.is_none());
+        }
+    }
+
+    #[test]
+    fn ignored_coordinates_report_kinds_and_only_primal_losses_warn_about_points() {
+        let parameters = oximo_solver::ParameterSnapshot::default();
+        for (records, primal, reduced, rows, socs) in [
+            ("R9=1\n", 0, 1, 0, 0),
+            ("D9=1\n", 0, 0, 1, 0),
+            ("Z9=1\n", 0, 0, 0, 1),
+            ("9=1\nR9=1\nD9=1\nZ9=1\n", 1, 1, 1, 1),
+        ] {
+            let result = parseoximo_solution(
+                &format!("STATUS=1\nSOLVESTAT=1\nMARGINALS=1\n0=0\nR0=0\n{records}"),
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &parameters,
+                (1, 1),
+            );
+
+            let log = result.raw_log.as_deref().unwrap();
+            assert!(log.contains(&format!("primal: {primal}, reduced costs: {reduced}, algebraic duals: {rows}, SOC duals: {socs}")));
+            assert_eq!(log.contains("Primal points may be incomplete"), primal != 0);
+        }
+    }
+
+    #[test]
+    fn active_groups_need_their_own_duals_and_inactive_prices_do_not_substitute() {
+        let model = Model::new("dual evidence groups");
+
+        variable!(model, x);
+        let row = constraint!(model, row, x >= 0.0);
+        let inactive = constraint!(model, inactive, x <= 1.0);
+        constraint!(model, free, x <= f64::INFINITY);
+        let cone = soc_constraint!(model, cone, [x] <= x);
+        let inactive_cone = soc_constraint!(model, inactive_cone, [x] <= x);
+        model.set_constraint_active(inactive, false).unwrap();
+        model.set_constraint_active(inactive_cone, false).unwrap();
+        let bounds = vec![LinearTerms { coeffs: vec![(VarId(0), 1.0)].into(), constant: 0.0 }; 2];
+
+        for (row_active, soc_active, capture_row, capture_soc, expected) in [
+            (true, false, false, false, DualStatus::Unknown),
+            (false, true, false, false, DualStatus::Unknown),
+            (false, false, false, false, DualStatus::FeasiblePoint),
+            (true, false, true, false, DualStatus::FeasiblePoint),
+            (false, true, false, true, DualStatus::FeasiblePoint),
+            (true, true, true, false, DualStatus::Unknown),
+            (true, true, true, true, DualStatus::FeasiblePoint),
+        ] {
+            model.set_constraint_active(row, row_active).unwrap();
+            model.set_constraint_active(cone, soc_active).unwrap();
+            let mut text = "STATUS=1\nSOLVESTAT=1\nMARGINALS=1\n0=0\nR0=0\nD1=0\nZ1=0\n".to_owned();
+
+            if capture_row {
+                text.push_str("D0=0\n");
+            }
+
+            if capture_soc {
+                text.push_str("Z0=0\n");
+            }
+
+            let mut result = parseoximo_solution(
+                &text,
+                &bounds,
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+                (1, 3),
+            );
+            assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
+
+            require_active_dual_evidence(
+                &mut result,
+                model.constraints().algebraic(),
+                &model.soc_constraints(),
+            );
+            result.model_id = model.id();
+            let result = finalize_result(result, &model, 1);
+            assert_eq!(result.dual_status, expected);
+            assert!(result.has_solution());
+
+            if expected == DualStatus::Unknown {
+                assert!(result.reduced_costs.is_empty());
+                assert!(
+                    result
+                        .raw_log
+                        .as_deref()
+                        .unwrap()
+                        .contains("No multiplier captured for active")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pool_diagnostics_count_numeric_foreign_ids_even_for_discarded_members() {
+        let parameters = oximo_solver::ParameterSnapshot::default();
+        let mut ignored = 0;
+        let member = parse_pool_member(
+            "Variable v0 / /;\nVariable v999 /L 4 /;\nVariable unrelated /L 7 /;\n",
+            &parameters,
+            2,
+            &mut ignored,
+        )
+        .unwrap();
+        assert_eq!(ignored, 1);
+        assert_eq!(member.value(VarId(0)), Some(0.0));
+        assert_eq!(member.value(VarId(1)), None);
+        assert!(
+            parse_pool_member("Variable v999 /L 4 /;\n", &parameters, 2, &mut ignored).is_none()
+        );
+        assert_eq!(ignored, 2);
+    }
+
+    #[test]
+    fn unusable_statuses_and_unavailable_marginals_do_not_allocate_arrays() {
+        for status in [3, 4] {
+            let text =
+                format!("0=1\nR0=1\nD0=1\nZ0=1\nMARGINALS=1\nSTATUS={status}\nSOLVESTAT=1\n");
+            let result = parseoximo_solution(
+                &text,
+                &[],
+                false,
+                std::time::Duration::ZERO,
+                None,
+                &oximo_solver::ParameterSnapshot::default(),
+                (1_000_000, 1_000_000),
+            );
+            assert!(result.solutions.is_empty());
+            assert_eq!(result.dual.slot_count(), 0);
+            assert_eq!(result.reduced_costs.slot_count(), 0);
+            assert_eq!(result.soc_dual.slot_count(), 0);
+        }
+        let result = parseoximo_solution(
+            "STATUS=1\nSOLVESTAT=1\n0=0\nD0=1\nR0=1\n",
+            &[],
+            false,
+            std::time::Duration::ZERO,
+            None,
+            &oximo_solver::ParameterSnapshot::default(),
+            (1, 1_000_000),
+        );
+        assert_eq!(result.value(VarId(0)), Some(0.0));
+        assert_eq!(result.dual.slot_count(), 0);
+        assert_eq!(result.reduced_costs.slot_count(), 0);
+    }
+
+    #[test]
     fn parses_iterations_from_put_file() {
         // The PUT solution file emits `ITER=` from `oximo_m.iterusd`.
         let content = "STATUS=1\nSOLVESTAT=1\nITER=42\nOBJVAL=10.0\n0=2.5\n";
@@ -1802,6 +2168,7 @@ mod tests {
                 std::time::Duration::ZERO,
                 None,
                 &oximo_solver::ParameterSnapshot::default(),
+                (1, 1),
             ),
             1,
         );
@@ -1826,6 +2193,7 @@ mod tests {
             std::time::Duration::ZERO,
             None,
             &parameters,
+            (1, 1),
         );
         assert_eq!(result.parameters.values().as_ptr(), parameters.values().as_ptr());
         assert_eq!(
@@ -1835,6 +2203,8 @@ mod tests {
         let pool = parse_pool_member(
             "positive Variable v0 /L 4 /;\nVariable v_obj /L 8 /;\n",
             &parameters,
+            1,
+            &mut 0,
         )
         .unwrap();
         assert_eq!(pool.parameters.values().as_ptr(), parameters.values().as_ptr());
@@ -1857,6 +2227,7 @@ mod tests {
                 std::time::Duration::ZERO,
                 None,
                 &oximo_solver::ParameterSnapshot::default(),
+                (1, 1),
             ),
             1,
         );
@@ -1880,6 +2251,7 @@ mod tests {
                 std::time::Duration::ZERO,
                 None,
                 &oximo_solver::ParameterSnapshot::default(),
+                (1, 1),
             ),
             1,
         );
@@ -1900,6 +2272,7 @@ mod tests {
                     std::time::Duration::ZERO,
                     None,
                     &oximo_solver::ParameterSnapshot::default(),
+                    (1, 1),
                 ),
                 1,
             );
@@ -1917,6 +2290,7 @@ mod tests {
                 std::time::Duration::ZERO,
                 None,
                 &oximo_solver::ParameterSnapshot::default(),
+                (1, 1),
             ),
             1,
         );
@@ -1936,6 +2310,7 @@ mod tests {
                     std::time::Duration::ZERO,
                     None,
                     &oximo_solver::ParameterSnapshot::default(),
+                    (1, 1),
                 ),
                 1,
             );
@@ -1959,6 +2334,7 @@ mod tests {
                 std::time::Duration::ZERO,
                 None,
                 &oximo_solver::ParameterSnapshot::default(),
+                (1, 1),
             ),
             1,
         );
@@ -1977,6 +2353,7 @@ mod tests {
                 std::time::Duration::ZERO,
                 None,
                 &oximo_solver::ParameterSnapshot::default(),
+                (1, 1),
             ),
             1,
         );
@@ -1998,6 +2375,7 @@ mod tests {
                     std::time::Duration::ZERO,
                     None,
                     &oximo_solver::ParameterSnapshot::default(),
+                    (1, 1),
                 ),
                 1,
             );
@@ -2022,12 +2400,13 @@ mod tests {
                     std::time::Duration::ZERO,
                     None,
                     &oximo_solver::ParameterSnapshot::default(),
+                    (2, 0),
                 ),
                 2,
             );
             let id = SocConstraintId(u32::try_from(index).unwrap());
             assert_eq!(result.soc_dual.len(), 1);
-            let multiplier = result.soc_dual.get(&id).copied().expect("SOC dual missing");
+            let multiplier = result.soc_dual.get(id).expect("SOC dual missing");
             assert!((multiplier - 3.0).abs() < 1e-9, "{id:?}: {multiplier}");
         }
     }

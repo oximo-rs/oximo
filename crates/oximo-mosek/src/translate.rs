@@ -1,4 +1,5 @@
 use oximo_core::PsdConstraintId;
+use oximo_solver::SolutionValues;
 use oximo_solver::prepare::{LoweringContext, PolynomialTerms};
 use oximo_solver::psd::{PsdTriangleOrder, svec_coordinates, unpack_svec};
 use oximo_solver::reconstruct::finalize_result;
@@ -672,14 +673,14 @@ fn extract_result(
 
     let variables = model.resolved_variables();
     let mut solutions = Vec::new();
-    let mut dual = FxHashMap::default();
-    let mut soc_dual = FxHashMap::default();
+    let mut dual = SolutionValues::default();
+    let mut soc_dual = SolutionValues::default();
     let mut psd_dual = FxHashMap::default();
-    let mut reduced_costs = FxHashMap::default();
+    let mut reduced_costs = SolutionValues::default();
     if has_point {
         let mut values = vec![0.0; variables.len()];
         task.get_xx(solution_type, &mut values).map_err(backend)?;
-        let primal = oximo_solver::reconstruct::project_dense_primal(&values, variables.len())
+        let primal = oximo_solver::reconstruct::project_owned_primal(values, variables.len())
             .unwrap_or_default();
         let objective = task.get_primal_obj(solution_type).ok().filter(|value| value.is_finite());
         solutions.push(SolutionPoint {
@@ -690,6 +691,7 @@ fn extract_result(
         });
     }
     if has_dual {
+        soc_dual = SolutionValues::missing(model.num_soc_constraints());
         collect_continuous_duals(
             task,
             solution_type,
@@ -768,9 +770,11 @@ fn collect_continuous_duals(
     solution_type: i32,
     meta: &Meta,
     num_variables: usize,
-    dual: &mut FxHashMap<ConstraintId, f64>,
-    reduced_costs: &mut FxHashMap<VarId, f64>,
+    dual: &mut SolutionValues<ConstraintId>,
+    reduced_costs: &mut SolutionValues<VarId>,
 ) -> Result<(), SolverError> {
+    *dual = SolutionValues::missing(meta.row_by_constraint.len());
+    *reduced_costs = SolutionValues::missing(num_variables);
     let num_rows = usize::try_from(task.get_num_con().map_err(backend)?)
         .map_err(|_| overflow("constraint"))?;
     let mut row_duals = vec![0.0; num_rows];
@@ -779,9 +783,9 @@ fn collect_continuous_duals(
         if let Some(row) = row
             && let Some(&value) = row_duals.get(usize::try_from(*row).unwrap_or(usize::MAX))
         {
-            dual.insert(
+            dual.set(
                 ConstraintId(u32::try_from(id).map_err(|_| overflow("constraint"))?),
-                value,
+                Some(value),
             );
         }
     }
@@ -791,8 +795,10 @@ fn collect_continuous_duals(
     task.get_slx(solution_type, &mut lower).map_err(backend)?;
     task.get_sux(solution_type, &mut upper).map_err(backend)?;
     for (index, (lower, upper)) in lower.into_iter().zip(upper).enumerate() {
-        reduced_costs
-            .insert(VarId(u32::try_from(index).map_err(|_| overflow("variable"))?), lower - upper);
+        reduced_costs.set(
+            VarId(u32::try_from(index).map_err(|_| overflow("variable"))?),
+            Some(lower - upper),
+        );
     }
     Ok(())
 }
@@ -801,14 +807,14 @@ fn collect_continuous_soc_duals(
     task: &TaskCB,
     solution_type: i32,
     meta: &Meta,
-    soc_dual: &mut FxHashMap<SocConstraintId, f64>,
+    soc_dual: &mut SolutionValues<SocConstraintId>,
 ) {
     for &(id, acc, dim) in &meta.explicit_accs {
         let mut dot_y = vec![0.0; dim];
         if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok()
             && let Some(&bound_multiplier) = dot_y.first()
         {
-            soc_dual.insert(id, bound_multiplier);
+            soc_dual.set(id, Some(bound_multiplier));
         }
     }
 }

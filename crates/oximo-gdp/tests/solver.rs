@@ -203,8 +203,8 @@ impl Solver for DualSolver {
         result.semantic_dual.extend(
             result
                 .dual
-                .keys()
-                .map(|&row| (oximo_core::SemanticConstraintId::Algebraic(row), Some(7.0))),
+                .iter()
+                .map(|(row, _)| (oximo_core::SemanticConstraintId::Algebraic(row), Some(7.0))),
         );
         Ok(result)
     }
@@ -226,7 +226,7 @@ fn mixed_soc_and_gdp_counts_only_algebraic_source_rows() {
         let mut solver = DualSolver.with_gdp(BigM::default());
         for _ in 0..3 {
             let result = solver.solve(&model, &()).unwrap();
-            assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [source_row]);
+            assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [source_row]);
         }
     }
 }
@@ -275,7 +275,7 @@ fn interleaved_source_rows_survive_multiple_gdp_generations_and_wrapper_reuse() 
             logical_constraint!(model, !active);
         }
         let result = solver.solve(&model, &()).unwrap();
-        assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [first]);
+        assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [first]);
     }
 
     constraint!(model, second_source, x >= -1.0);
@@ -285,8 +285,8 @@ fn interleaved_source_rows_survive_multiple_gdp_generations_and_wrapper_reuse() 
         DualSolver.with_gdp(BigM::default()).solve(&model, &()).unwrap(),
     ] {
         assert_eq!(result.dual.len(), 2);
-        assert!(result.dual.contains_key(&first));
-        assert!(result.dual.contains_key(&second));
+        assert!(result.dual.get(first).is_some());
+        assert!(result.dual.get(second).is_some());
     }
 }
 
@@ -328,12 +328,12 @@ fn backend_additions_enter_the_next_source_snapshot_and_parameters_stay_solve_lo
     let mut solver = AppendingSolver::default().with_gdp(BigM::default());
     let first = solver.solve(&model, &()).unwrap();
     let later = model.variable_id("callback_variable").unwrap();
-    assert!(!first.primal().unwrap().contains_key(&later));
+    assert!(first.primal().unwrap().get(later).is_none());
 
     model.set_param(cost, 4.0).unwrap();
     let second = solver.solve(&model, &()).unwrap();
-    assert!(second.primal().unwrap().contains_key(&later));
-    assert!(second.dual.contains_key(&model.constraint_id("callback_row").unwrap()));
+    assert!(second.primal().unwrap().get(later).is_some());
+    assert!(second.dual.get(model.constraint_id("callback_row").unwrap()).is_some());
 
     let third = solver.solve(&model, &()).unwrap();
     assert_eq!(first.value_of(cost * x).unwrap(), Some(2.0));
@@ -383,11 +383,14 @@ fn solve_projects_results_and_keeps_hull_activations_queryable() {
         let primal = result.primal().expect("projected primal");
         assert_eq!(primal.len(), source_variables + retained.len());
         assert!(
-            primal.keys().all(|id| id.index() < source_variables || retained.contains(id)),
+            primal
+                .iter()
+                .map(|(id, _)| id)
+                .all(|id| id.index() < source_variables || retained.contains(&id)),
             "generated variables without an activation contract must be filtered"
         );
         for id in &retained {
-            assert_eq!(primal.get(id), Some(&1.0), "retained activation {id:?} lost its value");
+            assert_eq!(primal.get(*id), Some(1.0), "retained activation {id:?} lost its value");
         }
         for &handle in &handles {
             assert!(result.hull_activation_value_of(handle).unwrap().is_some());
@@ -449,11 +452,14 @@ fn solve_after_adding_gdp_and_source_variables_keeps_the_source_set_queryable() 
     for index in 0..model.num_variables() {
         let id = VarId(u32::try_from(index).expect("variable index"));
         if !generated.contains(&id) {
-            assert!(primal.contains_key(&id), "source variable {id:?} was dropped");
+            assert!(primal.get(id).is_some(), "source variable {id:?} was dropped");
         }
     }
-    let leaked: Vec<_> =
-        primal.keys().filter(|id| generated.contains(id) && !retained.contains(id)).collect();
+    let leaked: Vec<_> = primal
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| generated.contains(id) && !retained.contains(id))
+        .collect();
     assert!(
         leaked.is_empty(),
         "generated variables without an activation contract remained: {leaked:?}"
@@ -491,9 +497,9 @@ fn sos_then_gdp_projects_only_original_declarations_and_refreshes_after_more_sos
             assert!(result.value_of(variable).unwrap().is_some());
         }
         for id in &first[0].variables {
-            assert!(!result.primal().unwrap().contains_key(&id.raw_id()));
+            assert!(result.primal().unwrap().get(id.raw_id()).is_none());
         }
-        assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+        assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [original.row_id()]);
         assert_eq!(result.semantic_dual.len(), 1);
         assert_eq!(result.dual_of(original).unwrap(), Some(7.0));
     }
@@ -502,7 +508,7 @@ fn sos_then_gdp_projects_only_original_declarations_and_refreshes_after_more_sos
     model.reformulate_sos(SosReformulationOptions::default()).unwrap();
     let result = solver.solve(&model, &()).unwrap();
     assert_eq!(result.primal().unwrap().len(), 4);
-    assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [original.row_id()]);
     assert_eq!(result.semantic_dual.len(), 1);
     assert_eq!(result.dual_of(original).unwrap(), Some(7.0));
 }
@@ -523,7 +529,7 @@ fn indicator_then_gdp_drops_generated_indicator_rows() {
     disjunct_constraint!(model, active, x <= 3.0);
 
     let result = DualSolver.with_gdp(BigM::default()).solve(&model, &()).unwrap();
-    assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [original.row_id()]);
     assert_eq!(result.primal().unwrap().len(), 3);
 }
 
@@ -573,10 +579,10 @@ fn nested_gdp_projection_keeps_declared_booleans_and_explicit_activation_weights
                 assert!(result.hull_activation_value_of(activation).unwrap().is_some());
             }
             for id in &report.variables {
-                assert_eq!(primal.contains_key(&id.raw_id()), retained.contains(id));
+                assert_eq!(primal.get(id.raw_id()).is_some(), retained.contains(id));
             }
         }
-        assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+        assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [original.row_id()]);
     }
 }
 
@@ -592,7 +598,7 @@ fn sos_only_history_is_projected_even_without_a_gdp_report() {
     assert!(model.gdp_reformulations().is_empty());
     let result = DualSolver.with_gdp(BigM::default()).solve(&model, &()).unwrap();
     assert_eq!(result.primal().unwrap().len(), 2);
-    assert_eq!(result.dual.keys().copied().collect::<Vec<_>>(), [original.row_id()]);
+    assert_eq!(result.dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [original.row_id()]);
     assert_eq!(result.dual_of(original).unwrap(), Some(7.0));
 
     for report in model.sos_reformulations().iter() {
@@ -601,7 +607,7 @@ fn sos_only_history_is_projected_even_without_a_gdp_report() {
             let handle = model
                 .require_scalar_dual_handle(model.constraint_handle_from_id(raw).unwrap())
                 .unwrap();
-            assert!(!result.dual.contains_key(&raw));
+            assert!(result.dual.get(raw).is_none());
             assert!(!result.semantic_dual.contains_key(&handle.id()));
             assert_eq!(result.dual_of(handle).unwrap(), None);
         }

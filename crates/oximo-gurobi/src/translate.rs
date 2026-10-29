@@ -1,3 +1,4 @@
+use oximo_solver::SolutionValues;
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
 use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 use std::time::Instant;
@@ -493,6 +494,11 @@ fn collect_after_optimize(
         built.obj_constant,
         &built.parameters,
     );
+
+    // Inactive trailing SOCs may leave a shorter multiplier buffer.
+    debug_assert!(dual.slot_count() <= model.constraints().algebraic().len());
+    debug_assert!(soc_dual.slot_count() <= model.num_soc_constraints());
+    debug_assert!(reduced_costs.slot_count() <= built.vars.len());
 
     let best_bound = built.model.get_attr(attr::ObjBound).ok().filter(|b| b.is_finite());
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1246,9 +1252,9 @@ fn set_objective(
 /// `(solutions, reduced_costs, dual, soc_dual)` bundle read from a solved model.
 type Collected = (
     Vec<SolutionPoint>,
-    FxHashMap<VarId, f64>,
-    FxHashMap<ConstraintId, f64>,
-    FxHashMap<SocConstraintId, f64>,
+    SolutionValues<VarId>,
+    SolutionValues<ConstraintId>,
+    SolutionValues<SocConstraintId>,
     bool,
 );
 
@@ -1282,9 +1288,9 @@ fn collect_solution(
     if sol_count <= 0 {
         return (
             Vec::new(),
-            FxHashMap::default(),
-            FxHashMap::default(),
-            FxHashMap::default(),
+            SolutionValues::default(),
+            SolutionValues::default(),
+            SolutionValues::default(),
             false,
         );
     }
@@ -1298,19 +1304,18 @@ fn collect_solution(
     if !supports_dual_attributes(kind) {
         return (
             solutions,
-            FxHashMap::default(),
-            FxHashMap::default(),
-            FxHashMap::default(),
+            SolutionValues::default(),
+            SolutionValues::default(),
+            SolutionValues::default(),
             false,
         );
     }
 
     let reduced_cost_values = model.get_obj_attr_batch(attr::RC, vars.iter().copied());
     let mut dual_available = reduced_cost_values.is_ok();
-    let reduced_costs = reduced_cost_values.map(|v| index_map(&v)).unwrap_or_default();
+    let reduced_costs = reduced_cost_values.map(index_values).unwrap_or_default();
 
-    let mut dual = FxHashMap::default();
-    dual.reserve(constrs.len());
+    let mut dual = SolutionValues::missing(constrs.len());
     for (i, handle) in constrs.iter().enumerate() {
         let mut value = 0.0;
         let mut available = false;
@@ -1326,15 +1331,16 @@ fn collect_solution(
             }
         }
         if available {
-            dual.insert(ConstraintId(u32::try_from(i).unwrap()), value);
+            dual.set(ConstraintId(u32::try_from(i).unwrap()), Some(value));
         }
     }
 
     // Convert the squared-form multiplier back to the norm-form
     // bound multiplier `z0 = 2 * bound_value * |QCPi|`.
     // Available only under `QCPDual=1`.
-    let mut soc_dual = FxHashMap::default();
-    soc_dual.reserve(soc_rows.len());
+    let mut soc_dual = SolutionValues::missing(
+        soc_rows.iter().map(|handle| handle.id.index().saturating_add(1)).max().unwrap_or(0),
+    );
     if let Some(first) = solutions.first() {
         let primal = &first.primal;
         for handle in soc_rows {
@@ -1344,9 +1350,9 @@ fn collect_solution(
                         .bound
                         .coeffs
                         .iter()
-                        .map(|&(v, c)| c * primal.get(&v).copied().unwrap_or(0.0))
+                        .map(|&(v, c)| c * primal.get(v).unwrap_or(0.0))
                         .sum::<f64>();
-                soc_dual.insert(handle.id, 2.0 * b_val * pi.abs());
+                soc_dual.set(handle.id, Some(2.0 * b_val * pi.abs()));
             }
         }
     }
@@ -1384,7 +1390,7 @@ fn collect_pool(
             .and_then(|v| ObjectiveTransform { sign: 1.0, offset: obj_constant }.restore(v));
         out.push(SolutionPoint {
             model_id: ModelId::UNASSIGNED,
-            primal: index_map(&vals),
+            primal: index_values(vals),
             objective,
             parameters: parameters.clone(),
         });
@@ -1403,7 +1409,7 @@ fn collect_incumbent(
 ) -> SolutionPoint {
     let primal = model
         .get_obj_attr_batch(attr::X, vars.iter().copied())
-        .map(|v| index_map(&v))
+        .map(index_values)
         .unwrap_or_default();
     let objective = model
         .get_attr(attr::ObjVal)
@@ -1417,9 +1423,10 @@ fn collect_incumbent(
     }
 }
 
-/// Map a dense per-variable value array (in `VarId` order) to a sparse map.
-fn index_map(vals: &[f64]) -> FxHashMap<VarId, f64> {
-    oximo_solver::reconstruct::project_dense_primal(vals, vals.len()).unwrap_or_default()
+/// Adopt a native per-variable array in `VarId` order.
+fn index_values(values: Vec<f64>) -> SolutionValues<VarId> {
+    let count = values.len();
+    oximo_solver::reconstruct::project_owned_primal(values, count).unwrap_or_default()
 }
 
 fn map_status(status: Status) -> TerminationStatus {

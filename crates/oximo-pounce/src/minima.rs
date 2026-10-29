@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use oximo_core::Model;
 use oximo_solver::prepare::LoweringContext;
-use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result, project_dense_primal};
+use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result, project_owned_primal};
 use oximo_solver::{DualStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus};
 use pounce_rs::minima::{
     HessianMode, IpoptLocalSolve, LocalOutcome, LocalSolve, Minimum, SolveQuality, Stop,
@@ -234,7 +234,7 @@ impl SearchResult {
 
         result.solutions.extend(minima.map(|minimum| SolutionPoint {
             model_id: result.model_id,
-            primal: project_dense_primal(&minimum.x, prep.x0.len()).unwrap_or_default(),
+            primal: project_owned_primal(minimum.x, prep.x0.len()).unwrap_or_default(),
             objective:
                 ObjectiveTransform { sign: prep.sign, offset: 0.0 }.restore(minimum.objective),
             parameters: result.parameters.clone(),

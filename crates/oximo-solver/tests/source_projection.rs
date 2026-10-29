@@ -51,8 +51,8 @@ fn borrowed_plan_preserves_interleaved_source_rows_and_reuses_membership() {
         let projected = projection.project(result.clone()).unwrap();
         assert_eq!(projected.primal().unwrap().len(), 3);
         assert_eq!(projected.dual.len(), 2);
-        assert_eq!(projected.dual.get(&last), Some(&2.0));
-        assert!(!projected.dual.contains_key(&generated_row));
+        assert_eq!(projected.dual.get(last), Some(2.0));
+        assert!(projected.dual.get(generated_row).is_none());
         assert!(
             !projected.semantic_dual.contains_key(&SemanticConstraintId::Algebraic(generated_row))
         );
@@ -65,7 +65,7 @@ fn borrowed_plan_preserves_interleaved_source_rows_and_reuses_membership() {
         assert_eq!(projected.dual_of(scalar_handle(last)).unwrap(), None);
         assert_eq!(projected.semantic_dual.get(&cone.id()), Some(&Some(3.0)));
         assert_eq!(projected.reduced_costs.len(), 2);
-        assert!(!projected.reduced_costs.contains_key(&generated_id));
+        assert!(projected.reduced_costs.get(generated_id).is_none());
     }
     // The same immutable plan remains usable by another projector.
     assert!(SourceProjection::with_plan(&source, &plan).project(result).unwrap().has_solution());
@@ -112,7 +112,7 @@ fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
     let mut result = SolverResult::for_model(&transformed);
     result.dual_status = DualStatus::FeasiblePoint;
 
-    let mut primal = rustc_hash::FxHashMap::default();
+    let mut primal = oximo_solver::SolutionValues::default();
     primal.insert(x.var_id().unwrap(), 0.5);
     primal.insert(y.var_id().unwrap(), 0.0);
     primal.insert(generated_variable, 0.0);
@@ -135,18 +135,18 @@ fn projection_filters_generated_entities_and_rebuilds_the_source_objective() {
     assert_eq!(projected.solutions.len(), 1);
     assert_eq!(projected.solutions[0].model_id, source.id());
     assert_eq!(projected.solutions[0].primal.len(), 2);
-    assert!(!projected.solutions[0].primal.contains_key(&generated_variable));
-    assert_eq!(projected.solutions[0].primal[&x.var_id().unwrap()], 0.5);
+    assert!(projected.solutions[0].primal.get(generated_variable).is_none());
+    assert_eq!(projected.solutions[0].primal.get(x.var_id().unwrap()).unwrap(), 0.5);
 
-    assert_eq!(projected.dual.get(&capacity.row_id()), Some(&1.0));
+    assert_eq!(projected.dual.get(capacity.row_id()), Some(1.0));
     assert_eq!(projected.dual_of(capacity).unwrap(), Some(5.0));
     assert!(
         !projected
             .semantic_dual
             .contains_key(&SemanticConstraintId::Algebraic(generated_constraint))
     );
-    assert!(!projected.dual.contains_key(&generated_constraint));
-    assert!(!projected.reduced_costs.contains_key(&generated_variable));
+    assert!(projected.dual.get(generated_constraint).is_none());
+    assert!(projected.reduced_costs.get(generated_variable).is_none());
 
     assert_eq!(projected.solutions[0].objective, Some(1.0));
     assert!(projected.parameters.same_bits(&solve_parameters));
@@ -244,7 +244,7 @@ fn in_place_reformulation_projects_without_cloning() {
     let mut result = SolverResult::for_model(&source);
     result.dual_status = DualStatus::FeasiblePoint;
 
-    let mut primal = rustc_hash::FxHashMap::default();
+    let mut primal = oximo_solver::SolutionValues::default();
     primal.insert(x.var_id().unwrap(), 1.0);
     primal.insert(y.var_id().unwrap(), 0.0);
     primal.insert(generated_variable, 0.0);
@@ -261,13 +261,13 @@ fn in_place_reformulation_projects_without_cloning() {
     assert_eq!(projected.model_id, source.id());
     assert_eq!(projected.solutions.len(), 1);
     assert_eq!(projected.solutions[0].primal.len(), 2);
-    assert!(!projected.solutions[0].primal.contains_key(&generated_variable));
+    assert!(projected.solutions[0].primal.get(generated_variable).is_none());
     assert_eq!(projected.solutions[0].objective, Some(1.0));
 
     // `reevaluate_objective` changes points only.
     assert_eq!(projected.best_bound, Some(6.0));
-    assert!(!projected.dual.contains_key(&generated_constraint));
-    assert!(!projected.reduced_costs.contains_key(&generated_variable));
+    assert!(projected.dual.get(generated_constraint).is_none());
+    assert!(projected.reduced_costs.get(generated_variable).is_none());
 }
 
 #[test]
@@ -326,9 +326,9 @@ fn projection_retains_explicitly_requested_generated_variables() {
 
     let primal = projected.primal().unwrap();
     assert_eq!(primal.len(), 3);
-    assert_eq!(primal.get(&retained), Some(&0.5));
-    assert_eq!(primal.get(&x_id), Some(&1.0));
-    assert!(!primal.contains_key(&dropped));
+    assert_eq!(primal.get(retained), Some(0.5));
+    assert_eq!(primal.get(x_id), Some(1.0));
+    assert!(primal.get(dropped).is_none());
 }
 
 #[test]
@@ -349,7 +349,7 @@ fn projection_drops_non_finite_retained_values() {
 
     let primal = projected.primal().unwrap();
     assert_eq!(primal.len(), 1);
-    assert!(!primal.contains_key(&retained));
+    assert!(primal.get(retained).is_none());
 }
 
 #[test]
@@ -399,13 +399,13 @@ fn explicit_source_variables_can_interleave_with_generated_ids() {
 
     let primal = projected.primal().unwrap();
     assert_eq!(primal.len(), 2);
-    assert_eq!(primal.get(&x_id), Some(&1.0));
-    assert_eq!(primal.get(&z_id), Some(&2.0));
-    assert!(!primal.contains_key(&y_id));
+    assert_eq!(primal.get(x_id), Some(1.0));
+    assert_eq!(primal.get(z_id), Some(2.0));
+    assert!(primal.get(y_id).is_none());
 
-    assert_eq!(projected.reduced_costs.get(&x_id), Some(&1.0));
-    assert_eq!(projected.reduced_costs.get(&z_id), Some(&2.0));
-    assert!(!projected.reduced_costs.contains_key(&y_id));
+    assert_eq!(projected.reduced_costs.get(x_id), Some(1.0));
+    assert_eq!(projected.reduced_costs.get(z_id), Some(2.0));
+    assert!(projected.reduced_costs.get(y_id).is_none());
 }
 
 #[test]
@@ -489,7 +489,7 @@ fn projection_filters_generated_cone_duals() {
         let projected = projection.project(result).unwrap();
 
         assert_eq!(projected.soc_dual.len(), 1);
-        assert_eq!(projected.soc_dual.get(&cone.soc_id()), Some(&2.0));
+        assert_eq!(projected.soc_dual.get(cone.soc_id()), Some(2.0));
         assert_eq!(projected.psd_dual.len(), 1);
         assert!(projected.psd_dual.contains_key(&positivity.psd_id()));
         assert_eq!(projected.semantic_dual.get(&cone.id()), Some(&Some(3.0)));
