@@ -1,6 +1,6 @@
 use oximo_solver::SolutionValues;
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
-use oximo_solver::reconstruct::finalize_result;
+use oximo_solver::reconstruct::{finalize_result, require_active_dual_evidence};
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::process::Stdio;
@@ -82,44 +82,10 @@ pub fn solve(
 
     require_active_dual_evidence(
         &mut result,
-        &con_order,
+        con_order.iter().copied(),
         prepared.constraints().second_order_cones(),
     );
     Ok(finalize_result(result, model, var_order.len()))
-}
-
-fn require_active_dual_evidence(
-    result: &mut SolverResult,
-    con_order: &[ConstraintId],
-    socs: &[SocConstraint],
-) {
-    if result.dual_status != DualStatus::FeasiblePoint {
-        return;
-    }
-    let missing_rows = !con_order.is_empty()
-        && (result.dual.is_empty()
-            || !con_order.iter().any(|&id| result.dual.get(id).is_some_and(f64::is_finite)));
-    let mut active_socs = socs.iter().enumerate().filter(|(_, soc)| soc.active).peekable();
-    let missing_socs = active_socs.peek().is_some()
-        && (result.soc_dual.is_empty()
-            || !active_socs.any(|(index, _)| {
-                result
-                    .soc_dual
-                    .get(SocConstraintId(u32::try_from(index).unwrap()))
-                    .is_some_and(|value| value.is_finite() && value >= 0.0)
-            }));
-    if missing_rows || missing_socs {
-        result.dual_status = DualStatus::Unknown;
-        let log = result.raw_log.get_or_insert_with(String::new);
-        if !log.is_empty() {
-            log.push('\n');
-        }
-        let group = if missing_rows { "algebraic" } else { "SOC" };
-        let _ = write!(
-            log,
-            "No multiplier captured for active {group} constraints; dual status is Unknown."
-        );
-    }
 }
 
 /// Build `model`, run BARON with IIS search enabled, and when BARON reports the
@@ -2196,7 +2162,11 @@ mod tests {
                 result.soc_dual.insert(cone.soc_id(), 0.0);
             }
             let con_order = if row_active { vec![row.row_id()] } else { Vec::new() };
-            require_active_dual_evidence(&mut result, &con_order, &model.soc_constraints());
+            require_active_dual_evidence(
+                &mut result,
+                con_order.iter().copied(),
+                &model.soc_constraints(),
+            );
 
             let result = finalize_result(result, &model, 1);
             assert_eq!(result.dual_status, expected);

@@ -1,5 +1,5 @@
 use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
-use oximo_solver::reconstruct::finalize_result;
+use oximo_solver::reconstruct::{finalize_result, require_active_dual_evidence};
 use oximo_solver::{SolutionValueId, SolutionValues};
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
@@ -232,52 +232,15 @@ pub fn solve(
     let _ = fs::remove_dir_all(&tmp_dir);
     result.solver_name = Some(gams_solver_label(opts));
     result.model_id = model.id();
-    require_active_dual_evidence(&mut result, constraints, socs);
+    require_active_dual_evidence(&mut result, active_dual_rows(constraints), socs);
     Ok(finalize_result(result, model, vars.len()))
 }
 
-fn require_active_dual_evidence(
-    result: &mut SolverResult,
-    rows: &[AlgebraicConstraint],
-    socs: &[SocConstraint],
-) {
-    if result.dual_status != DualStatus::FeasiblePoint {
-        return;
-    }
-    let mut active_rows = rows
-        .iter()
+fn active_dual_rows(rows: &[AlgebraicConstraint]) -> impl Iterator<Item = ConstraintId> + '_ {
+    rows.iter()
         .enumerate()
         .filter(|(_, row)| row.active && (row.lower.is_finite() || row.upper.is_finite()))
-        .peekable();
-    let missing_rows = active_rows.peek().is_some()
-        && (result.dual.is_empty()
-            || !active_rows.any(|(index, _)| {
-                result
-                    .dual
-                    .get(ConstraintId(u32::try_from(index).unwrap()))
-                    .is_some_and(f64::is_finite)
-            }));
-    let mut active_socs = socs.iter().enumerate().filter(|(_, soc)| soc.active).peekable();
-    let missing_socs = active_socs.peek().is_some()
-        && (result.soc_dual.is_empty()
-            || !active_socs.any(|(index, _)| {
-                result
-                    .soc_dual
-                    .get(SocConstraintId(u32::try_from(index).unwrap()))
-                    .is_some_and(|value| value.is_finite() && value >= 0.0)
-            }));
-    if missing_rows || missing_socs {
-        result.dual_status = DualStatus::Unknown;
-        let log = result.raw_log.get_or_insert_with(String::new);
-        if !log.is_empty() {
-            log.push('\n');
-        }
-        let group = if missing_rows { "algebraic" } else { "SOC" };
-        let _ = write!(
-            log,
-            "No multiplier captured for active {group} constraints; dual status is Unknown."
-        );
-    }
+        .map(|(index, _)| ConstraintId(u32::try_from(index).unwrap()))
 }
 
 /// Backend label for the result: `GAMS/<sub-solver>` when a sub-solver is
@@ -2082,7 +2045,7 @@ mod tests {
 
             require_active_dual_evidence(
                 &mut result,
-                model.constraints().algebraic(),
+                active_dual_rows(model.constraints().algebraic()),
                 &model.soc_constraints(),
             );
             result.model_id = model.id();

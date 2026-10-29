@@ -2,7 +2,7 @@ use oximo_core::{ConstraintId, VarId};
 use oximo_solver::reconstruct::{
     DualProjection, ObjectiveTransform, SourceCoordinates, accumulate_dual, finalize_result,
     finalize_result_with_coordinates, project_dense_primal, project_primal, relative_gap,
-    try_accumulate_dual,
+    require_active_dual_evidence, try_accumulate_dual,
 };
 use oximo_solver::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationStatus};
 
@@ -12,6 +12,65 @@ fn model_with_variables(count: usize) -> oximo_core::Model {
         model.__var(format!("x{index}")).build();
     }
     model
+}
+
+#[test]
+fn active_dual_evidence_reports_all_missing_groups_and_preserves_native_logs() {
+    use oximo_core::prelude::*;
+
+    let model = Model::new("active dual evidence");
+    variable!(model, x);
+    let inactive_row = constraint!(model, inactive_row, x <= 1.0);
+    let row = constraint!(model, row, x >= 0.0);
+    let inactive_cone = soc_constraint!(model, inactive_cone, [x] <= x);
+    let cone = soc_constraint!(model, cone, [x] <= x);
+    model.set_constraint_active(inactive_row, false).unwrap();
+    model.set_constraint_active(inactive_cone, false).unwrap();
+
+    for (row_value, soc_value, missing) in [
+        (None, None, Some("algebraic and SOC")),
+        (Some(0.0), None, Some("SOC")),
+        (None, Some(0.0), Some("algebraic")),
+        (Some(0.0), Some(0.0), None),
+        (Some(-1.0), Some(1.0), None),
+        (Some(f64::NAN), Some(f64::INFINITY), Some("algebraic and SOC")),
+        (Some(f64::INFINITY), Some(0.0), Some("algebraic")),
+        (Some(0.0), Some(-1.0), Some("SOC")),
+    ] {
+        let mut result = SolverResult::for_model(&model);
+        result.dual_status = DualStatus::FeasiblePoint;
+        result.raw_log = Some("native log".into());
+        result.reduced_costs.insert(VarId(0), 0.0);
+        result.dual.insert(inactive_row.row_id(), 0.0);
+        result.soc_dual.insert(inactive_cone.soc_id(), 0.0);
+        if let Some(value) = row_value {
+            result.dual.insert(row.row_id(), value);
+        }
+        if let Some(value) = soc_value {
+            result.soc_dual.insert(cone.soc_id(), value);
+        }
+
+        require_active_dual_evidence(&mut result, [row.row_id()], &model.soc_constraints());
+
+        if let Some(group) = missing {
+            assert_eq!(result.dual_status, DualStatus::Unknown);
+            assert_eq!(
+                result.raw_log.as_deref(),
+                Some(format!("native log\nNo multiplier captured for active {group} constraints; dual status is Unknown.").as_str())
+            );
+        } else {
+            assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
+            assert_eq!(result.raw_log.as_deref(), Some("native log"));
+        }
+    }
+
+    for status in [DualStatus::NoSolution, DualStatus::Unknown] {
+        let mut result = SolverResult::for_model(&model);
+        result.dual_status = status;
+        require_active_dual_evidence(&mut result, [row.row_id()], &model.soc_constraints());
+        assert_eq!(result.dual_status, status);
+        assert!(result.raw_log.is_none());
+    }
 }
 
 #[test]

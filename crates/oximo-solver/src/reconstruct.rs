@@ -6,14 +6,65 @@
 //! the original model's coordinates.
 
 use std::borrow::Cow;
+use std::fmt::Write as FmtWrite;
 
-use oximo_core::{ConstraintId, Model, ModelId, SemanticConstraintId, VarId};
+use oximo_core::{
+    ConstraintId, Model, ModelId, SemanticConstraintId, SocConstraint, SocConstraintId, VarId,
+};
 use rustc_hash::FxHashSet;
 
 use crate::{
     DualStatus, PrimalStatus, SolutionIndexError, SolutionPoint, SolutionValueId, SolutionValues,
     SolverResult, TerminationStatus,
 };
+
+/// Require at least one usable multiplier for each active constraint group.
+/// Backends select the algebraic row IDs; SOC IDs are indices into `socs`.
+/// Algebraic multipliers must be finite, and SOC multipliers must also be nonnegative.
+///
+/// # Panics
+/// Panics if an active SOC index exceeds `u32::MAX`.
+pub fn require_active_dual_evidence(
+    result: &mut SolverResult,
+    active_rows: impl IntoIterator<Item = ConstraintId>,
+    socs: &[SocConstraint],
+) {
+    if result.dual_status != DualStatus::FeasiblePoint {
+        return;
+    }
+
+    let mut active_rows = active_rows.into_iter().peekable();
+    let missing_rows = active_rows.peek().is_some()
+        && (result.dual.is_empty()
+            || !active_rows.any(|id| result.dual.get(id).is_some_and(f64::is_finite)));
+    let mut active_socs = socs.iter().enumerate().filter(|(_, soc)| soc.active).peekable();
+    let missing_socs = active_socs.peek().is_some()
+        && (result.soc_dual.is_empty()
+            || !active_socs.any(|(index, _)| {
+                result
+                    .soc_dual
+                    .get(SocConstraintId(u32::try_from(index).unwrap()))
+                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+            }));
+
+    if missing_rows || missing_socs {
+        result.dual_status = DualStatus::Unknown;
+        let log = result.raw_log.get_or_insert_with(String::new);
+        if !log.is_empty() {
+            log.push('\n');
+        }
+
+        let group = match (missing_rows, missing_socs) {
+            (true, true) => "algebraic and SOC",
+            (true, false) => "algebraic",
+            _ => "SOC",
+        };
+        let _ = write!(
+            log,
+            "No multiplier captured for active {group} constraints; dual status is Unknown."
+        );
+    }
+}
 
 /// Finalize a backend result in the source model's coordinates.
 /// Applies semantic dual safeguards and the common result contract in one pass.
