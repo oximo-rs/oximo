@@ -185,7 +185,7 @@ fn alternative_lowering_duals_do_not_inherit_native_row_coordinates() {
                 result.dual_of(model.require_scalar_dual_handle(erased).unwrap()).unwrap(),
                 None
             );
-            assert!((result.dual[&scaled.row_id()] - coefficient / 2.0).abs() < 1e-9);
+            assert!((result.dual.get(scaled.row_id()).unwrap() - coefficient / 2.0).abs() < 1e-9);
 
             let report = result.report(&model).unwrap().to_string();
             assert!(report.contains(&format!("direct  dual = {coefficient}")), "{report}");

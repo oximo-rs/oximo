@@ -2,11 +2,12 @@ use oximo_core::{PsdConstraintHandle, PsdConstraintId, SymmetricMatrix};
 use std::borrow::Cow;
 use std::time::Duration;
 
+use crate::SolutionValues;
 use oximo_core::{
     ConstraintHandle, ConstraintId, Expr, IndexKey, IndexedVar, Model, ModelId, ModelMismatchError,
     SocConstraintHandle, SocConstraintId, VarId,
 };
-use oximo_expr::{EvalContext, ExprArena, ExprId, ExprNode, ParamId, WithParameters, evaluate};
+use oximo_expr::{ExprArena, ExprId, ExprNode, WithParameters, evaluate};
 use rustc_hash::FxHashMap;
 
 pub use oximo_expr::ParameterSnapshot;
@@ -21,7 +22,7 @@ use crate::status::{PrimalStatus, TerminationStatus};
 #[derive(Clone, Debug)]
 pub struct SolutionPoint {
     pub model_id: ModelId,
-    pub primal: FxHashMap<VarId, f64>,
+    pub primal: SolutionValues<VarId>,
     pub objective: Option<f64>,
     /// Parameters used by the solve that produced this point.
     pub parameters: ParameterSnapshot,
@@ -31,28 +32,16 @@ impl Default for SolutionPoint {
     fn default() -> Self {
         Self {
             model_id: ModelId::UNASSIGNED,
-            primal: FxHashMap::default(),
+            primal: SolutionValues::default(),
             objective: None,
             parameters: ParameterSnapshot::default(),
         }
     }
 }
 
-struct PointContext<'a>(&'a FxHashMap<VarId, f64>);
-
-impl EvalContext for PointContext<'_> {
-    fn var(&self, id: VarId) -> Option<f64> {
-        self.0.get(&id).copied()
-    }
-
-    fn param(&self, _: ParamId) -> Option<f64> {
-        None
-    }
-}
-
 impl SolutionPoint {
     /// Capture model identity and parameters for a supplied primal point.
-    pub fn new(model: &Model, primal: FxHashMap<VarId, f64>, objective: Option<f64>) -> Self {
+    pub fn new(model: &Model, primal: SolutionValues<VarId>, objective: Option<f64>) -> Self {
         Self {
             model_id: model.id(),
             primal,
@@ -114,7 +103,7 @@ impl SolutionPoint {
     /// Look up a primal value by raw `VarId`. Raw IDs carry no model provenance;
     /// prefer [`Self::value_of`] when an expression handle is available.
     pub fn value(&self, id: VarId) -> Option<f64> {
-        self.primal.get(&id).copied()
+        self.primal.get(id)
     }
 
     /// Evaluate an expression at this primal point.
@@ -244,11 +233,11 @@ fn evaluate_at(
     point: &SolutionPoint,
     current_parameters: bool,
 ) -> Option<f64> {
-    let context = PointContext(&point.primal);
+    let context = &point.primal;
     if current_parameters {
-        evaluate(arena, id, &context).ok()
+        evaluate(arena, id, context).ok()
     } else {
-        evaluate(arena, id, &WithParameters::new(&context, &point.parameters)).ok()
+        evaluate(arena, id, &WithParameters::new(context, &point.parameters)).ok()
     }
 }
 
@@ -296,8 +285,8 @@ fn evaluate_soc_at(
 /// whether the point in `solutions` is usable. Primal points are held in
 /// `solutions` (index `0` is the best/incumbent, empty when no solution was
 /// found). `dual` and `reduced_costs` apply to the best continuous point and are
-/// sparse maps, so a solver that does not return duals (e.g. MILP) can simply
-/// leave them empty. `best_bound` is populated when a global bound is available.
+/// dense values with explicit missing slots. A solver that does not return duals
+/// (e.g. MILP) can leave them empty. `best_bound` is populated when a global bound is available.
 /// `gap` is the solver-reported gap, whose convention is backend-specific.
 #[derive(Clone, Debug)]
 pub struct SolverResult {
@@ -312,10 +301,10 @@ pub struct SolverResult {
     pub semantic_dual: FxHashMap<oximo_core::SemanticConstraintId, Option<f64>>,
     /// Multipliers of stored algebraic rows, in those rows' coordinates.
     /// Prefer [`Self::dual_of`] for semantic constraint handles.
-    pub dual: FxHashMap<ConstraintId, f64>,
-    pub soc_dual: FxHashMap<SocConstraintId, f64>,
+    pub dual: SolutionValues<ConstraintId>,
+    pub soc_dual: SolutionValues<SocConstraintId>,
     pub psd_dual: FxHashMap<PsdConstraintId, SymmetricMatrix<f64>>,
-    pub reduced_costs: FxHashMap<VarId, f64>,
+    pub reduced_costs: SolutionValues<VarId>,
     /// The best objective bound reported by the backend.
     pub best_bound: Option<f64>,
     /// The backend's relative optimality gap.
@@ -348,10 +337,10 @@ impl SolverResult {
             dual_status: DualStatus::NoSolution,
             solutions: Vec::new(),
             semantic_dual: FxHashMap::default(),
-            dual: FxHashMap::default(),
-            soc_dual: FxHashMap::default(),
+            dual: SolutionValues::default(),
+            soc_dual: SolutionValues::default(),
             psd_dual: FxHashMap::default(),
-            reduced_costs: FxHashMap::default(),
+            reduced_costs: SolutionValues::default(),
             best_bound: None,
             gap: None,
             solve_time: Duration::ZERO,
@@ -369,6 +358,7 @@ impl SolverResult {
 impl SolverResult {
     /// Create an empty result bound to the model's current identity and parameters.
     /// Capture this before solving or use the same arena snapshot as translation.
+    /// Use `result.dual.insert(id, value)` or `extend` for growing result assembly.
     #[inline]
     pub fn for_model(model: &Model) -> Self {
         Self::empty(model.id(), model.arena().parameter_snapshot())
@@ -406,7 +396,7 @@ impl SolverResult {
     /// Points must be added in best/incumbent-first order.
     /// This does not update statuses or validate the primal point.
     /// Adapters need to normalize afterward.
-    pub fn add_solution(&mut self, primal: FxHashMap<VarId, f64>, objective: Option<f64>) {
+    pub fn add_solution(&mut self, primal: SolutionValues<VarId>, objective: Option<f64>) {
         self.solutions.push(SolutionPoint {
             model_id: self.model_id,
             parameters: self.parameters.clone(),
@@ -449,8 +439,8 @@ impl SolverResult {
         self.solutions.first().and_then(|s| s.objective)
     }
 
-    /// The best solution's primal map, or `None` when no solution was found.
-    pub fn primal(&self) -> Option<&FxHashMap<VarId, f64>> {
+    /// The best solution's primal values, or `None` when no solution was found.
+    pub fn primal(&self) -> Option<&SolutionValues<VarId>> {
         self.solutions.first().map(|s| &s.primal)
     }
 
@@ -717,7 +707,7 @@ impl SolverResult {
     #[inline]
     fn row_multiplier(&self, id: oximo_core::SemanticConstraintId) -> Option<f64> {
         match id {
-            oximo_core::SemanticConstraintId::Algebraic(id) => self.dual.get(&id).copied(),
+            oximo_core::SemanticConstraintId::Algebraic(id) => self.dual.get(id),
             _ => None,
         }
     }
@@ -733,7 +723,7 @@ impl SolverResult {
         constraint: SocConstraintHandle,
     ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, constraint.model_id())?;
-        Ok(self.soc_dual.get(&constraint.soc_id()).copied())
+        Ok(self.soc_dual.get(constraint.soc_id()))
     }
 
     /// Look up the best solution's primal value for a specific index of an
@@ -858,9 +848,9 @@ impl std::fmt::Display for ModelReport<'_> {
             let show_rc = !r.reduced_costs.is_empty();
             for v in &vars {
                 let val = best.value(v.id).map_or_else(|| "n/a".to_owned(), num);
-                match (show_rc, r.reduced_costs.get(&v.id)) {
+                match (show_rc, r.reduced_costs.get(v.id)) {
                     (true, Some(rc)) => {
-                        writeln!(f, "  {:<width$} = {val}   (reduced cost {})", v.name, num(*rc))?;
+                        writeln!(f, "  {:<width$} = {val}   (reduced cost {})", v.name, num(rc))?;
                     }
                     _ => writeln!(f, "  {:<width$} = {val}", v.name)?,
                 }
@@ -895,7 +885,7 @@ impl std::fmt::Display for ModelReport<'_> {
             let width = socs.iter().map(|s| s.name.len()).max().unwrap_or(0);
             for (i, s) in socs.iter().enumerate() {
                 let id = SocConstraintId(u32::try_from(i).expect("soc index fits u32"));
-                let d = r.soc_dual.get(&id).copied().map_or_else(|| "n/a".to_owned(), num);
+                let d = r.soc_dual.get(id).map_or_else(|| "n/a".to_owned(), num);
                 writeln!(f, "  {:<width$}  dual = {d}", s.name)?;
             }
         }
@@ -958,9 +948,7 @@ mod tests {
         param!(m, p = 2.0);
         variable!(m, x);
         variable!(m, y);
-        let mut primal = FxHashMap::default();
-        primal.insert(x.var_id().unwrap(), 3.0);
-        primal.insert(y.var_id().unwrap(), 4.0);
+        let primal = [(x.var_id().unwrap(), 3.0), (y.var_id().unwrap(), 4.0)].into_iter().collect();
         let point = SolutionPoint {
             model_id: m.id(),
             primal,
@@ -1056,8 +1044,7 @@ mod tests {
         let ranged = m.constraint_handle("ranged").unwrap();
 
         let point = |value| {
-            let mut primal = FxHashMap::default();
-            primal.insert(x.var_id().unwrap(), value);
+            let primal = [(x.var_id().unwrap(), value)].into_iter().collect();
             SolutionPoint {
                 model_id: m.id(),
                 primal,
@@ -1114,10 +1101,13 @@ mod tests {
         variable!(m, t);
         let cone = soc_constraint!(m, cone, [x, y] <= t);
         let point = |x_value, y_value, t_value| {
-            let mut primal = FxHashMap::default();
-            primal.insert(x.var_id().unwrap(), x_value);
-            primal.insert(y.var_id().unwrap(), y_value);
-            primal.insert(t.var_id().unwrap(), t_value);
+            let primal = [
+                (x.var_id().unwrap(), x_value),
+                (y.var_id().unwrap(), y_value),
+                (t.var_id().unwrap(), t_value),
+            ]
+            .into_iter()
+            .collect();
             SolutionPoint {
                 model_id: m.id(),
                 primal,
@@ -1145,10 +1135,8 @@ mod tests {
 
     #[test]
     fn best_is_solution_zero() {
-        let mut p0 = FxHashMap::default();
-        p0.insert(VarId(0), 1.5);
-        let mut p1 = FxHashMap::default();
-        p1.insert(VarId(0), 2.5);
+        let p0 = [(VarId(0), 1.5)].into_iter().collect();
+        let p1 = [(VarId(0), 2.5)].into_iter().collect();
         let r = SolverResult {
             termination: TerminationStatus::Optimal,
             primal_status: PrimalStatus::OptimalPoint,
@@ -1173,10 +1161,8 @@ mod tests {
         let c = constraint!(m, c, x <= 5.0);
         objective!(m, Max, x);
 
-        let mut primal = FxHashMap::default();
-        primal.insert(x.var_id().unwrap(), 5.0);
-        let mut dual = FxHashMap::default();
-        dual.insert(c.row_id(), 1.0);
+        let primal = [(x.var_id().unwrap(), 5.0)].into_iter().collect();
+        let dual = [(c.row_id(), 1.0)].into_iter().collect();
 
         let r = SolverResult {
             model_id: m.id(),
@@ -1222,9 +1208,7 @@ mod tests {
         m.add_soc_constraint("cone", [x], t);
         objective!(m, Min, x);
 
-        let mut dual = FxHashMap::default();
-        dual.insert(first.row_id(), 1.0);
-        dual.insert(second.row_id(), 2.0);
+        let dual = [(first.row_id(), 1.0), (second.row_id(), 2.0)].into_iter().collect();
         let r = SolverResult { model_id: m.id(), dual, ..Default::default() };
 
         let out = r.report(&m).unwrap().to_string();

@@ -132,7 +132,10 @@ fn exact_derivatives_allow_minima_at_active_bounds() {
         assert!((points[0] + 2.0).abs() < 1e-5);
         assert!((points[1] - 2.0).abs() < 1e-5);
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
-        assert!((result.reduced_costs[&model.variable_id("x").unwrap()].abs() - 4.0).abs() < 1e-4);
+        assert!(
+            (result.reduced_costs.get(model.variable_id("x").unwrap()).unwrap().abs() - 4.0).abs()
+                < 1e-4
+        );
         assert!(result.raw_log.as_deref().unwrap().contains("saddle rejection skipped"));
     }
 }
@@ -248,7 +251,10 @@ fn minima_preserve_parameter_snapshots_constraint_duals_and_reduced_costs() {
         let sign = if maximize { -1.0 } else { 1.0 };
 
         assert!((result.dual_of(lower).unwrap().unwrap() - sign * 8.0).abs() < 1e-4);
-        assert!((result.reduced_costs[&model.variable_id("z").unwrap()] - sign * 2.0).abs() < 1e-4);
+        assert!(
+            (result.reduced_costs.get(model.variable_id("z").unwrap()).unwrap() - sign * 2.0).abs()
+                < 1e-4
+        );
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
 
         for minimum in result.solutions {

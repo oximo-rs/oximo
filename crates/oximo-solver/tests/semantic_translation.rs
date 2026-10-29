@@ -33,16 +33,14 @@ impl Solver for BoundRows {
         self.validate_model(model, opts).into_result()?;
         let mut result = SolverResult::for_model(model);
         result.dual_status = DualStatus::FeasiblePoint;
-        let mut primal = rustc_hash::FxHashMap::default();
-        for variable in &model.resolved_variables() {
-            primal.insert(variable.id, 1.0);
-        }
+        let primal = oximo_solver::SolutionValues::from_dense(vec![1.0; model.num_variables()]);
+        result.dual = oximo_solver::SolutionValues::missing(model.constraints().algebraic().len());
         result.add_solution(primal, Some(1.0));
         for record in model.semantic_constraints().into_iter().filter(|c| c.active) {
             if let oximo_core::SemanticConstraintId::Algebraic(row) = record.id {
-                result.dual.insert(
+                result.dual.set(
                     row,
-                    if record.pair.set.signature().is::<GreaterThan>() { 1.0 } else { 0.0 },
+                    Some(if record.pair.set.signature().is::<GreaterThan>() { 1.0 } else { 0.0 }),
                 );
             }
         }

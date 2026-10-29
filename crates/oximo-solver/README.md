@@ -69,15 +69,16 @@ point came back.
 | `termination`   | `TerminationStatus`            | Why the solve stopped                             |
 | `primal_status` | `PrimalStatus`                 | Whether a usable primal point is available        |
 | `solutions`     | `Vec<SolutionPoint>`           | Primal points, best first (empty if no solution)  |
-| `dual`          | `FxHashMap<ConstraintId, f64>` | Stored algebraic-row duals at the best point      |
-| `reduced_costs` | `FxHashMap<VarId, f64>`        | Variable reduced costs at the best point          |
+| `dual`          | `SolutionValues<ConstraintId>` | Stored algebraic-row duals at the best point      |
+| `reduced_costs` | `SolutionValues<VarId>`        | Variable reduced costs at the best point          |
 | `best_bound`    | `Option<f64>`                  | Dual/relaxation bound (branch-and-bound backends) |
 | `gap`           | `Option<f64>`                  | Relative optimality gap, when reported            |
 | `solve_time`    | `Duration`                     | Wall time around the solve call                   |
 | `iterations`    | `u64`                          | Simplex iteration count (if reported)             |
 | `raw_log`       | `Option<String>`               | Solver stdout/stderr                              |
 
-Each `SolutionPoint` holds the `primal` variable values (`FxHashMap<VarId, f64>`) and that point's `objective` (`Option<f64>`). Index `0` is the best/incumbent. Backends with solution pools return the extra points after it.
+Each `SolutionPoint` holds the `primal` variable values (`SolutionValues<VarId>`) and that point's `objective` (`Option<f64>`). Index `0` is the best/incumbent.
+Backends with solution pools return the extra points after it.
 
 ## Result accessors
 
@@ -109,7 +110,7 @@ added after the solve. Newly constructed expressions can use captured parameters
 Constraint definitions and bounds still come from the supplied model.
 
 Use `dual_of(scalar_handle)` for the multiplier of the original scalar constraint. The raw
-`dual` map uses stored algebraic rows, whose scaling may differ. If a solver or
+`dual` storage uses stored algebraic rows, whose scaling may differ. If a solver or
 transformation cannot supply an original-constraint multiplier, `dual_of` returns
 `None`.
 

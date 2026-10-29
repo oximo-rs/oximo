@@ -11,6 +11,6 @@ note: the function `normalize_result` is defined here
   | |     mut result: SolverResult,
   | |     source_variables: &SourceIndices,
   | |     retained: &FxHashSet<VarId>,
-  | |     projection: Option<ProjectionCoordinates<'_>>,
+  | |     projection: ProjectionCoordinates<'_>,
   | | ) -> SolverResult {
   | |_________________^

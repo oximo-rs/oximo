@@ -1,6 +1,5 @@
 use oximo_core::prelude::*;
 use oximo_solver::{SolutionPoint, SolverResult, reconstruct::finalize_result};
-use rustc_hash::FxHashMap;
 
 #[test]
 fn added_solutions_use_the_results_snapshot_even_after_the_model_changes() {
@@ -158,7 +157,11 @@ fn both_modes_validate_ownership_including_empty_results_and_inconsistent_points
     assert!(result.soc_evaluation_with_current_parameters(&model, foreign_cone).is_err());
     assert!(result.soc_evaluation_with_current_parameters(&other, cone).is_err());
 
-    result.solutions.push(SolutionPoint::new(&other, FxHashMap::default(), None));
+    result.solutions.push(SolutionPoint::new(
+        &other,
+        oximo_solver::SolutionValues::default(),
+        None,
+    ));
     assert!(result.value_of_with_current_parameters(x).is_err());
     assert!(result.constraint_evaluation_with_current_parameters(&model, row).is_err());
     assert!(result.soc_evaluation_with_current_parameters(&model, cone).is_err());

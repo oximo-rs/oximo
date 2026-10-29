@@ -54,7 +54,7 @@ fn gurobi_qp_duals_linear_constraint() {
 
     let dual = result.dual_of(cap).expect("matching model").expect("dual missing for cap");
     assert!((dual.abs() - 2.0).abs() < 1e-5, "dual={dual}");
-    let rc = result.reduced_costs.get(&x.var_id().unwrap()).copied();
+    let rc = result.reduced_costs.get(x.var_id().unwrap());
     assert!(rc.expect("reduced cost missing").abs() < 1e-5, "rc={rc:?}");
 }
 

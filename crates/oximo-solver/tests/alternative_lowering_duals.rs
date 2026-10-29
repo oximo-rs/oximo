@@ -37,7 +37,7 @@ fn explicit_ir_conversion_preserves_semantic_evaluation_and_dual_defaults() {
     result.add_solution([(x.var_id().unwrap(), 1.5)].into_iter().collect(), None);
     let result = finalize_result(result, &model, model.num_variables());
     assert_eq!(result.dual_of(handle).unwrap(), None);
-    assert_eq!(result.dual[&handle.row_id()], 0.5);
+    assert_eq!(result.dual.get(handle.row_id()).unwrap(), 0.5);
 
     let evaluation = result.constraint_evaluation(&model, handle).unwrap().unwrap();
     assert_eq!(evaluation.activity, 1.5);
@@ -72,7 +72,7 @@ fn finalization_uses_saved_parameters_and_preserves_explicit_semantic_mappings()
         }
         let result = finalize_result(result, &model, num_variables);
         assert_eq!(result.dual_of(scaled).unwrap(), mapped.then_some(1.0));
-        assert_eq!(result.dual[&scaled.row_id()], 0.5);
+        assert_eq!(result.dual.get(scaled.row_id()).unwrap(), 0.5);
         assert!(result.parameters.same_bits(&parameters));
         assert!(result.best().unwrap().parameters.same_bits(&parameters));
         assert_eq!(result.value_of(cost * x).unwrap(), Some(3.0));
@@ -131,7 +131,7 @@ fn alternative_dual_defaults_survive_normalization_and_preserve_explicit_mapping
 
         assert_eq!(result.dual_of(direct).unwrap(), Some(1.0));
         assert_eq!(result.dual_of(scaled).unwrap(), None);
-        assert_eq!(result.dual[&scaled.row_id()], 0.5);
+        assert_eq!(result.dual.get(scaled.row_id()).unwrap(), 0.5);
         let report = result.report(&model).unwrap().to_string();
         assert!(report.contains("direct  dual = 1"), "{report}");
         assert!(report.contains("scaled  dual = n/a"), "{report}");
@@ -141,7 +141,7 @@ fn alternative_dual_defaults_survive_normalization_and_preserve_explicit_mapping
         let mapped = finalize_result(mapped.with_semantic_dual_defaults(&model), &model, 2);
 
         assert_eq!(mapped.dual_of(scaled).unwrap(), Some(1.0));
-        assert_eq!(mapped.dual[&scaled.row_id()], 0.5);
+        assert_eq!(mapped.dual.get(scaled.row_id()).unwrap(), 0.5);
         let report = mapped.report(&model).unwrap().to_string();
         assert!(report.contains("scaled  dual = 1"), "{report}");
     }
@@ -324,7 +324,7 @@ fn projection_defaults_cannot_restore_generated_alternative_lowerings() {
             assert_eq!(projected.semantic_dual.get(&original.id()), Some(&None));
             assert_eq!(projected.dual_of(original).unwrap(), None);
             assert!(!projected.semantic_dual.contains_key(&generated.id()));
-            assert!(!projected.dual.contains_key(&generated.row_id()));
+            assert!(projected.dual.get(generated.row_id()).is_none());
             assert_eq!(projected.dual_of(generated).unwrap(), None);
 
             if let Some(later) = later {

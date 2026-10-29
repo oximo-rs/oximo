@@ -709,7 +709,7 @@ pub mod benchmark_support {
                     .zip(self.inner.cons.par_iter())
                     .with_min_len(VALUE_MIN_LEN)
                     .for_each_with(vec![0.0; self.inner.regs.len()], |regs, (out, slot)| {
-                        *out = slot_value(slot, &self.point, &self.inner.params, regs);
+                        *out = slot_value(slot, &self.point, self.inner.params.values(), regs);
                     });
             } else {
                 self.inner.eval_constraints(&self.point, &mut self.values);

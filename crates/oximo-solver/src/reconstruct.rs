@@ -6,13 +6,65 @@
 //! the original model's coordinates.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::hash::{BuildHasher, Hash};
+use std::fmt::Write as FmtWrite;
 
-use oximo_core::{ConstraintId, Model, ModelId, SemanticConstraintId, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
+use oximo_core::{
+    ConstraintId, Model, ModelId, SemanticConstraintId, SocConstraint, SocConstraintId, VarId,
+};
+use rustc_hash::FxHashSet;
 
-use crate::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationStatus};
+use crate::{
+    DualStatus, PrimalStatus, SolutionIndexError, SolutionPoint, SolutionValueId, SolutionValues,
+    SolverResult, TerminationStatus,
+};
+
+/// Require at least one usable multiplier for each active constraint group.
+/// Backends select the algebraic row IDs; SOC IDs are indices into `socs`.
+/// Algebraic multipliers must be finite, and SOC multipliers must also be nonnegative.
+///
+/// # Panics
+/// Panics if an active SOC index exceeds `u32::MAX`.
+pub fn require_active_dual_evidence(
+    result: &mut SolverResult,
+    active_rows: impl IntoIterator<Item = ConstraintId>,
+    socs: &[SocConstraint],
+) {
+    if result.dual_status != DualStatus::FeasiblePoint {
+        return;
+    }
+
+    let mut active_rows = active_rows.into_iter().peekable();
+    let missing_rows = active_rows.peek().is_some()
+        && (result.dual.is_empty()
+            || !active_rows.any(|id| result.dual.get(id).is_some_and(f64::is_finite)));
+    let mut active_socs = socs.iter().enumerate().filter(|(_, soc)| soc.active).peekable();
+    let missing_socs = active_socs.peek().is_some()
+        && (result.soc_dual.is_empty()
+            || !active_socs.any(|(index, _)| {
+                result
+                    .soc_dual
+                    .get(SocConstraintId(u32::try_from(index).unwrap()))
+                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+            }));
+
+    if missing_rows || missing_socs {
+        result.dual_status = DualStatus::Unknown;
+        let log = result.raw_log.get_or_insert_with(String::new);
+        if !log.is_empty() {
+            log.push('\n');
+        }
+
+        let group = match (missing_rows, missing_socs) {
+            (true, true) => "algebraic and SOC",
+            (true, false) => "algebraic",
+            _ => "SOC",
+        };
+        let _ = write!(
+            log,
+            "No multiplier captured for active {group} constraints; dual status is Unknown."
+        );
+    }
+}
 
 /// Finalize a backend result in the source model's coordinates.
 /// Applies semantic dual safeguards and the common result contract in one pass.
@@ -21,19 +73,49 @@ use crate::{DualStatus, PrimalStatus, SolutionPoint, SolverResult, TerminationSt
 /// has since gained variables (for example, from a solver callback).
 ///
 /// # Panics
-/// Panics for a foreign result, foreign points, or conflicting parameter snapshots.
+/// Panics if the captured variable count exceeds the model's current count,
+/// or for a foreign result, foreign points, or conflicting parameter snapshots.
 #[inline]
+#[track_caller]
 pub fn finalize_result(
     result: SolverResult,
     model: &oximo_core::Model,
     num_variables: usize,
 ) -> SolverResult {
+    let coordinates =
+        SourceCoordinates { variables: num_variables, ..SourceCoordinates::capture(model) };
+    finalize_result_with_coordinates(result, model, coordinates)
+}
+
+/// Finalize using variable, algebraic-row, SOC, and PSD counts captured before
+/// solving.
+///
+/// Counts describe ID prefixes.
+/// Use [`SourceProjection`] for interleaved source and generated IDs or
+/// a fallible coordinate/provenance check.
+///
+/// # Panics
+/// Panics if captured counts exceed the model's current counts, or for a foreign
+/// result, foreign points, or conflicting parameter snapshots.
+#[inline]
+#[track_caller]
+pub fn finalize_result_with_coordinates(
+    result: SolverResult,
+    model: &Model,
+    coordinates: SourceCoordinates,
+) -> SolverResult {
+    let plan = SourceProjectionPlan::new(coordinates);
+    check_source_coordinates(model, &plan).unwrap_or_else(|error| panic!("{error}"));
     finalize_result_retaining(
         result,
         model,
-        &SourceIndices::Prefix(num_variables),
-        &FxHashSet::default(),
-        None,
+        &plan.variables,
+        &plan.retained,
+        ProjectionCoordinates {
+            rows: &plan.rows,
+            soc: coordinates.soc_constraints,
+            psd: coordinates.psd_constraints,
+        },
     )
 }
 
@@ -99,12 +181,10 @@ fn finalize_result_retaining(
     model: &oximo_core::Model,
     variables: &SourceIndices,
     retained: &FxHashSet<VarId>,
-    projection: Option<ProjectionCoordinates<'_>>,
+    projection: ProjectionCoordinates<'_>,
 ) -> SolverResult {
     let result = normalize_result(result, variables, retained, projection);
-    result.with_semantic_dual_defaults_filtered(model, |id| {
-        projection.is_none_or(|coordinates| coordinates.includes_semantic(id))
-    })
+    result.with_semantic_dual_defaults_filtered(model, |id| projection.includes_semantic(id))
 }
 
 /// One native row's contribution to an original multiplier. Store `None` in
@@ -115,14 +195,28 @@ pub struct DualProjection<K> {
     pub scale: f64,
 }
 
-impl<K: Copy + Eq + Hash> DualProjection<K> {
-    pub fn accumulate<S: BuildHasher>(
+impl<K: SolutionValueId> DualProjection<K> {
+    /// Accumulate a mapped native multiplier into fixed-slot storage.
+    ///
+    /// # Panics
+    /// Panics if the source coordinate is outside the destination slot count.
+    /// Adapters processing native output should use `try_accumulate` instead.
+    #[track_caller]
+    pub fn accumulate(self, values: &mut SolutionValues<K>, value: f64, objective_sign: f64) {
+        accumulate_dual(values, self.source, value, self.scale * objective_sign);
+    }
+
+    /// Accumulate a mapped native multiplier without panicking on a count mismatch.
+    ///
+    /// # Errors
+    /// Returns an out-of-range coordinate error without changing stored values.
+    pub fn try_accumulate(
         self,
-        map: &mut HashMap<K, f64, S>,
+        values: &mut SolutionValues<K>,
         value: f64,
         objective_sign: f64,
-    ) {
-        accumulate_dual(map, self.source, value, self.scale * objective_sign);
+    ) -> Result<(), SolutionIndexError> {
+        try_accumulate_dual(values, self.source, value, self.scale * objective_sign)
     }
 }
 
@@ -147,16 +241,23 @@ pub fn project_primal(
     values: &[f64],
     columns: &[Option<VarId>],
     num_variables: usize,
-) -> Option<FxHashMap<VarId, f64>> {
-    if values.len() != columns.len() {
+) -> Option<SolutionValues<VarId>> {
+    if values.len() != columns.len() || num_variables > columns.len() {
         return None;
     }
-    let mut primal = FxHashMap::default();
+
+    if values.len() == num_variables
+        && columns.iter().enumerate().all(|(index, id)| id.is_some_and(|id| id.index() == index))
+    {
+        return project_dense_primal(values, num_variables);
+    }
+
+    let mut primal = SolutionValues::missing(num_variables);
     for (&value, &column) in values.iter().zip(columns) {
         if let Some(id) = column
             && (id.index() >= num_variables
                 || !value.is_finite()
-                || primal.insert(id, value).is_some())
+                || primal.set(id, Some(value)).is_some())
         {
             return None;
         }
@@ -165,29 +266,57 @@ pub fn project_primal(
 }
 
 /// Use when native columns are original variables in model order.
-pub fn project_dense_primal(values: &[f64], num_variables: usize) -> Option<FxHashMap<VarId, f64>> {
+pub fn project_dense_primal(values: &[f64], num_variables: usize) -> Option<SolutionValues<VarId>> {
     if values.len() != num_variables {
         return None;
     }
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, &value)| {
-            let id = VarId(u32::try_from(index).ok()?);
-            value.is_finite().then_some((id, value))
-        })
-        .collect()
+    if !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    Some(SolutionValues::from_dense(values.to_vec()))
+}
+
+/// Project an owned native vector in model order without copying its allocation.
+/// Every source variable must have a finite value and the slot count must match.
+pub fn project_owned_primal(
+    values: Vec<f64>,
+    num_variables: usize,
+) -> Option<SolutionValues<VarId>> {
+    if values.len() != num_variables || !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    Some(SolutionValues::from_dense(values))
 }
 
 /// Accumulate a known native multiplier with its adapter-supplied coordinate
-/// factor. Missing values must not call this helper with a fabricated zero.
-pub fn accumulate_dual<K: Eq + Hash, S: BuildHasher>(
-    map: &mut HashMap<K, f64, S>,
+/// factor. Missing multipliers must not be replaced by fabricated zeros.
+///
+/// # Panics
+/// Panics if `id` is outside the fixed slot count. Native adapters should use
+/// [`try_accumulate_dual`] and handle a count mismatch deliberately.
+#[track_caller]
+pub fn accumulate_dual<K: SolutionValueId>(
+    values: &mut SolutionValues<K>,
     id: K,
     value: f64,
     factor: f64,
 ) {
-    *map.entry(id).or_insert(0.0) += value * factor;
+    try_accumulate_dual(values, id, value, factor).unwrap_or_else(|error| {
+        panic!("solution ID {id:?} outside slot count {}", error.slot_count)
+    });
+}
+
+/// Fallible native multiplier accumulation.
+///
+/// # Errors
+/// Returns [`SolutionIndexError`] for a coordinate outside the fixed slot count.
+pub fn try_accumulate_dual<K: SolutionValueId>(
+    values: &mut SolutionValues<K>,
+    id: K,
+    value: f64,
+    factor: f64,
+) -> Result<(), SolutionIndexError> {
+    values.try_accumulate(id, value * factor)
 }
 
 /// Overflow-resistant symmetric relative gap in original objective units.
@@ -218,7 +347,7 @@ fn normalize_result(
     mut result: SolverResult,
     source_variables: &SourceIndices,
     retained: &FxHashSet<VarId>,
-    projection: Option<ProjectionCoordinates<'_>>,
+    projection: ProjectionCoordinates<'_>,
 ) -> SolverResult {
     for (index, point) in result.solutions.iter().enumerate() {
         assert!(
@@ -240,11 +369,16 @@ fn normalize_result(
     let mut first = true;
     let mut lost_incumbent = false;
     let expected = source_variables.len();
+    let primal_extent = retained
+        .iter()
+        .map(|id| id.index().saturating_add(1))
+        .fold(source_variables.upper_bound(), usize::max);
     result.solutions.retain_mut(|point| {
+        point.primal.truncate(primal_extent);
         let mut source_count = 0usize;
         point.primal.retain(|id, value| {
             let source = source_variables.contains(id.index());
-            let keep = (source || retained.contains(id)) && value.is_finite();
+            let keep = (source || retained.contains(&id)) && value.is_finite();
             if keep && source {
                 source_count += 1;
             }
@@ -253,6 +387,9 @@ fn normalize_result(
         point.objective = point.objective.filter(|v| v.is_finite());
         // Retained generated coordinates do not count toward source completeness.
         let valid = source_count == expected;
+        if valid {
+            point.primal.compact_if_excess();
+        }
         if first {
             lost_incumbent = !valid;
             first = false;
@@ -293,36 +430,28 @@ fn normalize_result(
 fn normalize_duals(
     result: &mut SolverResult,
     source_variables: &SourceIndices,
-    projection: Option<ProjectionCoordinates<'_>>,
+    coordinates: ProjectionCoordinates<'_>,
 ) {
     if result.dual_status != DualStatus::FeasiblePoint {
         result.semantic_dual.clear();
-        result.dual.clear();
-        result.soc_dual.clear();
+        result.dual = SolutionValues::default();
+        result.soc_dual = SolutionValues::default();
         result.psd_dual.clear();
-        result.reduced_costs.clear();
+        result.reduced_costs = SolutionValues::default();
         return;
     }
 
-    if let Some(coordinates) = projection {
-        match coordinates.rows {
-            SourceIndices::Prefix(count) => {
-                normalize_projected_duals(result, source_variables, coordinates, |row| {
-                    row.index() < *count
-                });
-            }
-            SourceIndices::Explicit { ids, .. } => {
-                normalize_projected_duals(result, source_variables, coordinates, |row| {
-                    ids.contains(&row.index())
-                });
-            }
+    match coordinates.rows {
+        SourceIndices::Prefix(count) => {
+            normalize_projected_duals(result, source_variables, coordinates, |row| {
+                row.index() < *count
+            });
         }
-    } else {
-        result.semantic_dual.values_mut().for_each(normalize_semantic_multiplier);
-        result.dual.retain(|_, value| value.is_finite());
-        result.soc_dual.retain(|_, value| value.is_finite() && *value >= 0.0);
-        result.psd_dual.retain(|_, matrix| matrix.upper_triangle().iter().all(|v| v.is_finite()));
-        result.reduced_costs.retain(|_, value| value.is_finite());
+        SourceIndices::Explicit { ids, .. } => {
+            normalize_projected_duals(result, source_variables, coordinates, |row| {
+                ids.contains(&row.index())
+            });
+        }
     }
 }
 
@@ -339,6 +468,9 @@ fn normalize_projected_duals(
     coordinates: ProjectionCoordinates<'_>,
     keep_row: impl Fn(ConstraintId) -> bool,
 ) {
+    result.dual.truncate(coordinates.rows.upper_bound());
+    result.soc_dual.truncate(coordinates.soc);
+    result.reduced_costs.truncate(source_variables.upper_bound());
     let keep_semantic = |id| match id {
         SemanticConstraintId::Algebraic(row) => keep_row(row),
         _ => coordinates.includes_semantic(id),
@@ -359,23 +491,26 @@ fn normalize_projected_duals(
         });
     }
     if coordinates.rows.len() == 0 {
-        result.dual.clear();
+        result.dual = SolutionValues::default();
     } else {
-        result.dual.retain(|id, value| keep_row(*id) && value.is_finite());
+        result.dual.retain(|id, value| keep_row(id) && value.is_finite());
     }
 
     result
         .soc_dual
-        .retain(|id, value| id.index() < coordinates.soc && value.is_finite() && *value >= 0.0);
+        .retain(|id, value| id.index() < coordinates.soc && value.is_finite() && value >= 0.0);
     result.psd_dual.retain(|id, matrix| {
         id.index() < coordinates.psd && matrix.upper_triangle().iter().all(|v| v.is_finite())
     });
     result
         .reduced_costs
         .retain(|id, value| source_variables.contains(id.index()) && value.is_finite());
+    result.dual.compact_if_excess();
+    result.soc_dual.compact_if_excess();
+    result.reduced_costs.compact_if_excess();
 }
 
-/// Coordinate counts captured from a source model before a reformulation.
+/// Coordinate counts captured from a source model before solving or reformulation.
 ///
 /// Entities appended by a reformulation have IDs at or above these bounds.
 /// For an in-place reformulation, capture this before modifying the model.
@@ -558,7 +693,7 @@ impl<'a> SourceProjection<'a> {
         self
     }
 
-    /// Keep explicitly listed generated variables in each projected primal map.
+    /// Keep explicitly listed generated variables in each projected primal point.
     ///
     /// Source variables are always kept. Use this for generated coordinates
     /// that remain intentionally queryable after projection, such as GDP Hull
@@ -634,9 +769,9 @@ impl<'a> SourceProjection<'a> {
         // explicitly retained generated variables.
         if reevaluate.is_some() {
             for point in &mut result.solutions {
-                point
-                    .primal
-                    .retain(|id, _| source_variables.contains(id.index()) || retained.contains(id));
+                point.primal.retain(|id, _| {
+                    source_variables.contains(id.index()) || retained.contains(&id)
+                });
             }
         }
 
@@ -660,11 +795,11 @@ impl<'a> SourceProjection<'a> {
             source,
             source_variables,
             retained,
-            Some(ProjectionCoordinates {
+            ProjectionCoordinates {
                 rows,
                 soc: coordinates.soc_constraints,
                 psd: coordinates.psd_constraints,
-            }),
+            },
         ))
     }
 }

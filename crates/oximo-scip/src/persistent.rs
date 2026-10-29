@@ -4,10 +4,10 @@ use crate::{
     translate::Snapshot,
 };
 use oximo_core::{Model, ModelKind, SosType, VarId};
+use oximo_solver::SolutionValues;
 use oximo_solver::resident::PersistentPreparation;
 use oximo_solver::{Solver, SolverError, SolverResult};
 use russcip::{Model as Native, ProblemCreated, ProblemOrSolving, Solved};
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 
@@ -17,7 +17,7 @@ struct State {
     snapshot: Arc<Snapshot>,
     options: ScipOptions,
     shared: SharedState,
-    incumbent: FxHashMap<VarId, f64>,
+    incumbent: SolutionValues<VarId>,
 }
 
 /// Reuses original SCIP problems on unchanged and append-only solves. Existing
@@ -91,7 +91,7 @@ impl ScipPersistent {
             Some(state) => state.snapshot.refresh(model, &prepared, self.preparation.change())?,
             None => Arc::new(Snapshot::prepare_view(model, &prepared)?),
         };
-        let old = self.state.take();
+        let mut old = self.state.take();
         let dense_edits = matches!(self.preparation.change(),oximo_solver::resident::PreparationChange::Selected(targets)
             if targets.len() > snapshot.rows.len().div_ceil(8).max(16));
 
@@ -108,9 +108,9 @@ impl ScipPersistent {
                     || (coefficient_reuse && snapshot.linear_edits_compatible(&s.snapshot)))
         });
         let previous = old
-            .as_ref()
+            .as_mut()
             .filter(|s| snapshot.columns.starts_with(&s.snapshot.columns))
-            .map(|s| s.incumbent.clone())
+            .map(|s| std::mem::take(&mut s.incumbent))
             .unwrap_or_default();
         let (mut native, mapping, shared) = if reusable {
             let s = old.expect("resident state");
@@ -216,12 +216,12 @@ fn add_start(
     native: &Native<ProblemCreated>,
     mapping: &ScipMapping,
     model: &Model,
-    previous: &FxHashMap<VarId, f64>,
+    previous: &SolutionValues<VarId>,
 ) -> Result<(), SolverError> {
     let values = model
         .variables()
         .iter()
-        .filter_map(|v| v.initial.or_else(|| previous.get(&v.id).copied()).map(|x| (v.id, x)))
+        .filter_map(|v| v.initial.or_else(|| previous.get(v.id)).map(|x| (v.id, x)))
         .collect::<Vec<_>>();
     if values.is_empty() {
         return Ok(());

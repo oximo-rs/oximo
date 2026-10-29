@@ -3,12 +3,13 @@
 //! both the exact-derivative path ([`crate::exact`], enzyme) and the
 //! stable hybrid path ([`crate::stable`]).
 
+use oximo_solver::SolutionValues;
 use oximo_solver::prepare::LoweringContext;
 use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 
 use std::time::{Duration, Instant};
 
-use oximo_core::{ConstraintId, Model, ModelKind, ObjectiveSense, SocConstraintId, VarId};
+use oximo_core::{Model, ModelKind, ObjectiveSense};
 use oximo_solver::{
     DualStatus, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
 };
@@ -430,7 +431,7 @@ pub(crate) fn map_status(s: ApplicationReturnStatus) -> TerminationStatus {
 /// and the reduced cost is `sign * (z_l − z_u)`.
 pub(crate) fn assemble(
     sign: f64,
-    o: Outcome,
+    mut o: Outcome,
     elapsed: Duration,
     model: &Model,
     parameters: oximo_solver::ParameterSnapshot,
@@ -440,31 +441,24 @@ pub(crate) fn assemble(
     let has_point = o.has_point;
 
     let mut solutions = Vec::new();
-    let mut dual: FxHashMap<ConstraintId, f64> = FxHashMap::default();
-    let mut reduced_costs: FxHashMap<VarId, f64> = FxHashMap::default();
-    let mut soc_dual: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
+    let mut dual = SolutionValues::default();
+    let mut reduced_costs = SolutionValues::default();
+    let mut soc_dual = SolutionValues::default();
 
     if has_point {
-        let primal = oximo_solver::reconstruct::project_dense_primal(&o.x, num_variables)
-            .unwrap_or_default();
-        for (i, &l) in o.lambda.iter().enumerate() {
-            dual.insert(
-                ConstraintId(u32::try_from(i).expect("constraint count overflow")),
-                -sign * l,
-            );
+        let primal =
+            oximo_solver::reconstruct::project_owned_primal(o.x, num_variables).unwrap_or_default();
+        for value in &mut o.lambda {
+            *value *= -sign;
         }
-        if let Some(red) = &o.reduced {
-            for (i, &r) in red.iter().enumerate() {
-                reduced_costs
-                    .insert(VarId(u32::try_from(i).expect("variable count overflow")), sign * r);
+        dual = SolutionValues::from_dense(o.lambda);
+        if let Some(mut red) = o.reduced {
+            for value in &mut red {
+                *value *= sign;
             }
+            reduced_costs = SolutionValues::from_dense(red);
         }
-        for (i, &value) in o.soc_dual.iter().enumerate() {
-            soc_dual.insert(
-                SocConstraintId(u32::try_from(i).expect("SOC constraint count overflow")),
-                value,
-            );
-        }
+        soc_dual = SolutionValues::from_dense(o.soc_dual);
         solutions.push(SolutionPoint {
             model_id,
             primal,
