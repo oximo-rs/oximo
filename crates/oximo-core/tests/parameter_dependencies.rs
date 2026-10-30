@@ -1,6 +1,121 @@
 use oximo_core::prelude::*;
 
 #[test]
+fn declaration_snapshots_share_storage_and_detach_only_on_registry_writes() {
+    let model = Model::new("declaration snapshots");
+
+    param!(model, p = 2.0);
+    let key = model.__update_key();
+    let original = model.parameters().as_ptr();
+    let first = model.parameter_declarations();
+    assert_eq!(first.as_ptr(), original);
+
+    let second = model.parameter_declarations();
+    assert_eq!(first.model_id(), model.id());
+    assert_eq!(first.as_ptr(), second.as_ptr());
+    assert_eq!(key, model.__update_key());
+
+    model.set_param(p, 7.0).unwrap();
+    assert_eq!(first.as_ptr(), model.parameter_declarations().as_ptr());
+
+    let fork = model.fork();
+    assert_eq!(first.as_ptr(), fork.parameter_declarations().as_ptr());
+
+    param!(model, later = 3.0);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, p.param_id().unwrap());
+    assert_eq!(first[0].name, "p");
+    assert_eq!(model.parameter_declarations().len(), 2);
+    assert_ne!(first.as_ptr(), model.parameter_declarations().as_ptr());
+    assert_eq!(model.parameter_declarations()[1].id, later.param_id().unwrap());
+}
+
+#[test]
+fn declaration_capture_remains_valid_while_the_registry_is_borrowed() {
+    let model = Model::new("borrowed declaration snapshot");
+
+    param!(model, _p = 2.0);
+    let registry = model.parameters();
+    let captured = model.parameter_declarations();
+    assert_eq!(captured.len(), registry.len());
+    assert_eq!(captured[0].name, registry[0].name);
+    assert_ne!(captured.as_ptr(), registry.as_ptr());
+
+    drop(registry);
+    param!(model, _later = 3.0);
+    assert_eq!(captured.len(), 1);
+    assert_eq!(model.parameter_declarations().len(), 2);
+}
+
+#[test]
+fn declaration_capture_during_a_read_borrow_keeps_already_shared_storage() {
+    let model = Model::new("shared borrowed declarations");
+
+    param!(model, _p = 2.0);
+    let first = model.parameter_declarations();
+    let key = model.__update_key();
+    let registry = model.parameters();
+    let second = model.parameter_declarations();
+    assert_eq!(second.as_ptr(), first.as_ptr());
+    assert_eq!(second.as_ptr(), registry.as_ptr());
+    assert_eq!(key, model.__update_key());
+
+    drop(registry);
+    param!(model, _later = 3.0);
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_ne!(second.as_ptr(), model.parameter_declarations().as_ptr());
+}
+
+#[test]
+fn declaration_prefix_checks_handle_shared_changed_and_missing_registries() {
+    let source = Model::new("prefix metadata");
+
+    param!(source, _p = 2.0);
+    let source_declarations = source.parameter_declarations();
+    let fork = source.fork();
+    assert!(source_declarations.matches_prefix(&fork.parameter_declarations(), 1));
+
+    param!(fork, _generated = 3.0);
+    assert!(source_declarations.matches_prefix(&fork.parameter_declarations(), 1));
+    assert!(!source_declarations.matches_prefix(&fork.parameter_declarations(), 2));
+
+    let unrelated = Model::new("different names");
+    param!(unrelated, _q = 2.0);
+    assert!(!source_declarations.matches_prefix(&unrelated.parameter_declarations(), 1));
+    assert!(!source_declarations.matches_prefix(&Model::new("empty").parameter_declarations(), 1));
+    assert!(source_declarations.matches_prefix(&Model::new("empty").parameter_declarations(), 0));
+}
+
+#[test]
+fn parameter_lineage_tracks_forks_siblings_and_indexed_family_boundaries() {
+    let root = Model::new("parameter lineage");
+
+    param!(root, p[i in 0..600] = 2.0);
+    let left = root.fork();
+    param!(root, later = 5.0);
+    let root_later = later;
+    let right = root.fork();
+    param!(left, later = 99.0);
+
+    assert_eq!(left.shared_parameter_prefix(&root), Some(600));
+    assert_eq!(root.shared_parameter_prefix(&right), Some(601));
+    assert_eq!(left.shared_parameter_prefix(&right), Some(600));
+    assert_eq!(right.shared_parameter_prefix(&left), Some(600));
+
+    let child = left.fork();
+    assert_eq!(child.shared_parameter_prefix(&left), Some(601));
+    assert_eq!(child.shared_parameter_prefix(&root), Some(600));
+
+    root.set_param_idx(&p, 0, 7.0).unwrap();
+    assert_eq!(root.shared_parameter_prefix(&right), Some(601));
+    assert_eq!(left.shared_parameter_prefix(&left), Some(601));
+    assert_eq!(root.shared_parameter_prefix(&Model::new("independent")), None);
+    assert_eq!(root.param_value(root_later.param_id().unwrap()), 5.0);
+    assert_eq!(left.param_value(later.param_id().unwrap()), 99.0);
+}
+
+#[test]
 fn dependencies_cover_objective_bounds_and_native_rows() {
     let model = Model::new("parameter dependencies");
     param!(model, objective_scale = 2.0);

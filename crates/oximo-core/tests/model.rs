@@ -1,6 +1,91 @@
 use oximo_core::prelude::*;
 
 #[test]
+fn fork_lineage_freezes_each_structural_prefix_and_refreshes_cached_counts() {
+    use oximo_core::ModelPrefix;
+
+    let source = Model::new("structural prefixes");
+    variable!(source, x);
+    variable!(source, t >= 0.0);
+    variable!(source, binary, Binary);
+
+    let mut expected = ModelPrefix { variables: 3, ..ModelPrefix::default() };
+    let mut forks = vec![(source.fork(), expected)];
+    variable!(source, _later);
+    expected.variables += 1;
+    forks.push((source.fork(), expected));
+    constraint!(source, x <= 1.0);
+    expected.algebraic_constraints += 1;
+    forks.push((source.fork(), expected));
+
+    soc_constraint!(source, [x] <= t);
+    expected.soc_constraints += 1;
+    forks.push((source.fork(), expected));
+
+    psd_constraint!(source, SymmetricMatrix::from_upper_triangle(1, [x]));
+    expected.psd_constraints += 1;
+    forks.push((source.fork(), expected));
+
+    source.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]);
+    expected.sos_constraints += 1;
+    forks.push((source.fork(), expected));
+
+    indicator_constraint!(source, binary == 1 => x <= 1.0);
+    expected.indicator_constraints += 1;
+    forks.push((source.fork(), expected));
+
+    param!(source, _p = 2.0);
+    expected.parameters += 1;
+    forks.push((source.fork(), expected));
+    assert_eq!(source.inherited_prefix(&source), Some(expected));
+
+    for (fork, saved) in forks {
+        assert_eq!(fork.inherited_prefix(&source), Some(saved));
+        assert_eq!(fork.fork().inherited_prefix(&source), Some(saved));
+        assert_eq!(source.inherited_prefix(&fork), None);
+        assert_eq!(fork.inherited_prefix(&source.fork()), None);
+    }
+}
+
+#[test]
+fn deep_fork_lineage_is_queried_and_dropped_without_recursion() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let root = Model::new("deep lineage");
+            let mut descendant = root.fork();
+            for _ in 0..6_000 {
+                descendant = descendant.fork();
+            }
+            assert!(descendant.inherits_from(&root));
+            assert_eq!(descendant.shared_parameter_prefix(&root), Some(0));
+            drop(descendant);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn ancestry_is_directional_even_without_parameters() {
+    let root = Model::new("root");
+
+    let child = root.fork();
+    let sibling = root.fork();
+    let grandchild = child.fork();
+    let unrelated = Model::new("unrelated");
+    assert!(root.inherits_from(&root));
+    assert!(child.inherits_from(&root));
+    assert!(grandchild.inherits_from(&child));
+    assert!(grandchild.inherits_from(&root));
+    assert!(!root.inherits_from(&child));
+    assert!(!child.inherits_from(&grandchild));
+    assert!(!child.inherits_from(&sibling));
+    assert!(!sibling.inherits_from(&child));
+    assert!(!child.inherits_from(&unrelated));
+}
+
+#[test]
 fn classifies_lp() {
     let m = Model::new("lp");
     variable!(m, x >= 0.0);

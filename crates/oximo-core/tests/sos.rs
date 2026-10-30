@@ -164,6 +164,9 @@ fn single_sos_reformulation_is_independent_and_tracks_artifacts() {
 
     let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
     assert_ne!(transformed.id(), m.id());
+    assert!(transformed.inherits_from(&m));
+    assert!(!m.inherits_from(&transformed));
+    assert!(transformed.fork().inherits_from(&m));
 
     assert_eq!(m.num_variables(), 2);
     assert_eq!(m.constraints().algebraic().len(), 0);

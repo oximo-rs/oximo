@@ -587,6 +587,73 @@ impl Model {
         self.parameters.borrow()
     }
 
+    /// Capture immutable declaration IDs and names without copying the registry.
+    #[must_use]
+    pub fn parameter_declarations(&self) -> crate::ParameterDeclarations {
+        let nonempty = self.num_parameters() != 0;
+        crate::ParameterDeclarations {
+            model_id: self.id(),
+            parameters: nonempty.then(|| self.parameters.snapshot()),
+        }
+    }
+
+    /// Whether this is the same model as `ancestor`, or was forked from it
+    /// directly or through other forks/reformulations.
+    /// Use [`Self::inherited_prefix`] to check which ancestor declarations were inherited.
+    #[must_use]
+    pub fn inherits_from(&self, ancestor: &Model) -> bool {
+        self.id() == ancestor.id() || self.lineage.iter().any(|(id, _)| id == ancestor.id())
+    }
+
+    pub(super) fn lineage_prefix(&self) -> super::ModelPrefix {
+        super::ModelPrefix {
+            variables: self.num_variables(),
+            parameters: self.num_parameters(),
+            algebraic_constraints: self.constraints.borrow().len(),
+            soc_constraints: self.num_soc_constraints(),
+            psd_constraints: self.num_psd_constraints(),
+            sos_constraints: self.num_sos_constraints(),
+            indicator_constraints: self.num_indicator_constraints(),
+        }
+    }
+
+    /// Registry prefixes inherited from `ancestor` when this model's branch
+    /// was forked. Later ancestor declarations are excluded, even when their IDs
+    /// collide with declarations added independently in this branch.
+    ///
+    /// Returns current counts for the same model, or `None` if this model is not
+    /// a descendant of `ancestor`.
+    #[must_use]
+    pub fn inherited_prefix(&self, ancestor: &Model) -> Option<super::ModelPrefix> {
+        if self.id() == ancestor.id() {
+            return Some(self.lineage_prefix());
+        }
+        self.lineage.iter().find_map(|(id, prefix)| (id == ancestor.id()).then_some(*prefix))
+    }
+
+    /// Number of parameter IDs inherited by both models from their most recent
+    /// common ancestor.
+    ///
+    /// Returns `None` for independently constructed models.
+    #[must_use]
+    pub fn shared_parameter_prefix(&self, other: &Model) -> Option<usize> {
+        if self.id() == other.id() {
+            return Some(self.parameters.borrow().len());
+        }
+        let own_count = self.parameters.borrow().len();
+        let other_count = other.parameters.borrow().len();
+        let own_depth = self.lineage.depth();
+        let other_depth = other.lineage.depth();
+        let own = std::iter::once((self.id(), own_count))
+            .chain(self.lineage.iter().map(|(id, prefix)| (id, prefix.parameters)))
+            .skip(own_depth.saturating_sub(other_depth));
+        let theirs = std::iter::once((other.id(), other_count))
+            .chain(other.lineage.iter().map(|(id, prefix)| (id, prefix.parameters)))
+            .skip(other_depth.saturating_sub(own_depth));
+        own.zip(theirs)
+            .find_map(|((a, count), (b, inherited))| (a == b).then_some(count.min(inherited)))
+    }
+
     pub fn num_parameters(&self) -> usize {
         self.parameters.borrow().len()
     }
