@@ -113,6 +113,7 @@ struct SourceKey {
     algebraic_constraints: usize,
     soc_constraints: usize,
     psd_constraints: usize,
+    parameters: usize,
 }
 
 impl SourceKey {
@@ -126,6 +127,7 @@ impl SourceKey {
             algebraic_constraints: model.constraints().algebraic().len(),
             soc_constraints: model.num_soc_constraints(),
             psd_constraints: model.num_psd_constraints(),
+            parameters: model.parameters().len(),
         }
     }
 }
@@ -140,12 +142,15 @@ fn source_plan(model: &Model) -> SourceProjectionPlan {
     let row_ranges = || provenance.row_ranges().iter().cloned();
     let variables = total_variables - variable_ranges().map(|range| range.len()).sum::<usize>();
     let rows = total_rows - row_ranges().map(|range| range.len()).sum::<usize>();
-    let mut plan = SourceProjectionPlan::new(SourceCoordinates {
-        variables,
-        algebraic_constraints: rows,
-        soc_constraints: model.num_soc_constraints(),
-        psd_constraints: model.num_psd_constraints(),
-    });
+    let mut plan = SourceProjectionPlan::with_coordinates(
+        model,
+        SourceCoordinates {
+            variables,
+            algebraic_constraints: rows,
+            soc_constraints: model.num_soc_constraints(),
+            psd_constraints: model.num_psd_constraints(),
+        },
+    );
     if !source_is_prefix(variables, variable_ranges()) {
         plan = plan.with_source_variables(
             source_indices(total_variables, variable_ranges())

@@ -36,6 +36,12 @@ impl ParameterSnapshot {
         &self.0
     }
 
+    /// Keep only parameter IDs below `count`, preserving exact value bits.
+    /// Shares the existing storage when no values need to be removed.
+    pub fn prefix(&self, count: usize) -> Self {
+        if count >= self.0.len() { self.clone() } else { Self(Arc::new(self.0[..count].to_vec())) }
+    }
+
     /// Compare exact parameter representations, including signed zero and NaN payloads.
     pub fn same_bits(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)

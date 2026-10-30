@@ -2,6 +2,7 @@ mod classify;
 mod constraints;
 mod dependencies;
 mod indexed;
+mod lineage;
 mod semantic;
 mod variables;
 
@@ -9,6 +10,7 @@ pub use classify::ModelKind;
 pub use constraints::{ConstraintRef, ModelConstraints};
 pub use dependencies::{ModelParameterSnapshot, ParameterDependencies, ParameterTarget};
 pub use indexed::{IndexedVarBuilder, display_index_key};
+pub use lineage::ModelPrefix;
 pub use semantic::SemanticConstraints;
 
 #[cfg(feature = "benchmark-support")]
@@ -113,6 +115,7 @@ pub struct Model {
     pub(crate) variables: SharedCell<Vec<Variable>>,
     pub(crate) var_names: SharedCell<FxHashMap<SmolStr, VarId>>,
     pub(crate) parameters: SharedCell<Vec<Parameter>>,
+    lineage: lineage::ModelLineage,
     pub(crate) param_names: SharedCell<FxHashMap<SmolStr, ParamId>>,
     pub(crate) semantics: LazySharedCell<semantic::SemanticRegistry>,
     implicit_scalars: Cell<bool>,
@@ -250,6 +253,8 @@ impl Model {
     }
 
     /// Share registries until mutation while preserving stable IDs and independent ownership.
+    /// All structural-copy paths must use this helper so forks and reformulations
+    /// record ancestry for `Model::inherits_from` and result projection.
     pub(crate) fn clone_preserving_ids_with_capacity(
         &self,
         additional_variables: usize,
@@ -268,6 +273,7 @@ impl Model {
             variables: self.variables.clone(),
             var_names: self.var_names.clone(),
             parameters: self.parameters.clone(),
+            lineage: self.lineage.forked(self.id(), self.lineage_prefix()),
             param_names: self.param_names.clone(),
             semantics: self.semantics.clone(),
             implicit_scalars: Cell::new(self.implicit_scalars.get()),
@@ -328,6 +334,7 @@ impl Model {
             variables: SharedCell::new(Vec::new()),
             var_names: SharedCell::new(FxHashMap::default()),
             parameters: SharedCell::new(Vec::new()),
+            lineage: lineage::ModelLineage::default(),
             param_names: SharedCell::new(FxHashMap::default()),
             semantics: LazySharedCell::default(),
             implicit_scalars: Cell::new(true),

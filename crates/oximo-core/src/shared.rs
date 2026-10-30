@@ -102,16 +102,37 @@ impl<T: Clone + Default> Clone for SharedCell<T> {
         let Ok(mut storage) = self.0.try_borrow_mut() else {
             return Self::new(self.borrow().clone());
         };
+        Self(
+            RefCell::new(CellStorage::Shared(share_registry(&mut storage))),
+            Cell::new(self.1.get()),
+        )
+    }
+}
 
-        let shared = match &mut *storage {
-            CellStorage::Owned(value) => {
-                let shared = Arc::new(std::mem::take(value));
-                *storage = CellStorage::Shared(Arc::clone(&shared));
-                shared
-            }
-            CellStorage::Shared(value) => Arc::clone(value),
+impl<T: Clone + Default> SharedCell<T> {
+    /// Promote owned storage once and share an immutable view without recording
+    /// a logical mutation.
+    pub(crate) fn snapshot(&self) -> Arc<T> {
+        let Ok(mut storage) = self.0.try_borrow_mut() else {
+            return match &*self.0.borrow() {
+                CellStorage::Owned(value) => Arc::new(value.clone()),
+                CellStorage::Shared(value) => Arc::clone(value),
+            };
         };
-        Self(RefCell::new(CellStorage::Shared(shared)), Cell::new(self.1.get()))
+
+        share_registry(&mut storage)
+    }
+}
+
+#[inline]
+fn share_registry<T: Default>(storage: &mut CellStorage<T>) -> Arc<T> {
+    match storage {
+        CellStorage::Owned(value) => {
+            let shared = Arc::new(std::mem::take(value));
+            *storage = CellStorage::Shared(Arc::clone(&shared));
+            shared
+        }
+        CellStorage::Shared(value) => Arc::clone(value),
     }
 }
 

@@ -391,7 +391,7 @@ fn eval_hashed<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Result
 
 /// The `next`-th lowering dependency of `id` (the `next`-th child), or `None`
 /// when all children have been yielded.
-fn eval_child(arena: &ExprArena, id: ExprId, next: usize) -> Option<ExprId> {
+pub(crate) fn eval_child(arena: &ExprArena, id: ExprId, next: usize) -> Option<ExprId> {
     match arena.get(id) {
         ExprNode::Add(children)
         | ExprNode::Mul(children)

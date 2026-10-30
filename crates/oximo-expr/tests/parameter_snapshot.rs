@@ -5,6 +5,22 @@ use oximo_expr::{
 
 struct Variables;
 
+#[test]
+fn snapshot_prefix_preserves_bits_and_shares_storage_when_unchanged() {
+    let mut arena = ExprArena::new();
+    let zero = arena.new_param(-0.0);
+    let extra = arena.new_param(7.0);
+    let saved = arena.parameter_snapshot();
+    assert_eq!(saved.prefix(2).values().as_ptr(), saved.values().as_ptr());
+    assert_eq!(saved.prefix(3).values().as_ptr(), saved.values().as_ptr());
+
+    let prefix = saved.prefix(1);
+    assert_eq!(prefix.value(zero).unwrap().to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(prefix.value(extra), None);
+    assert_eq!(saved.prefix(0).values(), []);
+    assert_eq!(saved.value(extra), Some(7.0));
+}
+
 impl EvalContext for Variables {
     fn var(&self, _: VarId) -> Option<f64> {
         Some(3.0)

@@ -56,11 +56,11 @@ pub use indicator::{
 };
 pub use model::{
     ConstraintRef, IndexedVarBuilder, Model, ModelConstraints, ModelKind, ModelParameterSnapshot,
-    ParameterDependencies, ParameterTarget, display_index_key,
+    ModelPrefix, ParameterDependencies, ParameterTarget, display_index_key,
 };
 pub use objective::{Objective, ObjectiveFunction, ObjectiveSense, SemanticObjective};
 pub use oximo_expr::ModelError;
-pub use param::Parameter;
+pub use param::{Parameter, ParameterDeclarations};
 pub use reformulation::{
     IndicatorReformulationArtifacts, IndicatorReformulationOptions, ReformulatedModel,
     ReformulationDisplay, ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
@@ -90,9 +90,10 @@ pub use var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable, var_name
 // Re-export the expression handle so downstream code does not need a separate
 // `oximo-expr` import.
 pub use oximo_expr::{
-    AffineBuilder, Children, EvalError, Expr, ExprArena, ExprArenaCell, ExprArenaSnapshot,
-    ExprArenaWriteGuard, ExprId, ExprNode, ModelId, ModelMismatchError, ParamId, ParameterSnapshot,
-    UnaryOp, VarId, describe_nonlinear_term, dot, render_expr, render_linear_terms,
+    AffineBuilder, CapturedExpr, Children, EvalError, Expr, ExprArena, ExprArenaCell,
+    ExprArenaSnapshot, ExprArenaWriteGuard, ExprId, ExprNode, ModelId, ModelMismatchError, ParamId,
+    ParameterSnapshot, UnaryOp, VarId, describe_nonlinear_term, dot, render_expr,
+    render_linear_terms,
 };
 
 pub use oximo_macros::{
