@@ -60,6 +60,13 @@ impl<'a> Expr<'a> {
     }
 }
 impl<'a, D: Degree> Expr<'a, D> {
+    /// Capture an immutable, owned copy of this expression's reachable graph.
+    /// Parameter values are supplied separately when evaluating the capture.
+    #[must_use]
+    pub fn capture(self) -> crate::CapturedExpr {
+        crate::CapturedExpr::new(self.model_id(), &self.arena().borrow(), self.id())
+    }
+
     #[inline]
     pub(crate) fn from_id(id: ExprId, arena: &'a ExprArenaCell) -> Self {
         Self {

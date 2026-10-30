@@ -3,6 +3,7 @@
 
 mod affine_builder;
 mod arena;
+mod captured;
 mod classify;
 pub mod degree;
 mod eval;
@@ -22,6 +23,7 @@ pub use arena::{
     ExprArenaWriteGuard, ExprId, ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ModelId,
     ModelMismatchError, ParamId, ParameterSnapshot, UnaryOp, VarId,
 };
+pub use captured::CapturedExpr;
 pub use classify::{ExprClass, classify};
 pub use degree::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
 pub use eval::{EvalContext, EvalError, WithParameters, evaluate};
