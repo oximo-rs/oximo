@@ -8,7 +8,7 @@ note: the function `normalize_result` is defined here
  --> src/reconstruct.rs
   |
   | / fn normalize_result(
-  | |     mut result: SolverResult,
+  | |     result: SolverResult,
   | |     source_variables: &SourceIndices,
   | |     retained: &FxHashSet<VarId>,
   | |     projection: ProjectionCoordinates<'_>,

@@ -195,23 +195,23 @@ appends generated variables, rows, and cones. `SourceProjection` maps a result
 solved on that model back to the source:
 
 ```rust,ignore
-let coordinates = SourceCoordinates::capture(&source);
+let plan = SourceProjectionPlan::capture(&source);
 let transformed = source.to_reformulated_sos_model(options)?;
 let result = solver.solve(&transformed, &solver_options)?;
 
-let projected = SourceProjection::with_coordinates(&source, coordinates)
+let projected = SourceProjection::with_plan(&source, &plan)
     .from_transformed(&transformed)
     .with_objective(ObjectiveTransform { sign: 1.0, offset: 0.0 })
-    .reevaluate_objective(|point| point.value_of(x + y).ok().flatten())
+    .reevaluate_objective_expr(x + y)?
     .project(result)?;
 ```
 
 The projection drops generated variables, algebraic rows, SOC/PSD cones, and
 their reduced costs and multipliers. It rebinds provenance to the source
-identity and preserves the solve-time parameter snapshot.
+identity and preserves the solve-time source parameter values.
 
 For an in-place reformulation (`reformulate_sos`, `reformulate_indicators`),
-capture `SourceCoordinates` before transforming, then omit `from_transformed`
+capture a `SourceProjectionPlan` before transforming, then omit `from_transformed`
 because the result already belongs to the source identity.
 
 ## Writing a new backend

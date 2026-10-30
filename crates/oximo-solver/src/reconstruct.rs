@@ -9,7 +9,8 @@ use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 
 use oximo_core::{
-    ConstraintId, Model, ModelId, SemanticConstraintId, SocConstraint, SocConstraintId, VarId,
+    ConstraintId, Model, ModelId, ParameterDeclarations, SemanticConstraintId, SocConstraint,
+    SocConstraintId, VarId,
 };
 use rustc_hash::FxHashSet;
 
@@ -343,29 +344,36 @@ pub fn relative_gap(primal: Option<f64>, bound: Option<f64>) -> Option<f64> {
 /// Panics if a point's model identity or captured parameters conflict with the result.
 /// Use [`SolverResult::for_model`] and [`SolverResult::add_solution`] to assemble
 /// points from a single captured parameter state.
+#[inline]
 fn normalize_result(
-    mut result: SolverResult,
+    result: SolverResult,
     source_variables: &SourceIndices,
     retained: &FxHashSet<VarId>,
     projection: ProjectionCoordinates<'_>,
 ) -> SolverResult {
-    for (index, point) in result.solutions.iter().enumerate() {
-        assert!(
-            point.model_id == oximo_core::ModelId::UNASSIGNED || point.model_id == result.model_id,
-            "model identity mismatch for solution {index}; assigned points must belong to the result's model"
-        );
-        let detached = point.model_id == oximo_core::ModelId::UNASSIGNED
-            && point.parameters.values().is_empty();
-        assert!(
-            detached || point.parameters.same_bits(&result.parameters),
-            "parameter snapshot mismatch for solution {index}; use SolverResult::for_model and add_solution to capture consistent parameters"
-        );
-    }
+    validate_result_points(&result).unwrap_or_else(|error| panic!("{error}"));
+    normalize_validated_result(
+        ValidatedResult(result),
+        source_variables,
+        retained,
+        projection,
+        |_| {},
+    )
+}
+
+/// Proof that point provenance was checked before any rebinding or callbacks.
+struct ValidatedResult(SolverResult);
+
+#[inline]
+fn normalize_validated_result(
+    ValidatedResult(mut result): ValidatedResult,
+    source_variables: &SourceIndices,
+    retained: &FxHashSet<VarId>,
+    projection: ProjectionCoordinates<'_>,
+    mut prepare_point: impl FnMut(&mut SolutionPoint),
+) -> SolverResult {
     let model_id = result.model_id;
-    for point in &mut result.solutions {
-        point.model_id = model_id;
-        point.parameters = result.parameters.clone();
-    }
+    let parameter_count = result.parameters.values().len();
     let mut first = true;
     let mut lost_incumbent = false;
     let expected = source_variables.len();
@@ -374,21 +382,39 @@ fn normalize_result(
         .map(|id| id.index().saturating_add(1))
         .fold(source_variables.upper_bound(), usize::max);
     result.solutions.retain_mut(|point| {
+        let detached =
+            point.model_id == ModelId::UNASSIGNED && point.parameters.values().is_empty();
+        point.model_id = model_id;
+
+        // Projection may also have removed a transformed-only parameter suffix.
+        if detached || point.parameters.values().len() > parameter_count {
+            point.parameters = result.parameters.clone();
+        }
         point.primal.truncate(primal_extent);
-        let mut source_count = 0usize;
-        point.primal.retain(|id, value| {
-            let source = source_variables.contains(id.index());
-            let keep = (source || retained.contains(&id)) && value.is_finite();
-            if keep && source {
-                source_count += 1;
-            }
-            keep
-        });
-        point.objective = point.objective.filter(|v| v.is_finite());
+        let source_count =
+            if matches!(source_variables, SourceIndices::Prefix(_)) && retained.is_empty() {
+                // Truncation already establishes membership for a source prefix.
+                // We don't repeat ID/hash checks and a counter update for every value.
+                point.primal.retain(|_, value| value.is_finite());
+                point.primal.len()
+            } else {
+                let mut count = 0usize;
+                point.primal.retain(|id, value| {
+                    let source = source_variables.contains(id.index());
+                    let keep = (source || retained.contains(&id)) && value.is_finite();
+                    if keep && source {
+                        count += 1;
+                    }
+                    keep
+                });
+                count
+            };
         // Retained generated coordinates do not count toward source completeness.
         let valid = source_count == expected;
         if valid {
             point.primal.compact_if_excess();
+            prepare_point(point);
+            point.objective = point.objective.filter(|v| v.is_finite());
         }
         if first {
             lost_incumbent = !valid;
@@ -517,6 +543,8 @@ fn normalize_projected_duals(
 /// Later source declarations can interleave with generated IDs; provide an
 /// explicit source sets through [`SourceProjection::with_source_variables`] and
 /// [`SourceProjection::with_source_rows`] in that case.
+/// These counts do not include parameter declarations. Use
+/// [`SourceProjectionPlan::capture`] to freeze those at the same boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceCoordinates {
     pub variables: usize,
@@ -545,8 +573,72 @@ impl SourceCoordinates {
 pub enum ProjectionError {
     #[error("source {kind} coordinates ({count}) exceed the source model's {available}")]
     CoordinatesExceedSource { kind: &'static str, count: usize, available: usize },
+    #[error(
+        "source {kind} coordinates extend to {count}, but the transformed model inherited only the first {inherited}"
+    )]
+    CoordinatesNotInherited { kind: &'static str, count: usize, inherited: usize },
     #[error("result belongs to model {actual:?}, expected {expected:?}")]
     ForeignResult { expected: ModelId, actual: ModelId },
+    #[error("expression belongs to model {actual:?}, expected {expected:?}")]
+    ForeignExpression { expected: ModelId, actual: ModelId },
+    #[error(
+        "parameter {parameter:?} is {source_name:?} in the source model, but {transformed_name:?} in the transformed model"
+    )]
+    IncompatibleParameter {
+        parameter: oximo_expr::ParamId,
+        source_name: String,
+        transformed_name: Option<String>,
+    },
+    #[error(
+        "transformed model {transformed_model:?} does not descend from source model {source_model:?}"
+    )]
+    UnrelatedTransformation { source_model: ModelId, transformed_model: ModelId },
+    #[error("projection plan belongs to source model {actual:?}, expected {expected:?}")]
+    ForeignSourcePlan { expected: ModelId, actual: ModelId },
+    #[error(
+        "model identity mismatch for solution {solution}: point belongs to model {actual:?}, expected {expected:?}"
+    )]
+    ForeignPoint { solution: usize, expected: ModelId, actual: ModelId },
+    #[error(
+        "parameter snapshot mismatch for solution {solution}: changed IDs {changed_parameters:?}; result has {result_parameters} parameters, point has {point_parameters}; use SolverResult::for_model and add_solution to capture consistent parameters"
+    )]
+    ParameterSnapshotMismatch {
+        solution: usize,
+        result_parameters: usize,
+        point_parameters: usize,
+        changed_parameters: Vec<oximo_expr::ParamId>,
+    },
+}
+
+impl From<oximo_core::ModelMismatchError> for ProjectionError {
+    fn from(error: oximo_core::ModelMismatchError) -> Self {
+        Self::ForeignExpression { expected: error.expected, actual: error.actual }
+    }
+}
+
+/// Validate native point provenance before any source-coordinate rebinding.
+#[inline]
+fn validate_result_points(result: &SolverResult) -> Result<(), ProjectionError> {
+    for (solution, point) in result.solutions.iter().enumerate() {
+        if point.model_id != ModelId::UNASSIGNED && point.model_id != result.model_id {
+            return Err(ProjectionError::ForeignPoint {
+                solution,
+                expected: result.model_id,
+                actual: point.model_id,
+            });
+        }
+        let detached =
+            point.model_id == ModelId::UNASSIGNED && point.parameters.values().is_empty();
+        if !detached && !point.parameters.same_bits(&result.parameters) {
+            return Err(ProjectionError::ParameterSnapshotMismatch {
+                solution,
+                result_parameters: result.parameters.values().len(),
+                point_parameters: point.parameters.values().len(),
+                changed_parameters: result.parameters.changed_parameters(&point.parameters),
+            });
+        }
+    }
+    Ok(())
 }
 
 type SourceObjective<'a> = Box<dyn Fn(&SolutionPoint) -> Option<f64> + 'a>;
@@ -555,15 +647,33 @@ type SourceObjective<'a> = Box<dyn Fn(&SolutionPoint) -> Option<f64> + 'a>;
 ///
 /// Build once, then borrow with [`SourceProjection::with_plan`] for each solve.
 /// Rebuild after source or generated entities change.
-#[derive(Clone, Debug)]
+/// Plans captured with [`Self::capture`] or [`Self::with_coordinates`] are pinned
+/// to the exact source model identity.
+#[derive(Clone)]
 pub struct SourceProjectionPlan {
     coordinates: SourceCoordinates,
     variables: SourceIndices,
     rows: SourceIndices,
     retained: FxHashSet<VarId>,
+    parameters: Option<ParameterDeclarations>,
+}
+
+impl std::fmt::Debug for SourceProjectionPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceProjectionPlan")
+            .field("coordinates", &self.coordinates)
+            .field("source_variables", &self.variables.len())
+            .field("source_rows", &self.rows.len())
+            .field("retained_variables", &self.retained.len())
+            .field("source_model", &self.parameters.as_ref().map(ParameterDeclarations::model_id))
+            .field("parameter_count", &self.parameters.as_ref().map(|prefix| prefix.len()))
+            .finish()
+    }
 }
 
 impl SourceProjectionPlan {
+    /// Use raw coordinate counts. Parameters are captured when a projector is
+    /// constructed from this plan; use [`Self::capture`] to freeze them earlier.
     #[must_use]
     pub fn new(coordinates: SourceCoordinates) -> Self {
         Self {
@@ -571,7 +681,21 @@ impl SourceProjectionPlan {
             rows: SourceIndices::Prefix(coordinates.algebraic_constraints),
             coordinates,
             retained: FxHashSet::default(),
+            parameters: None,
         }
+    }
+
+    /// Capture coordinate counts and an immutable parameter declaration prefix
+    /// before solving or transforming.
+    #[must_use]
+    pub fn capture(source: &Model) -> Self {
+        Self::with_coordinates(source, SourceCoordinates::capture(source))
+    }
+
+    /// Capture parameters now while using previously captured coordinate counts.
+    #[must_use]
+    pub fn with_coordinates(source: &Model, coordinates: SourceCoordinates) -> Self {
+        Self { parameters: Some(source.parameter_declarations()), ..Self::new(coordinates) }
     }
 
     /// Replace the source-variable prefix with exactly these IDs.
@@ -616,7 +740,7 @@ impl SourceProjectionPlan {
 /// - drops generated variables, rows, SOC/PSD cones, and reduced costs, except
 ///   for generated variables explicitly listed with [`Self::retain_variables`];
 /// - rebinds the result and its points to the source model identity;
-/// - preserves the solve-time parameter snapshot;
+/// - preserves solve-time source parameters and removes transformed-only suffixes;
 /// - optionally restores the objective convention and re-evaluates the source
 ///   objective on each projected point;
 /// - applies [`finalize_result`] so the usual result contract holds.
@@ -629,16 +753,21 @@ impl SourceProjectionPlan {
 /// Generated multipliers are dropped rather than reinterpreted in source
 /// coordinates. Semantic duals remain subject to the usual explicit-mapping
 /// rules; an unavailable value stays unavailable.
+///
+/// Model and point provenance are checked at runtime.
 pub struct SourceProjection<'a> {
     source: &'a Model,
     plan: Cow<'a, SourceProjectionPlan>,
     objective: ObjectiveTransform,
     reevaluate: Option<SourceObjective<'a>>,
     transformed: Option<&'a Model>,
+    parameters: ParameterDeclarations,
+    parameter_count: usize,
 }
 
 impl<'a> SourceProjection<'a> {
-    /// Capture the source counts now.
+    /// Capture coordinate counts and the source parameter declaration prefix now.
+    /// Later parameters remain unavailable through this projector.
     ///
     /// Use [`Self::with_coordinates`] when an in-place reformulation has already
     /// appended generated entities.
@@ -647,27 +776,37 @@ impl<'a> SourceProjection<'a> {
         Self::with_coordinates(source, SourceCoordinates::capture(source))
     }
 
-    /// Use counts captured before the model was transformed.
+    /// Use coordinate counts captured earlier and freeze parameter declarations
+    /// now.
     #[must_use]
     pub fn with_coordinates(source: &'a Model, coordinates: SourceCoordinates) -> Self {
+        let parameters = source.parameter_declarations();
+        let plan = SourceProjectionPlan::new(coordinates);
+        let parameter_count = parameters.len();
         Self {
             source,
-            plan: Cow::Owned(SourceProjectionPlan::new(coordinates)),
+            plan: Cow::Owned(plan),
             objective: ObjectiveTransform { sign: 1.0, offset: 0.0 },
             reevaluate: None,
             transformed: None,
+            parameters,
+            parameter_count,
         }
     }
 
-    /// Borrow a reusable plan without allocating or copying its membership sets.
+    /// Borrow a reusable plan without copying its membership sets.
     #[must_use]
     pub fn with_plan(source: &'a Model, plan: &'a SourceProjectionPlan) -> Self {
+        let parameters = plan.parameters.clone().unwrap_or_else(|| source.parameter_declarations());
+        let parameter_count = parameters.len();
         Self {
             source,
             plan: Cow::Borrowed(plan),
             objective: ObjectiveTransform { sign: 1.0, offset: 0.0 },
             reevaluate: None,
             transformed: None,
+            parameters,
+            parameter_count,
         }
     }
 
@@ -712,8 +851,13 @@ impl<'a> SourceProjection<'a> {
     }
 
     /// Require the result to belong to this transformed model.
+    ///
+    /// The transformed model must be the source itself or a descendant fork or
+    /// reformulation.
     #[must_use]
     pub fn from_transformed(mut self, transformed: &'a Model) -> Self {
+        let inherited = self.source.shared_parameter_prefix(transformed).unwrap_or(usize::MAX);
+        self.parameter_count = self.parameters.len().min(inherited);
         self.transformed = Some(transformed);
         self
     }
@@ -732,8 +876,9 @@ impl<'a> SourceProjection<'a> {
     /// Replace each projected objective with the source expression evaluated at
     /// the projected point.
     ///
-    /// The callback receives source coordinates and the solve-time parameter
-    /// snapshot. Returning `None` reports the value as unavailable instead of
+    /// The callback receives source coordinates, the solve-time parameter
+    /// snapshot, and an objective already restored by [`Self::with_objective`].
+    /// Returning `None` reports the value as unavailable instead of
     /// retaining a native epigraph value. When supplied, this takes precedence
     /// over [`Self::with_objective`] for solution objectives.
     #[must_use]
@@ -745,62 +890,161 @@ impl<'a> SourceProjection<'a> {
         self
     }
 
+    /// Re-evaluate a source expression using a captured expression graph and each
+    /// point's solve-time parameters.
+    ///
+    /// Captures the graph now, so later objective declarations and parameter
+    /// writes do not change the expression being evaluated. Missing variables or
+    /// solve-time parameters, and non-finite values, make the objective unavailable.
+    ///
+    /// # Errors
+    /// Returns an ownership error if the expression belongs to another model.
+    pub fn reevaluate_objective_expr<D: oximo_expr::Degree>(
+        self,
+        expression: oximo_expr::Expr<'_, D>,
+    ) -> Result<Self, ProjectionError> {
+        if expression.model_id() != self.source.id() {
+            return Err(oximo_core::ModelMismatchError::new(
+                self.source.id(),
+                expression.model_id(),
+            )
+            .into());
+        }
+        let expression = expression.capture();
+        Ok(self.reevaluate_objective(move |point| {
+            expression
+                .evaluate(&point.primal, &point.parameters)
+                .ok()
+                .filter(|value| value.is_finite())
+        }))
+    }
+
+    /// Check coordinates, parameter identity, and all point provenance without
+    /// consuming the result or invoking objective reevaluation.
+    ///
+    /// # Errors
+    /// Returns the same validation errors as [`Self::project`].
+    pub fn validate(&self, result: &SolverResult) -> Result<(), ProjectionError> {
+        check_source_coordinates(self.source, &self.plan)?;
+        if self.parameters.model_id() != self.source.id() {
+            return Err(ProjectionError::ForeignSourcePlan {
+                expected: self.source.id(),
+                actual: self.parameters.model_id(),
+            });
+        }
+        let native = self.transformed.unwrap_or(self.source);
+        if result.model_id != native.id() {
+            return Err(ProjectionError::ForeignResult {
+                expected: native.id(),
+                actual: result.model_id,
+            });
+        }
+        if native.id() != self.source.id() {
+            let inherited = native.inherited_prefix(self.source).ok_or(
+                ProjectionError::UnrelatedTransformation {
+                    source_model: self.source.id(),
+                    transformed_model: native.id(),
+                },
+            )?;
+            for (kind, count, inherited) in [
+                ("variable", self.plan.variables.upper_bound(), inherited.variables),
+                ("algebraic row", self.plan.rows.upper_bound(), inherited.algebraic_constraints),
+                (
+                    "SOC constraint",
+                    self.plan.coordinates.soc_constraints,
+                    inherited.soc_constraints,
+                ),
+                (
+                    "PSD constraint",
+                    self.plan.coordinates.psd_constraints,
+                    inherited.psd_constraints,
+                ),
+                ("SOS constraint", self.source.num_sos_constraints(), inherited.sos_constraints),
+                (
+                    "indicator constraint",
+                    self.source.num_indicator_constraints(),
+                    inherited.indicator_constraints,
+                ),
+            ] {
+                if count > inherited {
+                    return Err(ProjectionError::CoordinatesNotInherited {
+                        kind,
+                        count,
+                        inherited,
+                    });
+                }
+            }
+
+            // Retained generated primals must not alias later source variables.
+            if let Some(id) = self.plan.retained.iter().find(|id| {
+                id.index() >= inherited.variables && id.index() < self.source.num_variables()
+            }) {
+                return Err(ProjectionError::CoordinatesNotInherited {
+                    kind: "variable",
+                    count: id.index() + 1,
+                    inherited: inherited.variables,
+                });
+            }
+        }
+        if native.id() != self.source.id() && self.parameter_count != 0 {
+            let transformed = native.parameters();
+            if !self.parameters.matches_prefix(transformed.as_slice(), self.parameter_count) {
+                for parameter in self.parameters.iter().take(self.parameter_count) {
+                    let other = transformed.get(parameter.id.index());
+                    if !other.is_some_and(|p| p.id == parameter.id && p.name == parameter.name) {
+                        return Err(ProjectionError::IncompatibleParameter {
+                            parameter: parameter.id,
+                            source_name: parameter.name.to_string(),
+                            transformed_name: other.map(|p| p.name.to_string()),
+                        });
+                    }
+                }
+            }
+        }
+        validate_result_points(result)
+    }
+
     /// Project the result into the source model's coordinates.
     ///
     /// # Errors
     /// Returns [`ProjectionError`] when the captured coordinates exceed the
     /// source model, or when the result belongs to a model other than the
     /// expected one: the transformed model if [`Self::from_transformed`] was
-    /// set, otherwise the source model.
-    pub fn project(&self, result: SolverResult) -> Result<SolverResult, ProjectionError> {
-        let Self { source, plan, objective, reevaluate, transformed } = self;
-        let SourceProjectionPlan { coordinates, variables: source_variables, rows, retained } =
-            plan.as_ref();
-        check_source_coordinates(source, plan)?;
-        let expected = transformed.map_or_else(|| source.id(), Model::id);
-        if result.model_id != expected {
-            return Err(ProjectionError::ForeignResult { expected, actual: result.model_id });
-        }
-
-        let mut result = result;
-
-        // Generated multipliers and reduced costs have no source meaning.
-        // Primals are filtered by `finalize_result` below, which also keeps
-        // explicitly retained generated variables.
-        if reevaluate.is_some() {
-            for point in &mut result.solutions {
-                point.primal.retain(|id, _| {
-                    source_variables.contains(id.index()) || retained.contains(&id)
-                });
-            }
-        }
-
+    /// set, otherwise the source model. Rejects non-descendant transformations,
+    /// source coordinates outside the inherited prefixes, incompatible parameter IDs/names,
+    /// foreign solution points and conflicting point parameters before invoking
+    /// any reevaluation callback.
+    pub fn project(&self, mut result: SolverResult) -> Result<SolverResult, ProjectionError> {
+        self.validate(&result)?;
+        let Self { source, plan, objective, reevaluate, parameter_count, .. } = self;
+        let SourceProjectionPlan {
+            coordinates, variables: source_variables, rows, retained, ..
+        } = plan.as_ref();
         // Restore objective units on the native certificate.
-        for point in &mut result.solutions {
-            point.objective = point.objective.and_then(|value| objective.restore(value));
-        }
         result.best_bound = result.best_bound.and_then(|value| objective.restore(value));
-
-        // Rebind provenance before evaluating source expressions.
-        result.model_id = source.id();
-        for point in &mut result.solutions {
-            point.model_id = source.id();
-            if let Some(evaluate) = reevaluate {
-                point.objective = evaluate(point);
-            }
+        if result.parameters.values().len() > *parameter_count {
+            result.parameters = result.parameters.prefix(*parameter_count);
         }
-
-        Ok(finalize_result_retaining(
-            result,
-            source,
+        result.model_id = source.id();
+        let projection = ProjectionCoordinates {
+            rows,
+            soc: coordinates.soc_constraints,
+            psd: coordinates.psd_constraints,
+        };
+        let result = normalize_validated_result(
+            ValidatedResult(result),
             source_variables,
             retained,
-            ProjectionCoordinates {
-                rows,
-                soc: coordinates.soc_constraints,
-                psd: coordinates.psd_constraints,
+            projection,
+            |point| {
+                point.objective = point.objective.and_then(|value| objective.restore(value));
+                if let Some(evaluate) = reevaluate {
+                    point.objective = evaluate(point);
+                }
             },
-        ))
+        );
+        Ok(result
+            .with_semantic_dual_defaults_filtered(source, |id| projection.includes_semantic(id)))
     }
 }
 
@@ -812,6 +1056,7 @@ impl std::fmt::Debug for SourceProjection<'_> {
             .field("objective", &self.objective)
             .field("reevaluate", &self.reevaluate.is_some())
             .field("transformed", &self.transformed.map(Model::id))
+            .field("parameters", &self.parameter_count)
             .finish()
     }
 }

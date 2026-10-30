@@ -56,6 +56,19 @@ impl SolutionPoint {
         self.model_id
     }
 
+    /// Evaluate a captured graph with this point's solve-time parameters.
+    /// Returns `Ok(None)` for missing variables or parameters.
+    ///
+    /// # Errors
+    /// Returns an ownership error for a graph captured from another model.
+    pub fn value_of_captured(
+        &self,
+        expression: &oximo_expr::CapturedExpr,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, expression.model_id())?;
+        Ok(expression.evaluate(&self.primal, &self.parameters).ok())
+    }
+
     /// Evaluate ordinary entries of a symmetric matrix at this point.
     /// Uses solve-time parameters. Returns `Ok(None)` if any entry needs a
     /// missing primal variable or a parameter absent from the snapshot.
@@ -463,6 +476,19 @@ impl SolverResult {
     ) -> Result<Option<f64>, ModelMismatchError> {
         ensure_model_id(self.model_id, expr.model_id())?;
         self.solutions.first().map_or(Ok(None), |s| s.value_of(expr))
+    }
+
+    /// Evaluate a captured graph at the best solution using solve-time parameters.
+    /// Returns `Ok(None)` if no solution, variable, or parameter is available.
+    ///
+    /// # Errors
+    /// Returns [`ModelMismatchError`] for a foreign graph or point.
+    pub fn value_of_captured(
+        &self,
+        expression: &oximo_expr::CapturedExpr,
+    ) -> Result<Option<f64>, ModelMismatchError> {
+        ensure_model_id(self.model_id, expression.model_id())?;
+        self.best().map_or(Ok(None), |point| point.value_of_captured(expression))
     }
 
     /// Evaluate the best primal point using current model parameters.

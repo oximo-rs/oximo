@@ -2,6 +2,42 @@ use oximo_core::prelude::*;
 use oximo_solver::{SolutionPoint, SolverResult, reconstruct::finalize_result};
 
 #[test]
+fn captured_result_queries_check_both_owners_and_use_the_best_saved_point() {
+    let model = Model::new("captured result query");
+
+    param!(model, p = 2.0);
+    variable!(model, x);
+    variable!(model, missing);
+    let captured = (p * x).capture();
+    let mut result = SolverResult::for_model(&model);
+    assert_eq!(result.value_of_captured(&captured), Ok(None));
+
+    let foreign = Model::new("foreign captured query");
+
+    variable!(foreign, other);
+    let foreign_captured = other.capture();
+    let foreign_error = ModelMismatchError::new(model.id(), foreign.id());
+    assert_eq!(result.value_of_captured(&foreign_captured), Err(foreign_error));
+
+    model.set_param(p, 7.0).unwrap();
+    for value in [3.0, 5.0] {
+        result.add_solution([(x.var_id().unwrap(), value)].into_iter().collect(), None);
+    }
+    assert_eq!(result.value_of_captured(&captured), Ok(Some(6.0)));
+    assert_eq!(result.solution(1).unwrap().value_of_captured(&captured), Ok(Some(10.0)));
+    assert_eq!(result.value_of_captured(&missing.capture()), Ok(None));
+
+    param!(model, later = 4.0);
+    assert_eq!(result.value_of_captured(&(later * x).capture()), Ok(None));
+    result.solutions[0] =
+        SolutionPoint::new(&foreign, [(other.var_id().unwrap(), 9.0)].into_iter().collect(), None);
+    assert_eq!(
+        result.value_of_captured(&captured),
+        Err(ModelMismatchError::new(foreign.id(), model.id())),
+    );
+}
+
+#[test]
 fn added_solutions_use_the_results_snapshot_even_after_the_model_changes() {
     let model = Model::new("result assembly");
 
@@ -297,7 +333,7 @@ fn normalization_rejects_conflicting_parameter_bits_even_for_detached_points() {
 }
 
 #[test]
-fn normalization_shares_independent_snapshots_with_identical_finite_and_signed_zero_bits() {
+fn normalization_preserves_independent_snapshots_with_identical_finite_and_signed_zero_bits() {
     let model = Model::new("equivalent snapshots");
 
     let finite = 1.25_f64;
@@ -313,16 +349,14 @@ fn normalization_shares_independent_snapshots_with_identical_finite_and_signed_z
         None,
     ));
 
+    let point_storage = result.best().unwrap().parameters.values().as_ptr();
     assert_ne!(
         result.parameters.values().as_ptr(),
         result.best().unwrap().parameters.values().as_ptr()
     );
 
     let result = finalize_result(finalize_result(result, &model, 1), &model, 1);
-    assert_eq!(
-        result.parameters.values().as_ptr(),
-        result.best().unwrap().parameters.values().as_ptr()
-    );
+    assert_eq!(point_storage, result.best().unwrap().parameters.values().as_ptr());
     assert_eq!(result.value_of(p).unwrap().unwrap().to_bits(), finite.to_bits());
     assert_eq!(result.value_of(zero).unwrap().unwrap().to_bits(), (-0.0_f64).to_bits());
 }
