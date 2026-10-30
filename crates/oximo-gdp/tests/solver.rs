@@ -179,6 +179,30 @@ impl Solver for PrimalSolver {
 #[derive(Debug)]
 struct DualSolver;
 
+#[test]
+fn cached_projection_plan_refreshes_when_only_source_parameters_are_added() {
+    let model = Model::new("parameter-only source update");
+
+    param!(model, cost = 2.0);
+    variable!(model, x);
+    boolean_variable!(model, active);
+    logical_constraint!(model, active);
+    objective!(model, Min, cost * x);
+
+    let mut solver = PrimalSolver::default().with_gdp(BigM::default());
+    let first = solver.solve(&model, &()).unwrap();
+    let variables = model.num_variables();
+    let rows = model.constraints().algebraic().len();
+    param!(model, later = 7.0);
+
+    let second = solver.solve(&model, &()).unwrap();
+    assert_eq!(model.num_variables(), variables);
+    assert_eq!(model.constraints().algebraic().len(), rows);
+    assert_eq!(first.value_of(later * x), Ok(None));
+    assert_eq!(second.value_of(later * x), Ok(Some(7.0)));
+    assert_eq!(solver.into_inner().calls, 2);
+}
+
 impl Solver for DualSolver {
     type Options = ();
 
