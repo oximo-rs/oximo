@@ -8,8 +8,14 @@ fn detect_first(m: &Model) -> Option<SocForm> {
     let vars = m.resolved_variables();
     let model_constraints = m.constraints();
     let constraints = model_constraints.algebraic();
-    oximo_expr::extract_quadratic(&arena, constraints[0].lhs)
-        .and_then(|q| oximo_core::__detect_soc_from_quadratic(&vars, &constraints[0], &q))
+    oximo_expr::extract_quadratic(&arena, constraints[0].lhs).and_then(|q| {
+        let form = oximo_core::__detect_soc_from_quadratic(&vars, &constraints[0], &q);
+        assert_eq!(
+            oximo_core::__is_detected_soc_from_quadratic(&vars, &constraints[0], &q),
+            form.is_some(),
+        );
+        form
+    })
 }
 
 #[test]

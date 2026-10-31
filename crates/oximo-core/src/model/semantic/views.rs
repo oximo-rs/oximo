@@ -120,6 +120,34 @@ impl<'a> SemanticConstraints<'a> {
         Some(self.view(self.entry(position)?))
     }
 
+    /// Read a built-in scalar declaration without constructing function/set values.
+    /// Returns `None` for extension declarations, non-scalar constraints, and
+    /// positions outside the registry.
+    pub fn scalar_metadata(&self, position: usize) -> Option<crate::ScalarConstraintMetadata<'_>> {
+        let entry = self.entry(position)?;
+        let (SemanticConstraintId::Algebraic(id), Representation::Scalar) =
+            (entry.id, entry.representation)
+        else {
+            return None;
+        };
+
+        let row = &self.native.algebraic()[id.index()];
+        let signature = row.signature?;
+        let view =
+            self.inactive.as_deref().and_then(|views| views.get(&id)).copied().unwrap_or(
+                ScalarConstraintView { lhs: row.lhs, lower: row.lower, upper: row.upper },
+            );
+
+        Some(crate::ScalarConstraintMetadata {
+            id,
+            name: &row.name,
+            active: row.active,
+            function: signature.function.signature(),
+            set: signature.set.signature(),
+            view,
+        })
+    }
+
     fn entries(&self) -> super::storage::SemanticEntryIter<'_> {
         self.records.as_deref().filter(|_| self.implicit_len.is_none()).map_or_else(
             || super::storage::SemanticEntryIter::implicit(self.implicit_len.unwrap_or(0)),
