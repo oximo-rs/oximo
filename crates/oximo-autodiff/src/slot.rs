@@ -11,7 +11,9 @@ use crate::tape::Tape;
 #[derive(Clone, Debug)]
 pub struct FunctionSlot {
     pub kind: SlotKind,
-    /// Sorted, deduplicated indices of the variables this function touches.
+    /// Sorted, deduplicated structural derivative support. Variables appearing
+    /// only in inactive subexpressions, such as a literal zero power's base,
+    /// are excluded. Use [`crate::sparsity::variable_support`] for syntactic support.
     pub support: Vec<u32>,
     /// Exact structural lower-triangle Hessian pattern. Populated only for
     /// `Nonlinear` slots.

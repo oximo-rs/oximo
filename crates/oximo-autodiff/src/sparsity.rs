@@ -61,7 +61,6 @@ pub(crate) fn structural_sparsity(arena: &ExprArena, root: ExprId) -> Structural
 
 #[derive(Clone, Copy, Default)]
 struct NodeMeta {
-    syntax_epoch: u32,
     active_epoch: u32,
     active_state: u8,
     row: usize,
@@ -71,7 +70,6 @@ struct NodeMeta {
 enum WalkAction {
     ActiveEnter(ExprId),
     ActiveExit(ExprId),
-    Syntax(ExprId),
 }
 
 #[derive(Default)]
@@ -80,7 +78,6 @@ pub(crate) struct SparsityWorkspace {
     meta: Vec<NodeMeta>,
     walk: Vec<WalkAction>,
     order: Vec<ExprId>,
-    syntax_vars: Vec<u32>,
     active_vars: Vec<u32>,
     supports: Vec<u64>,
     clique_covered: Vec<bool>,
@@ -101,7 +98,6 @@ impl SparsityWorkspace {
         self.meta.resize(arena_len, NodeMeta::default());
         self.walk.clear();
         self.order.clear();
-        self.syntax_vars.clear();
         self.active_vars.clear();
         self.supports.clear();
         self.clique_covered.clear();
@@ -110,16 +106,6 @@ impl SparsityWorkspace {
         self.sparse_rows.clear();
         self.sparse_scratch.clear();
         self.sparse_pairs.clear();
-    }
-
-    fn mark_syntax(&mut self, arena: &ExprArena, id: ExprId) -> bool {
-        let meta = &mut self.meta[id.index()];
-        if meta.syntax_epoch == self.epoch {
-            return false;
-        }
-        meta.syntax_epoch = self.epoch;
-        collect_node_vars(arena.get(id), &mut self.syntax_vars);
-        true
     }
 
     fn alloc_row(&mut self, words: usize) -> usize {
@@ -311,23 +297,6 @@ fn collect_node_vars(node: &ExprNode, vars: &mut Vec<u32>) {
     }
 }
 
-fn push_syntax_children(node: &ExprNode, walk: &mut Vec<WalkAction>) {
-    match node {
-        ExprNode::Add(children)
-        | ExprNode::Mul(children)
-        | ExprNode::Min(children)
-        | ExprNode::Max(children) => {
-            walk.extend(children.iter().copied().map(WalkAction::Syntax));
-        }
-        ExprNode::Unary(_, inner) => walk.push(WalkAction::Syntax(*inner)),
-        ExprNode::Pow(base, exp) | ExprNode::Div(base, exp) | ExprNode::Atan2(base, exp) => {
-            walk.push(WalkAction::Syntax(*base));
-            walk.push(WalkAction::Syntax(*exp));
-        }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
-    }
-}
-
 fn push_active_children(arena: &ExprArena, id: ExprId, walk: &mut Vec<WalkAction>) {
     match arena.get(id) {
         ExprNode::Add(children)
@@ -342,10 +311,7 @@ fn push_active_children(arena: &ExprArena, id: ExprId, walk: &mut Vec<WalkAction
             walk.push(WalkAction::ActiveEnter(*num));
         }
         ExprNode::Pow(base, exp) => match arena.get(*exp) {
-            ExprNode::Const(e) if *e == 0.0 => {
-                walk.push(WalkAction::Syntax(*exp));
-                walk.push(WalkAction::Syntax(*base));
-            }
+            ExprNode::Const(e) if *e == 0.0 => {}
             ExprNode::Const(_) => walk.push(WalkAction::ActiveEnter(*base)),
             _ => {
                 walk.push(WalkAction::ActiveEnter(*exp));
@@ -364,13 +330,7 @@ fn build_order_and_variables(arena: &ExprArena, root: ExprId, workspace: &mut Sp
     workspace.walk.push(WalkAction::ActiveEnter(root));
     while let Some(action) = workspace.walk.pop() {
         match action {
-            WalkAction::Syntax(id) => {
-                if workspace.mark_syntax(arena, id) {
-                    push_syntax_children(arena.get(id), &mut workspace.walk);
-                }
-            }
             WalkAction::ActiveEnter(id) => {
-                workspace.mark_syntax(arena, id);
                 let meta = &mut workspace.meta[id.index()];
                 if meta.active_epoch == workspace.epoch {
                     continue;
@@ -390,8 +350,6 @@ fn build_order_and_variables(arena: &ExprArena, root: ExprId, workspace: &mut Sp
             }
         }
     }
-    workspace.syntax_vars.sort_unstable();
-    workspace.syntax_vars.dedup();
     workspace.active_vars.sort_unstable();
     workspace.active_vars.dedup();
 }
@@ -690,10 +648,27 @@ pub(crate) fn structural_sparsity_with_workspace(
         StorageMode::Dense { words } => build_dense_support_rows(arena, workspace, words),
         StorageMode::Sparse => build_sparse_support_rows(arena, workspace),
     }
-    StructuralSparsity {
-        support: workspace.syntax_vars.clone(),
-        hess_pairs: materialize_pattern(workspace, storage),
-    }
+
+    // Derivative support comes from the propagated root row.
+    let row = workspace.meta[root.index()].row;
+    let support = match storage {
+        StorageMode::Dense { words } => {
+            let start = row_start(row, words);
+            let bits = &workspace.supports[start..][..words];
+            workspace
+                .active_vars
+                .iter()
+                .enumerate()
+                .filter_map(|(bit, &var)| has_bit(bits, bit).then_some(var))
+                .collect()
+        }
+        StorageMode::Sparse => workspace.sparse_supports[workspace.sparse_rows[row].clone()]
+            .iter()
+            .map(|&bit| workspace.active_vars[bit])
+            .collect(),
+    };
+
+    StructuralSparsity { support, hess_pairs: materialize_pattern(workspace, storage) }
 }
 
 /// Constraint Jacobian pattern as `(constraint, variable)` index pairs in

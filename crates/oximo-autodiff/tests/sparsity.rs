@@ -2,8 +2,9 @@
 //! compression of the Hessian into Hessian-vector-product seeds.
 #![expect(clippy::unreadable_literal, clippy::cast_precision_loss)]
 
+use oximo_autodiff::FunctionSlot;
 use oximo_autodiff::sparsity::{
-    HessianColoring, hessian_pattern, star_hessian_coloring, variable_support,
+    HessianColoring, hessian_pattern, jacobian_structure, star_hessian_coloring, variable_support,
 };
 use oximo_expr::{ExprArena, ExprNode, UnaryOp, VarId, extract_quadratic};
 use rustc_hash::FxHashSet;
@@ -194,6 +195,84 @@ fn zero_power_keeps_syntactic_support_but_has_no_hessian() {
     let negative_zero = arena.constant(-0.0);
     let negative_zero_root = arena.push(ExprNode::Pow(nonlinear_base, negative_zero));
     assert_eq!(hessian_pattern(&arena, negative_zero_root), vec![]);
+}
+
+#[test]
+fn zero_power_excludes_inactive_variables_from_nonlinear_jacobians() {
+    for exponent in [0.0, -0.0] {
+        for width in [1, 1_024, 1_025] {
+            let mut arena = ExprArena::new();
+            let inactive = var(&mut arena, u32::MAX);
+            let base = arena.push(ExprNode::Unary(UnaryOp::Sin, inactive));
+            let zero = arena.constant(exponent);
+            let power = arena.push(ExprNode::Pow(base, zero));
+            let support: Vec<u32> = (0..width).map(|i| 3 * i + 7).collect();
+            let mut children: Vec<_> = support.iter().map(|&i| var(&mut arena, i)).collect();
+            let sine = arena.push(ExprNode::Unary(UnaryOp::Sin, children[0]));
+            children.extend([power, sine]);
+            let root = arena.push(ExprNode::Add(children.into_iter().collect()));
+
+            let slot = FunctionSlot::classify(&arena, root);
+            assert!(slot.is_nonlinear());
+            assert_eq!(slot.support, support);
+            assert_eq!(slot.hess_pairs, vec![(7, 7)]);
+
+            let expected_jacobian: Vec<_> = support.iter().map(|&i| (0, i as usize)).collect();
+            assert_eq!(jacobian_structure(&[slot]), expected_jacobian);
+
+            let mut syntax_support = support;
+            syntax_support.push(u32::MAX);
+            assert_eq!(variable_support(&arena, root), syntax_support);
+        }
+    }
+}
+
+#[test]
+fn nonlinear_composition_of_zero_power_has_empty_derivative_patterns() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 11);
+    let base = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
+    let zero = arena.constant(0.0);
+    let power = arena.push(ExprNode::Pow(base, zero));
+    let root = arena.push(ExprNode::Unary(UnaryOp::Sin, power));
+
+    let slot = FunctionSlot::classify(&arena, root);
+    assert!(slot.is_nonlinear());
+    assert_eq!(slot.support, []);
+    assert_eq!(slot.hess_pairs, []);
+    assert_eq!(jacobian_structure(&[slot]), []);
+    assert_eq!(variable_support(&arena, root), vec![11]);
+}
+
+#[test]
+fn zero_power_preserves_dependencies_shared_with_an_active_branch() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 11);
+    let base = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
+    let zero = arena.constant(0.0);
+    let power = arena.push(ExprNode::Pow(base, zero));
+    for children in [[power, base], [base, power]] {
+        let root = arena.push(ExprNode::Add(children.into_iter().collect()));
+        let slot = FunctionSlot::classify(&arena, root);
+        assert!(slot.is_nonlinear());
+        assert_eq!(slot.support, vec![11]);
+        assert_eq!(slot.hess_pairs, vec![(11, 11)]);
+    }
+}
+
+#[test]
+fn zero_valued_parameter_exponents_keep_symbolic_derivative_patterns() {
+    let mut arena = ExprArena::new();
+    let x = var(&mut arena, 11);
+    let base = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
+    let parameter = arena.new_param(0.0);
+    let exponent = arena.param(parameter);
+    let root = arena.push(ExprNode::Pow(base, exponent));
+
+    let slot = FunctionSlot::classify(&arena, root);
+    assert!(slot.is_nonlinear());
+    assert_eq!(slot.support, vec![11]);
+    assert_eq!(slot.hess_pairs, vec![(11, 11)]);
 }
 
 #[test]
