@@ -156,31 +156,24 @@ impl MosekPersistent {
 impl Solver for MosekPersistent {
     type Options = MosekOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        oximo_solver::Solver::profile(&crate::Mosek, opts)
+    }
+    fn validate_requirements(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        oximo_solver::Solver::validate_requirements(&crate::Mosek, model, opts, requirements)
+    }
     fn name(&self) -> &str {
         NAME
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        crate::supported(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Solver::domain_support(&crate::Mosek, domain)
-    }
-
-    fn supports_psd(&self) -> bool {
-        true
-    }
-
-    fn supports_model_extra(&self, model: &Model) -> bool {
-        crate::Mosek.supports_model_extra(model)
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
-    }
-
     fn solve(&mut self, model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
+        self.profile(opts).check_model(model).into_result()?;
+
         match self.solve_resident(model, opts) {
             Ok(result) => {
                 self.preparation.commit();

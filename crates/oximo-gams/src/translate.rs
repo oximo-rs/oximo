@@ -45,6 +45,10 @@ pub fn solve(
     opts: &GamsOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
+    oximo_solver::Solver::profile(&crate::Gams::default(), opts)
+        .check_model(model)
+        .into_result()?;
+
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
@@ -852,15 +856,6 @@ fn gams_solve_type_for(kind: ModelKind, nonsmooth: bool) -> &'static str {
     if nonsmooth && kind == ModelKind::NLP { "DNLP" } else { gams_solve_type(kind) }
 }
 
-/// Check expression support and the selected solve type without invoking GAMS.
-pub(crate) fn validate_model(model: &Model, opts: &GamsOptions) -> Result<(), SolverError> {
-    if model.has_active_psd_constraints() {
-        return Err(SolverError::UnsupportedConstraint("PSD"));
-    }
-    let prepared = LoweringContext::new(model)?;
-    validated_solve_type(&prepared, opts).map(|_| ())
-}
-
 /// Use the same operator checks and nonsmooth routing for validation and solving.
 fn validated_solve_type(
     prepared: &LoweringContext<'_>,
@@ -897,23 +892,26 @@ pub(crate) fn validate_indicator_solver(
     model: &Model,
     opts: &GamsOptions,
 ) -> Result<(), SolverError> {
-    if !model.has_active_indicator_constraints() {
-        return Ok(());
+    if model.has_active_indicator_constraints() && !indicator_supported(opts) {
+        Err(SolverError::UnsupportedIndicator)
+    } else {
+        Ok(())
     }
+}
+
+/// Native indicator mappings require a recognized, explicitly selected interface.
+pub(crate) fn indicator_supported(opts: &GamsOptions) -> bool {
     let Some(config) = opts.solver.as_ref() else {
-        return Err(SolverError::UnsupportedIndicator);
+        return false;
     };
     if matches!(
         config,
         crate::GamsSolverConfig::Named(crate::GamsSolver::Custom(_))
             | crate::GamsSolverConfig::Raw(crate::GamsSolver::Custom(_), _)
     ) {
-        return Err(SolverError::UnsupportedIndicator);
+        return false;
     }
-    match config.gams_name() {
-        "COPT" | "CPLEX" | "GUROBI" | "SCIP" | "XPRESS" => Ok(()),
-        _ => Err(SolverError::UnsupportedIndicator),
-    }
+    matches!(config.gams_name(), "COPT" | "CPLEX" | "GUROBI" | "SCIP" | "XPRESS")
 }
 
 #[cfg(test)]
@@ -961,15 +959,7 @@ fn analyze_gams_expressions(prepared: &LoweringContext<'_>) -> Result<bool, Solv
         }
         match arena.get(id) {
             ExprNode::Unary(op, child) => {
-                if matches!(
-                    op,
-                    UnaryOp::Cbrt
-                        | UnaryOp::Expm1
-                        | UnaryOp::Log1p
-                        | UnaryOp::Asinh
-                        | UnaryOp::Acosh
-                        | UnaryOp::Atanh
-                ) {
+                if !crate::supports_operator(oximo_solver::ExpressionOperator::Unary(*op)) {
                     return Err(SolverError::UnsupportedNonlinearOperator {
                         backend: "GAMS",
                         operator: op.name(),

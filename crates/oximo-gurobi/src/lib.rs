@@ -16,10 +16,12 @@ pub use options::{GurobiOptions, GurobiPresolve};
 pub use persistent::GurobiPersistent;
 pub use translate::solve;
 
-use oximo_core::{Model, ModelKind, SosType};
+use oximo_core::{Model, ModelKind};
 use oximo_solver::{
-    Iis, InfeasibilityDiagnosis, PersistentSolver, Solver, SolverError, SolverResult,
+    ExpressionOperator, Iis, InfeasibilityDiagnosis, MODEL_KINDS, PersistentSolver, Solver,
+    SolverError, SolverProfile, SolverResult,
 };
+use std::{borrow::Cow, sync::LazyLock};
 
 /// Gurobi solver handle.
 ///
@@ -52,27 +54,34 @@ pub(crate) const fn supported(kind: ModelKind) -> bool {
     )
 }
 
+static PROFILE: LazyLock<SolverProfile> = LazyLock::new(build_profile);
+
+fn build_profile() -> SolverProfile {
+    use oximo_expr::ExprClass::{Linear, Nonlinear, Quadratic};
+    use oximo_solver::VariableDomain::{Binary, Integer, Real, SemiContinuous, SemiInteger};
+
+    SolverProfile::new(NAME)
+        .with_scalar_constraints([Linear, Quadratic, Nonlinear])
+        .with_scalar_objectives([Linear, Quadratic, Nonlinear])
+        .with_soc(true)
+        .with_kinds(MODEL_KINDS.into_iter().filter(|kind| supported(*kind)))
+        .with_domains([Real, Integer, Binary, SemiContinuous, SemiInteger])
+        .with_operators(
+            ExpressionOperator::ALL.iter().copied().filter(|operator| supports_operator(*operator)),
+        )
+        .with_sos([oximo_core::SosType::Sos1, oximo_core::SosType::Sos2])
+        .with_indicators(true)
+}
+
 impl Solver for Gurobi {
     type Options = GurobiOptions;
 
+    fn profile(&self, _opts: &Self::Options) -> Cow<'_, SolverProfile> {
+        Cow::Borrowed(&PROFILE)
+    }
+
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        supported(kind)
-    }
-
-    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Capability::Native
-    }
-
-    fn supports_sos(&self, _sos_type: SosType) -> bool {
-        true
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
@@ -128,5 +137,19 @@ impl PersistentSolver for Gurobi {
 impl InfeasibilityDiagnosis for Gurobi {
     fn compute_iis(&mut self, model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverError> {
         translate::compute_iis(model, opts)
+    }
+}
+
+/// Translation and preflight share this vocabulary declaration.
+pub(crate) fn supports_operator(operator: oximo_solver::ExpressionOperator) -> bool {
+    use oximo_expr::UnaryOp::{Abs, Cos, Exp, Exp2, Log, Log2, Log10, Neg, Sin, Sqrt, Tan, Tanh};
+    use oximo_solver::ExpressionOperator::{Atan2, Unary};
+    match operator {
+        Unary(op) => matches!(
+            op,
+            Neg | Abs | Sqrt | Exp | Exp2 | Log | Log2 | Log10 | Sin | Cos | Tan | Tanh
+        ),
+        Atan2 => false,
+        _ => true,
     }
 }

@@ -1,12 +1,22 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+pub use oximo_expr::ExprClass;
+
 pub mod translation;
 pub use translation::{
     AffineRowTranslator, PreparedConstraint, TranslationContext, TypedConstraintTranslator,
 };
 pub mod capability;
-pub use capability::{Capability, CapabilityDiagnostic, ConstraintSignature, ModelValidation};
+pub use capability::{
+    CompatibilityReport, ConstraintSignature, MODEL_KINDS, RequirementAlternative,
+    RequirementDiagnostic, RequirementSupport, SolverProfile,
+};
+pub mod requirements;
+pub use requirements::{
+    ExpressionOperator, ModelFeatures, ModelRequirements, Requirement, RequirementEntity,
+    RequirementEntry, RequirementOrigin, VariableDomain,
+};
 pub mod incremental;
 pub mod infeasibility;
 pub mod options;

@@ -19,7 +19,7 @@ pub trait Solver {
     type Options;
 
     fn name(&self) -> &str;
-    fn supports(&self, kind: ModelKind) -> bool;
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, SolverProfile>;
     fn solve(&mut self, model: &Model, opts: &Self::Options) -> Result<SolverResult, SolverError>;
 }
 ```
@@ -28,24 +28,53 @@ Each backend defines its own `Options` type. Users get compile-time validation a
 
 ## Model compatibility
 
-`constraint_support(ConstraintSignature::of::<F, S>(), &options)` checks one
-function/set pair. `objective_support` and `domain_support(domain)` check the
-objective and variable domain separately. Queries return a `Capability`:
+`ModelRequirements::infer(&model)` captures typed domains, function/set pairs,
+objective sense, SOS kinds, operators, prerequisites, and combination facts. Its
+owned entries retain every source ID/name and the original constraint signature.
+Inactive constraints and unreachable expression nodes contribute no requirements.
+Selected lowerings are authoritative; runtime narrowing and existing quadratic
+cone recognition provide alternative supported interfaces.
 
-| Variant                      | Meaning                                                                |
-| ---------------------------- | ---------------------------------------------------------------------- |
-| `Native`                     | The backend implements this interface; whole-model checks still apply. |
-| `Unsupported`                | No supported interface was found.                                      |
-| `RequiresValidation(reason)` | The actual function data or options must be inspected.                 |
+`solver.profile(&options).check(&requirements)` matches that snapshot against the
+adapter's declarations. `profile.check_model(&model)` checks current structural
+requirements directly, reusing revision-valid summaries and materializing source
+names only for diagnostics that need them. Profile queries such as
+`constraint_support(ConstraintSignature::of::<F, S>())`, `objective_support`, and
+`domain_support` describe individual interfaces. Whole-model matching also checks
+combinations.
 
-You can use `solver.validate_model(&model, &options).into_result()?` to check
-the complete combination before solving. For example, HiGHS supports MILP
-and continuous QP separately, but does not support MIQP.
+`solver.validate_model(&model, &options)` additionally runs local data and route
+checks without starting a native solver. Both paths return `CompatibilityReport`:
 
-Direct model registration requires a recognized representation. Opaque custom
-pairs and objectives are rejected during construction. `TranslationContext` and
-`TypedConstraintTranslator` provide explicit typed translation operations; stock
-backends do not discover or invoke external translators automatically.
+| Query            | Meaning                                                         |
+| ---------------- | --------------------------------------------------------------- |
+| `is_supported()` | No known incompatibilities; a solve attempt is allowed.         |
+| `is_confirmed()` | No incompatibilities or unresolved conditions.                  |
+| `errors`         | Typed unmet requirements with all source locations and reasons. |
+| `conditions`     | Explicit uncertainty, such as an unknown external GAMS solver.  |
+
+Each diagnostic retains `alternatives`, pairing every considered requirement
+with its resolved support result. Failed native representations remain available
+alongside the original function signature, including in formatted reports.
+
+```rust
+use oximo_core::prelude::*;
+use oximo_solver::{ExprClass, ExpressionOperator, ModelRequirements, SolverProfile, VariableDomain};
+
+let model = Model::new("inspect");
+variable!(model, x, Integer);
+objective!(model, Min, x.square());
+
+let profile = SolverProfile::new("LP/MILP/QP adapter")
+    .with_scalar_constraints([ExprClass::Linear])
+    .with_scalar_objectives([ExprClass::Linear, ExprClass::Quadratic])
+    .with_kinds([ModelKind::LP, ModelKind::MILP, ModelKind::QP])
+    .with_domains([VariableDomain::Real, VariableDomain::Integer])
+    .with_operators(ExpressionOperator::ALL.iter().copied());
+
+let report = profile.check(&ModelRequirements::infer(&model));
+assert!(!report.is_supported()); // MIQP is an unsupported combination.
+```
 
 ## Shared preparation and reconstruction
 
@@ -218,7 +247,7 @@ because the result already belongs to the source identity.
 
 Mirror the layout of an existing backend crate (`oximo-highs`, `oximo-gurobi`, `oximo-gams`):
 
-1. `lib.rs`: public struct + `impl Solver`. `supports()` declares which `ModelKind`s are handled. `solve()` delegates to `translate::solve`.
+1. `lib.rs`: public struct + `impl Solver`. `profile()` declares interfaces and supported whole-model combinations. `solve()` delegates to `translate::solve`.
 2. `options.rs`: converts `MyOptions` into the backend's native option calls.
 3. `translate.rs`: `Model` -> backend conversion and result extraction.
 

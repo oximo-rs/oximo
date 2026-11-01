@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use oximo_core::prelude::*;
 use oximo_pounce::{MuStrategy, Pounce, PounceAlgorithm, PounceOptions, PounceSolverSelection};
-use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus, UniversalOptionsExt};
+use oximo_solver::{
+    PersistentSolver, Requirement, RequirementEntity, Solver, SolverError, TerminationStatus,
+    UniversalOptionsExt, VariableDomain,
+};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     assert!((got - want).abs() < tol, "{what}: got {got}, want {want}");
@@ -82,7 +85,7 @@ fn overflowed_print_level_is_rejected() {
     objective!(m, Min, x);
 
     let err = Pounce.solve(&m, &PounceOptions::default().print_level(u32::MAX)).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(_)), "{err}");
+    assert!(matches!(err, SolverError::Backend(_) | SolverError::IncompatibleModel(_)), "{err}");
 }
 
 #[test]
@@ -147,7 +150,14 @@ fn integer_models_are_rejected() {
     objective!(m, Min, x);
 
     let err = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+    assert!(
+        matches!(&err, SolverError::IncompatibleModel(report)
+        if report.errors.iter().any(|diagnostic|
+            diagnostic.requirement == Requirement::Domain(VariableDomain::Integer)
+                && diagnostic.origins.iter().any(|origin|
+                    origin.entity == RequirementEntity::Variable(x.var_id().unwrap())))),
+        "{err}"
+    );
 }
 
 #[test]
@@ -156,13 +166,20 @@ fn sos_constraints_are_rejected_consistently() {
     variable!(m, x >= 0.0);
     variable!(m, y >= 0.0);
     objective!(m, Min, x + y);
-    sos_constraint!(m, ordered, SOS1, [(x, 1.0), (y, 2.0)]);
+    let ordered = sos_constraint!(m, ordered, SOS1, [(x, 1.0), (y, 2.0)]);
 
     let cold = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(cold, SolverError::UnsupportedSos));
     let mut persistent = Pounce.persistent();
     let resident = persistent.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(resident, SolverError::UnsupportedSos));
+    for error in [cold, resident] {
+        assert!(
+            matches!(&error, SolverError::IncompatibleModel(report)
+            if report.errors.iter().any(|diagnostic|
+                diagnostic.requirement == Requirement::Sos(SosType::Sos1)
+                    && diagnostic.constraint() == Some(ordered.id()))),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -177,7 +194,12 @@ fn soc_constraints_are_rejected_in_mixed_models() {
 
     assert_eq!(m.kind(), ModelKind::NLP);
     let err = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::SOCP)));
+    assert!(
+        matches!(&err, SolverError::IncompatibleModel(report)
+        if report.errors.iter().any(|diagnostic|
+            diagnostic.requirement == Requirement::AdapterRestriction("POUNCE route"))),
+        "{err}"
+    );
 }
 
 #[test]
@@ -267,11 +289,17 @@ fn unknown_option_is_rejected() {
 
     let opts = PounceOptions::default().set("not_a_real_option", 1);
     let err = Pounce.solve(&m, &opts).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(_)), "cold: got {err:?}");
+    assert!(
+        matches!(err, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+        "cold: got {err:?}"
+    );
 
     let mut solver = Pounce.persistent();
     let err = solver.solve(&m, &opts).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(_)), "persistent: got {err:?}");
+    assert!(
+        matches!(err, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+        "persistent: got {err:?}"
+    );
 }
 
 #[test]
@@ -281,10 +309,16 @@ fn invalid_option_value_is_rejected() {
     objective!(m, Min, (x - 2.0).powi(2));
 
     let err = Pounce.solve(&m, &PounceOptions::default().set("mu_init", -1.0)).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(_)), "out-of-range: got {err:?}");
+    assert!(
+        matches!(err, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+        "out-of-range: got {err:?}"
+    );
 
     let err = Pounce.solve(&m, &PounceOptions::default().mu_oracle("nonsense")).unwrap_err();
-    assert!(matches!(err, SolverError::Backend(_)), "bad enum: got {err:?}");
+    assert!(
+        matches!(err, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+        "bad enum: got {err:?}"
+    );
 }
 
 #[test]
@@ -376,8 +410,7 @@ fn invalid_generated_fbbt_tape_is_returned_as_a_solver_error() {
         .print_level(0);
     let error = Pounce.solve(&m, &options).unwrap_err();
     assert!(
-        matches!(&error, SolverError::Backend(message) if
-            message.contains("oximo-pounce: generated FBBT tape rejected")),
+        error.to_string().contains("oximo-pounce: generated FBBT tape rejected"),
         "unexpected error: {error}"
     );
 }
@@ -396,17 +429,12 @@ fn tnlp_fbbt_rejects_invalid_tapes_in_cold_and_persistent_solves() {
         .presolve_fbbt(true)
         .print_level(0);
     let cold = Pounce.solve(&m, &options).unwrap_err();
-    assert!(
-        matches!(&cold, SolverError::Backend(message) if
-        message.contains("oximo-pounce: generated FBBT tape rejected")),
-        "{cold}"
-    );
+    assert!(cold.to_string().contains("oximo-pounce: generated FBBT tape rejected"), "{cold}");
 
     let mut persistent = Pounce.persistent();
     let resident = persistent.solve(&m, &options).unwrap_err();
     assert!(
-        matches!(&resident, SolverError::Backend(message) if
-        message.contains("oximo-pounce: generated FBBT tape rejected")),
+        resident.to_string().contains("oximo-pounce: generated FBBT tape rejected"),
         "{resident}"
     );
 }
@@ -561,7 +589,7 @@ fn automatic_convexity_respects_objective_sense() {
             &PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm),
         )
         .unwrap_err();
-    assert!(matches!(forced, SolverError::Backend(message) if message.contains("proven-convex")));
+    assert!(forced.to_string().contains("proven-convex"));
     let automatic = Pounce.solve(&convex_max, &PounceOptions::default()).unwrap();
     assert!(automatic.has_solution());
 }
@@ -724,14 +752,14 @@ fn persistent_sweep_reclassifies_nonlinear_objective() {
 fn public_solver_metadata_matches_supported_model_kinds() {
     assert_eq!(Pounce.name(), "pounce");
     for kind in [ModelKind::LP, ModelKind::QP, ModelKind::QCP, ModelKind::SOCP, ModelKind::NLP] {
-        assert!(Pounce.supports(kind), "{kind:?}");
+        assert!(Pounce.profile(&PounceOptions::default()).supports_kind(kind), "{kind:?}");
     }
-    assert!(!Pounce.supports(ModelKind::MILP));
+    assert!(!Pounce.profile(&PounceOptions::default()).supports_kind(ModelKind::MILP));
 
     let persistent = Pounce.persistent();
     assert_eq!(persistent.name(), "pounce");
-    assert!(persistent.supports(ModelKind::SOCP));
-    assert!(!persistent.supports(ModelKind::MINLP));
+    assert!(persistent.profile(&PounceOptions::default()).supports_kind(ModelKind::SOCP));
+    assert!(!persistent.profile(&PounceOptions::default()).supports_kind(ModelKind::MINLP));
     assert!(format!("{persistent:?}").contains("resident: false"));
 }
 
@@ -743,9 +771,7 @@ fn forced_routes_reject_incompatible_models() {
     let error = Pounce
         .solve(&qp, &PounceOptions::default().solver_selection(PounceSolverSelection::LpIpm))
         .unwrap_err();
-    assert!(
-        matches!(error, SolverError::Backend(message) if message.contains("anything other than an LP"))
-    );
+    assert!(error.to_string().contains("anything other than an LP"));
 
     let nlp = Model::new("not_convex");
     variable!(nlp, -2.0 <= y <= 2.0, initial = 0.5);
@@ -753,7 +779,10 @@ fn forced_routes_reject_incompatible_models() {
     for selection in [PounceSolverSelection::QpActiveSet, PounceSolverSelection::Socp] {
         let error =
             Pounce.solve(&nlp, &PounceOptions::default().solver_selection(selection)).unwrap_err();
-        assert!(matches!(error, SolverError::Backend(_)), "{selection:?}: {error:?}");
+        assert!(
+            matches!(error, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+            "{selection:?}: {error:?}"
+        );
     }
 
     let soc = Model::new("soc_is_not_nlp");
@@ -766,7 +795,10 @@ fn forced_routes_reject_incompatible_models() {
         PounceOptions::default().algorithm(PounceAlgorithm::ActiveSetSqp),
     ] {
         let error = Pounce.solve(&soc, &options).unwrap_err();
-        assert!(matches!(error, SolverError::Backend(_)), "{error:?}");
+        assert!(
+            matches!(error, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+            "{error:?}"
+        );
     }
     let timed =
         Pounce.solve(&soc, &PounceOptions::default().time_limit(Duration::from_secs(1))).unwrap();
@@ -798,7 +830,7 @@ fn coupled_quadratic_hessians_are_certified_by_inertia() {
             &PounceOptions::default().solver_selection(PounceSolverSelection::QpIpm),
         )
         .unwrap_err();
-    assert!(matches!(error, SolverError::Backend(message) if message.contains("proven-convex")));
+    assert!(error.to_string().contains("proven-convex"));
 }
 
 #[test]
@@ -890,7 +922,10 @@ fn convex_options_validate_and_apply_to_each_qp_engine() {
     ] {
         let error =
             Pounce.solve(&m, &invalid.solver_selection(PounceSolverSelection::QpIpm)).unwrap_err();
-        assert!(matches!(error, SolverError::Backend(_)), "{error:?}");
+        assert!(
+            matches!(error, SolverError::Backend(_) | SolverError::IncompatibleModel(_)),
+            "{error:?}"
+        );
     }
 }
 
@@ -904,22 +939,29 @@ fn persistent_error_discards_resident_state() {
     assert!(solver.solve(&m, &PounceOptions::default()).unwrap().has_solution());
     let error =
         solver.solve(&m, &PounceOptions::default().set("not_a_real_option", true)).unwrap_err();
-    assert!(matches!(error, SolverError::Backend(_)));
+    assert!(matches!(error, SolverError::Backend(_) | SolverError::IncompatibleModel(_)));
     assert!(format!("{solver:?}").contains("resident: false"));
     assert!(solver.solve(&m, &PounceOptions::default()).unwrap().has_solution());
 }
 
 #[test]
 fn semi_domains_are_rejected_consistently() {
-    for (label, model) in
-        [("semi-continuous", semi_model(false)), ("semi-integer", semi_model(true))]
-    {
-        let result = Pounce.solve(&model, &PounceOptions::default()).unwrap_err();
-        assert!(matches!(result, SolverError::Backend(_)), "{label} cold: {result}");
-
+    for (domain, model) in [
+        (VariableDomain::SemiContinuous, semi_model(false)),
+        (VariableDomain::SemiInteger, semi_model(true)),
+    ] {
         let mut persistent = Pounce.persistent();
-        let result = persistent.solve(&model, &PounceOptions::default()).unwrap_err();
-        assert!(matches!(result, SolverError::Backend(_)), "{label} persistent: {result}");
+        for error in [
+            Pounce.solve(&model, &PounceOptions::default()).unwrap_err(),
+            persistent.solve(&model, &PounceOptions::default()).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, SolverError::IncompatibleModel(report)
+                if report.errors.iter().any(|diagnostic|
+                    diagnostic.requirement == Requirement::Domain(domain))),
+                "{domain:?}: {error}"
+            );
+        }
     }
 }
 
@@ -945,7 +987,7 @@ fn route_validation_matches_ordinary_and_persistent_rejections() {
             [Pounce.validate_model(model, options), persistent.validate_model(model, options)]
         {
             assert!(!validation.is_supported());
-            assert!(validation.errors.iter().any(|d| d.reason == error), "{validation:?}: {error}");
+            assert_eq!(validation.to_string(), error);
         }
     }
 

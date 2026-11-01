@@ -144,3 +144,51 @@ fn persistent_callback_error_clears_and_rebuilds_resident_model() {
         solver.solve(&m, &opts).expect("persistent solve should rebuild after callback failure");
     assert!(recovered.has_solution());
 }
+
+#[test]
+fn preflight_aggregates_failures_before_any_callback_entry_point() {
+    use oximo_solver::Solver;
+    let model = Model::new("unsupported callback model");
+
+    variable!(model, x);
+    constraint!(model, unsupported, x.asin() <= 1.0);
+    objective!(model, Min, x.atan2(x));
+
+    let options = GurobiOptions::default();
+    let mut callback = Locations::default();
+    let mut solver = Gurobi;
+    let mut resident = solver.persistent();
+    let expected = solver.validate_model(&model, &options).to_string();
+
+    let errors = [
+        oximo_gurobi::solve(&model, &options).unwrap_err(),
+        solver.solve(&model, &options).unwrap_err(),
+        solver.solve_with_callback(&model, &options, &mut callback).unwrap_err(),
+        solver
+            .solve_with_callback_filtered(
+                &model,
+                &options,
+                &mut callback,
+                CallbackLocation::Polling,
+            )
+            .unwrap_err(),
+        resident.solve(&model, &options).unwrap_err(),
+        resident.solve_with_callback(&model, &options, &mut callback).unwrap_err(),
+        resident
+            .solve_with_callback_filtered(
+                &model,
+                &options,
+                &mut callback,
+                CallbackLocation::Polling,
+            )
+            .unwrap_err(),
+    ];
+
+    for error in errors {
+        assert!(
+            matches!(&error, oximo_solver::SolverError::IncompatibleModel(report) if report.errors.len() == 2)
+        );
+        assert_eq!(error.to_string(), expected);
+    }
+    assert_eq!(callback.0, []);
+}

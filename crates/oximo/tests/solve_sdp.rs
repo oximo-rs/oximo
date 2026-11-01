@@ -13,8 +13,14 @@ fn check_trace_problem<S: Solver>(solver: &mut S, options: &S::Options) {
     let cone = psd_constraint!(m, positivity, &X);
     constraint!(m, X[0, 1] == 1.0);
     objective!(m, Min, X.trace());
-    assert!(solver.supports_psd());
-    assert!(solver.supports_model(&m));
+    assert_eq!(
+        solver.profile(options).constraint_support(oximo::ConstraintSignature::of::<
+            oximo::core::SymmetricAffineData,
+            oximo::core::PositiveSemidefiniteCone,
+        >()),
+        oximo::RequirementSupport::Supported
+    );
+    assert!(solver.validate_model(&m, options).is_supported());
     let result = solver.solve(&m, options).unwrap();
     assert_eq!(result.termination, TerminationStatus::Optimal);
     close(result.objective().unwrap(), 2.0);
@@ -265,9 +271,12 @@ fn mosek_rejects_quadratic_sdp_before_optimization() {
     variable!(m, t);
     psd_constraint!(m, SymmetricMatrix::from_upper_triangle(1, [t]));
     objective!(m, Min, t.square());
-    assert!(!Mosek.supports_model(&m));
+    assert!(!Mosek.validate_model(&m, &MosekOptions::default()).is_supported());
     assert!(matches!(
         Mosek.solve(&m, &MosekOptions::default()),
-        Err(SolverError::UnsupportedConstraint(_))
+        Err(SolverError::IncompatibleModel(report)) if report.errors.iter().any(|diagnostic|
+            matches!(diagnostic.requirement, Requirement::Combination(features)
+                if features.kind == ModelKind::SDP && features.has_psd
+                    && features.objective_class == oximo::expr::ExprClass::Quadratic))
     ));
 }

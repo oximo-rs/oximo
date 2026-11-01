@@ -19,9 +19,12 @@ pub use plugins::*;
 pub use result::ScipSolveOutput;
 pub use russcip as native;
 
-use oximo_core::{Model, ModelKind, SosType};
-use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
-use std::{fmt::Debug, rc::Rc};
+use oximo_core::Model;
+use oximo_solver::{
+    ExpressionOperator, MODEL_KINDS, PersistentSolver, Solver, SolverError, SolverProfile,
+    SolverResult,
+};
+use std::{borrow::Cow, fmt::Debug, rc::Rc, sync::LazyLock};
 
 type Factory = dyn Fn(&mut ScipPluginRegistry<'_>) -> Result<(), SolverError>;
 
@@ -88,54 +91,51 @@ impl Scip {
         })
     }
 }
+static PROFILE: LazyLock<SolverProfile> = LazyLock::new(build_profile);
+
+fn build_profile() -> SolverProfile {
+    use oximo_expr::ExprClass::{Linear, Nonlinear, Quadratic};
+    use oximo_solver::VariableDomain::{Binary, Integer, Real, SemiContinuous, SemiInteger};
+
+    SolverProfile::new("SCIP")
+        .with_scalar_constraints([Linear, Quadratic, Nonlinear])
+        .with_scalar_objectives([Linear, Quadratic, Nonlinear])
+        .with_soc(true)
+        .with_kinds(MODEL_KINDS.into_iter().filter(|kind| {
+            !matches!(kind, oximo_core::ModelKind::SDP | oximo_core::ModelKind::MISDP)
+        }))
+        .with_domains([Real, Integer, Binary, SemiContinuous, SemiInteger])
+        .with_operators(
+            ExpressionOperator::ALL.iter().copied().filter(|operator| supports_operator(*operator)),
+        )
+        .with_sos([oximo_core::SosType::Sos1, oximo_core::SosType::Sos2])
+        .with_indicators(true)
+}
+
 impl Solver for Scip {
     type Options = ScipOptions;
+    fn profile(&self, _opts: &Self::Options) -> Cow<'_, SolverProfile> {
+        Cow::Borrowed(&PROFILE)
+    }
+
     fn name(&self) -> &str {
         "SCIP"
     }
-    fn supports(&self, kind: ModelKind) -> bool {
-        matches!(
-            kind,
-            ModelKind::LP
-                | ModelKind::MILP
-                | ModelKind::QP
-                | ModelKind::MIQP
-                | ModelKind::QCP
-                | ModelKind::MIQCP
-                | ModelKind::SOCP
-                | ModelKind::MISOCP
-                | ModelKind::NLP
-                | ModelKind::MINLP
-        )
-    }
 
-    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Capability::Native
-    }
-
-    fn supports_sos(&self, kind: SosType) -> bool {
-        matches!(kind, SosType::Sos1 | SosType::Sos2)
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
-    }
-
-    fn supports_model(&self, model: &Model) -> bool {
-        translate::Snapshot::prepare(model).is_ok()
-    }
-
-    fn validate_model_extra(
+    fn validate_requirements(
         &self,
         model: &Model,
-        _opts: &Self::Options,
-    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        if !self.profile(opts).check(requirements).is_supported() {
+            return Vec::new();
+        }
+
         translate::Snapshot::prepare(model)
             .err()
-            .map(|error| oximo_solver::CapabilityDiagnostic {
-                constraint: None,
-                location: "SCIP translation".into(),
-                reason: error.to_string(),
+            .map(|error| {
+                oximo_solver::RequirementDiagnostic::adapter("SCIP translation", error.to_string())
             })
             .into_iter()
             .collect()
@@ -175,4 +175,26 @@ pub(crate) fn boundary<T>(f: impl FnOnce() -> Result<T, SolverError>) -> Result<
                 .unwrap_or("upstream panicked"),
         )),
     }
+}
+
+pub(crate) fn supports_operator(operator: oximo_solver::ExpressionOperator) -> bool {
+    use oximo_expr::UnaryOp::{Abs, Cos, Exp, Log, Neg, Sin, Sqrt};
+    use oximo_solver::ExpressionOperator::{Atan2, Max, Min, Unary, VariablePower};
+    match operator {
+        Unary(op) => matches!(op, Neg | Abs | Sqrt | Exp | Log | Sin | Cos),
+        Atan2 | Min | Max | VariablePower => false,
+        _ => true,
+    }
+}
+
+/// Called only for local translation failures, before any native state changes.
+pub(crate) fn translation_rejection(error: SolverError) -> SolverError {
+    SolverError::IncompatibleModel(Box::new(oximo_solver::CompatibilityReport {
+        solver: "SCIP".into(),
+        errors: vec![oximo_solver::RequirementDiagnostic::adapter(
+            "SCIP translation",
+            error.to_string(),
+        )],
+        ..oximo_solver::CompatibilityReport::default()
+    }))
 }

@@ -14,7 +14,11 @@ pub use persistent::MosekPersistent;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
+use oximo_solver::{
+    ExpressionOperator, MODEL_KINDS, PersistentSolver, Solver, SolverError, SolverProfile,
+    SolverResult,
+};
+use std::{borrow::Cow, sync::LazyLock};
 
 /// MOSEK solver backend.
 #[derive(Debug, Default, Clone, Copy)]
@@ -37,35 +41,39 @@ pub(crate) const fn supported(kind: ModelKind) -> bool {
     )
 }
 
+static PROFILE: LazyLock<SolverProfile> = LazyLock::new(build_profile);
+
+fn build_profile() -> SolverProfile {
+    use oximo_expr::ExprClass::{Linear, Quadratic};
+    use oximo_solver::VariableDomain::{Binary, Integer, Real};
+
+    SolverProfile::new(NAME)
+        .with_scalar_constraints([Linear, Quadratic])
+        .with_scalar_objectives([Linear, Quadratic])
+        .with_soc(true)
+        .with_kinds(MODEL_KINDS.into_iter().filter(|kind| supported(*kind)))
+        .with_domains([Real, Integer, Binary])
+        .with_operators(ExpressionOperator::ALL.iter().copied())
+        .with_psd(true)
+        .with_indicators(true)
+        .reject_combination(
+            |f| {
+                f.has_psd
+                    && (f.kind != ModelKind::SDP || f.has_indicators || f.objective_class != Linear)
+            },
+            "MOSEK PSD models require a continuous SDP with an affine objective and no indicators",
+        )
+}
+
 impl Solver for Mosek {
     type Options = MosekOptions;
 
+    fn profile(&self, _opts: &Self::Options) -> Cow<'_, SolverProfile> {
+        Cow::Borrowed(&PROFILE)
+    }
+
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        supported(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        use oximo_core::Domain;
-        match domain {
-            Domain::Real | Domain::Integer | Domain::Binary => oximo_solver::Capability::Native,
-            _ => oximo_solver::Capability::Unsupported,
-        }
-    }
-
-    fn supports_psd(&self) -> bool {
-        true
-    }
-
-    fn supports_model_extra(&self, model: &Model) -> bool {
-        psd_compatible(model)
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
     }
 
     fn solve(&mut self, model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
@@ -101,8 +109,11 @@ mod tests {
     use super::*;
 
     fn assert_support(model: &Model, expected: bool) {
-        assert_eq!(Mosek.supports_model(model), expected);
-        assert_eq!(MosekPersistent::new().supports_model(model), expected);
+        assert_eq!(Mosek.validate_model(model, &MosekOptions::default()).is_supported(), expected);
+        assert_eq!(
+            MosekPersistent::new().validate_model(model, &MosekOptions::default()).is_supported(),
+            expected
+        );
     }
 
     #[test]

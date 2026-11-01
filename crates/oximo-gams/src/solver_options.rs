@@ -159,7 +159,7 @@ impl GamsSolverConfig {
 /// never emits them):
 /// - "GAMS Solver Manuals," GAMS Development Corporation.
 ///   <https://www.gams.com/latest/docs/S_MAIN.html#SOLVERS_MODEL_TYPES> (accessed May 14, 2026).
-fn supported_solve_types(gams_name: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn supported_solve_types(gams_name: &str) -> Option<&'static [&'static str]> {
     Some(match gams_name {
         "ALPHAECP" | "DICOPT" | "SBB" | "SHOT" => &["MINLP", "MIQCP"],
         "CONOPT" | "CONOPT3" | "CONOPT4" | "IPOPT" | "MINOS" | "SNOPT" => {

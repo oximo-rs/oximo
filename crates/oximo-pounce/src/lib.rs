@@ -41,37 +41,64 @@ pub struct Pounce;
 impl oximo_solver::Solver for Pounce {
     type Options = PounceOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            use oximo_core::ModelKind;
+            use oximo_expr::ExprClass::{Linear, Nonlinear, Quadratic};
+            use oximo_solver::VariableDomain::Real;
+            let selection = crate::translate::selected_solver(opts).ok();
+            let algorithm = crate::translate::selected_algorithm(opts).ok();
+            let profile = oximo_solver::SolverProfile::new(format!(
+                "pounce ({})",
+                selection.map_or("invalid route", |s| s.as_str())
+            ))
+            .with_scalar_constraints([Linear, Quadratic, Nonlinear])
+            .with_scalar_objectives([Linear, Quadratic, Nonlinear])
+            .with_soc(true)
+            .with_kinds(oximo_solver::MODEL_KINDS.into_iter().filter(|kind| {
+                algorithm.is_some_and(|a| a.supports(*kind))
+                    && selection.is_some_and(|s| match s {
+                        PounceSolverSelection::Auto | PounceSolverSelection::Nlp => true,
+                        PounceSolverSelection::LpIpm => *kind == ModelKind::LP,
+                        PounceSolverSelection::QpIpm | PounceSolverSelection::QpActiveSet => {
+                            matches!(kind, ModelKind::LP | ModelKind::QP)
+                        }
+                        PounceSolverSelection::Socp => {
+                            matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::SOCP)
+                        }
+                    })
+            }))
+            .with_domains([Real])
+            .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied());
+            if opts.minima.is_some()
+                || selection == Some(PounceSolverSelection::Nlp)
+                || (selection == Some(PounceSolverSelection::Auto)
+                    && algorithm == Some(PounceAlgorithm::ActiveSetSqp))
+            {
+                profile.reject_combination(
+                    |f| f.has_explicit_soc,
+                    "the selected NLP/search route does not accept explicit SOC constraints",
+                )
+            } else {
+                profile
+            }
+        })
+    }
+
     fn name(&self) -> &str {
         "pounce"
     }
 
-    fn supports(&self, kind: oximo_core::ModelKind) -> bool {
-        use oximo_core::ModelKind;
-        matches!(
-            kind,
-            ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
-        )
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        use oximo_core::Domain;
-        match domain {
-            Domain::Real => oximo_solver::Capability::Native,
-            _ => oximo_solver::Capability::Unsupported,
-        }
-    }
-
-    fn validate_model_extra(
+    fn validate_requirements(
         &self,
         model: &oximo_core::Model,
         opts: &Self::Options,
-    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
-        convex::validate_route(model, opts)
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        convex::validate_route(model, opts, requirements)
             .err()
-            .map(|error| oximo_solver::CapabilityDiagnostic {
-                constraint: None,
-                location: "POUNCE route".into(),
-                reason: error.to_string(),
+            .map(|error| {
+                oximo_solver::RequirementDiagnostic::adapter("POUNCE route", error.to_string())
             })
             .into_iter()
             .collect()

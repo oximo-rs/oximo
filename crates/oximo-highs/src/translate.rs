@@ -40,6 +40,8 @@ use crate::options::apply as apply_options;
 ///
 /// Panics if model variable IDs overflow `u32`.
 pub fn solve(model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+    oximo_solver::Solver::profile(&crate::Highs, opts).check_model(model).into_result()?;
+
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
@@ -601,7 +603,9 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::MIQP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MIQP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::MIQP)))
+        );
     }
 
     #[test]
@@ -613,7 +617,9 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::QCP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::QCP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::QCP)))
+        );
     }
 
     #[test]
@@ -680,6 +686,8 @@ mod tests {
         assert_eq!(m.kind(), ModelKind::SOCP);
 
         let err = solve(&m, &HighsOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::SOCP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::SOCP)))
+        );
     }
 }

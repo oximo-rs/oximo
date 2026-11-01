@@ -315,8 +315,10 @@ fn no_objective_declared_is_an_error() {
     constraint!(m, c, x >= 0.5);
     let err = Highs.solve(&m, &HighsOptions::default()).unwrap_err();
     assert!(
-        matches!(err, SolverError::Core(oximo::core::Error::NoObjective)),
-        "expected NoObjective, got {err:?}"
+        matches!(&err, SolverError::IncompatibleModel(report)
+        if report.errors.len() == 1
+            && report.errors[0].requirement == Requirement::ObjectiveDeclared),
+        "expected a missing-objective requirement, got {err}"
     );
 }
 

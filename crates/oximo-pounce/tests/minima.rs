@@ -7,8 +7,8 @@ use oximo_pounce::{
     PounceSolverSelection,
 };
 use oximo_solver::{
-    DualStatus, PersistentSolver, PrimalStatus, Solver, SolverError, TerminationStatus,
-    UniversalOptionsExt,
+    DualStatus, PersistentSolver, PrimalStatus, Requirement, Solver, SolverError,
+    TerminationStatus, UniversalOptionsExt, VariableDomain,
 };
 
 fn search_options(method: PounceMinimaMethod) -> PounceMinimaOptions {
@@ -340,7 +340,7 @@ fn invalid_options_and_unsupported_models_return_errors() {
     ] {
         assert!(matches!(
             Pounce.solve(&model, &PounceOptions::default().minima(search)),
-            Err(SolverError::Backend(_))
+            Err(SolverError::Backend(_) | SolverError::IncompatibleModel(_))
         ));
     }
 
@@ -352,7 +352,7 @@ fn invalid_options_and_unsupported_models_return_errors() {
     ] {
         assert!(matches!(
             Pounce.solve(&model, &options.clone().minima(PounceMinimaOptions::default())),
-            Err(SolverError::Backend(_))
+            Err(SolverError::Backend(_) | SolverError::IncompatibleModel(_))
         ));
 
         assert!(matches!(
@@ -360,7 +360,7 @@ fn invalid_options_and_unsupported_models_return_errors() {
                 &model,
                 &options.time_limit(Duration::ZERO).minima(PounceMinimaOptions::default())
             ),
-            Err(SolverError::Backend(_))
+            Err(SolverError::Backend(_) | SolverError::IncompatibleModel(_))
         ));
     }
 
@@ -371,7 +371,8 @@ fn invalid_options_and_unsupported_models_return_errors() {
 
     assert!(matches!(
         Pounce.solve(&integer, &PounceOptions::default().minima(PounceMinimaOptions::default())),
-        Err(SolverError::UnsupportedKind(_))
+        Err(SolverError::IncompatibleModel(report)) if report.errors.iter().any(|diagnostic|
+            diagnostic.requirement == Requirement::Domain(VariableDomain::Integer))
     ));
 }
 

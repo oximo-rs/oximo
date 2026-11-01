@@ -27,16 +27,7 @@ fn unsupported(operator: &'static str) -> SolverError {
 fn validate_node(node: &ExprNode) -> Result<(), SolverError> {
     match node {
         ExprNode::Unary(op, _)
-            if !matches!(
-                op,
-                UnaryOp::Neg
-                    | UnaryOp::Abs
-                    | UnaryOp::Sqrt
-                    | UnaryOp::Exp
-                    | UnaryOp::Log
-                    | UnaryOp::Sin
-                    | UnaryOp::Cos
-            ) =>
+            if !crate::supports_operator(oximo_solver::ExpressionOperator::Unary(*op)) =>
         {
             Err(unsupported(op.name()))
         }
@@ -115,16 +106,7 @@ impl Formula {
                     ExprNode::Add(_) => Op::Add(args),
                     ExprNode::Mul(_) => Op::Mul(args),
                     ExprNode::Unary(op, _) => {
-                        if !matches!(
-                            op,
-                            UnaryOp::Neg
-                                | UnaryOp::Abs
-                                | UnaryOp::Sqrt
-                                | UnaryOp::Exp
-                                | UnaryOp::Log
-                                | UnaryOp::Sin
-                                | UnaryOp::Cos
-                        ) {
+                        if !crate::supports_operator(oximo_solver::ExpressionOperator::Unary(*op)) {
                             return Err(unsupported(op.name()));
                         }
                         Op::Unary(*op, args[0])

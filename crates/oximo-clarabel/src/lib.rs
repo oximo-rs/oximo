@@ -17,7 +17,11 @@ pub use persistent::ClarabelPersistent;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
+use oximo_solver::{
+    ExpressionOperator, MODEL_KINDS, PersistentSolver, Solver, SolverError, SolverProfile,
+    SolverResult,
+};
+use std::{borrow::Cow, sync::LazyLock};
 
 /// Clarabel solver handle.
 ///
@@ -42,24 +46,12 @@ pub(crate) const fn supported(kind: ModelKind) -> bool {
 impl Solver for Clarabel {
     type Options = ClarabelOptions;
 
+    fn profile(&self, _opts: &Self::Options) -> Cow<'_, SolverProfile> {
+        Cow::Borrowed(&PROFILE)
+    }
+
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        supported(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        use oximo_core::Domain;
-        match domain {
-            Domain::Real => oximo_solver::Capability::Native,
-            _ => oximo_solver::Capability::Unsupported,
-        }
-    }
-
-    fn supports_psd(&self) -> bool {
-        cfg!(feature = "sdp")
     }
 
     fn solve(
@@ -69,6 +61,23 @@ impl Solver for Clarabel {
     ) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts)
     }
+}
+
+// Clarabel options do not change its supported interfaces. Borrow the immutable
+// declaration on the solve path instead of allocating it for every check.
+static PROFILE: LazyLock<SolverProfile> = LazyLock::new(build_profile);
+
+fn build_profile() -> SolverProfile {
+    use oximo_expr::ExprClass::{Linear, Quadratic};
+
+    SolverProfile::new(NAME)
+        .with_scalar_constraints([Linear])
+        .with_scalar_objectives([Linear, Quadratic])
+        .with_soc(true)
+        .with_kinds(MODEL_KINDS.into_iter().filter(|kind| supported(*kind)))
+        .with_domains([oximo_solver::VariableDomain::Real])
+        .with_operators(ExpressionOperator::ALL.iter().copied())
+        .with_psd(cfg!(feature = "sdp"))
 }
 
 impl PersistentSolver for Clarabel {

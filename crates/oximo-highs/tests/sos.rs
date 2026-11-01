@@ -1,33 +1,46 @@
 use oximo_core::prelude::*;
 use oximo_highs::{Highs, HighsOptions};
-use oximo_solver::{PersistentSolver, Solver, SolverError};
+use oximo_solver::{ConstraintSignature, PersistentSolver, Requirement, Solver, SolverError};
 
-fn sos_model() -> Model {
+fn sos_model() -> (Model, SosConstraintHandle) {
     let m = Model::new("highs_sos");
     variable!(m, x);
     variable!(m, y);
-    sos_constraint!(m, choice, SOS1, [x, y]);
-    m
+    objective!(m, Feasibility);
+    let choice = sos_constraint!(m, choice, SOS1, [x, y]);
+    (m, choice)
 }
 
 #[test]
 fn highs_rejects_sos_constraints() {
-    let model = sos_model();
+    let (model, choice) = sos_model();
     let mut solver = Highs;
-    assert!(matches!(
-        solver.solve(&model, &HighsOptions::default()),
-        Err(SolverError::UnsupportedSos)
-    ));
+    let error = solver.solve(&model, &HighsOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            SolverError::IncompatibleModel(report) if report.errors.iter().any(|diagnostic|
+                diagnostic.requirement == Requirement::Sos(SosType::Sos1)
+                    && diagnostic.constraint() == Some(choice.id()))
+        ),
+        "{error}"
+    );
 }
 
 #[test]
 fn highs_persistent_rejects_sos_constraints() {
-    let model = sos_model();
+    let (model, choice) = sos_model();
     let mut solver = Highs.persistent();
-    assert!(matches!(
-        solver.solve(&model, &HighsOptions::default()),
-        Err(SolverError::UnsupportedSos)
-    ));
+    let error = solver.solve(&model, &HighsOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            SolverError::IncompatibleModel(report) if report.errors.iter().any(|diagnostic|
+                diagnostic.requirement == Requirement::Sos(SosType::Sos1)
+                    && diagnostic.constraint() == Some(choice.id()))
+        ),
+        "{error}"
+    );
 }
 
 #[test]
@@ -35,12 +48,27 @@ fn highs_rejects_native_indicators() {
     let model = Model::new("highs_native_indicator");
     variable!(model, b, Binary);
     variable!(model, 0.0 <= x <= 10.0);
-    indicator_constraint!(model, cap, b == 1 => x <= 4.0);
-    let mut solver = Highs;
-    assert!(matches!(
-        solver.solve(&model, &HighsOptions::default()),
-        Err(SolverError::UnsupportedIndicator)
-    ));
+    objective!(model, Feasibility);
+    let cap = indicator_constraint!(model, cap, b == 1 => x <= 4.0);
+    let expected = Requirement::Constraint(ConstraintSignature::of::<
+        oximo_core::IndicatorFunctionData,
+        oximo_core::IndicatorSet,
+    >());
+    let mut persistent = Highs.persistent();
+    for error in [
+        Highs.solve(&model, &HighsOptions::default()).unwrap_err(),
+        persistent.solve(&model, &HighsOptions::default()).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                &error,
+                SolverError::IncompatibleModel(report) if report.errors.len() == 1
+                    && report.errors[0].requirement == expected
+                    && report.errors[0].constraint() == Some(cap.id())
+            ),
+            "{error}"
+        );
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use oximo_clarabel::{Clarabel, ClarabelOptions};
 use oximo_core::ScalarFunctionData;
 use oximo_core::prelude::*;
-use oximo_solver::{Capability, ConstraintSignature, Solver};
+use oximo_solver::{ConstraintSignature, RequirementSupport, Solver};
 
 #[test]
 fn detected_soc_is_validated_without_changing_its_declared_quadratic_identity() {
@@ -17,7 +17,10 @@ fn detected_soc_is_validated_without_changing_its_declared_quadratic_identity() 
     let options = ClarabelOptions::default();
     let signature = ConstraintSignature::of::<ScalarFunctionData<Quadratic>, LessThan>();
 
-    assert_eq!(Clarabel.constraint_support(signature, &options), Capability::Unsupported);
+    assert_eq!(
+        Clarabel.profile(&options).constraint_support(signature),
+        RequirementSupport::Unsupported
+    );
     assert!(Clarabel.validate_model(&model, &options).is_supported());
     assert!(
         model
@@ -73,6 +76,13 @@ impl<'a> LowerConstraint<LessThan> for Opaque<'a> {
 #[derive(Clone, Debug)]
 struct CustomUpper(f64);
 impl oximo_core::ConstraintSet for CustomUpper {}
+impl FunctionInSet<CustomUpper> for Opaque<'_> {}
+impl<'a> LowerConstraint<CustomUpper> for Opaque<'a> {
+    type Ir = oximo_core::function_set::AlgebraicConstraintIr<'a>;
+    fn lower(self, set: CustomUpper) -> Self::Ir {
+        self.0.le(set.0).into_ir()
+    }
+}
 impl FunctionInSet<CustomUpper> for ScalarAffineFunction<'_> {}
 impl<'a> LowerConstraint<CustomUpper> for ScalarAffineFunction<'a> {
     type Ir = oximo_core::function_set::AlgebraicConstraintIr<'a>;
@@ -98,15 +108,18 @@ fn explicit_opaque_and_custom_set_lowerings_validate_and_solve_in_native_coordin
     );
     let options = ClarabelOptions::default();
     assert_eq!(
-        Clarabel.constraint_support(ConstraintSignature::of::<OpaqueData, LessThan>(), &options),
-        Capability::Unsupported
+        Clarabel
+            .profile(&options)
+            .constraint_support(ConstraintSignature::of::<OpaqueData, LessThan>()),
+        RequirementSupport::Unsupported
     );
     assert_eq!(
-        Clarabel.constraint_support(
-            ConstraintSignature::of::<ScalarFunctionData<Affine>, CustomUpper>(),
-            &options
-        ),
-        Capability::Unsupported
+        Clarabel
+            .profile(&options)
+            .constraint_support(
+                ConstraintSignature::of::<ScalarFunctionData<Affine>, CustomUpper>()
+            ),
+        RequirementSupport::Unsupported
     );
     assert!(Clarabel.validate_model(&model, &options).is_supported());
     let mut persistent = Clarabel.persistent();
@@ -164,4 +177,51 @@ fn explicitly_lowered_opaque_quadratic_can_use_native_soc_detection() {
     let result = Clarabel.solve(&model, &options).unwrap();
     assert!((result.value_of(t).unwrap().unwrap() - 5.0).abs() < 1e-6);
     assert_eq!(result.dual_of(source).unwrap(), None);
+}
+
+#[test]
+fn soc_detection_uses_the_selected_native_row_for_a_custom_source_set() {
+    use oximo_solver::PersistentSolver;
+    let model = Model::new("custom set SOC lowering");
+
+    param!(model, scale = 1.0);
+    variable!(model, x >= 3.0);
+    variable!(model, y >= 4.0);
+    variable!(model, t >= 0.0);
+    let source = model.add_lowered_constraint(
+        "custom_soc",
+        Constraint::new(
+            Opaque((scale * (x.square() + y.square()) - t.square()).erase()),
+            CustomUpper(0.0),
+        )
+        .into_ir(),
+    );
+    objective!(model, Min, t);
+
+    let options = ClarabelOptions::default();
+    let mut persistent = Clarabel.persistent();
+
+    for value in [1.0_f64, 4.0] {
+        scale.set_param_value(value).unwrap();
+
+        assert_eq!(model.kind(), ModelKind::SOCP);
+        assert!(Clarabel.profile(&options).check_model(&model).is_confirmed());
+        assert!(Clarabel.validate_model(&model, &options).is_confirmed());
+        assert!(persistent.validate_model(&model, &options).is_confirmed());
+
+        for result in
+            [Clarabel.solve(&model, &options).unwrap(), persistent.solve(&model, &options).unwrap()]
+        {
+            assert!((result.value_of(t).unwrap().unwrap() - 5.0 * value.sqrt()).abs() < 1e-6);
+            assert_eq!(result.dual_of(source).unwrap(), None);
+        }
+    }
+
+    scale.set_param_value(-1.0).unwrap();
+    assert!(!Clarabel.validate_model(&model, &options).is_supported());
+    assert!(!persistent.validate_model(&model, &options).is_supported());
+
+    let declared = model.semantic_constraint(source).unwrap().unwrap();
+    assert!(declared.pair.function.signature().is::<OpaqueData>());
+    assert!(declared.pair.set.signature().is::<CustomUpper>());
 }

@@ -1,4 +1,4 @@
-use oximo_core::{Model, ModelKind, SosType};
+use oximo_core::Model;
 
 use crate::result::SolverResult;
 use crate::status::SolverError;
@@ -23,88 +23,31 @@ pub trait Solver {
 
     fn name(&self) -> &str;
 
-    fn supports(&self, kind: ModelKind) -> bool;
+    /// Declare the interfaces supported by this backend and option configuration.
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, crate::SolverProfile>;
 
-    /// Query an individual function/set interface, independently of model combinations.
-    fn constraint_support(
-        &self,
-        signature: crate::ConstraintSignature,
-        _opts: &Self::Options,
-    ) -> crate::Capability {
-        crate::capability::query_constraint(self, signature)
+    /// Match current requirements and perform local, side-effect-free data checks.
+    fn validate_model(&self, model: &Model, opts: &Self::Options) -> crate::CompatibilityReport {
+        let requirements = crate::requirements::for_matching(model);
+        let mut report = self.profile(opts).check_with_origins(model, &requirements);
+
+        // Data checks can depend on an objective and an already reformulated model.
+        if model.ensure_objective_declared().is_ok() && !model.has_unreformulated_gdp() {
+            report.errors.extend(self.validate_requirements(model, opts, &requirements));
+        }
+        report
     }
 
-    fn objective_support(
-        &self,
-        signature: oximo_core::SemanticType,
-        sense: oximo_core::ObjectiveSense,
-        _opts: &Self::Options,
-    ) -> crate::Capability {
-        crate::capability::query_objective(self, signature, sense)
-    }
-
-    /// Query the adapter's support for an individual variable domain.
-    /// Configuration-dependent restrictions are checked by [`Self::validate_model`].
-    fn domain_support(&self, domain: oximo_core::Domain) -> crate::Capability {
-        crate::capability::query_domain(self, domain)
-    }
-
-    /// Validate the complete combination, including options and adapter data restrictions.
-    fn validate_model(&self, model: &Model, opts: &Self::Options) -> crate::ModelValidation {
-        crate::capability::validate(self, model, opts)
-    }
-
-    /// Collect diagnostics for backend-specific model data and option restrictions.
-    ///
-    /// Called by the default [`Self::validate_model`] after the shared compatibility
-    /// checks. Override to report additional restrictions; the default returns no
-    /// diagnostics.
-    fn validate_model_extra(
+    /// Resolve local numeric, representation, or route restrictions without native setup.
+    /// The supplied summary may omit origins. Inspect `model` or explicitly call
+    /// `ModelRequirements::infer` when a local diagnostic needs source locations.
+    fn validate_requirements(
         &self,
         _model: &Model,
         _opts: &Self::Options,
-    ) -> Vec<crate::CapabilityDiagnostic> {
+        _requirements: &crate::ModelRequirements,
+    ) -> Vec<crate::RequirementDiagnostic> {
         Vec::new()
-    }
-
-    /// Whether this backend can consume native SOS constraints of `sos_type`.
-    fn supports_sos(&self, _sos_type: SosType) -> bool {
-        false
-    }
-
-    /// Whether this backend can consume native indicator constraints.
-    fn supports_indicators(&self) -> bool {
-        false
-    }
-
-    /// Whether this backend supports real affine PSD matrix constraints.
-    fn supports_psd(&self) -> bool {
-        false
-    }
-
-    /// Additional backend-specific restrictions after the shared capability checks.
-    ///
-    /// Override this hook to restrict supported model structures while retaining
-    /// the default GDP, model-kind, PSD, SOS, and indicator checks.
-    fn supports_model_extra(&self, _model: &Model) -> bool {
-        true
-    }
-
-    /// Whether this backend can consume all features present in `model`.
-    ///
-    /// Prefer overriding [`Solver::supports_model_extra`] for additional restrictions
-    /// so this method continues to apply the shared capability checks.
-    fn supports_model(&self, model: &Model) -> bool {
-        !model.has_unreformulated_gdp()
-            && self.supports(model.kind())
-            && (!model.has_active_psd_constraints() || self.supports_psd())
-            && model
-                .sos_constraints()
-                .iter()
-                .filter(|constraint| constraint.active)
-                .all(|constraint| self.supports_sos(constraint.sos_type))
-            && (!model.has_active_indicator_constraints() || self.supports_indicators())
-            && self.supports_model_extra(model)
     }
 
     /// Solves the given `Model` using this solver.
@@ -112,132 +55,13 @@ pub trait Solver {
     /// parameter snapshot used to translate or update the native problem.
     /// Use [`crate::reconstruct::finalize_result`] to normalize the result and suppress
     /// semantic dual fallback for alternative lowerings without mappings.
+    /// Implementors must validate before native setup, external execution, callbacks,
+    /// or resident-state changes. Use `self.validate_model(model, opts).into_result()?`,
+    /// or `self.profile(opts).check_model(model)` together with local data validation
+    /// that reuses the translation needed by the solve.
     ///
     /// # Errors
     ///
     /// Returns a [`SolverError`] if the model is unsupported or if the solver backend fails.
     fn solve(&mut self, model: &Model, opts: &Self::Options) -> Result<SolverResult, SolverError>;
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use oximo_core::{SosType, constraint, variable};
-
-    use super::*;
-
-    #[derive(Debug)]
-    struct NoSos;
-
-    impl Solver for NoSos {
-        type Options = ();
-
-        fn name(&self) -> &str {
-            "no-sos"
-        }
-
-        fn supports(&self, kind: ModelKind) -> bool {
-            matches!(kind, ModelKind::LP | ModelKind::MILP)
-        }
-
-        fn solve(&mut self, _model: &Model, _opts: &()) -> Result<SolverResult, SolverError> {
-            unreachable!("capability test solver is never solved")
-        }
-    }
-
-    #[derive(Debug)]
-    struct NativeSos;
-
-    impl Solver for NativeSos {
-        type Options = ();
-
-        fn name(&self) -> &str {
-            "native-sos"
-        }
-
-        fn supports(&self, kind: ModelKind) -> bool {
-            matches!(kind, ModelKind::LP | ModelKind::MILP)
-        }
-
-        fn supports_sos(&self, _sos_type: SosType) -> bool {
-            true
-        }
-
-        fn solve(&mut self, _model: &Model, _opts: &()) -> Result<SolverResult, SolverError> {
-            unreachable!("capability test solver is never solved")
-        }
-    }
-
-    fn sos_model() -> Model {
-        let m = Model::new("capabilities");
-        variable!(m, x);
-        variable!(m, y);
-        constraint!(m, bound, x + y <= 1.0);
-        m.add_sos_constraint("choice", SosType::Sos1, [(x, 1.0), (y, 2.0)]);
-        m
-    }
-
-    #[test]
-    fn supports_model_checks_native_sos_capability() {
-        let model = sos_model();
-        assert!(!NoSos.supports_model(&model));
-        assert!(NativeSos.supports_model(&model));
-
-        let transformed = model
-            .to_reformulated_sos_model(
-                oximo_core::SosReformulationOptions::default().with_fallback_big_m(100.0),
-            )
-            .unwrap();
-        assert!(NoSos.supports_model(&transformed));
-        assert!(NativeSos.supports_model(&transformed));
-    }
-
-    #[derive(Debug, Default)]
-    struct RestrictedModel {
-        checks: Cell<usize>,
-    }
-
-    impl Solver for RestrictedModel {
-        type Options = ();
-
-        fn name(&self) -> &str {
-            "restricted-model"
-        }
-
-        fn supports(&self, kind: ModelKind) -> bool {
-            matches!(kind, ModelKind::LP | ModelKind::MILP)
-        }
-
-        fn supports_model_extra(&self, model: &Model) -> bool {
-            self.checks.set(self.checks.get() + 1);
-            model.num_variables() <= 1
-        }
-
-        fn solve(&mut self, _model: &Model, _opts: &()) -> Result<SolverResult, SolverError> {
-            unreachable!("capability test solver is never solved")
-        }
-    }
-
-    #[test]
-    fn backend_hook_can_restrict_support_and_runs_after_shared_checks() {
-        let solver = RestrictedModel::default();
-        let model = Model::new("backend restriction");
-        variable!(model, _x);
-        assert!(solver.supports_model(&model));
-        assert_eq!(solver.checks.get(), 1);
-
-        variable!(model, _y);
-        assert!(!solver.supports_model(&model));
-        assert_eq!(solver.checks.get(), 2);
-
-        assert!(!solver.supports_model(&sos_model()));
-        assert_eq!(solver.checks.get(), 2);
-
-        let nonlinear = Model::new("unsupported kind");
-        variable!(nonlinear, z);
-        constraint!(nonlinear, z.exp() <= 2.0);
-        assert!(!solver.supports_model(&nonlinear));
-        assert_eq!(solver.checks.get(), 2);
-    }
 }

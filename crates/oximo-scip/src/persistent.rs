@@ -3,7 +3,7 @@ use crate::{
     plugins::{Shared, SharedState},
     translate::Snapshot,
 };
-use oximo_core::{Model, ModelKind, SosType, VarId};
+use oximo_core::{Model, ModelKind, VarId};
 use oximo_solver::SolutionValues;
 use oximo_solver::resident::PersistentPreparation;
 use oximo_solver::{Solver, SolverError, SolverResult};
@@ -64,14 +64,21 @@ impl ScipPersistent {
     ///
     /// Returns translation, registration, options, or solve errors. Any error
     /// clears the resident state so the next solve starts from a fresh problem.
+    /// Preflight incompatibility preserves the resident state.
     pub fn solve_detailed(
         &mut self,
         model: &Model,
         opts: &ScipOptions,
     ) -> Result<ScipSolveOutput, SolverError> {
+        self.profile(opts).check_model(model).into_result()?;
+
+        // Translation is also local data validation. Reuse its result rather
+        // than preparing a second snapshot just for preflight.
         let result = crate::boundary(|| self.run(model, opts));
         if result.is_err() {
-            self.state = None;
+            if !matches!(&result, Err(SolverError::IncompatibleModel(_))) {
+                self.state = None;
+            }
             self.preparation.clear();
         } else {
             self.preparation.commit();
@@ -82,15 +89,16 @@ impl ScipPersistent {
         if opts.concurrent && self.solver.factory.is_some() {
             return Err(crate::backend("concurrent solving cannot copy custom Rust plugins"));
         }
-        crate::check_name(&model.name)?;
+        crate::check_name(&model.name).map_err(crate::translation_rejection)?;
         if model.has_active_psd_constraints() {
             return Err(SolverError::UnsupportedConstraint("PSD"));
         }
         let prepared = self.preparation.prepare(model)?;
         let snapshot = match &self.state {
-            Some(state) => state.snapshot.refresh(model, &prepared, self.preparation.change())?,
-            None => Arc::new(Snapshot::prepare_view(model, &prepared)?),
-        };
+            Some(state) => state.snapshot.refresh(model, &prepared, self.preparation.change()),
+            None => Snapshot::prepare_view(model, &prepared).map(Arc::new),
+        }
+        .map_err(crate::translation_rejection)?;
         let mut old = self.state.take();
         let dense_edits = matches!(self.preparation.change(),oximo_solver::resident::PreparationChange::Selected(targets)
             if targets.len() > snapshot.rows.len().div_ceil(8).max(16));
@@ -175,36 +183,19 @@ impl ScipPersistent {
 }
 impl Solver for ScipPersistent {
     type Options = ScipOptions;
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        oximo_solver::Solver::profile(&self.solver, opts)
+    }
+    fn validate_requirements(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        oximo_solver::Solver::validate_requirements(&self.solver, model, opts, requirements)
+    }
     fn name(&self) -> &str {
         "SCIP"
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        self.solver.supports(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        self.solver.domain_support(domain)
-    }
-
-    fn supports_sos(&self, kind: SosType) -> bool {
-        self.solver.supports_sos(kind)
-    }
-
-    fn supports_indicators(&self) -> bool {
-        self.solver.supports_indicators()
-    }
-
-    fn supports_model(&self, model: &Model) -> bool {
-        self.solver.supports_model(model)
-    }
-
-    fn validate_model_extra(
-        &self,
-        model: &Model,
-        opts: &Self::Options,
-    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
-        self.solver.validate_model_extra(model, opts)
     }
 
     fn solve(&mut self, model: &Model, opts: &ScipOptions) -> Result<SolverResult, SolverError> {
@@ -283,6 +274,60 @@ mod tests {
             assert_eq!(first.value_of(unused), Ok(Some(1.0)));
             assert!(Arc::ptr_eq(&snapshot, &solver.state.as_ref().unwrap().snapshot));
         }
+        assert_eq!(solver.build_count(), 1);
+    }
+    #[test]
+    fn preflight_rejection_preserves_the_resident_snapshot_and_build_count() {
+        let model = Model::new("retained resident");
+        variable!(model, 1.0 <= x <= 3.0);
+        objective!(model, Min, x);
+
+        let options = ScipOptions::default();
+        let mut solver = ScipPersistent::new();
+        solver.solve(&model, &options).unwrap();
+        let snapshot = Arc::clone(&solver.state.as_ref().unwrap().snapshot);
+
+        let rejected = Model::new("unsupported replacement");
+        variable!(rejected, z);
+        objective!(rejected, Min, z.tan());
+
+        assert!(matches!(
+            solver.solve(&rejected, &options),
+            Err(SolverError::IncompatibleModel(_))
+        ));
+        assert!(Arc::ptr_eq(&snapshot, &solver.state.as_ref().unwrap().snapshot));
+
+        solver.solve(&model, &options).unwrap();
+        assert!(Arc::ptr_eq(&snapshot, &solver.state.as_ref().unwrap().snapshot));
+        assert_eq!(solver.build_count(), 1);
+    }
+
+    #[test]
+    fn local_preparation_rejection_preserves_native_state() {
+        let model = Model::new("retained after data validation");
+        variable!(model, 1.0 <= x <= 3.0);
+        objective!(model, Min, x);
+
+        let options = ScipOptions::default();
+        let mut solver = ScipPersistent::new();
+        solver.solve(&model, &options).unwrap();
+        let invalid = Model::new("invalid semi domain");
+        let z = invalid
+            .__var("z")
+            .domain(Domain::SemiContinuous { threshold: -1.0 })
+            .lb(0.0)
+            .ub(3.0)
+            .build();
+        objective!(invalid, Min, z);
+
+        let expected = solver.validate_model(&invalid, &options).to_string();
+        let error = solver.solve(&invalid, &options).unwrap_err();
+        assert!(matches!(error, SolverError::IncompatibleModel(_)));
+        assert_eq!(error.to_string(), expected);
+        assert!(solver.state.is_some());
+
+        let result = solver.solve(&model, &options).unwrap();
+        assert!((result.objective().unwrap() - 1.0).abs() < 1e-7);
         assert_eq!(solver.build_count(), 1);
     }
 }

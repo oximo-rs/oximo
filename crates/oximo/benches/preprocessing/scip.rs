@@ -21,10 +21,18 @@ pub fn bench(criterion: &mut Criterion) {
         for i in 0..rows {
             model.__add_constraint_auto((x + 2.0 * y).le(f64::from(i) + 10.0));
         }
-        assert!(Scip::new().supports_model(&model));
+        assert!(
+            Scip::new().validate_model(&model, &oximo_scip::ScipOptions::default()).is_supported()
+        );
         group.throughput(Throughput::Elements(u64::from(rows)));
         group.bench_with_input(BenchmarkId::new("lp", rows), &model, |bencher, model| {
-            bencher.iter(|| black_box(Scip::new().supports_model(black_box(model))));
+            bencher.iter(|| {
+                black_box(
+                    Scip::new()
+                        .validate_model(black_box(model), &oximo_scip::ScipOptions::default())
+                        .is_supported(),
+                )
+            });
         });
     }
     group.finish();

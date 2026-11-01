@@ -142,8 +142,14 @@ fn cone_forms<S: Solver>(mut solver: S, opts: &S::Options) {
         objective!(model, Min, t + 7.0);
         assert_eq!(model.kind(), ModelKind::SOCP);
         let result = solver.solve(&model, opts);
-        if !solver.supports(ModelKind::SOCP) {
-            assert!(matches!(result, Err(SolverError::UnsupportedKind(ModelKind::SOCP))));
+        if !solver.profile(opts).supports_kind(ModelKind::SOCP) {
+            assert!(
+                matches!(&result, Err(SolverError::IncompatibleModel(report))
+                if report.errors.iter().any(|diagnostic|
+                    matches!(diagnostic.requirement, Requirement::Combination(features)
+                        if features.kind == ModelKind::SOCP))),
+                "{result:?}"
+            );
             continue;
         }
         let result = result.unwrap();

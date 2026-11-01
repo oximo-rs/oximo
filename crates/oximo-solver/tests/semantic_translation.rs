@@ -1,8 +1,8 @@
 use oximo_core::prelude::*;
 use oximo_core::{ModelId, ScalarFunctionData, SemanticFunction, SemanticType};
-use oximo_expr::{ExprId, ExprIdRemap};
+use oximo_expr::{ExprClass, ExprId, ExprIdRemap};
 use oximo_solver::{
-    AffineRowTranslator, Capability, ConstraintSignature, DualStatus, Solver, SolverError,
+    AffineRowTranslator, ConstraintSignature, DualStatus, RequirementSupport, Solver, SolverError,
     SolverResult, TranslationContext,
 };
 
@@ -16,17 +16,28 @@ impl Solver for BoundRows {
         "bound rows"
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
-    }
-
-    fn constraint_support(&self, signature: ConstraintSignature, _opts: &()) -> Capability {
-        if signature.function.is::<ScalarFunctionData<Affine>>() && !signature.set.is::<Interval>()
-        {
-            Capability::Native
-        } else {
-            Capability::Unsupported
-        }
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([ExprClass::Linear])
+                .with_scalar_objectives([ExprClass::Linear, ExprClass::Quadratic])
+                .with_kinds(oximo_solver::MODEL_KINDS.into_iter().filter(|&kind| {
+                    matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
+                }))
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+                .with_support(
+                    oximo_solver::Requirement::Constraint(ConstraintSignature::of::<
+                        ScalarFunctionData<Affine>,
+                        Interval,
+                    >()),
+                    RequirementSupport::Unsupported,
+                )
+        })
     }
 
     fn solve(&mut self, model: &Model, opts: &()) -> Result<SolverResult, SolverError> {
@@ -55,14 +66,13 @@ fn pair_support_does_not_imply_supported_combinations() {
 
     variable!(m, x, Integer);
     objective!(m, Min, x.square());
-    assert_eq!(solver.domain_support(Domain::Integer), Capability::Native);
+    assert_eq!(solver.profile(&()).domain_support(Domain::Integer), RequirementSupport::Supported);
     assert_eq!(
-        solver.objective_support(
+        solver.profile(&()).objective_support(
             SemanticType::of::<ScalarFunctionData<Quadratic>>(),
-            ObjectiveSense::Minimize,
-            &()
+            ObjectiveSense::Minimize
         ),
-        Capability::Native
+        RequirementSupport::Supported
     );
 
     let report = solver.validate_model(&m, &());
@@ -121,16 +131,25 @@ impl Solver for Sos1Rows {
         "SOS1 rows"
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        matches!(kind, ModelKind::LP | ModelKind::MILP)
-    }
-
-    fn supports_sos(&self, kind: SosType) -> bool {
-        kind == SosType::Sos1
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([ExprClass::Linear])
+                .with_scalar_objectives([ExprClass::Linear])
+                .with_kinds(
+                    oximo_solver::MODEL_KINDS
+                        .into_iter()
+                        .filter(|&kind| matches!(kind, ModelKind::LP | ModelKind::MILP)),
+                )
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+                .with_sos([SosType::Sos1])
+                .with_indicators(true)
+        })
     }
 
     fn solve(&mut self, model: &Model, opts: &()) -> Result<SolverResult, SolverError> {
@@ -166,6 +185,66 @@ impl<T: SemanticFunction> SemanticFunction for Described<T> {
 
 impl FunctionInSet<oximo_core::SpecialOrderedSet> for Described<oximo_core::VariableVectorData> {}
 impl FunctionInSet<oximo_core::IndicatorSet> for Described<oximo_core::IndicatorFunctionData> {}
+impl FunctionInSet<LessThan> for Described<ScalarFunctionData<Affine>> {}
+
+#[test]
+fn custom_function_diagnostics_retain_native_alternatives_and_live_origins() {
+    use oximo_solver::{Requirement, SolverProfile, VariableDomain};
+    let model = Model::new("custom scalar alternatives");
+
+    variable!(model, x);
+    let row = model.add_constraint(
+        "custom",
+        Constraint::new(Described(ScalarFunctionData::from_expression(x)), LessThan(2.0)),
+    );
+    objective!(model, Min, x);
+    let source = Requirement::Constraint(ConstraintSignature::of::<
+        Described<ScalarFunctionData<Affine>>,
+        LessThan,
+    >());
+
+    let native =
+        Requirement::Constraint(ConstraintSignature::of::<ScalarFunctionData<Affine>, LessThan>());
+
+    let profile = SolverProfile::new("no scalar rows")
+        .with_scalar_objectives([ExprClass::Linear])
+        .with_kinds([ModelKind::LP])
+        .with_domains([VariableDomain::Real])
+        .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied());
+
+    let report = profile.check_model(&model);
+    assert_eq!(report.errors.len(), 1);
+
+    let mut diagnostic = report.errors[0].clone();
+    assert_eq!(diagnostic.constraint(), Some(row.id()));
+    assert_eq!(diagnostic.location(), "constraint \"custom\"");
+    assert_eq!(
+        diagnostic.alternatives.iter().map(|a| a.requirement.clone()).collect::<Vec<_>>(),
+        vec![source.clone(), native.clone()]
+    );
+    assert!(diagnostic.alternatives.iter().all(|a| a.support == RequirementSupport::Unsupported));
+
+    diagnostic.origins[0].location = "renamed row".into();
+    diagnostic.origins[0].entity = oximo_solver::RequirementEntity::Objective;
+    assert_eq!(diagnostic.location(), "renamed row");
+    assert_eq!(diagnostic.constraint(), None);
+
+    diagnostic.origins.clear();
+    assert_eq!(diagnostic.location(), "");
+
+    let detail = "native scalar data needs a local check";
+    let support = RequirementSupport::Conditional(detail);
+    let report = profile.with_support(native.clone(), support.clone()).check_model(&model);
+    assert!(report.is_supported() && !report.is_confirmed());
+    assert_eq!(report.conditions.len(), 1);
+
+    let diagnostic = &report.conditions[0];
+    assert_eq!(diagnostic.requirement, native);
+    assert_eq!(diagnostic.alternatives[0].requirement, source);
+    assert_eq!(diagnostic.alternatives[0].support, RequirementSupport::Unsupported);
+    assert_eq!(diagnostic.alternatives[1].support, support);
+    assert!(report.to_string().contains(detail));
+}
 
 #[test]
 fn custom_structured_representations_are_classified_without_erasing_their_identity() {
@@ -297,7 +376,7 @@ fn newer_function_roots_require_a_fresh_translation_context() {
 }
 
 #[derive(Debug)]
-struct RestrictedRows(Capability);
+struct RestrictedRows(RequirementSupport);
 
 impl Solver for RestrictedRows {
     type Options = ();
@@ -306,25 +385,41 @@ impl Solver for RestrictedRows {
         "restricted rows"
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        BoundRows.supports(kind)
-    }
-
-    fn constraint_support(&self, _signature: ConstraintSignature, _opts: &()) -> Capability {
-        self.0.clone()
-    }
-
-    fn objective_support(
-        &self,
-        _signature: SemanticType,
-        _sense: ObjectiveSense,
-        _opts: &(),
-    ) -> Capability {
-        self.0.clone()
-    }
-
-    fn domain_support(&self, _domain: Domain) -> Capability {
-        self.0.clone()
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([ExprClass::Linear])
+                .with_scalar_objectives([ExprClass::Linear, ExprClass::Quadratic])
+                .with_kinds(
+                    oximo_solver::MODEL_KINDS
+                        .into_iter()
+                        .filter(|&kind| BoundRows.profile(&()).supports_kind(kind)),
+                )
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+                .with_support(
+                    oximo_solver::Requirement::Constraint(ConstraintSignature::of::<
+                        ScalarFunctionData<Affine>,
+                        LessThan,
+                    >()),
+                    self.0.clone(),
+                )
+                .with_support(
+                    oximo_solver::Requirement::Objective {
+                        function: SemanticType::of::<ScalarFunctionData<Affine>>(),
+                        sense: ObjectiveSense::Minimize,
+                    },
+                    self.0.clone(),
+                )
+                .with_support(
+                    oximo_solver::Requirement::Domain(oximo_solver::VariableDomain::Real),
+                    self.0.clone(),
+                )
+        })
     }
 
     fn solve(&mut self, model: &Model, opts: &()) -> Result<SolverResult, SolverError> {
@@ -340,19 +435,24 @@ fn validation_preserves_capability_reasons() {
     variable!(model, x);
     let cap = constraint!(model, cap, x <= 2.0);
     objective!(model, Min, x);
-    assert!(RestrictedRows(Capability::Native).validate_model(&model, &()).is_supported());
+    assert!(
+        RestrictedRows(RequirementSupport::Supported).validate_model(&model, &()).is_supported()
+    );
 
     let detail = "custom data check is required";
     let validation =
-        RestrictedRows(Capability::RequiresValidation(detail)).validate_model(&model, &());
-    assert_eq!(validation.errors.len(), 3);
-    assert!(validation.errors.iter().all(|error| error.reason.contains(detail)));
-    assert!(validation.errors.iter().any(|error| error.constraint == Some(cap.id())));
-    assert!(validation.errors.iter().any(|error| error.location == "objective"));
-    assert!(validation.errors.iter().any(|error| error.location == "variable \"x\""));
-    assert!(validation.into_result().unwrap_err().to_string().contains(detail));
+        RestrictedRows(RequirementSupport::Conditional(detail)).validate_model(&model, &());
+    assert_eq!(validation.conditions.len(), 3);
+    assert!(validation.conditions.iter().all(|error| error.reason.contains(detail)));
+    assert!(validation.conditions.iter().any(|error| error.constraint() == Some(cap.id())));
+    assert!(validation.conditions.iter().any(|error| error.location() == "objective"));
+    assert!(validation.conditions.iter().any(|error| error.location() == "variable \"x\""));
+    assert!(!validation.is_confirmed());
+    assert!(validation.into_result().is_ok());
 
-    assert!(!RestrictedRows(Capability::Unsupported).validate_model(&model, &()).is_supported());
+    assert!(
+        !RestrictedRows(RequirementSupport::Unsupported).validate_model(&model, &()).is_supported()
+    );
 }
 
 #[test]

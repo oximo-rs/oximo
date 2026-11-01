@@ -49,6 +49,10 @@ pub fn solve(
     opts: &BaronOptions,
     exec: Option<&str>,
 ) -> Result<SolverResult, SolverError> {
+    oximo_solver::Solver::profile(&crate::Baron::default(), opts)
+        .check_model(model)
+        .into_result()?;
+
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }
@@ -62,7 +66,7 @@ pub fn solve(
     let prepared = LoweringContext::new(model)?;
     let parameters = prepared.arena().parameter_snapshot();
     let (bar, var_order, con_order, soc_order, soc_bounds) =
-        build_bar_prepared(model, &prepared, opts)?;
+        build_bar_prepared(model, &prepared, opts).map_err(translation_rejection)?;
     let run = run_baron(&bar, opts, exec)?;
     let mut result = parse_solution(
         &run.tim,
@@ -110,8 +114,13 @@ pub fn compute_iis(
     opts: &BaronOptions,
     exec: Option<&str>,
 ) -> Result<Iis, SolverError> {
+    oximo_solver::Solver::profile(&crate::Baron::default(), opts)
+        .check_model(model)
+        .into_result()?;
+
     let iis_opts = if opts.has_comp_iis() { opts.clone() } else { opts.clone().comp_iis(1) };
-    let (bar, _var_order, _con_order, _soc_order, _soc_bounds) = build_bar(model, &iis_opts)?;
+    let (bar, _var_order, _con_order, _soc_order, _soc_bounds) =
+        build_bar(model, &iis_opts).map_err(translation_rejection)?;
     let run = run_baron(&bar, &iis_opts, exec)?;
 
     let termination = map_status(&run.res, tim_model_status(&run.tim));
@@ -1557,6 +1566,17 @@ pub mod benchmark_support {
         }
         Ok(out)
     }
+}
+
+fn translation_rejection(error: SolverError) -> SolverError {
+    SolverError::IncompatibleModel(Box::new(oximo_solver::CompatibilityReport {
+        solver: crate::NAME.into(),
+        errors: vec![oximo_solver::RequirementDiagnostic::adapter(
+            "BARON translation",
+            error.to_string(),
+        )],
+        ..oximo_solver::CompatibilityReport::default()
+    }))
 }
 
 #[cfg(test)]

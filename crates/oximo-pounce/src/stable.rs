@@ -26,6 +26,38 @@ use crate::translate::{
 pub(crate) type Oracle = Rc<RefCell<HybridOracle>>;
 pub(crate) type Resident = tnlp::Resident<HybridOracle>;
 
+/// Options already accepted by the validator used for the builder surface.
+#[derive(Debug)]
+pub(crate) struct BuilderOptions(PounceOptions);
+
+impl BuilderOptions {
+    pub(crate) fn new(opts: &PounceOptions) -> Result<Self, SolverError> {
+        let mut validator = IpoptApplication::new();
+        validator.initialize().map_err(|e| SolverError::Backend(format!("pounce init: {e:?}")))?;
+        apply_options(validator.options_mut(), opts, false)?;
+        Ok(Self(opts.clone()))
+    }
+
+    pub(crate) fn matches(&self, opts: &PounceOptions) -> bool {
+        self.0 == *opts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn options_storage(&self) -> *const (String, PounceOptionValue) {
+        self.0.extra.as_ptr()
+    }
+
+    pub(crate) fn run(
+        &self,
+        model: &Model,
+        oracle: &Oracle,
+        prep: &Prepared,
+        warm: Option<&WarmStart>,
+    ) -> Result<Outcome, SolverError> {
+        run_builder(model, oracle, prep, &self.0, warm)
+    }
+}
+
 const GENERATED_FBBT_TAPE_REJECTED: &str = "oximo-pounce: generated FBBT tape rejected";
 
 // `Result` for signature parity with the exact path, which can fail to build.
@@ -75,7 +107,7 @@ pub(crate) fn run(
     if oracle.borrow().all_closed_form() {
         tnlp::run(model, oracle, prep, opts, warm)
     } else {
-        run_builder(model, oracle, prep, opts, warm)
+        BuilderOptions::new(opts)?.run(model, oracle, prep, warm)
     }
 }
 
@@ -128,12 +160,6 @@ fn run_builder(
     opts: &PounceOptions,
     warm: Option<&WarmStart>,
 ) -> Result<Outcome, SolverError> {
-    // The builder silently discards option errors, so validate the options
-    // against a fresh application first.
-    let mut validator = IpoptApplication::new();
-    validator.initialize().map_err(|e| SolverError::Backend(format!("pounce init: {e:?}")))?;
-    apply_options(validator.options_mut(), opts, false)?;
-
     let m = oracle.borrow().num_constraints();
     let fbbt_constraints = if opts.effective_bool("presolve").unwrap_or(false)
         && opts.effective_bool("presolve_fbbt").unwrap_or(false)

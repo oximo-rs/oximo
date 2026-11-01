@@ -114,6 +114,8 @@ impl PrimalStatus {
 
 #[derive(Error)]
 pub enum SolverError {
+    #[error("{0}")]
+    IncompatibleModel(Box<crate::CompatibilityReport>),
     #[error("solver does not support model kind {0:?}")]
     UnsupportedKind(oximo_core::ModelKind),
     #[error("solver does not support native {0} constraints")]

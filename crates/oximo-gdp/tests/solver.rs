@@ -16,12 +16,19 @@ impl Solver for RecordingSolver {
         "recording"
     }
 
-    fn supports(&self, _kind: ModelKind) -> bool {
-        true
-    }
-
-    fn supports_model_extra(&self, _model: &Model) -> bool {
-        true
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([oximo_expr::ExprClass::Linear])
+                .with_scalar_objectives([oximo_expr::ExprClass::Linear])
+                .with_kinds(oximo_solver::MODEL_KINDS)
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+        })
     }
 
     fn solve(&mut self, model: &Model, fail: &bool) -> Result<SolverResult, SolverError> {
@@ -37,15 +44,16 @@ impl Solver for RecordingSolver {
 #[test]
 fn backend_hook_cannot_accept_unreformulated_gdp() {
     let model = Model::new("GDP capabilities");
+    objective!(model, Feasibility);
 
     boolean_variable!(model, active);
     logical_constraint!(model, active);
 
     let solver = RecordingSolver::default();
-    assert!(!solver.supports_model(&model));
+    assert!(!solver.validate_model(&model, &false).is_supported());
 
     model.reformulate_gdp(BigM::default()).unwrap();
-    assert!(solver.supports_model(&model));
+    assert!(solver.validate_model(&model, &false).is_supported());
 }
 
 #[test]
@@ -158,8 +166,19 @@ impl Solver for PrimalSolver {
         "primal"
     }
 
-    fn supports(&self, _kind: ModelKind) -> bool {
-        true
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([oximo_expr::ExprClass::Linear])
+                .with_scalar_objectives([oximo_expr::ExprClass::Linear])
+                .with_kinds(oximo_solver::MODEL_KINDS)
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+        })
     }
 
     fn solve(&mut self, model: &Model, _opts: &()) -> Result<SolverResult, SolverError> {
@@ -210,8 +229,19 @@ impl Solver for DualSolver {
         "dual"
     }
 
-    fn supports(&self, _kind: ModelKind) -> bool {
-        true
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([oximo_expr::ExprClass::Linear])
+                .with_scalar_objectives([oximo_expr::ExprClass::Linear])
+                .with_kinds(oximo_solver::MODEL_KINDS)
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+        })
     }
 
     fn solve(&mut self, model: &Model, opts: &()) -> Result<SolverResult, SolverError> {
@@ -326,8 +356,19 @@ impl Solver for AppendingSolver {
         "appending"
     }
 
-    fn supports(&self, _kind: ModelKind) -> bool {
-        true
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([oximo_expr::ExprClass::Linear])
+                .with_scalar_objectives([oximo_expr::ExprClass::Linear])
+                .with_kinds(oximo_solver::MODEL_KINDS)
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+        })
     }
 
     fn solve(&mut self, model: &Model, opts: &()) -> Result<SolverResult, SolverError> {
@@ -636,4 +677,27 @@ fn sos_only_history_is_projected_even_without_a_gdp_report() {
             assert_eq!(result.dual_of(handle).unwrap(), None);
         }
     }
+}
+
+#[test]
+fn pending_logic_invalidates_cached_requirements_before_any_native_rows_exist() {
+    let model = Model::new("pending logical edits");
+    objective!(model, Feasibility);
+
+    let solver = RecordingSolver::default();
+    assert!(solver.validate_model(&model, &false).is_supported());
+
+    boolean_variable!(model, active);
+    logical_constraint!(model, active);
+
+    let report = solver.validate_model(&model, &false);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.requirement == oximo_solver::Requirement::GdpReformulated)
+    );
+
+    model.reformulate_gdp(BigM::default()).unwrap();
+    assert!(solver.validate_model(&model, &false).is_supported());
 }

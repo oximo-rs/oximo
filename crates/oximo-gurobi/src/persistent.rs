@@ -1,5 +1,5 @@
 use gurobi_rs::prelude::*;
-use oximo_core::{Model, ModelKind, SosType};
+use oximo_core::{Model, ModelKind};
 use oximo_solver::incremental::{refresh_snapshot, snapshot_prepared};
 use oximo_solver::prepare::LoweringContext;
 use oximo_solver::resident::{PersistentPreparation, PreparationChange};
@@ -225,6 +225,8 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
+        self.profile(opts).check_model(model).into_result()?;
+
         match self.solve_resident_with_callback(model, opts, callback, None) {
             Ok(result) => {
                 self.preparation.commit();
@@ -253,6 +255,8 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
+        self.profile(opts).check_model(model).into_result()?;
+
         match self.solve_resident_with_callback(model, opts, callback, Some(locations.into())) {
             Ok(result) => {
                 self.preparation.commit();
@@ -270,27 +274,24 @@ impl GurobiPersistent {
 impl Solver for GurobiPersistent {
     type Options = GurobiOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        oximo_solver::Solver::profile(&crate::Gurobi, opts)
+    }
+    fn validate_requirements(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        oximo_solver::Solver::validate_requirements(&crate::Gurobi, model, opts, requirements)
+    }
     fn name(&self) -> &str {
         crate::NAME
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        crate::supported(kind)
-    }
-
-    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Capability::Native
-    }
-
-    fn supports_sos(&self, _sos_type: SosType) -> bool {
-        true
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
-    }
-
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
+        self.profile(opts).check_model(model).into_result()?;
+
         // A mid-update failure (a failed rebuild, a partial delta push, or a solve
         // error) can leave the resident model partially modified or its snapshot
         // stale. Drop the resident state on any error so the next solve rebuilds from

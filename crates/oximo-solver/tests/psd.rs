@@ -8,8 +8,27 @@ impl Solver for ScalarOnly {
     fn name(&self) -> &str {
         "scalar"
     }
-    fn supports(&self, _: ModelKind) -> bool {
-        true
+    fn profile(&self, _opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([
+                    oximo_expr::ExprClass::Linear,
+                    oximo_expr::ExprClass::Quadratic,
+                    oximo_expr::ExprClass::Nonlinear,
+                ])
+                .with_scalar_objectives([
+                    oximo_expr::ExprClass::Linear,
+                    oximo_expr::ExprClass::Quadratic,
+                    oximo_expr::ExprClass::Nonlinear,
+                ])
+                .with_kinds(oximo_solver::MODEL_KINDS)
+                .with_domains([
+                    oximo_solver::VariableDomain::Real,
+                    oximo_solver::VariableDomain::Integer,
+                    oximo_solver::VariableDomain::Binary,
+                ])
+                .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+        })
     }
     fn solve(&mut self, _: &Model, (): &()) -> Result<SolverResult, SolverError> {
         unreachable!()
@@ -23,7 +42,7 @@ fn psd_capability_is_independent_of_model_kind() {
     psd_constraint!(m, SymmetricMatrix::from_upper_triangle(1, [x]));
     objective!(m, Min, x.exp());
     assert_eq!(m.kind(), ModelKind::NLP);
-    assert!(!ScalarOnly.supports_model(&m));
+    assert!(!ScalarOnly.validate_model(&m, &()).is_supported());
     assert!(matches!(snapshot(&m), Err(SolverError::UnsupportedConstraint("PSD"))));
 }
 

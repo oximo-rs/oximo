@@ -1,91 +1,470 @@
-//! Solver capability queries and whole-model compatibility validation.
-//!
-//! Queries report support for constraint function/set pairs, objectives, and variable
-//! domains. Validation checks their combinations and runs adapter-specific data checks.
+//! Declared solver profiles and accumulated compatibility reports.
 
-use oximo_expr::ExprClass;
-
-use oximo_core::{
-    Affine, Domain, FunctionKind, FunctionRepresentationRef, Model, ModelKind, Nonlinear,
-    ObjectiveSense, Quadratic, ScalarFunctionData, SemanticConstraintId, SemanticType,
-    SymmetricAffineData, VectorAffineData,
+use crate::{
+    ExpressionOperator, ModelFeatures, ModelRequirements, Requirement, RequirementEntity,
+    RequirementOrigin, VariableDomain,
 };
-
-use crate::Solver;
+use oximo_core::{
+    Affine, Domain, FunctionKind, ModelKind, Nonlinear, ObjectiveSense, Quadratic,
+    ScalarFunctionData, SemanticConstraintId, SemanticType, SosType,
+};
+use oximo_expr::ExprClass;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConstraintSignature {
     pub function: SemanticType,
     pub set: SemanticType,
 }
-
 impl ConstraintSignature {
-    /// Build a constraint signature from its function and set types.
     pub fn of<F: 'static, S: 'static>() -> Self {
         Self { function: SemanticType::of::<F>(), set: SemanticType::of::<S>() }
     }
 }
 
-/// A solver's support for a constraint signature, objective, or variable domain.
+/// External uncertainty is explicit and does not imply confirmed compatibility.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Capability {
-    /// The adapter implements this interface.
-    Native,
-
-    /// This query found no supported interface.
+pub enum RequirementSupport {
+    Supported,
     Unsupported,
-
-    /// The signature alone is insufficient to determine support.
-    RequiresValidation(&'static str),
+    Conditional(&'static str),
 }
 
-impl Capability {
-    /// Return no reason for native support, the supplied message for unsupported
-    /// constructs, or the stored reason when further validation is required.
-    fn rejection_reason(self, unsupported: &str) -> Option<String> {
-        match self {
-            Self::Native => None,
-            Self::Unsupported => Some(unsupported.into()),
-            Self::RequiresValidation(reason) => Some(reason.into()),
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequirementAlternative {
+    pub requirement: Requirement,
+    pub support: RequirementSupport,
 }
 
 #[derive(Clone, Debug)]
-pub struct CapabilityDiagnostic {
-    pub constraint: Option<SemanticConstraintId>,
-    pub location: String,
+pub struct RequirementDiagnostic {
+    /// Primary failure, or the alternative supplying a conditional acceptance.
+    pub requirement: Requirement,
+    pub origins: Vec<RequirementOrigin>,
+    /// Every considered representation and its resolved support result.
+    pub alternatives: Vec<RequirementAlternative>,
     pub reason: String,
+}
+impl RequirementDiagnostic {
+    pub fn new(
+        requirement: Requirement,
+        origins: Vec<RequirementOrigin>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let alternatives = vec![RequirementAlternative {
+            requirement: requirement.clone(),
+            support: RequirementSupport::Unsupported,
+        }];
+        Self { requirement, origins, alternatives, reason: reason.into() }
+    }
+
+    /// First constraint origin, when one exists.
+    pub fn constraint(&self) -> Option<SemanticConstraintId> {
+        self.origins.iter().find_map(|origin| match origin.entity {
+            RequirementEntity::Constraint(id) => Some(id),
+            _ => None,
+        })
+    }
+
+    /// All captured source locations, in declaration order.
+    pub fn location(&self) -> String {
+        self.origins.iter().map(|origin| origin.location.as_str()).collect::<Vec<_>>().join(", ")
+    }
+
+    pub fn adapter(location: &'static str, reason: impl Into<String>) -> Self {
+        Self::new(
+            Requirement::AdapterRestriction(location),
+            vec![RequirementOrigin {
+                entity: RequirementEntity::Model,
+                location: location.into(),
+                declared_constraint: None,
+            }],
+            reason,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ModelValidation {
-    pub errors: Vec<CapabilityDiagnostic>,
+pub struct CompatibilityReport {
+    pub solver: String,
+    pub errors: Vec<RequirementDiagnostic>,
+    pub conditions: Vec<RequirementDiagnostic>,
 }
-
-impl ModelValidation {
-    /// Return whether validation collected no compatibility errors.
+impl CompatibilityReport {
+    /// Whether a solve attempt is allowed; external uncertainty may remain.
     pub fn is_supported(&self) -> bool {
         self.errors.is_empty()
     }
 
-    /// Consume the validation report, returning `Ok(())` if it contains no errors.
-    ///
+    pub fn is_confirmed(&self) -> bool {
+        self.errors.is_empty() && self.conditions.is_empty()
+    }
+
     /// # Errors
-    /// Returns [`crate::SolverError::Backend`] with each diagnostic's location and
-    /// reason joined by newlines when compatibility errors were collected.
+    /// Returns the complete typed compatibility report when requirements are unmet.
     pub fn into_result(self) -> Result<(), crate::SolverError> {
         if self.is_supported() {
             Ok(())
         } else {
-            Err(crate::SolverError::Backend(
-                self.errors
-                    .into_iter()
-                    .map(|d| format!("{}: {}", d.location, d.reason))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ))
+            Err(crate::SolverError::IncompatibleModel(Box::new(self)))
         }
+    }
+}
+impl std::fmt::Display for CompatibilityReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} model compatibility", self.solver)?;
+        for diagnostic in &self.errors {
+            write!(
+                f,
+                "\n{}: unmet {}: {}",
+                diagnostic.location(),
+                diagnostic.requirement,
+                diagnostic.reason
+            )?;
+            display_alternatives(f, diagnostic)?;
+        }
+        for diagnostic in &self.conditions {
+            write!(
+                f,
+                "\n{}: conditional {}: {}",
+                diagnostic.location(),
+                diagnostic.requirement,
+                diagnostic.reason
+            )?;
+            display_alternatives(f, diagnostic)?;
+        }
+        Ok(())
+    }
+}
+
+fn display_alternatives(
+    f: &mut std::fmt::Formatter<'_>,
+    diagnostic: &RequirementDiagnostic,
+) -> std::fmt::Result {
+    if diagnostic.alternatives.len() > 1 {
+        for alternative in &diagnostic.alternatives {
+            write!(f, "\n  alternative {}: ", alternative.requirement)?;
+            match alternative.support {
+                RequirementSupport::Supported => f.write_str("supported")?,
+                RequirementSupport::Unsupported => f.write_str("unsupported")?,
+                RequirementSupport::Conditional(reason) => write!(f, "conditional: {reason}")?,
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CombinationRule {
+    rejects: fn(&ModelFeatures) -> bool,
+    reason: &'static str,
+}
+
+/// A self-contained declaration for one backend configuration.
+/// Unlisted domains, operators, and interfaces are unsupported.
+#[derive(Clone, Debug)]
+pub struct SolverProfile {
+    pub name: String,
+    kinds: Vec<ModelKind>,
+    scalar_constraints: Vec<ExprClass>,
+    scalar_objectives: Vec<ExprClass>,
+    domains: Vec<VariableDomain>,
+    sos: Vec<SosType>,
+    indicators: bool,
+    soc: bool,
+    psd: bool,
+    operators: Vec<ExpressionOperator>,
+    overrides: Vec<(Requirement, RequirementSupport)>,
+    rules: Vec<CombinationRule>,
+    uncertainty: Option<&'static str>,
+}
+
+/// All summary kinds, useful when declaring a profile from an adapter table.
+pub const MODEL_KINDS: [ModelKind; 12] = [
+    ModelKind::LP,
+    ModelKind::MILP,
+    ModelKind::QP,
+    ModelKind::MIQP,
+    ModelKind::QCP,
+    ModelKind::MIQCP,
+    ModelKind::SOCP,
+    ModelKind::MISOCP,
+    ModelKind::SDP,
+    ModelKind::MISDP,
+    ModelKind::NLP,
+    ModelKind::MINLP,
+];
+
+impl SolverProfile {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kinds: Vec::new(),
+            scalar_constraints: Vec::new(),
+            scalar_objectives: Vec::new(),
+            domains: Vec::new(),
+            sos: Vec::new(),
+            indicators: false,
+            soc: false,
+            psd: false,
+            operators: Vec::new(),
+            overrides: Vec::new(),
+            rules: Vec::new(),
+            uncertainty: None,
+        }
+    }
+
+    /// Declare supported whole-model combinations.
+    #[must_use]
+    pub fn with_kinds(mut self, kinds: impl IntoIterator<Item = ModelKind>) -> Self {
+        self.kinds.extend(kinds);
+        self
+    }
+
+    /// Enable scalar inequalities, equalities, and intervals of these classes.
+    #[must_use]
+    pub fn with_scalar_constraints(mut self, classes: impl IntoIterator<Item = ExprClass>) -> Self {
+        self.scalar_constraints.extend(classes);
+        self
+    }
+
+    /// Enable scalar objectives of these classes, for both objective senses.
+    /// Use `with_support` for an exact type/sense restriction.
+    #[must_use]
+    pub fn with_scalar_objectives(mut self, classes: impl IntoIterator<Item = ExprClass>) -> Self {
+        self.scalar_objectives.extend(classes);
+        self
+    }
+
+    #[must_use]
+    pub fn with_soc(mut self, enabled: bool) -> Self {
+        self.soc = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_domains(mut self, domains: impl IntoIterator<Item = VariableDomain>) -> Self {
+        self.domains.extend(domains);
+        self
+    }
+
+    #[must_use]
+    pub fn with_sos(mut self, kinds: impl IntoIterator<Item = SosType>) -> Self {
+        self.sos.extend(kinds);
+        self
+    }
+
+    #[must_use]
+    pub fn with_indicators(mut self, enabled: bool) -> Self {
+        self.indicators = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_psd(mut self, enabled: bool) -> Self {
+        self.psd = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_operators(
+        mut self,
+        operators: impl IntoIterator<Item = ExpressionOperator>,
+    ) -> Self {
+        self.operators.extend(operators);
+        self
+    }
+
+    /// Override an individual interface, independently of whole-model combinations.
+    #[must_use]
+    pub fn with_support(mut self, requirement: Requirement, support: RequirementSupport) -> Self {
+        self.overrides.push((requirement, support));
+        self
+    }
+
+    #[must_use]
+    pub fn reject_combination(
+        mut self,
+        rejects: fn(&ModelFeatures) -> bool,
+        reason: &'static str,
+    ) -> Self {
+        self.rules.push(CombinationRule { rejects, reason });
+        self
+    }
+
+    #[must_use]
+    pub fn with_external_uncertainty(mut self, reason: &'static str) -> Self {
+        self.uncertainty = Some(reason);
+        self
+    }
+
+    #[must_use]
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn supports_kind(&self, kind: ModelKind) -> bool {
+        self.kinds.contains(&kind)
+    }
+
+    /// Whether support for this SOS kind is confirmed, after overrides.
+    /// Use `sos_support` to retain conditional support details.
+    pub fn supports_sos(&self, kind: SosType) -> bool {
+        matches!(self.sos_support(kind), RequirementSupport::Supported)
+    }
+
+    /// Resolve kind-specific SOS support, including overrides and conditions.
+    pub fn sos_support(&self, kind: SosType) -> RequirementSupport {
+        self.support(&Requirement::Sos(kind))
+    }
+
+    pub fn constraint_support(&self, signature: ConstraintSignature) -> RequirementSupport {
+        self.support(&Requirement::Constraint(signature))
+    }
+
+    pub fn objective_support(
+        &self,
+        function: SemanticType,
+        sense: ObjectiveSense,
+    ) -> RequirementSupport {
+        self.support(&Requirement::Objective { function, sense })
+    }
+
+    pub fn domain_support(&self, domain: Domain) -> RequirementSupport {
+        self.support(&Requirement::Domain(domain.into()))
+    }
+
+    pub fn support(&self, requirement: &Requirement) -> RequirementSupport {
+        if let Some((_, support)) = self.overrides.iter().rev().find(|(r, _)| r == requirement) {
+            return support.clone();
+        }
+
+        let supported = match requirement {
+            Requirement::ObjectiveDeclared
+            | Requirement::GdpReformulated
+            | Requirement::AdapterRestriction(_) => false,
+            Requirement::Domain(domain) => self.domains.contains(domain),
+            Requirement::Constraint(signature) => return query_constraint(self, *signature),
+            Requirement::Objective { function, sense } => {
+                return query_objective(self, *function, *sense);
+            }
+            Requirement::Sos(kind) => self.sos.contains(kind),
+            Requirement::Operator(operator) => self.operators.contains(operator),
+            Requirement::Combination(features) => {
+                self.supports_kind(features.kind)
+                    && !self.rules.iter().any(|rule| (rule.rejects)(features))
+            }
+        };
+        if supported {
+            if let Some(reason) =
+                self.uncertainty.filter(|_| matches!(requirement, Requirement::Combination(_)))
+            {
+                return RequirementSupport::Conditional(reason);
+            }
+            RequirementSupport::Supported
+        } else {
+            RequirementSupport::Unsupported
+        }
+    }
+
+    /// Check the current model's structural requirements, reusing only revision-valid summaries.
+    /// Local numeric and adapter route checks belong to `Solver::validate_model`.
+    pub fn check_model(&self, model: &oximo_core::Model) -> CompatibilityReport {
+        let requirements = crate::requirements::for_matching(model);
+        self.check_with_origins(model, &requirements)
+    }
+
+    pub(crate) fn check_with_origins(
+        &self,
+        model: &oximo_core::Model,
+        requirements: &ModelRequirements,
+    ) -> CompatibilityReport {
+        let report = self.check(requirements);
+        if report.errors.iter().chain(&report.conditions).all(|diagnostic| {
+            !diagnostic.origins.is_empty()
+                && diagnostic.origins.iter().all(|origin| !origin.location.is_empty())
+        }) {
+            report
+        } else {
+            // Materialize source names only when we need them.
+            self.check(&crate::requirements::for_validation(model))
+        }
+    }
+
+    pub fn check(&self, requirements: &ModelRequirements) -> CompatibilityReport {
+        let mut report =
+            CompatibilityReport { solver: self.name.clone(), ..CompatibilityReport::default() };
+
+        for entry in &requirements.entries {
+            let mut condition = None;
+            let mut supports = smallvec::SmallVec::<[RequirementSupport; 3]>::new();
+            if entry.alternatives.iter().enumerate().any(|(index, r)| {
+                let support = self.support(r);
+                supports.push(support.clone());
+                match support {
+                    RequirementSupport::Supported => true,
+                    RequirementSupport::Conditional(reason) => {
+                        condition = Some((index, reason));
+                        false
+                    }
+                    RequirementSupport::Unsupported => false,
+                }
+            }) {
+                continue;
+            }
+            let alternatives = entry
+                .alternatives
+                .iter()
+                .cloned()
+                .zip(supports)
+                .map(|(requirement, support)| RequirementAlternative { requirement, support })
+                .collect();
+
+            if let Some((index, reason)) = condition {
+                report.conditions.push(RequirementDiagnostic {
+                    requirement: entry.alternatives[index].clone(),
+                    origins: entry.origins.clone(),
+                    alternatives,
+                    reason: reason.into(),
+                });
+                continue;
+            }
+            let Some(requirement) = entry.alternatives.first() else {
+                report.errors.push(RequirementDiagnostic::adapter(
+                    "requirement alternatives",
+                    "no representation alternatives supplied",
+                ));
+                continue;
+            };
+
+            let reason = match requirement {
+                Requirement::ObjectiveDeclared => "no objective or feasibility direction declared".into(),
+                Requirement::GdpReformulated => "GDP requires explicit reformulation".into(),
+                Requirement::Constraint(signature) if signature.set.is::<oximo_core::IndicatorSet>() => "explicitly use Model::reformulate_indicators or Model::to_reformulated_indicator_model".into(),
+                Requirement::Constraint(_) => "unsupported function/set pair".into(),
+                Requirement::Combination(features) => self.rules.iter().filter(|rule| (rule.rejects)(features)).map(|rule| rule.reason).collect::<Vec<_>>().join("; "),
+                _ => "unsupported by this solver configuration".into(),
+            };
+            report.errors.push(RequirementDiagnostic {
+                requirement: requirement.clone(),
+                origins: entry.origins.clone(),
+                alternatives,
+                reason: if reason.is_empty() {
+                    "unsupported model combination".into()
+                } else {
+                    reason
+                },
+            });
+        }
+        report
+    }
+}
+
+pub(crate) fn scalar_signature(class: ExprClass) -> SemanticType {
+    match class {
+        ExprClass::Linear => SemanticType::of::<ScalarFunctionData<Affine>>(),
+        ExprClass::Quadratic => SemanticType::of::<ScalarFunctionData<Quadratic>>(),
+        ExprClass::Nonlinear => SemanticType::of::<ScalarFunctionData<Nonlinear>>(),
     }
 }
 
@@ -106,339 +485,88 @@ pub(crate) fn scalar_set(signature: SemanticType) -> bool {
         || signature.is::<oximo_core::Interval>()
 }
 
-/// Determine support for a function/set pair from the solver's advertised model
-/// kinds and constraint features, flagging cases that need data checks.
-pub(crate) fn query_constraint<S: Solver + ?Sized>(
-    solver: &S,
-    signature: ConstraintSignature,
-) -> Capability {
+/// Determine support for a function/set pair independently of model combinations.
+fn query_constraint(solver: &SolverProfile, signature: ConstraintSignature) -> RequirementSupport {
     let kind = signature.function.function_kind();
     if scalar_set(signature.set) {
         if let Some(class) = scalar_class(signature.function) {
-            let supported = match class {
-                ExprClass::Linear => solver.supports(ModelKind::LP),
-                ExprClass::Quadratic => {
-                    solver.supports(ModelKind::QCP) || solver.supports(ModelKind::MIQCP)
-                }
-                ExprClass::Nonlinear => {
-                    solver.supports(ModelKind::NLP) || solver.supports(ModelKind::MINLP)
-                }
+            let supported = solver.scalar_constraints.contains(&class);
+            return if supported {
+                RequirementSupport::Supported
+            } else {
+                RequirementSupport::Unsupported
             };
-            return if supported { Capability::Native } else { Capability::Unsupported };
         }
 
         if matches!(kind, FunctionKind::Scalar(None)) {
-            return Capability::RequiresValidation(
-                "dynamic function needs classification or narrowing",
-            );
+            return RequirementSupport::Unsupported;
         }
     }
 
     if kind == FunctionKind::VectorAffine && signature.set.is::<oximo_core::SecondOrderCone>() {
-        return if solver.supports(ModelKind::SOCP) || solver.supports(ModelKind::MISOCP) {
-            Capability::Native
+        return if solver.soc {
+            RequirementSupport::Supported
         } else {
-            Capability::Unsupported
+            RequirementSupport::Unsupported
         };
     }
 
     if kind == FunctionKind::SymmetricAffine
         && signature.set.is::<oximo_core::PositiveSemidefiniteCone>()
     {
-        return if solver.supports_psd() { Capability::Native } else { Capability::Unsupported };
+        return if solver.psd {
+            RequirementSupport::Supported
+        } else {
+            RequirementSupport::Unsupported
+        };
     }
 
     if kind == FunctionKind::Indicator && signature.set.is::<oximo_core::IndicatorSet>() {
-        return if solver.supports_indicators() {
-            Capability::Native
+        return if solver.indicators {
+            RequirementSupport::Supported
         } else {
-            Capability::Unsupported
+            RequirementSupport::Unsupported
         };
     }
 
     if kind == FunctionKind::Variables && signature.set.is::<oximo_core::SpecialOrderedSet>() {
-        return if solver.supports_sos(oximo_core::SosType::Sos1)
-            && solver.supports_sos(oximo_core::SosType::Sos2)
-        {
-            Capability::Native
-        } else if solver.supports_sos(oximo_core::SosType::Sos1)
-            || solver.supports_sos(oximo_core::SosType::Sos2)
-        {
-            Capability::RequiresValidation("SOS kind needs checking")
-        } else {
-            Capability::Unsupported
-        };
-    }
-    Capability::Unsupported
-}
-
-/// Determine objective support from its scalar expression class and the solver's
-/// advertised model kinds.
-pub(crate) fn query_objective<S: Solver + ?Sized>(
-    solver: &S,
-    signature: SemanticType,
-    _sense: ObjectiveSense,
-) -> Capability {
-    match scalar_class(signature) {
-        Some(ExprClass::Linear) => {
-            if solver.supports(ModelKind::LP) {
-                Capability::Native
-            } else {
-                Capability::Unsupported
+        // An unqualified SOS signature promises both kinds.
+        // A concrete model instead requires its resolved kind.
+        return match (solver.sos_support(SosType::Sos1), solver.sos_support(SosType::Sos2)) {
+            (RequirementSupport::Unsupported, _) | (_, RequirementSupport::Unsupported) => {
+                RequirementSupport::Unsupported
             }
-        }
-
-        Some(ExprClass::Quadratic) => {
-            if solver.supports(ModelKind::QP) || solver.supports(ModelKind::MIQP) {
-                Capability::Native
-            } else {
-                Capability::Unsupported
+            (RequirementSupport::Supported, RequirementSupport::Supported) => {
+                RequirementSupport::Supported
             }
-        }
-
-        Some(ExprClass::Nonlinear) => {
-            if solver.supports(ModelKind::NLP) || solver.supports(ModelKind::MINLP) {
-                Capability::Native
-            } else {
-                Capability::Unsupported
-            }
-        }
-        None => Capability::RequiresValidation("objective has no supported scalar representation"),
-    }
-}
-
-/// Determine variable-domain support from the solver's advertised model kinds,
-/// leaving semicontinuous and semi-integer domains to backend-specific validation.
-pub(crate) fn query_domain<S: Solver + ?Sized>(solver: &S, domain: Domain) -> Capability {
-    match domain {
-        Domain::Real => Capability::Native,
-        Domain::Integer | Domain::Binary => {
-            if solver.supports(ModelKind::MILP)
-                || solver.supports(ModelKind::MINLP)
-                || solver.supports(ModelKind::MIQP)
-                || solver.supports(ModelKind::MIQCP)
-                || solver.supports(ModelKind::MISOCP)
-                || solver.supports(ModelKind::MISDP)
-            {
-                Capability::Native
-            } else {
-                Capability::Unsupported
-            }
-        }
-        Domain::SemiContinuous { .. } | Domain::SemiInteger { .. } => {
-            Capability::RequiresValidation(
-                "semicontinuous domains need backend-specific validation",
-            )
-        }
-    }
-}
-
-/// Validate structural interfaces and combinations, then run the adapter's data checks.
-/// Numerical validity, termination and solution availability are not predicted here.
-pub(crate) fn validate<S: Solver + ?Sized>(
-    solver: &S,
-    model: &Model,
-    opts: &S::Options,
-) -> ModelValidation {
-    let mut report = ModelValidation::default();
-    let mut reject = |constraint, location: String, reason: String| {
-        report.errors.push(CapabilityDiagnostic { constraint, location, reason });
-    };
-
-    if model.ensure_objective_declared().is_err() {
-        reject(None, "model".into(), "no objective or feasibility direction declared".into());
-    }
-
-    if model.has_unreformulated_gdp() {
-        reject(None, "model".into(), "GDP requires reformulation".into());
-    }
-
-    let semantic = model.semantic_constraints_ref();
-    let arena = model.arena();
-    let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
-
-    for c in semantic.iter().filter(|c| c.active) {
-        if let Some(reason) = support_for_record(solver, &c, model, &arena, &variables, opts)
-            .rejection_reason("unsupported function/set pair")
-        {
-            reject(
-                Some(c.id),
-                format!("constraint {:?}", c.name),
-                format!(
-                    "{reason}; declared {} in {}",
-                    c.pair.function.signature().name(),
-                    c.pair.set.signature().name()
-                ),
-            );
-        }
-    }
-
-    if let Some(objective) = model.semantic_objective().as_ref() {
-        let declared =
-            solver.objective_support(objective.function.signature(), objective.sense, opts);
-        let support = if matches!(declared, Capability::Native) {
-            declared
-        } else if let Some(root) = match objective.function.representation() {
-            FunctionRepresentationRef::Scalar(root) => Some(root),
-            _ => None,
-        } {
-            solver.objective_support(
-                signature_for_class(oximo_expr::classify(&arena, root)),
-                objective.sense,
-                opts,
-            )
-        } else {
-            declared
-        };
-
-        if let Some(reason) = support.rejection_reason("unsupported objective function and sense") {
-            reject(None, "objective".into(), reason);
-        }
-    }
-
-    for variable in &variables {
-        if let Some(reason) =
-            solver.domain_support(variable.domain).rejection_reason("unsupported domain")
-        {
-            reject(None, format!("variable {:?}", variable.name), reason);
-        }
-    }
-
-    let kind = model.__kind_at(&arena, &variables);
-    if !solver.supports(kind) {
-        reject(
-            None,
-            "model".into(),
-            format!("unsupported combination of domains, objective and constraints ({kind})"),
-        );
-    }
-
-    if !solver.supports_model_extra(model) {
-        reject(None, "model".into(), "backend-specific structural or data restriction".into());
-    }
-
-    report.errors.extend(solver.validate_model_extra(model, opts));
-
-    report
-}
-
-/// Map an expression class to the corresponding built-in scalar function signature.
-fn signature_for_class(class: ExprClass) -> SemanticType {
-    match class {
-        ExprClass::Linear => SemanticType::of::<ScalarFunctionData<Affine>>(),
-        ExprClass::Quadratic => SemanticType::of::<ScalarFunctionData<Quadratic>>(),
-        ExprClass::Nonlinear => SemanticType::of::<ScalarFunctionData<Nonlinear>>(),
-    }
-}
-
-/// Determine support for a constraint using its selected alternative lowering,
-/// declared signature, or canonical representation.
-pub(crate) fn support_for_record<S: Solver + ?Sized>(
-    solver: &S,
-    record: &oximo_core::SemanticConstraintRef<'_>,
-    model: &Model,
-    arena: &oximo_expr::ExprArena,
-    variables: &[oximo_core::ResolvedVariable],
-    opts: &S::Options,
-) -> Capability {
-    if let Some(view) = model.alternative_lowering_view(record.id) {
-        let signature = match record.id {
-            SemanticConstraintId::Algebraic(_) => ConstraintSignature {
-                function: signature_for_class(oximo_expr::classify(arena, view.lhs)),
-                set: native_scalar_set(view),
-            },
-            SemanticConstraintId::Indicator(_) => {
-                ConstraintSignature::of::<oximo_core::IndicatorFunctionData, oximo_core::IndicatorSet>(
+            (RequirementSupport::Conditional(a), RequirementSupport::Conditional(b)) if a != b => {
+                RequirementSupport::Conditional(
+                    "SOS1 and SOS2 have separate support conditions; query sos_support for each kind",
                 )
             }
-            _ => unreachable!("alternative scalar views belong to rows or indicator consequents"),
-        };
-        return support_for_native_signature(
-            solver, signature, record.id, model, arena, variables, opts,
-        );
-    }
-
-    let mut signature = ConstraintSignature {
-        function: record.pair.function.signature(),
-        set: record.pair.set.signature(),
-    };
-
-    let declared = solver.constraint_support(signature, opts);
-
-    if matches!(declared, Capability::Native) {
-        return declared;
-    }
-
-    match record.pair.function.representation() {
-        FunctionRepresentationRef::Scalar(root) => {
-            signature.function = signature_for_class(oximo_expr::classify(arena, root));
-        }
-        FunctionRepresentationRef::VectorAffine(_) => {
-            signature.function = SemanticType::of::<VectorAffineData>();
-        }
-        FunctionRepresentationRef::SymmetricAffine(_) => {
-            signature.function = SemanticType::of::<SymmetricAffineData>();
-        }
-        FunctionRepresentationRef::Variables(_) => {
-            if let Some(kind) = record.pair.set.sos_kind() {
-                return if solver.supports_sos(kind) {
-                    Capability::Native
-                } else {
-                    Capability::Unsupported
-                };
+            (RequirementSupport::Conditional(reason), _)
+            | (_, RequirementSupport::Conditional(reason)) => {
+                RequirementSupport::Conditional(reason)
             }
-            return declared;
-        }
-        FunctionRepresentationRef::Indicator { .. } => {
-            signature.function = SemanticType::of::<oximo_core::IndicatorFunctionData>();
-        }
-        _ => return declared,
+        };
     }
-
-    support_for_native_signature(solver, signature, record.id, model, arena, variables, opts)
+    RequirementSupport::Unsupported
 }
 
-/// Recover the canonical bound set of a native scalar interval row.
-#[expect(clippy::float_cmp, reason = "native equality rows use exact matching bound values")]
-fn native_scalar_set(view: oximo_core::ScalarConstraintView) -> SemanticType {
-    if view.lower == view.upper {
-        SemanticType::of::<oximo_core::EqualTo>()
-    } else if view.lower == f64::NEG_INFINITY && view.upper != f64::INFINITY {
-        SemanticType::of::<oximo_core::LessThan>()
-    } else if view.upper == f64::INFINITY && view.lower != f64::NEG_INFINITY {
-        SemanticType::of::<oximo_core::GreaterThan>()
-    } else {
-        SemanticType::of::<oximo_core::Interval>()
+/// Determine objective support independently of model combinations.
+fn query_objective(
+    solver: &SolverProfile,
+    signature: SemanticType,
+    _sense: ObjectiveSense,
+) -> RequirementSupport {
+    match scalar_class(signature) {
+        Some(class) => {
+            if solver.scalar_objectives.contains(&class) {
+                RequirementSupport::Supported
+            } else {
+                RequirementSupport::Unsupported
+            }
+        }
+        None => RequirementSupport::Unsupported,
     }
-}
-
-/// Query the selected native pair, including supported quadratic-to-SOC detection.
-fn support_for_native_signature<S: Solver + ?Sized>(
-    solver: &S,
-    signature: ConstraintSignature,
-    id: SemanticConstraintId,
-    model: &Model,
-    arena: &oximo_expr::ExprArena,
-    variables: &[oximo_core::ResolvedVariable],
-    opts: &S::Options,
-) -> Capability {
-    let narrowed = solver.constraint_support(signature, opts);
-
-    if !matches!(narrowed, Capability::Native)
-        && scalar_set(signature.set)
-        && matches!(
-            solver.constraint_support(
-                ConstraintSignature::of::<VectorAffineData, oximo_core::SecondOrderCone>(),
-                opts
-            ),
-            Capability::Native
-        )
-        && let SemanticConstraintId::Algebraic(id) = id
-        && let Some(row) = model.constraints().algebraic().get(id.index())
-        && let Some(quadratic) = oximo_expr::extract_quadratic(arena, row.lhs)
-        && oximo_core::__detect_soc_from_quadratic(variables, row, &quadratic).is_some()
-    {
-        return Capability::Native;
-    }
-    narrowed
 }
