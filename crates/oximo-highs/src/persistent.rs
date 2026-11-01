@@ -465,7 +465,7 @@ mod tests {
         let rejected = Model::new("unsupported resident replacement");
         variable!(rejected, z, Integer);
         objective!(rejected, Min, z.square());
-	
+
         let before = solver.updates;
         let error = solver.solve(&rejected, &options).unwrap_err();
         assert!(matches!(error, oximo_solver::SolverError::IncompatibleModel(_)));

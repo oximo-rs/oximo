@@ -5,7 +5,6 @@ use oximo_solver::{Solver, SolverError};
 #[test]
 fn mixed_integer_solver_profiles_accept_affine_interfaces_without_lp_support() {
     for selected in [GamsSolver::Scip, GamsSolver::OdhCplex] {
-
         let model = Model::new("affine pieces of a MILP");
         variable!(model, 0.0 <= x <= 2.0, Integer);
         constraint!(model, cap, x <= 1.0);
