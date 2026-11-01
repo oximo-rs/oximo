@@ -678,21 +678,7 @@ pub(crate) fn validate_supported(
         }
         match arena.get(id) {
             ExprNode::Unary(op, child) => {
-                if !matches!(
-                    op,
-                    UnaryOp::Neg
-                        | UnaryOp::Abs
-                        | UnaryOp::Sqrt
-                        | UnaryOp::Exp
-                        | UnaryOp::Exp2
-                        | UnaryOp::Log
-                        | UnaryOp::Log2
-                        | UnaryOp::Log10
-                        | UnaryOp::Sin
-                        | UnaryOp::Cos
-                        | UnaryOp::Tan
-                        | UnaryOp::Tanh
-                ) {
+                if !crate::supports_operator(oximo_solver::ExpressionOperator::Unary(*op)) {
                     return Err(SolverError::UnsupportedNonlinearOperator {
                         backend: "Gurobi",
                         operator: op.name(),

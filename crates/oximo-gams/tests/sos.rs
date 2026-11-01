@@ -5,15 +5,16 @@ use oximo_solver::Solver;
 #[test]
 fn gams_advertises_sos1_and_sos2_support() {
     let model = Model::new("gams_sos");
+    objective!(model, Feasibility);
     variable!(model, x);
     variable!(model, y);
     sos_constraint!(model, choice, SOS1, [(x, 1.0), (y, 2.0)]);
     sos_constraint!(model, adjacent, SOS2, [(x, 1.0), (y, 2.0)]);
 
     let solver = Gams::new();
-    assert!(solver.supports_sos(SosType::Sos1));
-    assert!(solver.supports_sos(SosType::Sos2));
-    assert!(solver.supports_model(&model));
+    assert!(solver.profile(&oximo_gams::GamsOptions::default()).supports_sos(SosType::Sos1));
+    assert!(solver.profile(&oximo_gams::GamsOptions::default()).supports_sos(SosType::Sos2));
+    assert!(solver.validate_model(&model, &oximo_gams::GamsOptions::default()).is_supported());
 }
 
 #[test]
@@ -28,5 +29,7 @@ fn gams_accepts_a_reformulated_model_without_active_sos() {
 
     let solver = Gams::new();
     assert!(!transformed.has_active_sos_constraints());
-    assert!(solver.supports_model(&transformed));
+    assert!(
+        solver.validate_model(&transformed, &oximo_gams::GamsOptions::default()).is_supported()
+    );
 }

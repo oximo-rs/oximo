@@ -152,8 +152,8 @@ fn sos1_and_sos2() {
     objective!(m, Max, x + y);
     close(solve(&m).objective().unwrap(), 3.0);
     m.add_sos_constraint("ordered", SosType::Sos2, [(x, 1.0), (y, 2.0)]);
-    assert!(Scip::new().supports_sos(SosType::Sos2));
-    assert!(Scip::new().supports_model(&m));
+    assert!(Scip::new().profile(&ScipOptions::default()).supports_sos(SosType::Sos2));
+    assert!(Scip::new().validate_model(&m, &oximo_scip::ScipOptions::default()).is_supported());
     close(solve(&m).objective().unwrap(), 3.0);
     let d = Model::new("duplicate-native-names");
     variable!(d, 0.0 <= x <= 1.0);
@@ -172,7 +172,7 @@ fn native_indicators_enforce_trigger_values_and_both_sides() {
     indicator_constraint!(m, cap, b == 1 => x <= 2.0);
     indicator_constraint!(m, inactive, b == 0 => x <= 1.0);
     objective!(m, Max, x);
-    assert!(Scip::new().supports_model(&m));
+    assert!(Scip::new().validate_model(&m, &oximo_scip::ScipOptions::default()).is_supported());
     close(solve(&m).objective().unwrap(), 2.0);
 
     let m = Model::new("indicator_zero");
@@ -234,7 +234,7 @@ fn unsupported_operators_and_semi_variables() {
     let m = Model::new("tan");
     variable!(m,0.0<=x<=1.0);
     objective!(m, Min, x.tan());
-    assert!(!Scip::new().supports_model(&m));
+    assert!(!Scip::new().validate_model(&m, &oximo_scip::ScipOptions::default()).is_supported());
     assert!(
         Scip::new().solve(&m, &ScipOptions::default()).unwrap_err().to_string().contains("tan")
     );
@@ -248,7 +248,7 @@ fn unsupported_operators_and_semi_variables() {
     variable!(m,0.0<=x<=3.0,SemiCont(1.0));
     variable!(m,0.0<=y<=4.0,SemiInt(2.0));
     objective!(m, Min, x + y);
-    assert!(Scip::new().supports_model(&m));
+    assert!(Scip::new().validate_model(&m, &oximo_scip::ScipOptions::default()).is_supported());
     close(solve(&m).objective().unwrap(), 0.0);
     constraint!(m, require_positive, x + y >= 2.5);
     close(solve(&m).objective().unwrap(), 2.5);

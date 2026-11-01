@@ -908,18 +908,36 @@ fn borrowed_declarations_match_owned_snapshots_across_registries() {
     let owned = model.semantic_constraints();
     let borrowed = model.semantic_constraints_ref();
     assert_eq!(owned.len(), borrowed.len());
-    for (view, snapshot) in borrowed.iter().zip(&owned) {
+    for (position, (view, snapshot)) in borrowed.iter().zip(&owned).enumerate() {
         assert_eq!(view.id, snapshot.id);
         assert_eq!(view.name, snapshot.name.as_str());
         assert_eq!(view.active, snapshot.active);
         assert_eq!(view.pair.function.signature(), snapshot.pair.function.signature());
         assert_eq!(view.pair.set.signature(), snapshot.pair.set.signature());
+        if let Some(metadata) = borrowed.scalar_metadata(position) {
+            assert_eq!(SemanticConstraintId::Algebraic(metadata.id), view.id);
+            assert_eq!(metadata.name, view.name);
+            assert_eq!(metadata.active, view.active);
+            assert_eq!(metadata.function, view.pair.function.signature());
+            assert_eq!(metadata.set, view.pair.set.signature());
+            assert!(
+                matches!(view.pair.function.representation(), FunctionRepresentationRef::Scalar(root) if root == metadata.view.lhs)
+            );
+            let (lower, upper) = view.pair.set.scalar_bounds().unwrap();
+
+            assert_eq!(metadata.view.lower.to_bits(), lower.to_bits());
+            assert_eq!(metadata.view.upper.to_bits(), upper.to_bits());
+        } else {
+            assert!(!matches!(view.id, SemanticConstraintId::Algebraic(_)));
+        }
         assert_eq!(view.pair.function.model_id(), model.id());
+
         let mut roots = Vec::new();
         view.pair.function.visit_expressions(&mut |root| roots.push(root));
         assert_eq!(roots, snapshot.pair.function.expressions());
         assert_eq!(view.pair.set.scalar_bounds(), snapshot.pair.set.scalar_bounds());
     }
+    assert!(borrowed.scalar_metadata(borrowed.len()).is_none());
 }
 
 #[test]
@@ -936,6 +954,12 @@ fn inactive_canonical_scalar_edits_preserve_the_source_until_reactivation() {
     assert_eq!(source.pair.set.scalar_bounds().unwrap().1, 7.0);
     let root = source.pair.function.expressions()[0];
     assert_ne!(root, model.constraints().algebraic()[row.index()].lhs);
+    let declarations = model.semantic_constraints_ref();
+    let metadata = declarations.scalar_metadata(0).unwrap();
+    assert!(!metadata.active);
+    assert_eq!(metadata.view.lhs, root);
+    assert_eq!(metadata.view.upper, 7.0);
+    drop(declarations);
 
     let sibling = model.fork();
     let sibling_row = sibling

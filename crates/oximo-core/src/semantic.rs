@@ -10,7 +10,9 @@ mod view;
 pub(crate) use representation::NativeConstraintRef;
 pub use representation::{FunctionKind, FunctionRepresentationRef, VariableVectorRef};
 
-pub use view::{FunctionRef, SemanticConstraintRef, SemanticPairRef, SetRef};
+pub use view::{
+    FunctionRef, ScalarConstraintMetadata, SemanticConstraintRef, SemanticPairRef, SetRef,
+};
 
 use std::any::{Any, TypeId, type_name};
 use std::fmt::Debug;
@@ -47,10 +49,27 @@ impl SemanticConstraintId {
 }
 
 /// Exact Rust identity of an owned semantic representation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Equality and hashing use type identity.
+#[derive(Clone, Copy, Debug)]
 pub struct SemanticType {
     id: TypeId,
     name: &'static str,
+}
+
+impl PartialEq for SemanticType {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for SemanticType {}
+
+impl std::hash::Hash for SemanticType {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.id, state);
+    }
 }
 
 impl SemanticType {
@@ -532,7 +551,17 @@ impl SetValue {
     }
 
     pub fn signature(&self) -> SemanticType {
-        self.0.erased().signature()
+        match &self.0 {
+            SetStorage::LessThan(_) => SemanticType::of::<crate::LessThan>(),
+            SetStorage::GreaterThan(_) => SemanticType::of::<crate::GreaterThan>(),
+            SetStorage::EqualTo(_) => SemanticType::of::<crate::EqualTo>(),
+            SetStorage::Interval(_) => SemanticType::of::<crate::Interval>(),
+            SetStorage::SecondOrderCone(_) => SemanticType::of::<crate::SecondOrderCone>(),
+            SetStorage::PositiveSemidefiniteCone(_) => {
+                SemanticType::of::<crate::PositiveSemidefiniteCone>()
+            }
+            SetStorage::Shared(value) => value.signature(),
+        }
     }
 
     pub fn downcast_ref<T: crate::function_set::Set>(&self) -> Option<&T> {

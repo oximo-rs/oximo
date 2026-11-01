@@ -16,7 +16,7 @@ pub use options::{GamsOptions, GamsSolver};
 pub use solver_options::*;
 pub use translate::solve;
 
-use oximo_core::{Model, ModelKind, SosType};
+use oximo_core::{Model, ModelKind};
 use oximo_solver::{Solver, SolverError, SolverResult};
 
 /// GAMS solver backend.
@@ -70,50 +70,71 @@ pub(crate) const fn supported(kind: ModelKind) -> bool {
 impl Solver for Gams {
     type Options = GamsOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned({
+            use oximo_expr::ExprClass::{Linear, Nonlinear, Quadratic};
+            use oximo_solver::VariableDomain::{
+                Binary, Integer, Real, SemiContinuous, SemiInteger,
+            };
+
+            let profile = oximo_solver::SolverProfile::new(self.name())
+                .with_scalar_constraints([Linear, Quadratic, Nonlinear])
+                .with_scalar_objectives([Linear, Quadratic, Nonlinear])
+                .with_soc(true)
+                .with_kinds(oximo_solver::MODEL_KINDS.into_iter().filter(|kind| {
+                    supported(*kind)
+                        && opts.solver.as_ref().is_none_or(|config| config.supports(*kind))
+                }))
+                .with_domains([Real, Integer, Binary, SemiContinuous, SemiInteger])
+                .with_operators(
+                    oximo_solver::ExpressionOperator::ALL
+                        .iter()
+                        .copied()
+                        .filter(|operator| supports_operator(*operator)),
+                )
+                .with_sos([oximo_core::SosType::Sos1, oximo_core::SosType::Sos2])
+                .with_indicators(translate::indicator_supported(opts));
+
+            let profile = if opts.solver.as_ref().is_some_and(|config| {
+                !crate::solver_options::solver_supports_type(config.gams_name(), "DNLP")
+            }) {
+                profile.reject_combination(
+                    |f| f.kind == oximo_core::ModelKind::NLP && f.has_variable_nonsmooth,
+                    "the selected GAMS solver does not support DNLP models",
+                )
+            } else {
+                profile
+            };
+
+            let profile = if let Some(config) = &opts.solver {
+                profile.named(format!("GAMS ({})", config.gams_name()))
+            } else {
+                profile
+            };
+
+            if opts.solver.as_ref().is_none_or(|config| {
+                crate::solver_options::supported_solve_types(config.gams_name()).is_none()
+            }) {
+                profile.with_external_uncertainty(
+                    "the externally selected GAMS solver has no locally confirmed capability table",
+                )
+            } else {
+                profile
+            }
+        })
+    }
+
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        supported(kind)
-    }
-
-    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Capability::Native
-    }
-
-    fn supports_sos(&self, _sos_type: SosType) -> bool {
-        true
-    }
-
-    fn supports_indicators(&self) -> bool {
-        true
-    }
-
-    fn validate_model_extra(
-        &self,
-        model: &Model,
-        opts: &Self::Options,
-    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
-        let mut diagnostics = Vec::new();
-        if let Err(error) = translate::validate_model(model, opts) {
-            diagnostics.push(oximo_solver::CapabilityDiagnostic {
-                constraint: None,
-                location: "GAMS translation".into(),
-                reason: error.to_string(),
-            });
-        }
-        if let Err(error) = translate::validate_indicator_solver(model, opts) {
-            diagnostics.push(oximo_solver::CapabilityDiagnostic {
-                constraint: None,
-                location: "GAMS indicators".into(),
-                reason: error.to_string(),
-            });
-        }
-        diagnostics
     }
 
     fn solve(&mut self, model: &Model, opts: &GamsOptions) -> Result<SolverResult, SolverError> {
         translate::solve(model, opts, self.exec.as_deref())
     }
+}
+
+pub(crate) fn supports_operator(operator: oximo_solver::ExpressionOperator) -> bool {
+    use oximo_expr::UnaryOp::{Acosh, Asinh, Atanh, Cbrt, Expm1, Log1p};
+    use oximo_solver::ExpressionOperator::Unary;
+    !matches!(operator, Unary(Cbrt | Expm1 | Log1p | Asinh | Acosh | Atanh))
 }

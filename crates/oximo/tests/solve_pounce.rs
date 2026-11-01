@@ -185,7 +185,14 @@ fn integer_models_are_rejected() {
     objective!(m, Min, x);
 
     let err = Pounce.solve(&m, &PounceOptions::default()).unwrap_err();
-    assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+    assert!(
+        matches!(&err, SolverError::IncompatibleModel(report)
+        if report.errors.iter().any(|diagnostic|
+            diagnostic.requirement == Requirement::Domain(VariableDomain::Integer)
+                && diagnostic.origins.iter().any(|origin|
+                    origin.entity == RequirementEntity::Variable(x.var_id().unwrap())))),
+        "{err}"
+    );
 }
 
 #[test]

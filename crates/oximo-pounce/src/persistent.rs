@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use oximo_core::{Model, ModelKind};
+use oximo_core::Model;
 use oximo_solver::prepare::LoweringContext;
 use oximo_solver::resident::{PersistentPreparation, PreparationChange};
 use oximo_solver::{ParameterSnapshot, Solver, SolverError, SolverResult};
@@ -25,6 +25,38 @@ struct NlpState {
     warm: Option<WarmStart>,
     resident: Option<backend::Resident>,
     params: ParameterSnapshot,
+    #[cfg(not(feature = "enzyme"))]
+    builder_options: Option<backend::BuilderOptions>,
+}
+
+impl NlpState {
+    fn run_direct(
+        &mut self,
+        model: &Model,
+        prep: &crate::translate::Prepared,
+        opts: &PounceOptions,
+    ) -> Result<crate::translate::Outcome, SolverError> {
+        self.resident = None;
+        #[cfg(feature = "enzyme")]
+        {
+            backend::run(model, &self.oracle, prep, opts, self.warm.as_ref())
+        }
+        #[cfg(not(feature = "enzyme"))]
+        {
+            if backend::supports_resident(&self.oracle) {
+                return backend::run(model, &self.oracle, prep, opts, self.warm.as_ref());
+            }
+            if self.builder_options.as_ref().is_none_or(|cached| !cached.matches(opts)) {
+                self.builder_options = Some(backend::BuilderOptions::new(opts)?);
+            }
+            self.builder_options.as_ref().expect("validated builder options").run(
+                model,
+                &self.oracle,
+                prep,
+                self.warm.as_ref(),
+            )
+        }
+    }
 }
 
 struct ConvexState {
@@ -152,6 +184,8 @@ impl PouncePersistent {
                     warm: None,
                     resident: None,
                     params,
+                    #[cfg(not(feature = "enzyme"))]
+                    builder_options: None,
                 })));
                 let Some(State::Nlp(state)) = slot else { unreachable!() };
                 state
@@ -176,8 +210,7 @@ impl PouncePersistent {
             }
             resident.solve(&prep, opts, state.warm.as_ref())?
         } else {
-            state.resident = None;
-            backend::run(model, &state.oracle, &prep, opts, state.warm.as_ref())?
+            state.run_direct(model, &prep, opts)?
         };
         let mut outcome = if resident_primary {
             run_nlp_retries_after(model, &state.oracle, &prep, opts, primary_started, primary)?
@@ -282,30 +315,24 @@ impl PouncePersistent {
 impl Solver for PouncePersistent {
     type Options = PounceOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        oximo_solver::Solver::profile(&crate::Pounce, opts)
+    }
+    fn validate_requirements(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        oximo_solver::Solver::validate_requirements(&crate::Pounce, model, opts, requirements)
+    }
     fn name(&self) -> &str {
         "pounce"
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        matches!(
-            kind,
-            ModelKind::LP | ModelKind::QP | ModelKind::QCP | ModelKind::SOCP | ModelKind::NLP
-        )
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Solver::domain_support(&crate::Pounce, domain)
-    }
-
-    fn validate_model_extra(
-        &self,
-        model: &oximo_core::Model,
-        opts: &Self::Options,
-    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
-        oximo_solver::Solver::validate_model_extra(&crate::Pounce, model, opts)
-    }
-
     fn solve(&mut self, model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+        oximo_solver::Solver::validate_model(self, model, opts).into_result()?;
+
         if opts.minima.is_some() {
             self.reset();
 
@@ -331,6 +358,47 @@ mod tests {
     use super::*;
     use crate::options::PounceSolverSelection;
     use oximo_core::{constraint, objective, param, variable};
+
+    #[cfg(not(feature = "enzyme"))]
+    #[test]
+    fn builder_option_validation_is_reused_for_parameters_and_rechecked_for_options() {
+        let model = Model::new("builder option cache");
+        param!(model, demand = 1.0);
+        variable!(model, 0.0 <= x <= 2.0);
+        constraint!(model, resource, x >= demand);
+        objective!(model, Min, x.exp());
+
+        let opts = PounceOptions::default()
+            .solver_selection(PounceSolverSelection::Nlp)
+            .set("mu_strategy", "adaptive");
+        let mut solver = PouncePersistent::new();
+        solver.solve(&model, &opts).unwrap();
+        let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+        let storage = state.builder_options.as_ref().unwrap().options_storage();
+
+        for value in [0.5_f64, 1.2] {
+            demand.set_param_value(value).unwrap();
+            let result = solver.solve(&model, &opts).unwrap();
+            assert!((result.objective().unwrap() - value.exp()).abs() < 1e-4);
+
+            let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+            assert_eq!(state.builder_options.as_ref().unwrap().options_storage(), storage);
+        }
+
+        let changed = opts.clone().tol(1e-8);
+        solver.solve(&model, &changed).unwrap();
+        let Some(State::Nlp(state)) = &solver.state else { panic!("NLP state") };
+        let cached = state.builder_options.as_ref().unwrap();
+        assert!(cached.matches(&changed));
+        assert_ne!(cached.options_storage(), storage);
+
+        let invalid = changed.clone().set("not_a_real_option", true);
+        assert!(
+            matches!(solver.solve(&model, &invalid), Err(SolverError::Backend(message)) if message.contains("not_a_real_option"))
+        );
+        assert!(solver.state.is_none());
+        assert!(solver.solve(&model, &changed).unwrap().has_solution());
+    }
 
     #[test]
     fn persistent_parameter_snapshots_refresh_on_native_reuse() {

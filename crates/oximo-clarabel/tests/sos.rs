@@ -1,31 +1,44 @@
 use oximo_clarabel::{Clarabel, ClarabelOptions};
 use oximo_core::prelude::*;
-use oximo_solver::{PersistentSolver, Solver, SolverError};
+use oximo_solver::{PersistentSolver, Requirement, Solver, SolverError};
 
-fn sos_model() -> Model {
+fn sos_model() -> (Model, SosConstraintHandle) {
     let m = Model::new("clarabel_sos");
     variable!(m, x);
     variable!(m, y);
-    sos_constraint!(m, choice, SOS1, [x, y]);
-    m
+    objective!(m, Feasibility);
+    let choice = sos_constraint!(m, choice, SOS1, [x, y]);
+    (m, choice)
 }
 
 #[test]
 fn clarabel_rejects_sos_constraints() {
-    let model = sos_model();
+    let (model, choice) = sos_model();
     let mut solver = Clarabel;
-    assert!(matches!(
-        solver.solve(&model, &ClarabelOptions::default()),
-        Err(SolverError::UnsupportedSos)
-    ));
+    let error = solver.solve(&model, &ClarabelOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            SolverError::IncompatibleModel(report) if report.errors.iter().any(|diagnostic|
+                diagnostic.requirement == Requirement::Sos(SosType::Sos1)
+                    && diagnostic.constraint() == Some(choice.id()))
+        ),
+        "{error}"
+    );
 }
 
 #[test]
 fn clarabel_persistent_rejects_sos_constraints() {
-    let model = sos_model();
+    let (model, choice) = sos_model();
     let mut solver = Clarabel.persistent();
-    assert!(matches!(
-        solver.solve(&model, &ClarabelOptions::default()),
-        Err(SolverError::UnsupportedSos)
-    ));
+    let error = solver.solve(&model, &ClarabelOptions::default()).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            SolverError::IncompatibleModel(report) if report.errors.iter().any(|diagnostic|
+                diagnostic.requirement == Requirement::Sos(SosType::Sos1)
+                    && diagnostic.constraint() == Some(choice.id()))
+        ),
+        "{error}"
+    );
 }

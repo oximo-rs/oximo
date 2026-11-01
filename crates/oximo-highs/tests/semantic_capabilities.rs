@@ -1,7 +1,7 @@
 use oximo_core::prelude::*;
 use oximo_core::{FunctionRepresentationRef, ScalarFunctionData};
 use oximo_highs::{Highs, HighsOptions};
-use oximo_solver::{Capability, ConstraintSignature, Solver};
+use oximo_solver::{ConstraintSignature, RequirementSupport, Solver};
 
 struct Scaled<'a>(Expr<'a, Affine>);
 impl Function for Scaled<'_> {
@@ -25,14 +25,13 @@ fn individually_supported_domains_and_objectives_do_not_admit_miqp() {
         let x = model.__var("x").domain(domain).build();
         objective!(model, Min, x.square());
         let options = HighsOptions::default();
-        assert_eq!(Highs.domain_support(domain), Capability::Native);
+        assert_eq!(Highs.profile(&options).domain_support(domain), RequirementSupport::Supported);
         assert_eq!(
-            Highs.objective_support(
+            Highs.profile(&options).objective_support(
                 oximo_core::SemanticType::of::<ScalarFunctionData<Quadratic>>(),
-                ObjectiveSense::Minimize,
-                &options
+                ObjectiveSense::Minimize
             ),
-            Capability::Native
+            RequirementSupport::Supported
         );
         assert_eq!(model.kind(), ModelKind::MIQP);
         assert!(!Highs.validate_model(&model, &options).is_supported());
@@ -51,11 +50,11 @@ fn compilation_can_narrow_without_changing_the_declared_function() {
 
     let options = HighsOptions::default();
     assert_eq!(
-        Highs.constraint_support(
-            ConstraintSignature::of::<ScalarFunctionData<Quadratic>, GreaterThan>(),
-            &options
-        ),
-        Capability::Unsupported
+        Highs.profile(&options).constraint_support(ConstraintSignature::of::<
+            ScalarFunctionData<Quadratic>,
+            GreaterThan,
+        >()),
+        RequirementSupport::Unsupported
     );
     assert!(Highs.validate_model(&model, &options).is_supported());
 
@@ -82,11 +81,12 @@ fn affine_intervals_with_quadratic_declarations_narrow_without_bridges() {
 
     let options = HighsOptions::default();
     assert_eq!(
-        Highs.constraint_support(
-            ConstraintSignature::of::<ScalarFunctionData<Quadratic>, Interval>(),
-            &options
-        ),
-        Capability::Unsupported
+        Highs
+            .profile(&options)
+            .constraint_support(
+                ConstraintSignature::of::<ScalarFunctionData<Quadratic>, Interval>()
+            ),
+        RequirementSupport::Unsupported
     );
     assert!(Highs.validate_model(&model, &options).is_supported());
 

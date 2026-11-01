@@ -11,7 +11,7 @@ fn native_sos1_and_sos2_solve() {
     objective!(m, Max, x + y + z);
     sos_constraint!(m, one, SOS1, [(x, 1.0), (y, 2.0)]);
     sos_constraint!(m, two, SOS2, [(x, 1.0), (y, 2.0), (z, 3.0)]);
-    assert!(Gurobi.supports_model(&m));
+    assert!(Gurobi.validate_model(&m, &oximo_gurobi::GurobiOptions::default()).is_supported());
     let result = Gurobi.solve(&m, &GurobiOptions::default()).expect("Gurobi SOS solve");
     assert!(result.has_solution());
     assert_eq!(m.kind(), ModelKind::MILP);
@@ -48,7 +48,9 @@ fn reformulated_sos1_solves_and_preserves_original_ids() {
     let choice = sos_constraint!(m, choice, SOS1, [x, y]);
 
     let transformed = choice.to_reformulated_model(&m, SosReformulationOptions::default()).unwrap();
-    assert!(Gurobi.supports_model(&transformed));
+    assert!(
+        Gurobi.validate_model(&transformed, &oximo_gurobi::GurobiOptions::default()).is_supported()
+    );
     let result = Gurobi
         .solve(&transformed, &GurobiOptions::default())
         .expect("Gurobi reformulated SOS solve");

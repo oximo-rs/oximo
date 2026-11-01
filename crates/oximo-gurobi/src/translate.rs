@@ -39,6 +39,8 @@ pub(crate) fn map_gurobi_err(e: gurobi_rs::Error) -> SolverError {
 ///
 /// Panics if model variable or constraint indices overflow `u32`.
 pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
+    oximo_solver::Solver::profile(&crate::Gurobi, opts).check_model(model).into_result()?;
+
     let kind = model.kind();
     validate_model_operators(model)?;
     if model.has_active_psd_constraints() {
@@ -550,6 +552,8 @@ pub fn solve_with_callback<F>(
 where
     F: gurobi_rs::callback::Callback,
 {
+    oximo_solver::Solver::profile(&crate::Gurobi, opts).check_model(model).into_result()?;
+
     let kind = model.kind();
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));
@@ -574,6 +578,8 @@ where
 ///
 /// Panics if a constraint, SOC, or variable index overflows `u32`.
 pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverError> {
+    oximo_solver::Solver::profile(&crate::Gurobi, opts).check_model(model).into_result()?;
+
     if model.has_active_psd_constraints() {
         return Err(SolverError::UnsupportedConstraint("PSD"));
     }

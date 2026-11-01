@@ -38,7 +38,7 @@ struct State {
 /// solve to behave exactly like a cold [`Highs::solve`](crate::Highs),
 /// options and all.
 ///
-/// A failed `solve` (HiGHS returning an error) leaves the handle without a resident
+/// A preflight rejection retains resident state. A native HiGHS error leaves the handle without a resident
 /// model, the next call rebuilds from scratch.
 #[derive(Default)]
 pub struct HighsPersistent {
@@ -185,19 +185,24 @@ impl HighsPersistent {
 impl Solver for HighsPersistent {
     type Options = HighsOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        oximo_solver::Solver::profile(&crate::Highs, opts)
+    }
+    fn validate_requirements(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        oximo_solver::Solver::validate_requirements(&crate::Highs, model, opts, requirements)
+    }
     fn name(&self) -> &str {
         NAME
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        crate::supported(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Solver::domain_support(&crate::Highs, domain)
-    }
-
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {
+        self.profile(opts).check_model(model).into_result()?;
+
         if model.has_active_psd_constraints() {
             return Err(SolverError::UnsupportedConstraint("PSD"));
         }
@@ -445,5 +450,30 @@ mod tests {
             persistent_iters <= cold_iters,
             "warm-started handle used more iterations ({persistent_iters}) than cold ({cold_iters})"
         );
+    }
+    #[test]
+    fn preflight_rejection_preserves_the_resident_model_and_update_path() {
+        let model = Model::new("retained resident");
+        variable!(model, 1.0 <= x <= 3.0);
+        objective!(model, Min, x);
+
+        let options = HighsOptions::default();
+        let mut solver = Highs.persistent();
+        solver.solve(&model, &options).unwrap();
+        assert!(solver.state.is_some());
+
+        let rejected = Model::new("unsupported resident replacement");
+        variable!(rejected, z, Integer);
+        objective!(rejected, Min, z.square());
+
+        let before = solver.updates;
+        let error = solver.solve(&rejected, &options).unwrap_err();
+        assert!(matches!(error, oximo_solver::SolverError::IncompatibleModel(_)));
+        assert!(solver.state.is_some());
+        assert_eq!(solver.updates, before);
+
+        let result = solver.solve(&model, &options).unwrap();
+        assert!((result.objective().unwrap() - 1.0).abs() < 1e-6);
+        assert_eq!(solver.updates, before + 1);
     }
 }

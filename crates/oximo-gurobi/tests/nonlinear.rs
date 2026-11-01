@@ -195,13 +195,10 @@ fn unsupported_operator_errors_before_environment_or_optimize() {
     let m = Model::new("unsupported_asin");
     variable!(m, -0.5 <= x <= 0.5);
     objective!(m, Min, x.asin());
-    assert!(matches!(
-        Gurobi.solve(&m, &GurobiOptions::default()),
-        Err(oximo_solver::SolverError::UnsupportedNonlinearOperator {
-            backend: "Gurobi",
-            operator: "asin"
-        })
-    ));
+    let error = Gurobi.solve(&m, &GurobiOptions::default()).unwrap_err();
+    assert!(
+        matches!(&error, oximo_solver::SolverError::IncompatibleModel(report) if report.errors.iter().any(|diagnostic| matches!(&diagnostic.requirement, oximo_solver::Requirement::Operator(op) if op.to_string() == "asin")))
+    );
 }
 
 #[test]

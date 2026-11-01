@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use clarabel::solver::{DefaultSolver, IPSolver};
-use oximo_core::{Model, ModelKind};
+use oximo_core::Model;
 use oximo_solver::resident::PersistentPreparation;
 use oximo_solver::{Solver, SolverError, SolverResult};
 
@@ -41,8 +41,9 @@ struct State {
 /// to keep the fast path available. Disabling decomposition can increase the
 /// cost of solving each PSD block.
 ///
-/// A failed `solve` leaves the handle without a resident model; the next call
-/// rebuilds from scratch.
+/// A preflight rejection retains resident state.
+/// A native solve failure leaves the handle without a resident model;
+/// the next call rebuilds from scratch.
 #[derive(Default)]
 pub struct ClarabelPersistent {
     state: Option<State>,
@@ -143,20 +144,19 @@ impl ClarabelPersistent {
 impl Solver for ClarabelPersistent {
     type Options = ClarabelOptions;
 
+    fn profile(&self, opts: &Self::Options) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        oximo_solver::Solver::profile(&crate::Clarabel, opts)
+    }
+    fn validate_requirements(
+        &self,
+        model: &oximo_core::Model,
+        opts: &Self::Options,
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        oximo_solver::Solver::validate_requirements(&crate::Clarabel, model, opts, requirements)
+    }
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn supports_psd(&self) -> bool {
-        cfg!(feature = "sdp")
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        crate::supported(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Solver::domain_support(&crate::Clarabel, domain)
     }
 
     fn solve(
@@ -164,6 +164,8 @@ impl Solver for ClarabelPersistent {
         model: &Model,
         opts: &ClarabelOptions,
     ) -> Result<SolverResult, SolverError> {
+        crate::PROFILE.check_model(model).into_result()?;
+
         match self.solve_resident(model, opts) {
             Ok(result) => {
                 self.preparation.commit();
@@ -507,12 +509,39 @@ mod tests {
     }
 
     #[test]
-    fn persistent_unsupported_kind_errors_and_clears() {
+    fn persistent_unsupported_kind_returns_a_compatibility_report() {
         let m = Model::new("milp");
         variable!(m, 0.0 <= x <= 5.0, Int);
         objective!(m, Min, x);
         let mut solver = Clarabel.persistent();
         let err = solver.solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::MILP)))
+        );
+    }
+    #[test]
+    fn preflight_rejection_preserves_the_resident_model_and_update_path() {
+        let model = Model::new("retained resident");
+        variable!(model, 1.0 <= x <= 3.0);
+        objective!(model, Min, x);
+
+        let options = ClarabelOptions::default();
+        let mut solver = Clarabel.persistent();
+        solver.solve(&model, &options).unwrap();
+        assert!(solver.state.is_some());
+
+        let rejected = Model::new("unsupported resident replacement");
+        variable!(rejected, z, Integer);
+        objective!(rejected, Min, z.square());
+
+        let before = solver.updates;
+        let error = solver.solve(&rejected, &options).unwrap_err();
+        assert!(matches!(error, SolverError::IncompatibleModel(_)));
+        assert!(solver.state.is_some());
+        assert_eq!(solver.updates, before);
+
+        let result = solver.solve(&model, &options).unwrap();
+        assert!((result.objective().unwrap() - 1.0).abs() < 1e-6);
+        assert_eq!(solver.updates, before + 1);
     }
 }

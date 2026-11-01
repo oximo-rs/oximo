@@ -17,7 +17,11 @@ pub use options::BaronOptions;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{Iis, InfeasibilityDiagnosis, Solver, SolverError, SolverResult};
+use oximo_solver::{
+    ExpressionOperator, Iis, InfeasibilityDiagnosis, MODEL_KINDS, Solver, SolverError,
+    SolverProfile, SolverResult,
+};
+use std::{borrow::Cow, sync::LazyLock};
 
 /// BARON backend. Writes an oximo [`Model`] to a temporary `.bar` file, invokes
 /// the `baron` executable, and parses the result.
@@ -63,36 +67,48 @@ pub(crate) const fn supported(kind: ModelKind) -> bool {
     )
 }
 
+static PROFILE: LazyLock<SolverProfile> = LazyLock::new(build_profile);
+
+fn build_profile() -> SolverProfile {
+    use oximo_expr::ExprClass::{Linear, Nonlinear, Quadratic};
+    use oximo_solver::VariableDomain::{Binary, Integer, Real};
+
+    SolverProfile::new(NAME)
+        .with_scalar_constraints([Linear, Quadratic, Nonlinear])
+        .with_scalar_objectives([Linear, Quadratic, Nonlinear])
+        .with_soc(true)
+        .with_kinds(MODEL_KINDS.into_iter().filter(|kind| supported(*kind)))
+        .with_domains([Real, Integer, Binary])
+        .with_operators(
+            ExpressionOperator::ALL.iter().copied().filter(|operator| supports_operator(*operator)),
+        )
+}
+
 impl Solver for Baron {
     type Options = BaronOptions;
+
+    fn profile(&self, _opts: &Self::Options) -> Cow<'_, SolverProfile> {
+        Cow::Borrowed(&PROFILE)
+    }
 
     fn name(&self) -> &str {
         NAME
     }
 
-    fn supports(&self, kind: ModelKind) -> bool {
-        supported(kind)
-    }
-
-    fn domain_support(&self, domain: oximo_core::Domain) -> oximo_solver::Capability {
-        use oximo_core::Domain;
-        match domain {
-            Domain::Real | Domain::Integer | Domain::Binary => oximo_solver::Capability::Native,
-            _ => oximo_solver::Capability::Unsupported,
-        }
-    }
-
-    fn validate_model_extra(
+    fn validate_requirements(
         &self,
         model: &Model,
         opts: &Self::Options,
-    ) -> Vec<oximo_solver::CapabilityDiagnostic> {
+        requirements: &oximo_solver::ModelRequirements,
+    ) -> Vec<oximo_solver::RequirementDiagnostic> {
+        if !self.profile(opts).check(requirements).is_supported() {
+            return Vec::new();
+        }
+
         translate::validate_model(model, opts)
             .err()
-            .map(|error| oximo_solver::CapabilityDiagnostic {
-                constraint: None,
-                location: "BARON translation".into(),
-                reason: error.to_string(),
+            .map(|error| {
+                oximo_solver::RequirementDiagnostic::adapter("BARON translation", error.to_string())
             })
             .into_iter()
             .collect()
@@ -106,5 +122,15 @@ impl Solver for Baron {
 impl InfeasibilityDiagnosis for Baron {
     fn compute_iis(&mut self, model: &Model, opts: &BaronOptions) -> Result<Iis, SolverError> {
         translate::compute_iis(model, opts, self.exec.as_deref())
+    }
+}
+
+pub(crate) fn supports_operator(operator: oximo_solver::ExpressionOperator) -> bool {
+    use oximo_expr::UnaryOp::{Abs, Exp, Exp2, Log, Log10, Neg, Sqrt};
+    use oximo_solver::ExpressionOperator::{Atan2, Max, Min, Unary};
+    match operator {
+        Unary(op) => matches!(op, Neg | Abs | Sqrt | Exp | Exp2 | Log | Log10),
+        Atan2 | Min | Max => false,
+        _ => true,
     }
 }

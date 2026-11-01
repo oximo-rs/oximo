@@ -11,7 +11,15 @@ fn native_indicators_enforce_only_the_selected_branch() {
         constraint!(model, fix, b == fixed);
         indicator_constraint!(model, cap, b == 1 => x <= 3.0);
         objective!(model, Max, x);
-        assert!(Gurobi.supports_indicators());
+        assert_eq!(
+            Gurobi.profile(&GurobiOptions::default()).constraint_support(
+                oximo_solver::ConstraintSignature::of::<
+                    oximo_core::IndicatorFunctionData,
+                    oximo_core::IndicatorSet,
+                >()
+            ),
+            oximo_solver::RequirementSupport::Supported
+        );
         let result = Gurobi.solve(&model, &GurobiOptions::default()).unwrap();
         assert!((result.value_of(x).unwrap().unwrap() - expected).abs() < 1e-6);
     }

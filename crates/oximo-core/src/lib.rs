@@ -70,10 +70,10 @@ pub use semantic::ScalarConstraintSource;
 pub use semantic::{
     ConstraintOrigin, ConstraintUpdateError, Erased, FunctionKind, FunctionRef,
     FunctionRepresentationRef, FunctionValue, ImmutableSemanticFunction, IndicatorFunctionData,
-    IndicatorSet, ScalarConstraintView, ScalarFunctionData, SemanticConstraint,
-    SemanticConstraintId, SemanticConstraintRef, SemanticFunction, SemanticPair, SemanticPairRef,
-    SemanticType, SetRef, SetValue, SpecialOrderedSet, SymmetricAffineData, VariableVectorData,
-    VariableVectorRef, VectorAffineData,
+    IndicatorSet, ScalarConstraintMetadata, ScalarConstraintView, ScalarFunctionData,
+    SemanticConstraint, SemanticConstraintId, SemanticConstraintRef, SemanticFunction,
+    SemanticPair, SemanticPairRef, SemanticType, SetRef, SetValue, SpecialOrderedSet,
+    SymmetricAffineData, VariableVectorData, VariableVectorRef, VectorAffineData,
 };
 pub use set::{
     Axis, FromIndexKey, FromIndexKeyRef, IndexKey, IndexKeyRef, IndexTuple, KeyCat, ScalarKey, Set,
@@ -81,7 +81,9 @@ pub use set::{
 };
 pub use shared::SharedSlice;
 #[doc(hidden)]
-pub use soc::{__detect_soc_from_quadratic, __soc_bound_variable};
+pub use soc::{
+    __detect_soc_from_quadratic, __is_detected_soc_from_quadratic, __soc_bound_variable,
+};
 pub use soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;

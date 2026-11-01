@@ -255,8 +255,24 @@ fn native_lowering_is_checked_even_when_the_source_signature_is_supported() {
         fn name(&self) -> &str {
             "linear-only"
         }
-        fn supports(&self, kind: ModelKind) -> bool {
-            kind == ModelKind::LP
+        fn profile(
+            &self,
+            _opts: &Self::Options,
+        ) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+            std::borrow::Cow::Owned({
+                oximo_solver::SolverProfile::new(self.name())
+                    .with_scalar_constraints([oximo_expr::ExprClass::Linear])
+                    .with_scalar_objectives([oximo_expr::ExprClass::Linear])
+                    .with_kinds(
+                        oximo_solver::MODEL_KINDS.into_iter().filter(|&kind| kind == ModelKind::LP),
+                    )
+                    .with_domains([
+                        oximo_solver::VariableDomain::Real,
+                        oximo_solver::VariableDomain::Integer,
+                        oximo_solver::VariableDomain::Binary,
+                    ])
+                    .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied())
+            })
         }
         fn solve(&mut self, _: &Model, (): &()) -> Result<SolverResult, SolverError> {
             unreachable!()
@@ -269,15 +285,19 @@ fn native_lowering_is_checked_even_when_the_source_signature_is_supported() {
         "squared",
         Constraint::new(SquaredBound(x), LessThan(2.0)).into_ir(),
     );
+    let cold = LinearOnly.profile(&()).check_model(&model);
     let validation = LinearOnly.validate_model(&model, &());
-    let diagnostic = validation.errors.iter().find(|d| d.constraint == Some(row.id())).unwrap();
+    assert_eq!(cold.to_string(), validation.to_string());
+
+    let diagnostic = validation.errors.iter().find(|d| d.constraint() == Some(row.id())).unwrap();
     assert!(diagnostic.reason.contains("unsupported function/set pair"));
+
+    let declared = diagnostic.origins[0].declared_constraint.unwrap();
+    assert!(declared.function.is::<ScalarFunctionData<Affine>>());
+    assert!(declared.set.is::<LessThan>());
     assert!(
-        diagnostic
-            .reason
-            .contains(oximo_core::SemanticType::of::<ScalarFunctionData<Affine>>().name())
+        matches!(&diagnostic.requirement, oximo_solver::Requirement::Constraint(pair) if pair.function.is::<ScalarFunctionData<Quadratic>>())
     );
-    assert!(diagnostic.reason.contains(oximo_core::SemanticType::of::<LessThan>().name()));
 }
 
 #[test]

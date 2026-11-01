@@ -45,5 +45,11 @@ fn milp_is_rejected_with_kind() {
     variable!(m, 0.0 <= x <= 5.0, Int);
     objective!(m, Min, x);
     let err = Clarabel.solve(&m, &ClarabelOptions::default()).unwrap_err();
-    assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+    assert!(
+        matches!(&err, SolverError::IncompatibleModel(report)
+        if report.errors.iter().any(|diagnostic|
+            matches!(diagnostic.requirement, Requirement::Combination(features)
+                if features.kind == ModelKind::MILP))),
+        "{err}"
+    );
 }

@@ -31,11 +31,14 @@ pub use oximo_core::__macro_support;
 pub use oximo_expr as expr;
 pub use oximo_solver as solver;
 pub use oximo_solver::{
-    ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,
-    ModelReport, ParameterSnapshot, PersistentSolver, PrimalStatus, SocEvaluation,
-    SolutionIndexError, SolutionIter, SolutionKeys, SolutionPoint, SolutionValueId, SolutionValues,
-    SolutionValuesIter, Solver, SolverError, SolverResult, TerminationStatus, UniversalOptions,
-    UniversalOptionsExt, VarBoundKind,
+    CompatibilityReport, ConstraintEvaluation, ConstraintSignature, DualStatus, ExpressionOperator,
+    HasUniversal, Iis, IisReport, InfeasibilityDiagnosis, ModelFeatures, ModelReport,
+    ModelRequirements, ParameterSnapshot, PersistentSolver, PrimalStatus, Requirement,
+    RequirementAlternative, RequirementDiagnostic, RequirementEntity, RequirementEntry,
+    RequirementOrigin, RequirementSupport, SocEvaluation, SolutionIndexError, SolutionIter,
+    SolutionKeys, SolutionPoint, SolutionValueId, SolutionValues, SolutionValuesIter, Solver,
+    SolverError, SolverProfile, SolverResult, TerminationStatus, UniversalOptions,
+    UniversalOptionsExt, VarBoundKind, VariableDomain,
 };
 
 #[cfg(feature = "gdp")]
@@ -127,11 +130,14 @@ pub mod prelude {
         GdpSolverExt, Hull, HullInclusivePolicy,
     };
     pub use oximo_solver::{
-        ConstraintEvaluation, DualStatus, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis,
-        ModelReport, ParameterSnapshot, PersistentSolver, PrimalStatus, SocEvaluation,
-        SolutionIndexError, SolutionIter, SolutionKeys, SolutionPoint, SolutionValueId,
-        SolutionValues, SolutionValuesIter, Solver, SolverError, SolverResult, TerminationStatus,
-        UniversalOptions, UniversalOptionsExt, VarBoundKind,
+        CompatibilityReport, ConstraintEvaluation, ConstraintSignature, DualStatus,
+        ExpressionOperator, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis, ModelFeatures,
+        ModelReport, ModelRequirements, ParameterSnapshot, PersistentSolver, PrimalStatus,
+        Requirement, RequirementAlternative, RequirementDiagnostic, RequirementEntity,
+        RequirementEntry, RequirementOrigin, RequirementSupport, SocEvaluation, SolutionIndexError,
+        SolutionIter, SolutionKeys, SolutionPoint, SolutionValueId, SolutionValues,
+        SolutionValuesIter, Solver, SolverError, SolverProfile, SolverResult, TerminationStatus,
+        UniversalOptions, UniversalOptionsExt, VarBoundKind, VariableDomain,
     };
 
     #[cfg(feature = "highs")]

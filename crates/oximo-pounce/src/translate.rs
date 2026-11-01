@@ -94,6 +94,8 @@ pub(crate) fn reject_semi_domains(model: &Model) -> Result<(), SolverError> {
 /// [`SolverError::Core`] for a model with neither an objective nor a declared
 /// feasibility problem.
 pub fn solve(model: &Model, opts: &PounceOptions) -> Result<SolverResult, SolverError> {
+    oximo_solver::Solver::validate_model(&crate::Pounce, model, opts).into_result()?;
+
     if let Some(search) = &opts.minima {
         return crate::minima::solve(model, opts, search);
     }

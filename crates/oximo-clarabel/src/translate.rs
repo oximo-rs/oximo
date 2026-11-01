@@ -457,6 +457,8 @@ impl Problem {
 /// domains or a Clarabel setup failure, and [`SolverError::Nonlinear`] if an
 /// expression defeats extraction.
 pub fn solve(model: &Model, opts: &ClarabelOptions) -> Result<SolverResult, SolverError> {
+    crate::PROFILE.check_model(model).into_result()?;
+
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }
@@ -1685,7 +1687,9 @@ mod tests {
         variable!(m, 0.0 <= x <= 5.0, Int);
         objective!(m, Min, x);
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::MILP)))
+        );
     }
 
     #[test]
@@ -1698,7 +1702,9 @@ mod tests {
         constraint!(m, c, x * y <= 4.0);
         objective!(m, Min, x + y);
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::QCP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::QCP)))
+        );
     }
 
     #[test]
@@ -1707,7 +1713,9 @@ mod tests {
         variable!(m, x >= 0.1);
         objective!(m, Min, x.sin());
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::NLP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::NLP)))
+        );
     }
 
     #[test]
@@ -1716,7 +1724,9 @@ mod tests {
         variable!(m, s <= 10.0, SemiCont(2.0));
         objective!(m, Min, s);
         let err = solve(&m, &ClarabelOptions::default()).unwrap_err();
-        assert!(matches!(err, SolverError::UnsupportedKind(ModelKind::MILP)));
+        assert!(
+            matches!(err, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d| matches!(d.requirement, oximo_solver::Requirement::Combination(f) if f.kind == ModelKind::MILP)))
+        );
     }
 
     #[test]

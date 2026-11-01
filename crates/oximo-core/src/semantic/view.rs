@@ -1,5 +1,16 @@
 //! Borrowed source views.
 
+/// Built-in scalar declaration metadata without synthesized function/set payloads.
+#[derive(Clone, Copy, Debug)]
+pub struct ScalarConstraintMetadata<'a> {
+    pub id: crate::ConstraintId,
+    pub name: &'a str,
+    pub active: bool,
+    pub function: super::SemanticType,
+    pub set: super::SemanticType,
+    pub view: super::ScalarConstraintView,
+}
+
 use oximo_expr::{ExprId, ModelId, VarId};
 
 use super::{

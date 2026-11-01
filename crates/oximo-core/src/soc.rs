@@ -101,7 +101,17 @@ pub(crate) fn is_detected_soc(
     if !matches!(c.as_single(), Some((Sense::Le, _))) {
         return false;
     }
-    extract_quadratic(arena, c.lhs).is_some_and(|q| soc_quadratic(vars, c, &q).is_some())
+    extract_quadratic(arena, c.lhs).is_some_and(|q| __is_detected_soc_from_quadratic(vars, c, &q))
+}
+
+/// Test an already extracted quadratic for the supported detected-SOC shape.
+#[doc(hidden)]
+pub fn __is_detected_soc_from_quadratic(
+    vars: &[Variable],
+    c: &AlgebraicConstraint,
+    q: &QuadraticTerms,
+) -> bool {
+    soc_quadratic(vars, c, q).is_some()
 }
 
 /// Bound variable of a structurally eligible diagonal SOC, ignoring its bound.

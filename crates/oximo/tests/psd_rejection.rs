@@ -13,11 +13,26 @@ use oximo::prelude::*;
 fn check<S: Solver>(solver: &mut S, options: &S::Options) {
     let m = Model::new("unsupported PSD");
     variable!(m, x);
-    psd_constraint!(m, SymmetricMatrix::from_upper_triangle(1, [x]));
+    let cone = psd_constraint!(m, SymmetricMatrix::from_upper_triangle(1, [x]));
     objective!(m, Min, x.exp());
     assert_eq!(m.kind(), ModelKind::NLP);
-    assert!(!solver.supports_model(&m));
-    assert!(matches!(solver.solve(&m, options), Err(SolverError::UnsupportedConstraint(_))));
+    let expected = Requirement::Constraint(oximo::ConstraintSignature::of::<
+        oximo::core::SymmetricAffineData,
+        PositiveSemidefiniteCone,
+    >());
+    let report = solver.validate_model(&m, options);
+    assert!(
+        report.errors.iter().any(|diagnostic| diagnostic.requirement == expected
+            && diagnostic.constraint() == Some(cone.id())),
+        "{report}"
+    );
+    let error = solver.solve(&m, options).unwrap_err();
+    assert!(
+        matches!(&error, SolverError::IncompatibleModel(report)
+        if report.errors.iter().any(|diagnostic|
+            diagnostic.requirement == expected && diagnostic.constraint() == Some(cone.id()))),
+        "{error}"
+    );
 }
 
 #[cfg(feature = "highs")]

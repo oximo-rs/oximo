@@ -48,6 +48,8 @@ struct TaskScratch {
 /// Returns an error for unsupported model kinds or variable domains, invalid
 /// expressions, and native MOSEK setup, optimization, or solution-query errors.
 pub fn solve(model: &Model, opts: &MosekOptions) -> Result<SolverResult, SolverError> {
+    oximo_solver::Solver::profile(&crate::Mosek, opts).check_model(model).into_result()?;
+
     if model.has_active_sos_constraints() {
         return Err(SolverError::UnsupportedSos);
     }

@@ -14,7 +14,11 @@ pub use persistent::HighsPersistent;
 pub use translate::solve;
 
 use oximo_core::{Model, ModelKind};
-use oximo_solver::{PersistentSolver, Solver, SolverError, SolverResult};
+use oximo_solver::{
+    ExpressionOperator, MODEL_KINDS, PersistentSolver, Solver, SolverError, SolverProfile,
+    SolverResult,
+};
+use std::{borrow::Cow, sync::LazyLock};
 
 /// HiGHS solver handle.
 ///
@@ -34,19 +38,29 @@ pub(crate) const fn supported(kind: ModelKind) -> bool {
     matches!(kind, ModelKind::LP | ModelKind::MILP | ModelKind::QP)
 }
 
+static PROFILE: LazyLock<SolverProfile> = LazyLock::new(build_profile);
+
+fn build_profile() -> SolverProfile {
+    use oximo_expr::ExprClass::{Linear, Quadratic};
+    use oximo_solver::VariableDomain::{Binary, Integer, Real, SemiContinuous, SemiInteger};
+
+    SolverProfile::new(NAME)
+        .with_scalar_constraints([Linear])
+        .with_scalar_objectives([Linear, Quadratic])
+        .with_kinds(MODEL_KINDS.into_iter().filter(|kind| supported(*kind)))
+        .with_domains([Real, Integer, Binary, SemiContinuous, SemiInteger])
+        .with_operators(ExpressionOperator::ALL.iter().copied())
+}
+
 impl Solver for Highs {
     type Options = HighsOptions;
 
+    fn profile(&self, _opts: &Self::Options) -> Cow<'_, SolverProfile> {
+        Cow::Borrowed(&PROFILE)
+    }
+
     fn name(&self) -> &str {
         NAME
-    }
-
-    fn supports(&self, kind: ModelKind) -> bool {
-        supported(kind)
-    }
-
-    fn domain_support(&self, _domain: oximo_core::Domain) -> oximo_solver::Capability {
-        oximo_solver::Capability::Native
     }
 
     fn solve(&mut self, model: &Model, opts: &HighsOptions) -> Result<SolverResult, SolverError> {

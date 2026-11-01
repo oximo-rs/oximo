@@ -1,4 +1,6 @@
-use super::{FunctionValue, ScalarFunctionData, SemanticPair, SetValue};
+use super::{
+    FunctionStorage, FunctionValue, ScalarFunctionData, SemanticPair, SetStorage, SetValue,
+};
 use oximo_expr::{Affine, Constant, Dynamic, ExprId, ModelId, Nonlinear, Quadratic};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,14 +16,28 @@ pub(crate) enum ScalarKind {
 }
 
 impl ScalarKind {
+    pub(crate) fn signature(self) -> super::SemanticType {
+        use super::SemanticType;
+        match self {
+            Self::Constant => SemanticType::of::<ScalarFunctionData<Constant>>(),
+            Self::Affine => SemanticType::of::<ScalarFunctionData<Affine>>(),
+            Self::Quadratic => SemanticType::of::<ScalarFunctionData<Quadratic>>(),
+            Self::Nonlinear => SemanticType::of::<ScalarFunctionData<Nonlinear>>(),
+            Self::Dynamic => SemanticType::of::<ScalarFunctionData<Dynamic>>(),
+            Self::AnyAffine | Self::AnyQuadratic | Self::AnyNonlinear => {
+                SemanticType::of::<crate::AnyScalarFunctionData>()
+            }
+        }
+    }
+
     pub(crate) fn of(value: &FunctionValue) -> Option<Self> {
         value.builtin_scalar().map(|(kind, _)| kind)
     }
 
     pub(crate) fn function(self, model: ModelId, root: ExprId) -> FunctionValue {
-        match self {
+        FunctionValue(match self {
             Self::AnyAffine | Self::AnyQuadratic | Self::AnyNonlinear => {
-                FunctionValue::new(crate::AnyScalarFunctionData {
+                FunctionStorage::AnyScalar(crate::AnyScalarFunctionData {
                     expression: ScalarFunctionData::new(model, root),
                     class: match self {
                         Self::AnyAffine => oximo_expr::ExprClass::Linear,
@@ -30,16 +46,20 @@ impl ScalarKind {
                     },
                 })
             }
-            Self::Constant => FunctionValue::new(ScalarFunctionData::<Constant>::new(model, root)),
-            Self::Affine => FunctionValue::new(ScalarFunctionData::<Affine>::new(model, root)),
+            Self::Constant => {
+                FunctionStorage::Constant(ScalarFunctionData::<Constant>::new(model, root))
+            }
+            Self::Affine => FunctionStorage::Affine(ScalarFunctionData::<Affine>::new(model, root)),
             Self::Quadratic => {
-                FunctionValue::new(ScalarFunctionData::<Quadratic>::new(model, root))
+                FunctionStorage::Quadratic(ScalarFunctionData::<Quadratic>::new(model, root))
             }
             Self::Nonlinear => {
-                FunctionValue::new(ScalarFunctionData::<Nonlinear>::new(model, root))
+                FunctionStorage::Nonlinear(ScalarFunctionData::<Nonlinear>::new(model, root))
             }
-            Self::Dynamic => FunctionValue::new(ScalarFunctionData::<Dynamic>::new(model, root)),
-        }
+            Self::Dynamic => {
+                FunctionStorage::Dynamic(ScalarFunctionData::<Dynamic>::new(model, root))
+            }
+        })
     }
 }
 
@@ -52,17 +72,27 @@ pub(crate) enum BoundKind {
 }
 
 impl BoundKind {
+    pub(crate) fn signature(self) -> super::SemanticType {
+        use super::SemanticType;
+        match self {
+            Self::Less => SemanticType::of::<crate::LessThan>(),
+            Self::Greater => SemanticType::of::<crate::GreaterThan>(),
+            Self::Equal => SemanticType::of::<crate::EqualTo>(),
+            Self::Interval => SemanticType::of::<crate::Interval>(),
+        }
+    }
+
     pub(crate) fn of(value: &SetValue) -> Option<Self> {
         value.builtin_bound_kind()
     }
 
     pub(crate) fn set(self, lower: f64, upper: f64) -> SetValue {
-        match self {
-            Self::Less => SetValue::new(crate::LessThan(upper)),
-            Self::Greater => SetValue::new(crate::GreaterThan(lower)),
-            Self::Equal => SetValue::new(crate::EqualTo(lower)),
-            Self::Interval => SetValue::new(crate::Interval { lower, upper }),
-        }
+        SetValue(match self {
+            Self::Less => SetStorage::LessThan(crate::LessThan(upper)),
+            Self::Greater => SetStorage::GreaterThan(crate::GreaterThan(lower)),
+            Self::Equal => SetStorage::EqualTo(crate::EqualTo(lower)),
+            Self::Interval => SetStorage::Interval(crate::Interval { lower, upper }),
+        })
     }
 }
 

@@ -51,8 +51,23 @@ pub(crate) fn route(
 }
 
 /// Check route compatibility without classifying models that have an NLP fallback.
-pub(crate) fn validate_route(model: &Model, opts: &PounceOptions) -> Result<(), SolverError> {
-    let kind = model.kind();
+pub(crate) fn validate_route(
+    model: &Model,
+    opts: &PounceOptions,
+    requirements: &oximo_solver::ModelRequirements,
+) -> Result<(), SolverError> {
+    let kind = requirements
+        .entries
+        .iter()
+        .flat_map(|entry| &entry.alternatives)
+        .find_map(|requirement| {
+            if let oximo_solver::Requirement::Combination(features) = requirement {
+                Some(features.kind)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| model.kind());
     let algorithm = crate::translate::validate_algorithm(kind, opts)?;
     model.ensure_gdp_reformulated()?;
     model.ensure_objective_declared()?;

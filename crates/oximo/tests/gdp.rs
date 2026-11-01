@@ -100,7 +100,7 @@ fn linear_gdp_matches_enumerated_branch_optimum_and_persistent_rejects_new_logic
     disjunction!(model, [a, b]);
     objective!(model, Max, 3.0 * x + z);
 
-    assert!(!Highs.supports_model(&model));
+    assert!(!Highs.validate_model(&model, &HighsOptions::default()).is_supported());
     assert!(Highs.solve(&model, &HighsOptions::default()).is_err());
     let mut best = f64::NEG_INFINITY;
     for (x_bound, z_bound) in [(2.0, 8.0), (7.0, 1.0)] {

@@ -1,6 +1,9 @@
 use oximo_core::prelude::*;
 use oximo_mosek::{Mosek, MosekOptions, solve};
-use oximo_solver::{PersistentSolver, Solver, SolverError, TerminationStatus};
+use oximo_solver::{
+    PersistentSolver, Requirement, RequirementEntity, Solver, SolverError, TerminationStatus,
+    VariableDomain,
+};
 
 fn close(actual: f64, expected: f64) {
     assert!((actual - expected).abs() < 1e-6, "actual={actual}, expected={expected}");
@@ -156,7 +159,9 @@ fn unsupported_nonlinear_and_semi_domains() {
     objective!(nonlinear, Min, x.sin());
     assert!(matches!(
         solve(&nonlinear, &MosekOptions::default()),
-        Err(SolverError::UnsupportedKind(ModelKind::NLP))
+        Err(SolverError::IncompatibleModel(report)) if report.errors.iter().any(|diagnostic|
+            matches!(diagnostic.requirement, Requirement::Objective { function, .. }
+                if function.is::<ScalarFunctionData<Nonlinear>>()))
     ));
 
     let mixed_nonlinear = Model::new("mixed_nonlinear");
@@ -164,20 +169,28 @@ fn unsupported_nonlinear_and_semi_domains() {
     objective!(mixed_nonlinear, Min, z.sin());
     assert!(matches!(
         solve(&mixed_nonlinear, &MosekOptions::default()),
-        Err(SolverError::UnsupportedKind(ModelKind::MINLP))
+        Err(SolverError::IncompatibleModel(report)) if report.errors.iter().any(|diagnostic|
+            matches!(diagnostic.requirement, Requirement::Objective { function, .. }
+                if function.is::<ScalarFunctionData<Nonlinear>>()))
     ));
 
     let semi = Model::new("semi");
     variable!(semi, s <= 10.0, SemiCont(2.0));
     objective!(semi, Min, s);
     let error = solve(&semi, &MosekOptions::default()).unwrap_err();
-    assert!(error.to_string().contains("semi-continuous or semi-integer"));
+    assert!(matches!(error, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d|
+            d.requirement == Requirement::Domain(VariableDomain::SemiContinuous)
+                && d.origins.iter().any(|origin|
+                    origin.entity == RequirementEntity::Variable(s.var_id().unwrap())))));
 
     let semi_integer = Model::new("semi_integer");
     variable!(semi_integer, si <= 10.0, SemiInt(2.0));
     objective!(semi_integer, Min, si);
     let error = solve(&semi_integer, &MosekOptions::default()).unwrap_err();
-    assert!(error.to_string().contains("semi-continuous or semi-integer"));
+    assert!(matches!(error, SolverError::IncompatibleModel(report) if report.errors.iter().any(|d|
+            d.requirement == Requirement::Domain(VariableDomain::SemiInteger)
+                && d.origins.iter().any(|origin|
+                    origin.entity == RequirementEntity::Variable(si.var_id().unwrap())))));
 }
 
 #[test]
@@ -186,10 +199,16 @@ fn unsupported_sos_reports_explicit_reformulation_hint() {
     variable!(model, 0.0 <= x <= 1.0);
     variable!(model, 0.0 <= y <= 1.0);
     objective!(model, Max, x + y);
-    sos_constraint!(model, choice, SOS1, [x, y]);
+    let choice = sos_constraint!(model, choice, SOS1, [x, y]);
 
     let error = solve(&model, &MosekOptions::default()).unwrap_err();
-    assert!(matches!(error, SolverError::UnsupportedSos));
+    assert!(
+        matches!(&error, SolverError::IncompatibleModel(report)
+        if report.errors.len() == 1
+            && report.errors[0].requirement == Requirement::Sos(SosType::Sos1)
+            && report.errors[0].constraint() == Some(choice.id())),
+        "{error}"
+    );
     assert!(error.to_string().contains("Model::to_reformulated_sos_model"));
 }
 
