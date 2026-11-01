@@ -56,8 +56,11 @@ impl oximo_solver::Solver for Pounce {
             .with_scalar_objectives([Linear, Quadratic, Nonlinear])
             .with_soc(true)
             .with_kinds(oximo_solver::MODEL_KINDS.into_iter().filter(|kind| {
-                algorithm.is_some_and(|a| a.supports(*kind))
-                    && selection.is_some_and(|s| match s {
+                let (Some(algorithm), Some(selection)) = (algorithm, selection) else {
+                    return true;
+                };
+                algorithm.supports(*kind)
+                    && match selection {
                         PounceSolverSelection::Auto | PounceSolverSelection::Nlp => true,
                         PounceSolverSelection::LpIpm => *kind == ModelKind::LP,
                         PounceSolverSelection::QpIpm | PounceSolverSelection::QpActiveSet => {
@@ -66,7 +69,7 @@ impl oximo_solver::Solver for Pounce {
                         PounceSolverSelection::Socp => {
                             matches!(kind, ModelKind::LP | ModelKind::QP | ModelKind::SOCP)
                         }
-                    })
+                    }
             }))
             .with_domains([Real])
             .with_operators(oximo_solver::ExpressionOperator::ALL.iter().copied());

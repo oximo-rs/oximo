@@ -978,6 +978,51 @@ fn semi_model(integral: bool) -> Model {
 }
 
 #[test]
+fn invalid_route_options_preserve_option_diagnostics() {
+    let model = Model::new("invalid route options");
+    variable!(model, 0.0 <= x <= 1.0);
+    objective!(model, Min, x);
+
+    for (name, options) in [
+        ("algorithm", PounceOptions::default().set("algorithm", "invalid")),
+        ("algorithm", PounceOptions::default().set("algorithm", true)),
+        ("solver_selection", PounceOptions::default().set("solver_selection", "invalid")),
+        ("solver_selection", PounceOptions::default().set("solver_selection", true)),
+        (
+            "algorithm",
+            PounceOptions::default()
+                .solver_selection(PounceSolverSelection::LpIpm)
+                .set("algorithm", "invalid"),
+        ),
+        (
+            "solver_selection",
+            PounceOptions::default()
+                .algorithm(PounceAlgorithm::ActiveSetSqp)
+                .set("solver_selection", "invalid"),
+        ),
+        (
+            "algorithm",
+            PounceOptions::default().set("algorithm", "invalid").set("solver_selection", "invalid"),
+        ),
+    ] {
+        let profile = Pounce.profile(&options);
+        for kind in oximo_solver::MODEL_KINDS {
+            assert!(profile.supports_kind(kind), "{name}: {kind:?}");
+        }
+
+        let report = Pounce.validate_model(&model, &options);
+        assert_eq!(report.errors.len(), 1, "{report}");
+        assert_eq!(report.errors[0].requirement, Requirement::AdapterRestriction("POUNCE route"));
+        assert!(report.errors[0].reason.contains(name), "{report}");
+        assert_eq!(Pounce.solve(&model, &options).unwrap_err().to_string(), report.to_string());
+        assert_eq!(
+            Pounce.persistent().solve(&model, &options).unwrap_err().to_string(),
+            report.to_string()
+        );
+    }
+}
+
+#[test]
 fn route_validation_matches_ordinary_and_persistent_rejections() {
     fn rejected(model: &Model, options: &PounceOptions) {
         let mut persistent = Pounce.persistent();
