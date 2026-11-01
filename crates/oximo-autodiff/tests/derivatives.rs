@@ -114,6 +114,46 @@ fn constraint_jacobian_matches_fd() {
 }
 
 #[test]
+fn zero_powers_drop_inactive_jacobian_entries_without_changing_derivatives() {
+    let m = Model::new("zero_power_support");
+    variable!(m, 0.1 <= x <= 2.0);
+    variable!(m, 0.1 <= y <= 2.0);
+    objective!(m, Min, x.sin().powi(0) + y.sin());
+    constraint!(m, only_y, x.sin().powf(-0.0) + y.sin() <= 3.0);
+    constraint!(m, constant_nl, x.sin().powi(0).sin() <= 3.0);
+    constraint!(m, only_x, y.sin().powi(0) + x.sin() <= 3.0);
+
+    let ev = NlpEvaluator::new(&m).unwrap();
+    assert_eq!(ev.jacobian_structure(), &[(0, 1), (2, 0)]);
+    assert_eq!(ev.hessian_lagrangian_structure(), &[(0, 0), (1, 1)]);
+
+    for point in [[0.7_f64, 0.4_f64], [1.1, 0.8]] {
+        assert_close(ev.eval_objective(&point), 1.0 + point[1].sin(), 1e-12, "objective");
+
+        let mut gradient = vec![f64::NAN; 2];
+        ev.eval_objective_gradient(&point, &mut gradient);
+        assert_close(gradient[0], 0.0, 1e-12, "inactive objective derivative");
+        assert_close(gradient[1], point[1].cos(), 1e-12, "active objective derivative");
+
+        let mut values = vec![f64::NAN; 3];
+        ev.eval_constraint(&point, &mut values);
+        assert_close(values[0], 1.0 + point[1].sin(), 1e-12, "only_y constraint");
+        assert_close(values[1], 1.0_f64.sin(), 1e-12, "constant nonlinear constraint");
+        assert_close(values[2], 1.0 + point[0].sin(), 1e-12, "only_x constraint");
+
+        let mut jacobian = vec![f64::NAN; 2];
+        ev.eval_constraint_jacobian(&point, &mut jacobian);
+        assert_close(jacobian[0], point[1].cos(), 1e-12, "only_y Jacobian");
+        assert_close(jacobian[1], point[0].cos(), 1e-12, "only_x Jacobian");
+
+        let mut hessian = vec![f64::NAN; 2];
+        ev.eval_hessian_lagrangian(&point, 0.5, &[2.0, 3.0, 4.0], &mut hessian);
+        assert_close(hessian[0], -4.0 * point[0].sin(), 1e-12, "H[x,x]");
+        assert_close(hessian[1], -2.5 * point[1].sin(), 1e-12, "H[y,y]");
+    }
+}
+
+#[test]
 fn hessian_exact_on_quadratic() {
     // f = 3x^2 + xy + y^2 + 2x - y, Hessian [[6, 1], [1, 2]].
     let m = Model::new("qp");
