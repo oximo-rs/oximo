@@ -238,9 +238,9 @@ fn nonlinear_composition_of_zero_power_has_empty_derivative_patterns() {
 
     let slot = FunctionSlot::classify(&arena, root);
     assert!(slot.is_nonlinear());
-    assert!(slot.support.is_empty());
-    assert!(slot.hess_pairs.is_empty());
-    assert!(jacobian_structure(&[slot]).is_empty());
+    assert_eq!(slot.support, []);
+    assert_eq!(slot.hess_pairs, []);
+    assert_eq!(jacobian_structure(&[slot]), []);
     assert_eq!(variable_support(&arena, root), vec![11]);
 }
 
