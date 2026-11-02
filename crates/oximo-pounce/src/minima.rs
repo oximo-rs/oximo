@@ -141,7 +141,6 @@ pub(crate) fn solve(
         raw_log: verbose.then(String::new),
     };
 
-    // TODO: Use upstream search cancellation once POUNCE supports it (v0.14).
     if let Some(result) = expired_search(&prep, opts, started) {
         return Ok(result.into_solver_result(&prep, model, empty));
     }
@@ -153,19 +152,7 @@ pub(crate) fn solve(
         result.minima.iter().filter(|minimum| !has_recovered_duals(minimum, &prep)).count();
     let warnings = solver.collect_warnings(result.warnings, n_failed_dual_recoveries);
 
-    let stop = if solver.timed_out
-        || opts.universal.time_limit.is_some_and(|limit| started.elapsed() >= limit)
-    {
-        SearchStop::TimeLimit
-    } else {
-        match result.stop {
-            Stop::TargetReached => SearchStop::TargetReached,
-            Stop::Converged => SearchStop::Converged,
-            Stop::BudgetExhausted => SearchStop::BudgetExhausted,
-            Stop::SampleCapReached => SearchStop::SampleCapReached,
-            Stop::Aborted => SearchStop::Aborted,
-        }
-    };
+    let stop = search_stop(result.stop, solver.should_stop());
 
     Ok(SearchResult {
         minima: result.minima,
@@ -181,6 +168,18 @@ pub(crate) fn solve(
         raw_log: solver.raw_log,
     }
     .into_solver_result(&prep, model, empty))
+}
+
+fn search_stop(stop: Stop, timed_out: bool) -> SearchStop {
+    match stop {
+        Stop::TargetReached => SearchStop::TargetReached,
+        Stop::Cancelled => SearchStop::TimeLimit,
+        _ if timed_out => SearchStop::TimeLimit,
+        Stop::Converged => SearchStop::Converged,
+        Stop::BudgetExhausted => SearchStop::BudgetExhausted,
+        Stop::SampleCapReached => SearchStop::SampleCapReached,
+        Stop::Aborted => SearchStop::Aborted,
+    }
 }
 
 /// Minima search always uses the general NLP route.
@@ -320,7 +319,7 @@ fn expired_search(
         return None;
     }
 
-    // Match POUNCE 0.13's search scales.
+    // Match POUNCE's search scales.
     let has_box = prep.x_l.iter().zip(&prep.x_u).all(|(&lo, &hi)| lo > -1e19 && hi < 1e19);
     let scale = prep
         .x_l
@@ -438,6 +437,10 @@ impl SearchSolver {
 }
 
 impl LocalSolve for SearchSolver {
+    fn should_stop(&self) -> bool {
+        self.timed_out || self.time_limit.is_some_and(|limit| self.started.elapsed() >= limit)
+    }
+
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
         if let Some(limit) = self.time_limit {
             let remaining = limit.saturating_sub(self.started.elapsed());
@@ -514,7 +517,7 @@ fn validate_options(options: &PounceMinimaOptions, n: usize) -> Result<(), Solve
         }
     }
 
-    // POUNCE v0.13 eagerly evaluates the default even with an explicit budget.
+    // POUNCE eagerly evaluates the default even with an explicit budget.
     if options.n_minima.checked_mul(8).is_none() {
         return Err(invalid("n_minima"));
     }
@@ -572,8 +575,210 @@ fn validate_options(options: &PounceMinimaOptions, n: usize) -> Result<(), Solve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
     use oximo_core::{constraint, objective, param, variable};
     use oximo_solver::UniversalOptionsExt;
+    use pounce_rs::{
+        BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest,
+        StartingPoint,
+    };
+
+    fn search_solver() -> SearchSolver {
+        SearchSolver {
+            app: IpoptApplication::new(),
+            exact_hessian: true,
+            local_exact_hessian: true,
+            curvature: Rc::new(SearchCurvature::default()),
+            started: Instant::now(),
+            time_limit: None,
+            local_time_limit: 1e20,
+            timed_out: false,
+            n_failed_solves: 0,
+            iterations: 0,
+            warnings: Vec::new(),
+            raw_log: None,
+        }
+    }
+
+    // Expire the real adapter deadline at a specified objective evaluation,
+    // so sampling cancellation is deterministic.
+    struct DeadlineProblem {
+        solver: Rc<RefCell<SearchSolver>>,
+        evaluations: Rc<Cell<usize>>,
+        expire_at: usize,
+    }
+
+    impl TNLP for DeadlineProblem {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo { n: 1, m: 0, nnz_jac_g: 0, nnz_h_lag: 1, index_style: IndexStyle::C })
+        }
+
+        fn get_bounds_info(&mut self, bounds: BoundsInfo<'_>) -> bool {
+            bounds.x_l[0] = 0.0;
+            bounds.x_u[0] = 2.0;
+            true
+        }
+
+        fn get_starting_point(&mut self, start: StartingPoint<'_>) -> bool {
+            start.x[0] = 1.0;
+            true
+        }
+
+        fn eval_f(&mut self, x: &[f64], _new_x: bool) -> Option<f64> {
+            self.evaluations.set(self.evaluations.get() + 1);
+            if self.evaluations.get() == self.expire_at {
+                self.solver.borrow_mut().time_limit = Some(Duration::ZERO);
+            }
+            Some(x[0].powi(2))
+        }
+
+        fn eval_grad_f(&mut self, x: &[f64], _new_x: bool, gradient: &mut [f64]) -> bool {
+            gradient[0] = 2.0 * x[0];
+            true
+        }
+
+        fn eval_g(&mut self, _x: &[f64], _new_x: bool, _values: &mut [f64]) -> bool {
+            true
+        }
+
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[f64]>,
+            _new_x: bool,
+            _mode: SparsityRequest<'_>,
+        ) -> bool {
+            true
+        }
+
+        fn eval_h(
+            &mut self,
+            _x: Option<&[f64]>,
+            _new_x: bool,
+            obj_factor: f64,
+            _lambda: Option<&[f64]>,
+            _new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow[0] = 0;
+                    jcol[0] = 0;
+                }
+                SparsityRequest::Values { values } => values[0] = 2.0 * obj_factor,
+            }
+            true
+        }
+
+        fn finalize_solution(&mut self, _solution: Solution<'_>, _data: &IpoptData, _cq: &IpoptCq) {
+        }
+    }
+
+    struct DeadlineSolver {
+        inner: Rc<RefCell<SearchSolver>>,
+        solves: usize,
+        converged: bool,
+        expire_after_solve: bool,
+    }
+
+    impl LocalSolve for DeadlineSolver {
+        fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
+            self.solves += 1;
+            if self.should_stop() {
+                return self.inner.borrow_mut().solve(problem, mode);
+            }
+            if self.expire_after_solve {
+                self.inner.borrow_mut().time_limit = Some(Duration::ZERO);
+            }
+            LocalOutcome {
+                converged: self.converged,
+                x: vec![0.0],
+                lambda: Vec::new(),
+                z_l: vec![0.0],
+                z_u: vec![0.0],
+                quality: SolveQuality::default(),
+            }
+        }
+
+        fn should_stop(&self) -> bool {
+            self.inner.borrow().should_stop()
+        }
+    }
+
+    #[test]
+    fn expired_deadline_cancels_before_any_local_solve() {
+        let inner = Rc::new(RefCell::new(search_solver()));
+        assert!(!inner.borrow().should_stop());
+        inner.borrow_mut().time_limit = Some(Duration::ZERO);
+        let evaluations = Rc::new(Cell::new(0));
+        let problem: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(DeadlineProblem {
+            solver: Rc::clone(&inner),
+            evaluations: Rc::clone(&evaluations),
+            expire_at: usize::MAX,
+        }));
+        let mut solver =
+            DeadlineSolver { inner, solves: 0, converged: true, expire_after_solve: false };
+        let result =
+            pounce_rs::minima::find_minima(&problem, &mut solver, &PounceMinimaOptions::default())
+                .unwrap();
+
+        assert_eq!(result.stop, Stop::Cancelled);
+        assert_eq!(search_stop(result.stop, solver.should_stop()), SearchStop::TimeLimit);
+        assert_eq!(solver.solves, 0);
+        assert_eq!(evaluations.get(), 0);
+        assert!(result.minima.is_empty());
+    }
+
+    #[test]
+    fn deadline_checks_interrupt_mlsl_sampling_without_another_local_solve() {
+        let inner = Rc::new(RefCell::new(search_solver()));
+        let evaluations = Rc::new(Cell::new(0));
+        let problem: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(DeadlineProblem {
+            solver: Rc::clone(&inner),
+            evaluations: Rc::clone(&evaluations),
+            expire_at: 3,
+        }));
+        let mut solver =
+            DeadlineSolver { inner, solves: 0, converged: false, expire_after_solve: false };
+        let options = PounceMinimaOptions {
+            method: PounceMinimaMethod::Mlsl,
+            samples_per_round: Some(10_000),
+            max_solves: Some(10),
+            ..Default::default()
+        };
+        let result = pounce_rs::minima::find_minima(&problem, &mut solver, &options).unwrap();
+
+        assert_eq!(result.stop, Stop::Cancelled);
+        assert_eq!(search_stop(result.stop, solver.should_stop()), SearchStop::TimeLimit);
+        assert_eq!(evaluations.get(), 3);
+        assert_eq!(solver.solves, 1);
+        assert!(result.minima.is_empty());
+    }
+
+    #[test]
+    fn cancellation_keeps_accepted_minima_and_target_completion_takes_precedence() {
+        for n_minima in [1, 2] {
+            let inner = Rc::new(RefCell::new(search_solver()));
+            let problem: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(DeadlineProblem {
+                solver: Rc::clone(&inner),
+                evaluations: Rc::new(Cell::new(0)),
+                expire_at: usize::MAX,
+            }));
+            let mut solver =
+                DeadlineSolver { inner, solves: 0, converged: true, expire_after_solve: true };
+            let options = PounceMinimaOptions { n_minima, ..Default::default() };
+            let result = pounce_rs::minima::find_minima(&problem, &mut solver, &options).unwrap();
+
+            let expected =
+                if n_minima == 1 { SearchStop::TargetReached } else { SearchStop::TimeLimit };
+            assert_eq!(search_stop(result.stop, solver.should_stop()), expected);
+            assert_eq!(solver.solves, if n_minima == 1 { 2 } else { 1 });
+            assert_eq!(result.minima.len(), 1);
+            assert_eq!(result.minima[0].x, vec![0.0]);
+            assert_eq!(result.minima[0].z_l, Vec::<f64>::new());
+            assert_eq!(result.minima[0].z_u, Vec::<f64>::new());
+        }
+    }
 
     #[test]
     fn deadlines_expired_during_setup_preserve_search_scales() {

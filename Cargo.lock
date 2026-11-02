@@ -1035,9 +1035,9 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feral"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52a5d10907e7891a65325ff1ae839b4dc0b01a79f7415ee200c0e850651cd491"
+checksum = "23dd33f6336c12ec1db6668cf1c3e7f49203dc7eba421336af2b896c3ec05546"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -2769,14 +2769,15 @@ dependencies = [
 
 [[package]]
 name = "pounce-algorithm"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d167547821e25d84b458aa38af8fd44669e09faed3e9adb60b6503851412fe3e"
+checksum = "7f4c19b369aba6a6077395c22ec43c987eeb173ab85afdbc15b167ad506f2d65"
 dependencies = [
  "anstream",
  "anstyle",
  "faer 0.24.4",
  "pounce-common",
+ "pounce-convex",
  "pounce-feral",
  "pounce-l1penalty",
  "pounce-linalg",
@@ -2792,9 +2793,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-common"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819e72bd9f5627799007a4feb603d0ef399376d90f79b07e9e246cd0be388495"
+checksum = "89d7ecf01fec89d5fb84fd5324914281399c998c339e6c567a36c32482bd1833"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -2803,9 +2804,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-convex"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d687acd0c125cd0193f6efe564a4a3fb2f4ffaf0466aea8f43db6bd038814e42"
+checksum = "4c6f37bc9c157dc46814246648d26dba21625c54707338d89bbeb27bdc87e3f1"
 dependencies = [
  "feral",
  "pounce-common",
@@ -2820,9 +2821,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-feral"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b31ce9e3281335cadf47ca9c12638526dccac33bcfe4d273e858e130f8398a7"
+checksum = "b99ac405eddd963e71bd3b7420e68b2e26f2d885985985edc4dbb8c809b1c694"
 dependencies = [
  "feral",
  "pounce-common",
@@ -2833,9 +2834,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-l1penalty"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fea53dc78b24fd6b859bb47abb23f5519d9172febbf662fd810ed4e292d9519"
+checksum = "5eeaa2b6b153ba6828476ed099c9c1650ece4bc6af5a6dcd8376ed95136335e1"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -2843,18 +2844,18 @@ dependencies = [
 
 [[package]]
 name = "pounce-linalg"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d68ccbbff801b3fc93b8bc7ad0ba2c917c044527ab9e1144e3b5b47e9e7a55d"
+checksum = "6e0a79a3ad038e2b085542d06094110f1cd441ccb5c774600e896971b9000221"
 dependencies = [
  "pounce-common",
 ]
 
 [[package]]
 name = "pounce-linsol"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39481cd17276dd26e9743267f1e806225d23a60b61e3f7e8ff327b51c78d8b1b"
+checksum = "37bece7637be11c2cf578ab3e5827cc8240a9d33feb41abf3780e78ff9181d94"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -2863,9 +2864,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-minima"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3254151c364d3a261d0177954724f2dc56e30b0c42a2ff7ddb3bfd8e93d0d286"
+checksum = "38746e759951c8a2c4b60cca844e223693c44f0728f65e290189c693ff49dae5"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -2878,9 +2879,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-nlp"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a52b54fd46eea961e27c9624fe4444b1cd0f37c7ec58d272541b3d684d72fdb"
+checksum = "7ada3e1f0a5aa48d9481a84e2ec97d4aab193b33e75ab5c63e9e68875ef623d9"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -2889,9 +2890,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-observability"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fd5f1f28e5aa76752959f9eb2679988e73b80f71e3c07557cffa64e6b393976"
+checksum = "4d6c169bff835230b0fbd5d58c4c6eee7042586a405b690ac306520b46f583d2"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -2904,9 +2905,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-presolve"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95ad0f05c10ee21978da3407732a799500d175cdee2b04edafc364bc15535205"
+checksum = "1290ac6a9132c1445dfecb12305074967f7f8b8d1676085f7b31fa4bfa41ca71"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -2915,20 +2916,21 @@ dependencies = [
 
 [[package]]
 name = "pounce-qp"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf819e0117e16635f04d7a166ba35022f73d95f2ab1a4c71cd373bbf1970ced"
+checksum = "043d95f9edf7b88a791d4d0db3404a7384a547ae4d1dc39a7440de2b4daf880e"
 dependencies = [
  "pounce-common",
+ "pounce-feral",
  "pounce-linalg",
  "pounce-linsol",
 ]
 
 [[package]]
 name = "pounce-restoration"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d319819e34ea438778617c2e7cfff7db8cf61edad732e7f25248231fc7362c0"
+checksum = "d983d59d5f331f0efdb40d4ab7941c5fe1a038d5ed5cc8cdf25d83a3c44dce23"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -2940,9 +2942,9 @@ dependencies = [
 
 [[package]]
 name = "pounce-rs"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55918eb950a3927123224f83687db5e70d48a02fa6ea57a0a127ed48184bcdcf"
+checksum = "582762d799b693f6d2a006941a1399bda989cb62d1404c2e50fb7426b0d65d06"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -2960,19 +2962,22 @@ dependencies = [
 
 [[package]]
 name = "pounce-sens-core"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfb6684f6c74aaeb1123f765ccf81ad843642c54195392e119523b24a3326d9c"
+checksum = "8431c239b1ddee35d59ba96a4079f1457adba713d25a982baff9e4642f29ee2f"
 dependencies = [
+ "faer 0.24.4",
  "pounce-common",
+ "pounce-feral",
  "pounce-linalg",
+ "pounce-qp",
 ]
 
 [[package]]
 name = "pounce-solve-report"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "864f6c6674706c1054487abdcb5b453e3a903f56e8d1b858e63393413a51b486"
+checksum = "cf3cbdcbf93fcbf0a11f3b044b14cd70b5e2dd70bc3f2e008b9671ce87b79768"
 dependencies = [
  "anstream",
  "anstyle",

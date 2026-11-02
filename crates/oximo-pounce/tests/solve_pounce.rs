@@ -282,6 +282,39 @@ fn typed_options_still_solve() {
 }
 
 #[test]
+fn handover_controls_solve_cold_and_persistent_nlp_routes() {
+    let opts = PounceOptions::default()
+        .solver_selection(PounceSolverSelection::Nlp)
+        .ipm_sqp_handover(true)
+        .ipm_sqp_handover_tol(1e-2)
+        .ipm_sqp_handover_stall_iter(3)
+        .ipm_sqp_handover_max_attempts(2)
+        .sqp_dense_hessian_max_n(0)
+        .infeasibility_saddle_escape_retry(false);
+
+    for nonlinear in [false, true] {
+        let model = Model::new("handover_controls");
+        variable!(model, -3.0 <= x <= 3.0, initial = -1.0);
+        if nonlinear {
+            objective!(model, Min, (x - 1.0).powi(4) + (x - 1.0).powi(2));
+        } else {
+            objective!(model, Min, (x - 1.0).powi(2));
+        }
+
+        let mut persistent = Pounce.persistent();
+        for result in [
+            Pounce.solve(&model, &opts).unwrap(),
+            persistent.solve(&model, &opts).unwrap(),
+            persistent.solve(&model, &opts).unwrap(),
+        ] {
+            assert!(result.has_solution(), "{nonlinear}: {:?}", result.termination);
+            assert_close(result.value_of(x).unwrap().unwrap(), 1.0, 1e-4, "handover x");
+            assert_close(result.objective().unwrap(), 0.0, 1e-8, "handover objective");
+        }
+    }
+}
+
+#[test]
 fn unknown_option_is_rejected() {
     let m = Model::new("reject");
     variable!(m, 0.0 <= x <= 5.0, initial = 1.0);
