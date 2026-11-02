@@ -283,10 +283,35 @@ fn evaluate_soc_at(
     let arena = model.arena();
     let socs = model.soc_constraints();
     let constraint = socs.get(id.index())?;
-    let squared_norm = constraint.terms.iter().try_fold(0.0, |sum, &term| {
-        evaluate_at(&arena, term, point, current_parameters).map(|value| sum + value * value)
-    })?;
-    let norm = squared_norm.sqrt();
+    let mut scale = 0.0_f64;
+    let mut sum_squares = 0.0_f64;
+    let mut has_nan = false;
+    let mut has_infinite = false;
+    for &term in &constraint.terms {
+        let value = evaluate_at(&arena, term, point, current_parameters)?;
+        let magnitude = value.abs();
+        if magnitude.is_nan() {
+            has_nan = true;
+        } else if magnitude.is_infinite() {
+            has_infinite = true;
+        } else if magnitude > 0.0 {
+            if magnitude > scale {
+                let ratio = scale / magnitude;
+                sum_squares = 1.0 + sum_squares * ratio * ratio;
+                scale = magnitude;
+            } else {
+                let ratio = magnitude / scale;
+                sum_squares += ratio * ratio;
+            }
+        }
+    }
+    let norm = if has_nan {
+        f64::NAN
+    } else if has_infinite {
+        f64::INFINITY
+    } else {
+        scale * sum_squares.sqrt()
+    };
     let bound = evaluate_at(&arena, constraint.bound, point, current_parameters)?;
     let slack = bound - norm;
     Some(SocEvaluation { norm, bound, slack, violation: (-slack).max(0.0) })
@@ -1157,6 +1182,136 @@ mod tests {
                 < f64::EPSILON
         );
         assert!(result.soc_evaluation_at(&m, cone, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn soc_evaluation_avoids_avoidable_overflow_and_underflow() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("soc scaling");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, t);
+        let cone = soc_constraint!(m, cone, [x, y] <= t);
+        let point = |x_value, y_value, t_value| {
+            let primal = [
+                (x.var_id().unwrap(), x_value),
+                (y.var_id().unwrap(), y_value),
+                (t.var_id().unwrap(), t_value),
+            ]
+            .into_iter()
+            .collect();
+            SolutionPoint {
+                model_id: m.id(),
+                primal,
+                objective: None,
+                parameters: m.arena().parameter_snapshot(),
+            }
+        };
+        let result = SolverResult {
+            model_id: m.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![
+                point(1e200, 0.0, 2e200),
+                point(1e-200, 0.0, 5e-201),
+                point(1e-200, 1e200, 5e199),
+                point(0.0, 0.0, 0.0),
+            ],
+            ..Default::default()
+        };
+        let evaluation = |index| result.soc_evaluation_at(&m, cone, index).unwrap().unwrap();
+
+        let large = evaluation(0);
+        assert_eq!(
+            (large.norm, large.bound, large.slack, large.violation),
+            (1e200, 2e200, 1e200, 0.0)
+        );
+
+        let tiny = evaluation(1);
+        assert_eq!(
+            (tiny.norm, tiny.bound, tiny.slack, tiny.violation),
+            (1e-200, 5e-201, -5e-201, 5e-201)
+        );
+
+        let mixed = evaluation(2);
+        assert_eq!(
+            (mixed.norm, mixed.bound, mixed.slack, mixed.violation),
+            (1e200, 5e199, -5e199, 5e199)
+        );
+
+        assert_eq!(
+            evaluation(3),
+            SocEvaluation { norm: 0.0, bound: 0.0, slack: 0.0, violation: 0.0 }
+        );
+    }
+
+    #[test]
+    fn soc_norm_propagates_nan_components() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("soc undefined component");
+        variable!(m, x);
+        variable!(m, t);
+        let cone = soc_constraint!(m, cone, [x] <= t);
+        let point = SolutionPoint {
+            model_id: m.id(),
+            primal: [(x.var_id().unwrap(), f64::NAN), (t.var_id().unwrap(), 1.0)]
+                .into_iter()
+                .collect(),
+            objective: None,
+            parameters: m.arena().parameter_snapshot(),
+        };
+        let result = SolverResult {
+            model_id: m.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![point],
+            ..Default::default()
+        };
+
+        let evaluation = result.soc_evaluation(&m, cone).unwrap().unwrap();
+        assert!(evaluation.norm.is_nan());
+        assert!(evaluation.slack.is_nan());
+    }
+
+    #[test]
+    fn soc_norm_preserves_infinities_without_hiding_nan() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("soc undefined components");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, t);
+        let cone = soc_constraint!(m, cone, [x, y] <= t);
+        let point = |x_value, y_value, t_value| {
+            let primal = [
+                (x.var_id().unwrap(), x_value),
+                (y.var_id().unwrap(), y_value),
+                (t.var_id().unwrap(), t_value),
+            ]
+            .into_iter()
+            .collect();
+            SolutionPoint {
+                model_id: m.id(),
+                primal,
+                objective: None,
+                parameters: m.arena().parameter_snapshot(),
+            }
+        };
+        let result = SolverResult {
+            model_id: m.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![
+                point(f64::INFINITY, 1.0, f64::INFINITY),
+                point(f64::NAN, f64::INFINITY, 1.0),
+            ],
+            ..Default::default()
+        };
+
+        let infinite = result.soc_evaluation_at(&m, cone, 0).unwrap().unwrap();
+        assert_eq!(infinite.norm, f64::INFINITY);
+
+        let undefined = result.soc_evaluation_at(&m, cone, 1).unwrap().unwrap();
+        assert!(undefined.norm.is_nan());
     }
 
     #[test]
