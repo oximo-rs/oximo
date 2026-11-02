@@ -30,6 +30,8 @@ pub use eval::{EvalContext, EvalError, WithParameters, evaluate};
 pub use handle::{ClassifiedExpr, Expr, ExprData};
 pub use linear::{LinearTerms, SignedExpr, describe_nonlinear_term, extract_linear, split_linear};
 pub use model_error::{Bound, ModelError};
+#[doc(hidden)]
+pub use ops::ExtremaBuilder;
 pub use ops::dot;
 pub use quadratic::{QuadraticTerms, extract_quadratic};
 pub use render::{render_expr, render_linear_terms};

@@ -156,6 +156,12 @@ pub fn sum(input: TokenStream) -> TokenStream {
 }
 
 /// `min!(body for pat in domain[, pat in domain ...][ if cond])`, an indexed minimum.
+/// Empty inner domains are skipped.
+///
+/// # Panics
+///
+/// Panics when no terms survive (empty iteration or every key filtered out),
+/// or when surviving terms belong to different expression arenas.
 #[proc_macro]
 pub fn min(input: TokenStream) -> TokenStream {
     extrema::expand(input.into(), extrema::Extremum::Min)
@@ -164,6 +170,12 @@ pub fn min(input: TokenStream) -> TokenStream {
 }
 
 /// `max!(body for pat in domain[, pat in domain ...][ if cond])`, an indexed maximum.
+/// Empty inner domains are skipped.
+///
+/// # Panics
+///
+/// Panics when no terms survive (empty iteration or every key filtered out),
+/// or when surviving terms belong to different expression arenas.
 #[proc_macro]
 pub fn max(input: TokenStream) -> TokenStream {
     extrema::expand(input.into(), extrema::Extremum::Max)

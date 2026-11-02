@@ -138,8 +138,11 @@ fn pairwise_min_and_max_flatten_both_sides_in_stable_order() {
 }
 
 #[test]
-fn extrema_term_helpers_return_the_only_flattened_child() {
+fn extrema_builder_streams_in_order_flattens_and_handles_empty() {
     let arena = ExprArenaCell::new(ExprArena::new());
+    let a = Expr::from_var(&arena, VarId(0));
+    let b = Expr::from_var(&arena, VarId(1));
+    let c = Expr::from_var(&arena, VarId(2));
     let (empty_min, empty_max, child) = {
         let mut nodes = arena.borrow_mut();
         (
@@ -152,13 +155,38 @@ fn extrema_term_helpers_return_the_only_flattened_child() {
     let empty_max = Expr::new(empty_max, &arena);
     let child = Expr::new(child, &arena);
 
-    let minimum = Expr::__min_terms([empty_min, child].into_iter()).unwrap();
-    let maximum = Expr::__max_terms([empty_max, child].into_iter()).unwrap();
+    let mut minimum = oximo_expr::ExtremaBuilder::min();
+    minimum.push(a.min(b).erase());
+    minimum.push(c.erase());
+    let minimum = minimum.finish().unwrap();
+
+    let mut maximum = oximo_expr::ExtremaBuilder::max();
+    maximum.push(a.max(b).erase());
+    maximum.push(c.erase());
+    let maximum = maximum.finish().unwrap();
+
+    let snapshot = arena.borrow();
+    assert!(
+        matches!(snapshot.get(minimum.id), ExprNode::Min(children) if children.as_slice() == [a.id, b.id, c.id])
+    );
+    assert!(
+        matches!(snapshot.get(maximum.id), ExprNode::Max(children) if children.as_slice() == [a.id, b.id, c.id])
+    );
+    drop(snapshot);
+
+    let mut minimum = oximo_expr::ExtremaBuilder::min();
+    minimum.push(empty_min);
+    minimum.push(child);
+    let minimum = minimum.finish().unwrap();
+    let mut maximum = oximo_expr::ExtremaBuilder::max();
+    maximum.push(empty_max);
+    maximum.push(child);
+    let maximum = maximum.finish().unwrap();
 
     assert_eq!(minimum.id, child.id);
     assert_eq!(maximum.id, child.id);
     assert_eq!(value(minimum), 7.0);
     assert_eq!(value(maximum), 7.0);
-    assert_eq!(Expr::__min_terms([child].into_iter()).unwrap().id, child.id);
-    assert_eq!(Expr::__max_terms([child].into_iter()).unwrap().id, child.id);
+    assert!(oximo_expr::ExtremaBuilder::<oximo_expr::Affine>::min().finish().is_none());
+    assert!(oximo_expr::ExtremaBuilder::<oximo_expr::Affine>::max().finish().is_none());
 }
