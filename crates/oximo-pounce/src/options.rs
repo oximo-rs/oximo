@@ -16,7 +16,7 @@ use oximo_solver::{HasUniversal, UniversalOptions};
 ///     `verbose` -> `print_level` 5 (else 0) and captures the iteration log
 ///     into [`SolverResult::raw_log`](oximo_solver::SolverResult::raw_log),
 ///     `threads` is ignored.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PounceOptions {
     pub universal: UniversalOptions,
 
@@ -47,88 +47,6 @@ pub struct PounceOptions {
     bool_opts: Vec<(&'static str, bool)>,
     /// Escape hatch: raw POUNCE options applied last.
     pub extra: Vec<(String, PounceOptionValue)>,
-}
-
-// MinimaOptions does not implement PartialEq.
-// Here we destructure all fields so an upstream addition cannot escape option-cache comparisons.
-macro_rules! minima_options_equal {
-    ($left:expr, $right:expr, $($field:ident),+ $(,)?) => {{
-        let PounceMinimaOptions { $($field: _),+ } = $left;
-
-        $( $left.$field == $right.$field )&&+
-    }};
-}
-
-impl PartialEq for PounceOptions {
-    fn eq(&self, other: &Self) -> bool {
-        let Self {
-            universal,
-            minima,
-            tol,
-            max_iter,
-            print_level,
-            mu_strategy,
-            algorithm,
-            solver_selection,
-            num_opts,
-            int_opts,
-            str_opts,
-            bool_opts,
-            extra,
-        } = self;
-
-        let same_minima = match (minima, &other.minima) {
-            (None, None) => true,
-            (Some(left), Some(right)) => minima_options_equal!(
-                left,
-                right,
-                method,
-                n_minima,
-                max_solves,
-                patience,
-                dedup,
-                psd_tol,
-                kkt_tol,
-                seed,
-                sobol,
-                sigma,
-                sigma_frac,
-                amplitude,
-                amp_margin,
-                eta,
-                power,
-                soft,
-                length,
-                length_frac,
-                gamma,
-                samples_per_round,
-                step,
-                temperature,
-                restart_jitter,
-                sigma_per_dim,
-                length_per_dim,
-                max_samples,
-                amp_bump,
-                amp_bump_cap,
-                amp_fallback,
-            ),
-            _ => false,
-        };
-
-        same_minima
-            && universal == &other.universal
-            && tol == &other.tol
-            && max_iter == &other.max_iter
-            && print_level == &other.print_level
-            && mu_strategy == &other.mu_strategy
-            && algorithm == &other.algorithm
-            && solver_selection == &other.solver_selection
-            && num_opts == &other.num_opts
-            && int_opts == &other.int_opts
-            && str_opts == &other.str_opts
-            && bool_opts == &other.bool_opts
-            && extra == &other.extra
-    }
 }
 
 /// `mu_strategy` values.
@@ -333,6 +251,12 @@ impl PounceOptions {
         (int, crossover_max_iter, "crossover_max_iter"),
         (num, crossover_mult_tol, "crossover_mult_tol"),
         (num, crossover_primal_tol, "crossover_primal_tol"),
+        // Interior-point to SQP handover and sparse quasi-Newton QPs.
+        (bool, ipm_sqp_handover, "ipm_sqp_handover"),
+        (num, ipm_sqp_handover_tol, "ipm_sqp_handover_tol"),
+        (int, ipm_sqp_handover_stall_iter, "ipm_sqp_handover_stall_iter"),
+        (int, ipm_sqp_handover_max_attempts, "ipm_sqp_handover_max_attempts"),
+        (int, sqp_dense_hessian_max_n, "sqp_dense_hessian_max_n"),
         (str, fd_hessian_coloring, "fd_hessian_coloring"),
         (str, fd_hessian_pattern, "fd_hessian_pattern"),
         (num, fd_hessian_reuse_tol, "fd_hessian_reuse_tol"),
@@ -423,6 +347,7 @@ impl PounceOptions {
         (num, dual_inf_scale_kappa, "dual_inf_scale_kappa"),
         (num, feral_inertia_pivot_floor, "feral_inertia_pivot_floor"),
         (bool, infeasibility_mu_strategy_retry, "infeasibility_mu_strategy_retry"),
+        (bool, infeasibility_saddle_escape_retry, "infeasibility_saddle_escape_retry"),
         (num, primal_noise_floor_kappa, "primal_noise_floor_kappa"),
         (num, qp_tau_max, "qp_tau_max"),
         (int, resto_decline_deferrals, "resto_decline_deferrals"),
@@ -486,13 +411,12 @@ impl PounceOptions {
         self
     }
 
-    // TODO: Change this once pounce-rs v0.14 is released.
-
     /// Enable multiple-minima search through [`oximo_solver::Solver::solve`].
     ///
     /// Uses the general NLP engine with `Auto` or `Nlp` routing.
-    /// The universal time limit covers local solves and dual recovery,
-    /// but upstream MLSL sampling and clustering cannot be interrupted.
+    /// The universal time limit covers local solves, dual recovery, and
+    /// cooperative checks during sampling and clustering.
+    /// Reaching the requested number of minima takes precedence over cancellation.
     /// FBBT is unsupported during search.
     #[must_use]
     pub fn minima(mut self, search: PounceMinimaOptions) -> Self {
@@ -627,6 +551,30 @@ mod tests {
 
         changed = search.clone();
         changed.minima.as_mut().unwrap().sigma_per_dim = Some(vec![1.0, 2.0]);
+        assert_ne!(search, changed);
+    }
+
+    #[test]
+    fn minima_equality_compares_float_bit_patterns() {
+        let search = PounceOptions::default().minima(PounceMinimaOptions {
+            dedup: f64::from_bits(0x7ff8_0000_0000_0001),
+            sigma_per_dim: Some(vec![f64::from_bits(0x7ff8_0000_0000_0002)]),
+            temperature: Some(0.0),
+            ..Default::default()
+        });
+        assert_eq!(search, search.clone());
+
+        let mut changed = search.clone();
+        changed.minima.as_mut().unwrap().dedup = f64::from_bits(0x7ff8_0000_0000_0003);
+        assert_ne!(search, changed);
+
+        changed = search.clone();
+        changed.minima.as_mut().unwrap().sigma_per_dim =
+            Some(vec![f64::from_bits(0x7ff8_0000_0000_0004)]);
+        assert_ne!(search, changed);
+
+        changed = search.clone();
+        changed.minima.as_mut().unwrap().temperature = Some(-0.0);
         assert_ne!(search, changed);
     }
 

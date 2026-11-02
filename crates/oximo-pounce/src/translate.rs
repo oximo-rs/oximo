@@ -811,6 +811,83 @@ mod retry_tests {
     }
 
     #[test]
+    fn controls_reach_the_registry_and_raw_overrides_win() {
+        let mut app = pounce_rs::IpoptApplication::new();
+        app.initialize().unwrap();
+        let opts = PounceOptions::default()
+            .ipm_sqp_handover(true)
+            .ipm_sqp_handover_tol(1e-3)
+            .ipm_sqp_handover_stall_iter(5)
+            .ipm_sqp_handover_max_attempts(2)
+            .sqp_dense_hessian_max_n(500)
+            .infeasibility_saddle_escape_retry(false);
+        apply_options(app.options_mut(), &opts, false).unwrap();
+
+        let registry = app.options();
+        assert!(registry.get_bool_value("ipm_sqp_handover", "").unwrap().0);
+        assert!(!registry.get_bool_value("infeasibility_saddle_escape_retry", "").unwrap().0);
+        assert_eq!(
+            registry.get_numeric_value("ipm_sqp_handover_tol", "").unwrap().0.to_bits(),
+            1e-3_f64.to_bits(),
+        );
+        for (name, expected) in [
+            ("ipm_sqp_handover_stall_iter", 5),
+            ("ipm_sqp_handover_max_attempts", 2),
+            ("sqp_dense_hessian_max_n", 500),
+        ] {
+            assert_eq!(registry.get_integer_value(name, "").unwrap().0, expected);
+        }
+
+        let opts = opts
+            .set("ipm_sqp_handover", false)
+            .set("ipm_sqp_handover_tol", 1e-2)
+            .set("ipm_sqp_handover_stall_iter", 0)
+            .set("ipm_sqp_handover_max_attempts", 1)
+            .set("sqp_dense_hessian_max_n", 0)
+            .set("infeasibility_saddle_escape_retry", true);
+        apply_options(app.options_mut(), &opts, false).unwrap();
+
+        let registry = app.options();
+        assert!(!registry.get_bool_value("ipm_sqp_handover", "").unwrap().0);
+        assert!(registry.get_bool_value("infeasibility_saddle_escape_retry", "").unwrap().0);
+        assert_eq!(
+            registry.get_numeric_value("ipm_sqp_handover_tol", "").unwrap().0.to_bits(),
+            1e-2_f64.to_bits(),
+        );
+        for (name, expected) in [
+            ("ipm_sqp_handover_stall_iter", 0),
+            ("ipm_sqp_handover_max_attempts", 1),
+            ("sqp_dense_hessian_max_n", 0),
+        ] {
+            assert_eq!(registry.get_integer_value(name, "").unwrap().0, expected);
+        }
+    }
+
+    #[test]
+    fn controls_reject_invalid_values() {
+        for (name, opts) in [
+            ("ipm_sqp_handover", PounceOptions::default().set("ipm_sqp_handover", "invalid")),
+            ("ipm_sqp_handover_tol", PounceOptions::default().ipm_sqp_handover_tol(-1.0)),
+            (
+                "ipm_sqp_handover_stall_iter",
+                PounceOptions::default().ipm_sqp_handover_stall_iter(-1),
+            ),
+            (
+                "ipm_sqp_handover_max_attempts",
+                PounceOptions::default().ipm_sqp_handover_max_attempts(-1),
+            ),
+            ("sqp_dense_hessian_max_n", PounceOptions::default().sqp_dense_hessian_max_n(-1)),
+            (
+                "infeasibility_saddle_escape_retry",
+                PounceOptions::default().set("infeasibility_saddle_escape_retry", "invalid"),
+            ),
+        ] {
+            let error = crate::convex::validate_options(&opts).unwrap_err().to_string();
+            assert!(error.contains(name), "{error}");
+        }
+    }
+
+    #[test]
     fn assemble_preserves_explicit_dual_status_for_partial_and_limit_points() {
         let model = Model::new("result assembly");
         model.__var("value").build();
