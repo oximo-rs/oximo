@@ -29,4 +29,5 @@ fn main() {
     let _ = sum!(pair[i,,j] for i in 0..2);
     let _ = min!(pair[i,,j] for i in 0..2);
     let _ = max!(pair[i,,j] for i in 0..2);
+    objective!(model, Min, sum!(pair[i,,j] for i in 0..2));
 }

@@ -61,24 +61,38 @@ fn subscriptable(tt: &TokenTree) -> bool {
 
 /// Rewrite every multi-arg index subscript in a value-expression token stream.
 pub(crate) fn rewrite_index_subscripts(ts: TokenStream2) -> syn::Result<TokenStream2> {
+    rewrite_subscripts(ts, false)
+}
+
+fn rewrite_subscripts(ts: TokenStream2, defer_errors: bool) -> syn::Result<TokenStream2> {
     let mut out: Vec<TokenTree> = Vec::new();
     let mut index_pos = false;
 
     for tt in ts {
         if let TokenTree::Group(g) = &tt {
             let delim = g.delimiter();
-            let inner = rewrite_index_subscripts(g.stream())?;
+            let macro_input = matches!(
+                out.as_slice(),
+                [.., TokenTree::Ident(id), TokenTree::Punct(p)]
+                    if p.as_char() == '!' && !is_keyword(&id.to_string())
+            );
+            let inner = rewrite_subscripts(g.stream(), defer_errors || macro_input)?;
 
             if delim == Delimiter::Bracket && index_pos {
-                let elems = parse_index_components(inner.clone())?;
-                if elems.len() >= 2 {
-                    let tuple = build_ref_tuple(&elems);
-                    let mut newg = Group::new(Delimiter::Bracket, tuple);
-                    newg.set_span(g.span());
-                    out.push(TokenTree::Group(newg));
-                    // the resulting `]` can be subscripted again
-                    index_pos = true;
-                    continue;
+                match parse_index_components(inner.clone()) {
+                    Ok(elems) if elems.len() >= 2 => {
+                        let tuple = build_ref_tuple(&elems);
+                        let mut newg = Group::new(Delimiter::Bracket, tuple);
+                        newg.set_span(g.span());
+                        out.push(TokenTree::Group(newg));
+                        // the resulting `]` can be subscripted again
+                        index_pos = true;
+                        continue;
+                    }
+                    Err(error) if !defer_errors => return Err(error),
+
+                    // The enclosing macro owns its input grammar.
+                    _ => {}
                 }
             }
 
@@ -168,6 +182,10 @@ mod tests {
             "q[,]",
             "foo(q[i,,j])",
             "q[r[i,,j], k]",
+            "opaque!(tokens[i,,j]) + q[i,,j]",
+            "!(q[i,,j] == other)",
+            "return !(q[i,,j] == other)",
+            "if !(q[i,,j] == other) {}",
         ] {
             let error = rewrite_index_subscripts(src.parse().unwrap()).unwrap_err();
             assert_eq!(error.to_string(), "missing index component", "{src}");
@@ -202,6 +220,22 @@ mod tests {
     #[test]
     fn leaves_nested_macro_binding_syntax() {
         unchanged("variable!(model, x[i in 0..2]);");
+    }
+
+    #[test]
+    fn defers_missing_components_inside_macro_input() {
+        unchanged("opaque!(tokens[,i,j])");
+        unchanged("opaque![tokens[i,,j]]");
+        unchanged("path::opaque! { tokens[i,j,,] }");
+        unchanged("opaque!({ foo(tokens[i,,j]) })");
+    }
+
+    #[test]
+    fn rewrites_valid_subscripts_alongside_opaque_macro_input() {
+        assert_eq!(
+            rewrite("opaque!(tokens[i,,j], q[i,j], sum!(r[a,b] for a in domain))"),
+            "opaque!(tokens[i,,j],q[(&(i),&(j))],sum!(r[(&(a),&(b))]foraindomain))",
+        );
     }
 
     #[test]

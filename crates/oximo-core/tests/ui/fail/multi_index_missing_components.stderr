@@ -117,3 +117,9 @@ error: missing index component
    |
 31 |     let _ = max!(pair[i,,j] for i in 0..2);
    |                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:32:40
+   |
+32 |     objective!(model, Min, sum!(pair[i,,j] for i in 0..2));
+   |                                        ^
