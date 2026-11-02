@@ -39,7 +39,7 @@ impl Parse for ExtremaInput {
 }
 
 pub(crate) fn expand(input: TokenStream2, kind: Extremum) -> syn::Result<TokenStream2> {
-    let input = crate::index::rewrite_index_subscripts(input);
+    let input = crate::index::rewrite_index_subscripts(input)?;
     let ExtremaInput { body, binds, cond } = syn::parse2(input)?;
     let root = oximo_root();
     let name = match kind {

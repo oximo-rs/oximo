@@ -2,10 +2,10 @@ use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use quote::quote;
 
 use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
-use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
+use crate::{Named, build_set, oximo_root, parse_comma_list, parse_named};
 
 pub(crate) fn symmetric_variable(input: TokenStream) -> syn::Result<TokenStream> {
-    let parts = split_top_commas(input);
+    let parts = parse_comma_list(input, "missing macro argument")?;
     if parts.len() != 2 {
         return Err(syn::Error::new(
             Span::call_site(),
@@ -28,7 +28,7 @@ pub(crate) fn symmetric_variable(input: TokenStream) -> syn::Result<TokenStream>
 }
 
 pub(crate) fn constraint(input: TokenStream) -> syn::Result<TokenStream> {
-    let parts = split_top_commas(input);
+    let parts = parse_comma_list(input, "missing macro argument")?;
     if !(2..=3).contains(&parts.len()) {
         return Err(syn::Error::new(
             Span::call_site(),
@@ -39,13 +39,11 @@ pub(crate) fn constraint(input: TokenStream) -> syn::Result<TokenStream> {
     let model = sums.receiver();
     let root = oximo_root();
     if parts.len() == 2 {
-        let matrix =
-            sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(parts[1].clone()))?)?;
+        let matrix = sums.rewrite(crate::index::parse_value_expr(parts[1].clone())?)?;
         return Ok(sums.wrap(quote!((#model).__add_psd_constraint_auto(#matrix))));
     }
     if let Some(name) = crate::constraint::computed_name(&parts[1]) {
-        let matrix =
-            sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(parts[2].clone()))?)?;
+        let matrix = sums.rewrite(crate::index::parse_value_expr(parts[2].clone())?)?;
         return Ok(sums.wrap(quote!((#model).add_psd_constraint(#name, #matrix))));
     }
     let Named { name, binds, cond } = parse_named(parts[1].clone())?;
@@ -53,8 +51,7 @@ pub(crate) fn constraint(input: TokenStream) -> syn::Result<TokenStream> {
     if let Some(binds) = &binds {
         sums.indexed(binds);
     }
-    let matrix =
-        sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(parts[2].clone()))?)?;
+    let matrix = sums.rewrite(crate::index::parse_value_expr(parts[2].clone())?)?;
     let expansion = if let Some(binds) = binds {
         let param = family_closure_param(&binds);
         let used = mark_bindings_used(&binds);

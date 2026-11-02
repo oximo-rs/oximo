@@ -225,21 +225,26 @@ impl RelOp {
     }
 }
 
-/// Split a token stream on top-level commas.
-fn split_top_commas(ts: TokenStream2) -> Vec<TokenStream2> {
+/// Parse a list separated by top-level commas, allowing one trailing comma.
+fn parse_comma_list(ts: TokenStream2, missing: &str) -> syn::Result<Vec<TokenStream2>> {
     let mut out = Vec::new();
     let mut cur = Vec::new();
     for tt in ts {
         if let TokenTree::Punct(p) = &tt
             && p.as_char() == ','
         {
+            if cur.is_empty() {
+                return Err(syn::Error::new(p.span(), missing));
+            }
             out.push(cur.drain(..).collect());
             continue;
         }
         cur.push(tt);
     }
-    out.push(cur.into_iter().collect());
-    out
+    if !cur.is_empty() {
+        out.push(cur.into_iter().collect());
+    }
+    Ok(out)
 }
 
 /// Split a token stream on top-level relational operators (`==`, `<=`, `>=`),
@@ -355,4 +360,38 @@ pub fn symmetric_variable(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn psd_constraint(input: TokenStream) -> TokenStream {
     psd::constraint(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comma_lists_allow_empty_input_and_one_trailing_comma() {
+        for (source, expected) in [("", 0), ("a", 1), ("a,", 1), ("a,b", 2), ("a,b,", 2)] {
+            let parts = parse_comma_list(source.parse().unwrap(), "missing entry").unwrap();
+            assert_eq!(parts.len(), expected, "{source}");
+            assert!(parts.iter().all(|part| !part.is_empty()));
+        }
+    }
+
+    #[test]
+    fn comma_lists_reject_missing_entries() {
+        for source in [",", ",,", ",a,b", "a,,b", "a,b,,", "a,b,,,", "a,,b,"] {
+            let error = parse_comma_list(source.parse().unwrap(), "missing entry").unwrap_err();
+            assert_eq!(error.to_string(), "missing entry", "{source}");
+        }
+    }
+
+    #[test]
+    fn comma_lists_keep_nested_groups_intact() {
+        let parts = parse_comma_list(
+            "f(a,b), [c,d,], { let e = (1,2); e },".parse().unwrap(),
+            "missing entry",
+        )
+        .unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].to_string(), "f (a , b)");
+        assert_eq!(parts[1].to_string(), "[c , d ,]");
+    }
 }

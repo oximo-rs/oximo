@@ -266,7 +266,7 @@ fn expand_in(
     inherited: Option<&Context>,
     captures: &mut Captures,
 ) -> syn::Result<TokenStream2> {
-    let input = crate::index::rewrite_index_subscripts(input);
+    let input = crate::index::rewrite_index_subscripts(input)?;
     let SumInput { model, body, binds, cond } = syn::parse2(input)?;
     let root = oximo_root();
     let mut anchor = TokenStream2::new();

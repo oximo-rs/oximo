@@ -1,0 +1,137 @@
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:12:15
+   |
+12 |     variable!(,model, z);
+   |               ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:13:24
+   |
+13 |     variable!(model, z,, lb = 0.0);
+   |                        ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:14:24
+   |
+14 |     variable!(model, z,,);
+   |                        ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:15:12
+   |
+15 |     param!(,model, limit = 1.0);
+   |            ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:16:18
+   |
+16 |     param!(model,, limit = 1.0);
+   |                  ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:17:31
+   |
+17 |     param!(model, limit = 1.0,,);
+   |                               ^
+
+error: missing SOC term
+  --> tests/ui/fail/comma_list_missing_components.rs:19:29
+   |
+19 |     soc_constraint!(model, [,x,y] <= x + 1.0);
+   |                             ^
+
+error: missing SOC term
+  --> tests/ui/fail/comma_list_missing_components.rs:20:31
+   |
+20 |     soc_constraint!(model, [x,,y] <= x + 1.0);
+   |                               ^
+
+error: missing SOC term
+  --> tests/ui/fail/comma_list_missing_components.rs:21:33
+   |
+21 |     soc_constraint!(model, [x,y,,] <= x + 1.0);
+   |                                 ^
+
+error: a SOC constraint needs at least one term
+  --> tests/ui/fail/comma_list_missing_components.rs:22:28
+   |
+22 |     soc_constraint!(model, [] <= x + 1.0);
+   |                            ^^
+
+error: missing SOS member
+  --> tests/ui/fail/comma_list_missing_components.rs:23:35
+   |
+23 |     sos_constraint!(model, SOS1, [,x,y]);
+   |                                   ^
+
+error: missing SOS member
+  --> tests/ui/fail/comma_list_missing_components.rs:24:37
+   |
+24 |     sos_constraint!(model, SOS1, [x,,y]);
+   |                                     ^
+
+error: missing SOS member
+  --> tests/ui/fail/comma_list_missing_components.rs:25:39
+   |
+25 |     sos_constraint!(model, SOS1, [x,y,,]);
+   |                                       ^
+
+error: sos_constraint! the member list cannot be empty
+  --> tests/ui/fail/comma_list_missing_components.rs:26:34
+   |
+26 |     sos_constraint!(model, SOS1, []);
+   |                                  ^^
+
+error: missing SOS variable or weight
+  --> tests/ui/fail/comma_list_missing_components.rs:27:36
+   |
+27 |     sos_constraint!(model, SOS1, [(,1.0)]);
+   |                                    ^
+
+error: missing SOS variable or weight
+  --> tests/ui/fail/comma_list_missing_components.rs:28:38
+   |
+28 |     sos_constraint!(model, SOS1, [(x,,1.0)]);
+   |                                      ^
+
+error: missing SOS variable or weight
+  --> tests/ui/fail/comma_list_missing_components.rs:29:42
+   |
+29 |     sos_constraint!(model, SOS1, [(x,1.0,,)]);
+   |                                          ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:31:23
+   |
+31 |     constraint!(model,, x <= 1.0);
+   |                       ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:32:33
+   |
+32 |     indicator_constraint!(model,, active == 1 => y <= 1.0);
+   |                                 ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:33:27
+   |
+33 |     psd_constraint!(model,, &matrix);
+   |                           ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:34:46
+   |
+34 |     symmetric_variable!(model, matrix_var[2],,);
+   |                                              ^
+
+error: unexpected token
+  --> tests/ui/fail/comma_list_missing_components.rs:35:30
+   |
+35 |     objective!(model, Min, x,,);
+   |                              ^
+
+error: expected an expression
+  --> tests/ui/fail/comma_list_missing_components.rs:36:35
+   |
+36 |     objective!(model, Feasibility,,);
+   |                                   ^

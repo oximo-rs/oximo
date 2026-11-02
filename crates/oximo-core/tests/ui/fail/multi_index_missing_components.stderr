@@ -1,0 +1,125 @@
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:12:33
+   |
+12 |     objective!(model, Min, pair[,i,j]);
+   |                                 ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:13:35
+   |
+13 |     objective!(model, Min, pair[i,,j]);
+   |                                   ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:14:37
+   |
+14 |     objective!(model, Min, pair[i,j,,]);
+   |                                     ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:15:35
+   |
+15 |     objective!(model, Min, pair[0,,1]);
+   |                                   ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:16:31
+   |
+16 |     constraint!(model, pair[i,,j] <= 1.0);
+   |                               ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:17:36
+   |
+17 |     soc_constraint!(model, [pair[i,,j]] <= pair[i,j] + 1.0);
+   |                                    ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:18:42
+   |
+18 |     sos_constraint!(model, SOS1, [pair[i,,j]]);
+   |                                          ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:19:43
+   |
+19 |     sos_constraint!(model, SOS1, [(pair[i,,j], 1.0)]);
+   |                                           ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:20:57
+   |
+20 |     sos_constraint!(model, SOS1, [(pair[i,j], weights[i,,j])]);
+   |                                                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:21:37
+   |
+21 |     param!(model, value = weights[i,,j]);
+   |                                     ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:22:49
+   |
+22 |     param!(model, values[k in 0..2] = weights[k,,j]);
+   |                                                 ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:23:41
+   |
+23 |     variable!(model, lower >= weights[i,,j]);
+   |                                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:24:41
+   |
+24 |     variable!(model, upper <= weights[i,,j]);
+   |                                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:25:51
+   |
+25 |     variable!(model, started, initial = weights[i,,j]);
+   |                                                   ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:26:45
+   |
+26 |     variable!(model, fixed, fix = weights[i,,j]);
+   |                                             ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:27:43
+   |
+27 |     indicator_constraint!(model, binary[i,,j] == 1 => pair[i,j] <= 1.0);
+   |                                           ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:28:76
+   |
+28 |     psd_constraint!(model, SymmetricMatrix::from_upper_triangle(1, [pair[i,,j]]));
+   |                                                                            ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:29:25
+   |
+29 |     let _ = sum!(pair[i,,j] for i in 0..2);
+   |                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:30:25
+   |
+30 |     let _ = min!(pair[i,,j] for i in 0..2);
+   |                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:31:25
+   |
+31 |     let _ = max!(pair[i,,j] for i in 0..2);
+   |                         ^
+
+error: missing index component
+  --> tests/ui/fail/multi_index_missing_components.rs:32:40
+   |
+32 |     objective!(model, Min, sum!(pair[i,,j] for i in 0..2));
+   |                                        ^

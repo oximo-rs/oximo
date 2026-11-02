@@ -4,10 +4,10 @@ use syn::Expr;
 
 use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
 use crate::constraint::computed_name;
-use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
+use crate::{Named, build_set, oximo_root, parse_comma_list, parse_named};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
-    let parts = split_top_commas(input);
+    let parts = parse_comma_list(input, "missing macro argument")?;
     let mut parts = parts.into_iter();
     let model_ts = parts.next().ok_or_else(|| err("needs a model expression"))?;
     let model: Expr = syn::parse2(model_ts)?;
@@ -121,8 +121,7 @@ fn parse_members(tokens: &TokenStream2) -> syn::Result<Members> {
             "sos_constraint! members must be written [var, ...] or [(var, weight), ...]",
         ));
     }
-    let parts: Vec<_> =
-        split_top_commas(group.stream()).into_iter().filter(|part| !part.is_empty()).collect();
+    let parts = parse_comma_list(group.stream(), "missing SOS member")?;
     if parts.is_empty() {
         return Err(syn::Error::new(
             group.span(),
@@ -141,7 +140,7 @@ fn parse_members(tokens: &TokenStream2) -> syn::Result<Members> {
         return parts
             .into_iter()
             .map(|part| {
-                let expr: Expr = syn::parse2(crate::index::rewrite_index_subscripts(part))?;
+                let expr: Expr = crate::index::parse_value_expr(part)?;
                 Ok(expr.into_token_stream())
             })
             .collect::<syn::Result<Vec<_>>>()
@@ -163,27 +162,15 @@ fn parse_members(tokens: &TokenStream2) -> syn::Result<Members> {
                     "sos_constraint! SOS member needs exactly `(var, weight)`",
                 ));
             }
-            let mut p = split_top_commas(pair.stream()).into_iter();
-            let expr = p.next().ok_or_else(|| {
-                syn::Error::new_spanned(
-                    &part,
-                    "sos_constraint! SOS member needs a variable and weight",
-                )
-            })?;
-            let weight = p.next().ok_or_else(|| {
-                syn::Error::new_spanned(
-                    &part,
-                    "sos_constraint! SOS member needs a variable and weight",
-                )
-            })?;
-            if p.next().is_some() {
+            let components = parse_comma_list(pair.stream(), "missing SOS variable or weight")?;
+            let [expr, weight] = components.as_slice() else {
                 return Err(syn::Error::new_spanned(
                     &part,
                     "sos_constraint! SOS member needs exactly `(var, weight)`",
                 ));
-            }
-            let expr: Expr = syn::parse2(crate::index::rewrite_index_subscripts(expr))?;
-            let weight: Expr = syn::parse2(weight)?;
+            };
+            let expr = crate::index::parse_value_expr(expr.clone())?;
+            let weight = crate::index::parse_value_expr(weight.clone())?;
             Ok(quote!((#expr, #weight)))
         })
         .collect::<syn::Result<Vec<_>>>()
@@ -209,11 +196,11 @@ mod tests {
 
     #[test]
     fn parses_inferred_and_explicit_members() {
-        match parse_members(&tokens("[x, y[i]]")).expect("inferred members") {
+        match parse_members(&tokens("[x, y[i],]")).expect("inferred members") {
             Members::Auto(members) => assert_eq!(members.len(), 2),
             Members::Explicit(_) => panic!("expected inferred members"),
         }
-        match parse_members(&tokens("[(x, 1.0), (y, 2.0)]")).expect("explicit members") {
+        match parse_members(&tokens("[(x, 1.0,), (y, 2.0,),]")).expect("explicit members") {
             Members::Explicit(members) => assert_eq!(members.len(), 2),
             Members::Auto(_) => panic!("expected explicit members"),
         }
@@ -221,7 +208,19 @@ mod tests {
 
     #[test]
     fn rejects_malformed_member_lists() {
-        for source in ["x", "[]", "[(x, 1.0), y]", "[(x)]", "[(x, 1.0, 2.0)]"] {
+        for source in [
+            "x",
+            "[]",
+            "[,x,y]",
+            "[x,,y]",
+            "[x,y,,]",
+            "[(x, 1.0), y]",
+            "[(x)]",
+            "[(x, 1.0, 2.0)]",
+            "[(,1.0)]",
+            "[(x,,1.0)]",
+            "[(x,1.0,,)]",
+        ] {
             assert!(parse_members(&tokens(source)).is_err(), "expected rejection for {source}");
         }
     }
