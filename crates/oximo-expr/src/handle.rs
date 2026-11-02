@@ -345,43 +345,47 @@ impl<'a, D: Degree> Expr<'a, D> {
         Expr::from_id(id, self.arena)
     }
 
-    fn extrema<E: Degree>(self, other: Expr<'a, E>, is_min: bool) -> Expr<'a, Nonlinear> {
+    fn extrema<E: Degree>(
+        self,
+        other: Expr<'a, E>,
+        kind: crate::ops::Extremum,
+    ) -> Expr<'a, Nonlinear> {
+        use crate::ops::matching_children;
+
         self.assert_same_arena(other);
         let id = self.arena.with_mut(|arena| {
             let mut children = Children::new();
-            let left = match arena.get(self.id) {
-                ExprNode::Min(existing) if is_min => Some(existing.as_slice()),
-                ExprNode::Max(existing) if !is_min => Some(existing.as_slice()),
-                _ => None,
-            };
-            if let Some(existing) = left {
+            if let Some(existing) = matching_children(arena.get(self.id), kind) {
                 children.extend_from_slice(existing);
             } else {
                 children.push(self.id);
             }
-            let right = match arena.get(other.id) {
-                ExprNode::Min(existing) if is_min => Some(existing.as_slice()),
-                ExprNode::Max(existing) if !is_min => Some(existing.as_slice()),
-                _ => None,
-            };
-            if let Some(existing) = right {
+            if let Some(existing) = matching_children(arena.get(other.id), kind) {
                 children.extend_from_slice(existing);
             } else {
                 children.push(other.id);
             }
-            arena.push(if is_min { ExprNode::Min(children) } else { ExprNode::Max(children) })
+            arena.push(kind.node(children))
         });
         Expr::from_id(id, self.arena)
     }
 
     /// Pairwise minimum, flattening nested minima into deterministic n-ary nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operands belong to different expression arenas.
     pub fn min<E: Degree>(self, other: Expr<'a, E>) -> Expr<'a, Nonlinear> {
-        self.extrema(other, true)
+        self.extrema(other, crate::ops::Extremum::Min)
     }
 
     /// Pairwise maximum, flattening nested maxima into deterministic n-ary nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operands belong to different expression arenas.
     pub fn max<E: Degree>(self, other: Expr<'a, E>) -> Expr<'a, Nonlinear> {
-        self.extrema(other, false)
+        self.extrema(other, crate::ops::Extremum::Max)
     }
 
     #[doc(hidden)]

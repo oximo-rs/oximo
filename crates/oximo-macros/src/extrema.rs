@@ -46,24 +46,21 @@ pub(crate) fn expand(input: TokenStream2, kind: Extremum) -> syn::Result<TokenSt
         Extremum::Min => "min",
         Extremum::Max => "max",
     };
-    let over = format_ident!("{name}_over");
-    let terms = format_ident!("{name}_terms");
-    let terms_acc = syn::Ident::new("__terms", proc_macro2::Span::mixed_site());
+    let constructor = format_ident!("{name}");
+    let empty_diagnostic =
+        format!("{name}! produced no terms (empty domain or every key filtered out)");
+    let emit = syn::Ident::new("__emit", proc_macro2::Span::mixed_site());
 
-    let Some(cond) = cond else {
-        let mut expr = quote!(#body);
-        for b in binds.iter().rev() {
-            let param = b.closure_param();
-            let used = crate::bind::mark_bindings_used(std::slice::from_ref(b));
-            let domain = &b.domain;
-            expr = quote!( #root::__macro_support::#over(&(#domain), |#param| { #used #expr }) );
+    // Keep body control flow local, even though traversal uses generated loops.
+    let mut inner = if let Some(cond) = &cond {
+        quote! {
+            if #cond {
+                #emit.push((|| #body)());
+            }
         }
-        return Ok(expr);
-    };
-
-    let mut inner = quote! {
-        if #cond {
-            #terms_acc.push(#body);
+    } else {
+        quote! {
+            #emit.push((|| #body)());
         }
     };
     for b in binds.iter().rev() {
@@ -82,9 +79,10 @@ pub(crate) fn expand(input: TokenStream2, kind: Extremum) -> syn::Result<TokenSt
             }
         };
     }
+
     Ok(quote! {{
-        let mut #terms_acc = ::std::vec::Vec::new();
+        let mut #emit = #root::__macro_support::ExtremaBuilder::#constructor();
         #inner
-        #root::__macro_support::#terms(#terms_acc)
+        #emit.finish().expect(#empty_diagnostic)
     }})
 }

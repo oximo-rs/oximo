@@ -13,6 +13,7 @@ pub use crate::gdp::DisjunctionKind;
 pub use crate::set::{FromIndexKey, FromIndexKeyRef, IndexKeyRef, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
+pub use oximo_expr::ExtremaBuilder;
 
 /// Sum over a domain while retaining a model-owned additive identity for an
 /// empty domain. This is the implementation behind the anchored
@@ -47,44 +48,6 @@ pub fn sum_terms_in<'a, E: oximo_expr::Degree>(
     terms: Vec<oximo_expr::Expr<'a, E>>,
 ) -> oximo_expr::Expr<'a, E> {
     oximo_expr::Expr::__sum_terms_in(arena, terms.into_iter())
-}
-
-#[must_use]
-pub fn min_terms<'a, E: oximo_expr::Degree>(
-    terms: Vec<oximo_expr::Expr<'a, E>>,
-) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear> {
-    oximo_expr::Expr::__min_terms(terms.into_iter())
-        .expect("min! with an `if` filter produced no terms")
-}
-
-#[must_use]
-pub fn max_terms<'a, E: oximo_expr::Degree>(
-    terms: Vec<oximo_expr::Expr<'a, E>>,
-) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear> {
-    oximo_expr::Expr::__max_terms(terms.into_iter())
-        .expect("max! with an `if` filter produced no terms")
-}
-
-pub fn min_over<'a, E: oximo_expr::Degree, K, D, F>(
-    domain: &D,
-    f: F,
-) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear>
-where
-    D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> oximo_expr::Expr<'a, E>,
-{
-    oximo_expr::Expr::__min_terms(domain.keys().map(f)).expect("min! on empty domain")
-}
-
-pub fn max_over<'a, E: oximo_expr::Degree, K, D, F>(
-    domain: &D,
-    f: F,
-) -> oximo_expr::Expr<'a, oximo_expr::Nonlinear>
-where
-    D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> oximo_expr::Expr<'a, E>,
-{
-    oximo_expr::Expr::__max_terms(domain.keys().map(f)).expect("max! on empty domain")
 }
 
 /// Filter a [`Set`] by a typed predicate over its decoded keys. Backs the

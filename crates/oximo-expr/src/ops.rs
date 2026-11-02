@@ -1,7 +1,7 @@
 use crate::degree::{AddDegree, Degree, DivDegree, MulDegree, Nonlinear};
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
-use crate::arena::{Children, ExprId, ExprNode};
+use crate::arena::{Children, ExprArenaCell, ExprId, ExprNode};
 use crate::handle::Expr;
 use crate::linear::{add_into, add_n, div_into, mul_into, neg_into, sub_into};
 
@@ -224,46 +224,96 @@ impl<'a, D: Degree> Expr<'a, D> {
         let id = arena.with_mut(|arena| add_n(arena, ids));
         Expr::from_id(id, arena)
     }
+}
 
-    fn extrema_terms(
-        mut iter: impl Iterator<Item = Self>,
-        is_min: bool,
-    ) -> Option<Expr<'a, Nonlinear>> {
-        let first = iter.next()?;
-        let mut same_arena = true;
-        let mut ids = Children::new();
-        let mut append = |expr: Self| {
-            same_arena &= std::ptr::eq(first.arena, expr.arena);
-            expr.arena.with_ref(|arena| match arena.get(expr.id) {
-                ExprNode::Min(children) if is_min => ids.extend_from_slice(children),
-                ExprNode::Max(children) if !is_min => ids.extend_from_slice(children),
-                _ => ids.push(expr.id),
-            });
-        };
-        append(first);
-        for expr in iter {
-            append(expr);
+/// Which flat extrema node an [`ExtremaBuilder`] constructs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Extremum {
+    Min,
+    Max,
+}
+
+impl Extremum {
+    pub(crate) fn node(self, children: Children) -> ExprNode {
+        match self {
+            Self::Min => ExprNode::Min(children),
+            Self::Max => ExprNode::Max(children),
         }
-        assert!(same_arena, "expressions belong to different arenas");
-        if ids.len() == 1 {
-            return Some(Expr::from_id(ids[0], first.arena));
+    }
+}
+
+/// Return the children of a node when it is the requested extrema kind.
+pub(crate) fn matching_children(node: &ExprNode, kind: Extremum) -> Option<&[ExprId]> {
+    match (kind, node) {
+        (Extremum::Min, ExprNode::Min(children)) | (Extremum::Max, ExprNode::Max(children)) => {
+            Some(children.as_slice())
         }
-        let id = first.arena.with_mut(|arena| {
-            arena.push(if is_min { ExprNode::Min(ids) } else { ExprNode::Max(ids) })
+        _ => None,
+    }
+}
+
+/// Streaming builder for flat n-ary minima and maxima.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct ExtremaBuilder<'a, E: Degree> {
+    arena: Option<&'a ExprArenaCell>,
+    same_arena: bool,
+    kind: Extremum,
+    ids: Children,
+    _degree: std::marker::PhantomData<fn() -> E>,
+}
+
+impl<'a, E: Degree> ExtremaBuilder<'a, E> {
+    fn new(kind: Extremum) -> Self {
+        Self {
+            arena: None,
+            same_arena: true,
+            kind,
+            ids: Children::new(),
+            _degree: std::marker::PhantomData,
+        }
+    }
+
+    /// Start building a flat n-ary minimum.
+    #[doc(hidden)]
+    pub fn min() -> Self {
+        Self::new(Extremum::Min)
+    }
+
+    /// Start building a flat n-ary maximum.
+    #[doc(hidden)]
+    pub fn max() -> Self {
+        Self::new(Extremum::Max)
+    }
+
+    /// Add one term, flattening matching extrema nodes in place.
+    /// Arena ownership is checked by [`Self::finish`] after all terms are pushed.
+    #[doc(hidden)]
+    pub fn push(&mut self, expr: Expr<'a, E>) {
+        match self.arena {
+            Some(arena) => self.same_arena &= std::ptr::eq(arena, expr.arena),
+            None => self.arena = Some(expr.arena),
+        }
+        expr.arena.with_ref(|arena| match matching_children(arena.get(expr.id), self.kind) {
+            Some(children) => self.ids.extend_from_slice(children),
+            None => self.ids.push(expr.id),
         });
-        Some(Expr::from_id(id, first.arena))
     }
 
-    /// Macro support for constructing a flat n-ary minimum.
+    /// Finish the extrema node, returning `None` when no terms were pushed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if pushed terms belong to different expression arenas.
     #[doc(hidden)]
-    pub fn __min_terms(iter: impl Iterator<Item = Self>) -> Option<Expr<'a, Nonlinear>> {
-        Self::extrema_terms(iter, true)
-    }
-
-    /// Macro support for constructing a flat n-ary maximum.
-    #[doc(hidden)]
-    pub fn __max_terms(iter: impl Iterator<Item = Self>) -> Option<Expr<'a, Nonlinear>> {
-        Self::extrema_terms(iter, false)
+    pub fn finish(self) -> Option<Expr<'a, Nonlinear>> {
+        let arena = self.arena?;
+        assert!(self.same_arena, "expressions belong to different arenas");
+        if self.ids.len() == 1 {
+            return Some(Expr::from_id(self.ids[0], arena));
+        }
+        let id = arena.with_mut(|arena| arena.push(self.kind.node(self.ids)));
+        Some(Expr::from_id(id, arena))
     }
 }
 

@@ -800,14 +800,181 @@ fn extrema_macros_accept_typed_sets() {
 }
 
 #[test]
-fn filtered_extrema_macro_does_not_capture_caller_terms_binding() {
+fn extrema_macros_skip_empty_inner_domains() {
+    let m = Model::new("extrema_empty_inner");
+    variable!(m, x[i in 0..2]);
+
+    let before = m.arena().len();
+    let mut evaluated = 0;
+    let lo = min!({ evaluated += 1; x[i] } for i in 0..2, j in 0..i);
+    let hi = max!(x[i] for i in 0..2, j in 0..i);
+
+    assert_eq!(evaluated, 1);
+    assert_eq!(lo.id, x[1].id);
+    assert_eq!(hi.id, x[1].id);
+    assert_eq!(m.arena().len(), before);
+}
+
+#[test]
+fn extrema_macros_skip_multiple_empty_inner_branches_in_order() {
+    let m = Model::new("extrema_empty_branches");
+    variable!(m, x[i in 0..6]);
+
+    let before = m.arena().len();
+    let lo = min!(x[i] for i in 0..6, j in 0..(i % 2));
+    let hi = max!(x[i] for i in 0..6, j in 0..(i % 2));
+    let arena = m.arena();
+    assert_eq!(arena.len(), before + 2);
+    assert!(matches!(
+        arena.get(lo.id),
+        oximo_core::ExprNode::Min(children)
+            if children.as_slice() == [x[1].id, x[3].id, x[5].id]
+    ));
+    assert!(matches!(
+        arena.get(hi.id),
+        oximo_core::ExprNode::Max(children)
+            if children.as_slice() == [x[1].id, x[3].id, x[5].id]
+    ));
+}
+
+#[test]
+fn filtered_extrema_macros_skip_empty_inner_domains_in_order() {
+    let m = Model::new("extrema_empty_filtered");
+    variable!(m, x[i in 0..12]);
+
+    let lo = min!(x[2 * i + j] for i in 0..4, j in 0..i if j % 2 == 0);
+    let hi = max!(x[2 * i + j] for i in 0..4, j in 0..i if j % 2 == 0);
+    let arena = m.arena();
+    assert!(matches!(
+        arena.get(lo.id),
+        oximo_core::ExprNode::Min(children)
+            if children.as_slice() == [x[2].id, x[4].id, x[6].id, x[8].id]
+    ));
+    assert!(matches!(
+        arena.get(hi.id),
+        oximo_core::ExprNode::Max(children)
+            if children.as_slice() == [x[2].id, x[4].id, x[6].id, x[8].id]
+    ));
+}
+
+#[test]
+#[should_panic(expected = "min! produced no terms")]
+fn min_macro_all_inner_domains_empty_panics() {
+    let m = Model::new("all_empty_min");
+    variable!(m, x);
+    let _ = min!(x for i in 0..4, _j in i..i);
+}
+
+#[test]
+#[should_panic(expected = "max! produced no terms")]
+fn max_macro_all_inner_domains_empty_panics() {
+    let m = Model::new("all_empty_max");
+    variable!(m, x);
+    let _ = max!(x for i in 0..4, _j in i..i);
+}
+
+#[test]
+#[should_panic(expected = "min! produced no terms (empty domain or every key filtered out)")]
+fn filtered_min_macro_all_inner_domains_empty_panics() {
+    let m = Model::new("all_empty_filtered_min");
+    variable!(m, x);
+    let _ = min!(x for i in 0..4, _j in i..i if i < 10);
+}
+
+#[test]
+#[should_panic(expected = "max! produced no terms (empty domain or every key filtered out)")]
+fn filtered_max_macro_all_inner_domains_empty_panics() {
+    let m = Model::new("all_empty_filtered_max");
+    variable!(m, x);
+    let _ = max!(x for i in 0..4, _j in i..i if i < 10);
+}
+
+#[test]
+#[allow(clippy::needless_return)] // Exercise an explicit return inside each body.
+fn extrema_body_return_is_local_and_evaluates_each_surviving_term() {
+    let m = Model::new("extrema_body_return");
+    variable!(m, x[i in 0..3]);
+    let mut evaluated = 0;
+    let lo = min!({ evaluated += 1; return x[i]; } for i in 0..3);
+    let hi = max!({ evaluated += 1; return x[i]; } for i in 0..3 if i != 1);
+    assert_eq!(evaluated, 5);
+    let arena = m.arena();
+    assert!(matches!(arena.get(lo.id), oximo_core::ExprNode::Min(children) if children.len() == 3));
+    assert!(matches!(arena.get(hi.id), oximo_core::ExprNode::Max(children) if children.len() == 2));
+}
+
+#[test]
+fn extrema_domains_and_filters_propagate_errors_without_committing_nodes() {
+    fn build(x: Expr<'_, Affine>, is_min: bool, fail_filter: bool) -> Result<(), &'static str> {
+        if fail_filter {
+            let allowed = |i| if i == 1 { Err("filter") } else { Ok(true) };
+            if is_min {
+                let _ = min!(x for i in 0..3 if allowed(i)?);
+            } else {
+                let _ = max!(x for i in 0..3 if allowed(i)?);
+            }
+        } else {
+            let domain = Err::<std::ops::Range<usize>, _>("domain");
+            if is_min {
+                let _ = min!(x for i in domain?);
+            } else {
+                let _ = max!(x for i in domain?);
+            }
+        }
+        Ok(())
+    }
+
+    let model = Model::new("extrema_propagation");
+    variable!(model, x);
+    let before = model.arena().len();
+    for is_min in [true, false] {
+        assert_eq!(build(x, is_min, false), Err("domain"));
+        assert_eq!(build(x, is_min, true), Err("filter"));
+        assert_eq!(model.arena().len(), before);
+    }
+}
+
+#[test]
+fn extrema_domain_and_filter_returns_target_the_caller() {
+    fn domain_return(x: Expr<'_, Affine>, is_min: bool, leave: bool) -> bool {
+        let _ = if is_min {
+            min!(x for i: usize in { if leave { return true; } 0..2 })
+        } else {
+            max!(x for i: usize in { if leave { return true; } 0..2 })
+        };
+        false
+    }
+
+    fn filter_return(x: Expr<'_, Affine>, is_min: bool) -> bool {
+        let _ = if is_min {
+            min!(x for i in 0..2 if { if i == 1 { return true; } true })
+        } else {
+            max!(x for i in 0..2 if { if i == 1 { return true; } true })
+        };
+        false
+    }
+
+    let model = Model::new("extrema_return");
+    variable!(model, x);
+    for is_min in [true, false] {
+        assert!(domain_return(x, is_min, true));
+        assert!(!domain_return(x, is_min, false));
+        assert!(filter_return(x, is_min));
+    }
+}
+
+#[test]
+fn extrema_macros_do_not_capture_caller_accumulator_bindings() {
     let m = Model::new("extrema_hygiene");
     variable!(m, x);
     let __terms = x;
+    let __emit = x;
 
     let lo = min!(__terms for i in 0..2 if i == 1);
+    let hi = max!(__emit for i in 0..1);
 
     assert_eq!(lo.id, x.id);
+    assert_eq!(hi.id, x.id);
 }
 
 #[test]
@@ -821,7 +988,7 @@ fn extrema_macro_rejects_foreign_arenas() {
 }
 
 #[test]
-#[should_panic(expected = "min! on empty domain")]
+#[should_panic(expected = "min! produced no terms")]
 fn min_macro_empty_domain_has_specific_diagnostic() {
     let m = Model::new("empty_min");
     variable!(m, x);
@@ -829,7 +996,7 @@ fn min_macro_empty_domain_has_specific_diagnostic() {
 }
 
 #[test]
-#[should_panic(expected = "max! with an `if` filter produced no terms")]
+#[should_panic(expected = "max! produced no terms")]
 fn max_macro_empty_filter_has_specific_diagnostic() {
     let m = Model::new("empty_max_filter");
     variable!(m, x);

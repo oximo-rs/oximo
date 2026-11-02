@@ -1,0 +1,35 @@
+error[E0267]: `break` inside of a closure
+ --> tests/ui/fail/extrema_body_control_flow.rs:6:20
+  |
+6 |     let _ = min!({ break; x } for i in 0..3);
+  |             -------^^^^^--------------------
+  |             |      |
+  |             |      cannot `break` inside of a closure
+  |             enclosing closure
+
+error[E0267]: `continue` inside of a closure
+ --> tests/ui/fail/extrema_body_control_flow.rs:7:20
+  |
+7 |     let _ = max!({ continue; x } for i in 0..3);
+  |             -------^^^^^^^^--------------------
+  |             |      |
+  |             |      cannot `continue` inside of a closure
+  |             enclosing closure
+
+error[E0267]: `break` inside of a closure
+ --> tests/ui/fail/extrema_body_control_flow.rs:8:20
+  |
+8 |     let _ = min!({ break; x } for i in 0..3 if i > 0);
+  |             -------^^^^^-----------------------------
+  |             |      |
+  |             |      cannot `break` inside of a closure
+  |             enclosing closure
+
+error[E0267]: `continue` inside of a closure
+ --> tests/ui/fail/extrema_body_control_flow.rs:9:20
+  |
+9 |     let _ = max!({ continue; x } for i in 0..3 if i > 0);
+  |             -------^^^^^^^^-----------------------------
+  |             |      |
+  |             |      cannot `continue` inside of a closure
+  |             enclosing closure
