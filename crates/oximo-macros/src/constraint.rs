@@ -10,11 +10,11 @@ use syn::Expr;
 
 use crate::bind::{IndexBind, family_closure_param, filtered_set, mark_bindings_used};
 use crate::{
-    Named, RelOp, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas,
+    Named, RelOp, build_set, next_seg, oximo_root, parse_comma_list, parse_named, split_relops,
 };
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
-    let parts = split_top_commas(input);
+    let parts = parse_comma_list(input, "missing macro argument")?;
     let mut parts = parts.into_iter();
     let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "constraint! needs a model expression")
@@ -86,7 +86,7 @@ pub(crate) enum Relations {
 }
 
 fn parse_seg(ts: TokenStream2, sums: &mut crate::sum::ModelSums) -> syn::Result<Expr> {
-    sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(ts))?)
+    sums.rewrite(crate::index::parse_value_expr(ts)?)
 }
 
 /// Split the relation on its relational operators. One operator yields a

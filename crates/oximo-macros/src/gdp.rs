@@ -1,7 +1,8 @@
 //! GDP declarations macros.
 
 use crate::bind::{IndexBind, family_closure_param, filtered_set, mark_bindings_used};
-use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
+use crate::index::parse_value_expr;
+use crate::{Named, build_set, oximo_root, parse_comma_list, parse_named};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::Expr;
@@ -75,10 +76,6 @@ impl DeclarationName {
     }
 }
 
-fn parse_expression(tokens: TokenStream) -> syn::Result<Expr> {
-    syn::parse2(crate::index::rewrite_index_subscripts(tokens))
-}
-
 struct ConditionalDeclaration {
     receiver: Expr,
     indicator: Expr,
@@ -88,12 +85,12 @@ struct ConditionalDeclaration {
 
 impl ConditionalDeclaration {
     fn parse(input: TokenStream) -> syn::Result<Self> {
-        let mut parts = split_top_commas(input).into_iter();
-        let receiver = parse_expression(
+        let mut parts = parse_comma_list(input, "missing macro argument")?.into_iter();
+        let receiver = parse_value_expr(
             parts.next().ok_or_else(|| syn::Error::new(Span::call_site(), "expected a model"))?,
         )?;
         let indicator =
-            parse_expression(parts.next().ok_or_else(|| {
+            parse_value_expr(parts.next().ok_or_else(|| {
                 syn::Error::new(Span::call_site(), "expected a Boolean indicator")
             })?)?;
         let first = parts
@@ -189,7 +186,7 @@ impl DisjunctionOption {
     }
 
     fn starts_option(tokens: &TokenStream) -> bool {
-        parse_expression(tokens.clone())
+        parse_value_expr(tokens.clone())
             .is_ok_and(|expression| Self::from_expression(expression).is_ok())
     }
 }
@@ -209,7 +206,7 @@ impl DeclarationOptions {
                 return Err(syn::Error::new_spanned(tokens, "unexpected GDP option"));
             }
 
-            match DisjunctionOption::from_expression(parse_expression(tokens.clone())?)? {
+            match DisjunctionOption::from_expression(parse_value_expr(tokens.clone())?)? {
                 DisjunctionOption::Selector(value) => {
                     if let Some(previous) = selector {
                         let message = if previous == value {
@@ -244,8 +241,8 @@ struct Declaration {
 
 impl Declaration {
     fn parse(input: TokenStream, kind: Kind) -> syn::Result<Self> {
-        let mut parts = split_top_commas(input).into_iter();
-        let receiver = parse_expression(parts.next().ok_or_else(|| {
+        let mut parts = parse_comma_list(input, "missing macro argument")?.into_iter();
+        let receiver = parse_value_expr(parts.next().ok_or_else(|| {
             syn::Error::new(Span::call_site(), "expected a model or disjunct context")
         })?)?;
         let first = parts
@@ -272,9 +269,9 @@ impl Declaration {
             }
             (DeclarationName::Named(Box::new(parse_named(first)?)), None)
         } else if let Some(body) = second {
-            (DeclarationName::parse(first)?, Some(parse_expression(body)?))
+            (DeclarationName::parse(first)?, Some(parse_value_expr(body)?))
         } else {
-            (DeclarationName::Anonymous, Some(parse_expression(first)?))
+            (DeclarationName::Anonymous, Some(parse_value_expr(first)?))
         };
 
         Ok(Self { receiver, name, body, options })

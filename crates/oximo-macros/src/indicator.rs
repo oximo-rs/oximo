@@ -6,10 +6,10 @@ use syn::Expr;
 
 use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
 use crate::constraint::{Relations, build_relations, computed_name};
-use crate::{Named, build_set, next_seg, oximo_root, parse_named, split_relops, split_top_commas};
+use crate::{Named, build_set, next_seg, oximo_root, parse_comma_list, parse_named, split_relops};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
-    let parts = split_top_commas(input);
+    let parts = parse_comma_list(input, "missing macro argument")?;
     let mut parts = parts.into_iter();
     let model_ts = parts.next().ok_or_else(|| err("needs a model expression"))?;
     let mut sums = crate::sum::ModelSums::new(syn::parse2(model_ts)?);
@@ -92,8 +92,7 @@ fn parse_trigger(
         ));
     }
     let mut segs = segs.into_iter();
-    let trigger =
-        sums.rewrite(syn::parse2(crate::index::rewrite_index_subscripts(next_seg(&mut segs)?))?)?;
+    let trigger = sums.rewrite(crate::index::parse_value_expr(next_seg(&mut segs)?)?)?;
     let value_tokens = next_seg(&mut segs)?;
     let value: syn::LitInt = syn::parse2(value_tokens.clone()).map_err(|_| {
         syn::Error::new_spanned(value_tokens, "indicator trigger value must be literal 0 or 1")

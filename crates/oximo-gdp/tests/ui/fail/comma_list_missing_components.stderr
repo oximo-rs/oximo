@@ -1,0 +1,41 @@
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:10:29
+   |
+10 |     boolean_variable!(model,, flag);
+   |                             ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:11:30
+   |
+11 |     disjunct!(model, |_d| {},,);
+   |                              ^
+
+error: missing macro argument
+  --> tests/ui/fail/comma_list_missing_components.rs:12:24
+   |
+12 |     disjunction!(model,, [selected[(0, 0)]]);
+   |                        ^
+
+error: missing index component
+  --> tests/ui/fail/comma_list_missing_components.rs:13:43
+   |
+13 |     logical_constraint!(model, selected[0,,1]);
+   |                                           ^
+
+error: missing index component
+  --> tests/ui/fail/comma_list_missing_components.rs:14:44
+   |
+14 |     disjunct_constraint!(model, selected[0,,1], x[0,1] <= 1.0);
+   |                                            ^
+
+error: missing index component
+  --> tests/ui/fail/comma_list_missing_components.rs:15:52
+   |
+15 |     disjunct_constraint!(model, selected[0,1], x[0,,1] <= 1.0);
+   |                                                    ^
+
+error: missing index component
+  --> tests/ui/fail/comma_list_missing_components.rs:16:62
+   |
+16 |     disjunction!(model, [selected[0,0]], parent = selected[0,,1]);
+   |                                                              ^

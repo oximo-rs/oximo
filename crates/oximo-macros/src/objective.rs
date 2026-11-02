@@ -23,6 +23,9 @@ impl Parse for ObjectiveInput {
         let model = input.parse::<Expr>()?;
         input.parse::<Token![,]>()?;
         let sense = input.parse::<Ident>()?;
+        if !input.is_empty() {
+            input.parse::<Token![,]>()?;
+        }
 
         // Two-argument form: `objective!(m, Feasibility)`.
         if input.is_empty() {
@@ -37,8 +40,8 @@ impl Parse for ObjectiveInput {
         }
 
         // Three-argument form: `objective!(m, Min|Max, expr)`.
-        input.parse::<Token![,]>()?;
         let expr = input.parse::<Expr>()?;
+        input.parse::<Option<Token![,]>>()?;
         if is_feasibility_kw(&sense) {
             return Err(syn::Error::new(
                 sense.span(),
@@ -51,7 +54,7 @@ impl Parse for ObjectiveInput {
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     // Rewrite `q[i, j, k]` index sugar in the objective expression.
-    let input = crate::index::rewrite_index_subscripts(input);
+    let input = crate::index::rewrite_index_subscripts(input)?;
 
     match syn::parse2(input)? {
         ObjectiveInput::Feasibility { model } => Ok(quote!( (#model).__feasibility() )),

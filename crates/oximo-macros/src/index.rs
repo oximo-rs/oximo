@@ -8,9 +8,17 @@
 //! [`IndexedVar`](../../oximo_core/struct.IndexedVar.html) access.
 
 use proc_macro2::{Delimiter, Group, TokenStream as TokenStream2, TokenTree};
-use quote::quote;
+use quote::{ToTokens, quote};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::{Expr, Token};
 
-use crate::split_top_commas;
+use crate::parse_comma_list;
+
+/// Parse a value expression.
+pub(crate) fn parse_value_expr(ts: TokenStream2) -> syn::Result<syn::Expr> {
+    syn::parse2(rewrite_index_subscripts(ts)?)
+}
 
 /// Rust keywords that may precede a `[` without it being a subscript.
 /// After these, a bracket starts a pattern or expression, not an index.
@@ -52,19 +60,17 @@ fn subscriptable(tt: &TokenTree) -> bool {
 }
 
 /// Rewrite every multi-arg index subscript in a value-expression token stream.
-pub(crate) fn rewrite_index_subscripts(ts: TokenStream2) -> TokenStream2 {
+pub(crate) fn rewrite_index_subscripts(ts: TokenStream2) -> syn::Result<TokenStream2> {
     let mut out: Vec<TokenTree> = Vec::new();
     let mut index_pos = false;
 
     for tt in ts {
         if let TokenTree::Group(g) = &tt {
             let delim = g.delimiter();
-            let inner = rewrite_index_subscripts(g.stream());
+            let inner = rewrite_index_subscripts(g.stream())?;
 
             if delim == Delimiter::Bracket && index_pos {
-                let mut elems = split_top_commas(inner.clone());
-                // trailing comma
-                elems.retain(|e| !e.is_empty());
+                let elems = parse_index_components(inner.clone())?;
                 if elems.len() >= 2 {
                     let tuple = build_ref_tuple(&elems);
                     let mut newg = Group::new(Delimiter::Bracket, tuple);
@@ -87,7 +93,18 @@ pub(crate) fn rewrite_index_subscripts(ts: TokenStream2) -> TokenStream2 {
         }
     }
 
-    out.into_iter().collect()
+    Ok(out.into_iter().collect())
+}
+
+fn parse_index_components(ts: TokenStream2) -> syn::Result<Vec<TokenStream2>> {
+    // Rust expressions can contain commas in generic arguments or closure
+    // parameters without a surrounding token group.
+    if let Ok(elems) = Punctuated::<Expr, Token![,]>::parse_terminated.parse2(ts.clone()) {
+        return Ok(elems.into_iter().map(ToTokens::into_token_stream).collect());
+    }
+
+    // This token walk also reaches nested macro input such as `x[i in domain]`.
+    parse_comma_list(ts, "missing index component")
 }
 
 /// `[e0, e1, ..]` -> `(&(e0), &(e1), ..)`, leaving an element that already begins
@@ -115,12 +132,12 @@ mod tests {
     }
 
     fn rewrite(src: &str) -> String {
-        norm(rewrite_index_subscripts(src.parse().unwrap()))
+        norm(rewrite_index_subscripts(src.parse().unwrap()).unwrap())
     }
 
     fn unchanged(src: &str) {
         let parsed: TokenStream2 = src.parse().unwrap();
-        assert_eq!(norm(rewrite_index_subscripts(parsed.clone())), norm(parsed), "{src}");
+        assert_eq!(norm(rewrite_index_subscripts(parsed.clone()).unwrap()), norm(parsed), "{src}");
     }
 
     #[test]
@@ -128,6 +145,34 @@ mod tests {
         assert_eq!(rewrite("q[i, j, k]"), "q[(&(i),&(j),&(k))]");
         assert_eq!(rewrite("s[p, n]"), "s[(&(p),&(n))]");
         assert_eq!(rewrite("s[p, n + 1]"), "s[(&(p),&(n+1))]");
+    }
+
+    #[test]
+    fn rewrites_multi_index_with_one_trailing_comma() {
+        assert_eq!(rewrite("q[i, j,]"), "q[(&(i),&(j))]");
+        assert_eq!(rewrite("q[i, j, k,]"), "q[(&(i),&(j),&(k))]");
+        assert_eq!(rewrite("q[&i, j,]"), "q[(&i,&(j))]");
+    }
+
+    #[test]
+    fn rejects_missing_index_components() {
+        for src in [
+            "q[,i,j]",
+            "q[i,,j]",
+            "q[i,j,,]",
+            "q[i,j,,,]",
+            "q[,i,j,]",
+            "q[i,,j,]",
+            "q[,i]",
+            "q[i,,]",
+            "q[,]",
+            "foo(q[i,,j])",
+            "q[r[i,,j], k]",
+        ] {
+            let error = rewrite_index_subscripts(src.parse().unwrap()).unwrap_err();
+            assert_eq!(error.to_string(), "missing index component", "{src}");
+        }
+        assert!(parse_value_expr("q[]".parse().unwrap()).is_err());
     }
 
     #[test]
@@ -140,6 +185,23 @@ mod tests {
         unchanged("cost[i]");
         unchanged("sigma[i][j]");
         unchanged("a[i + 1]");
+    }
+
+    #[test]
+    fn leaves_commas_within_single_index_expressions() {
+        unchanged("weights[index::<u8, u16>()]");
+        unchanged("weights[index::<u8, u16,>()]");
+        unchanged("map[|i, j| i + j]");
+    }
+
+    #[test]
+    fn rewrites_multi_index_with_generic_arguments() {
+        assert_eq!(rewrite("q[index::<u8, u16>(), j,]"), "q[(&(index::<u8,u16>()),&(j))]");
+    }
+
+    #[test]
+    fn leaves_nested_macro_binding_syntax() {
+        unchanged("variable!(model, x[i in 0..2]);");
     }
 
     #[test]

@@ -6,10 +6,10 @@ use quote::quote;
 use syn::Expr;
 
 use crate::bind::{family_closure_param, filtered_set, mark_bindings_used};
-use crate::{Named, build_set, oximo_root, parse_named, split_top_commas};
+use crate::{Named, build_set, oximo_root, parse_comma_list, parse_named};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
-    let mut parts = split_top_commas(input).into_iter();
+    let mut parts = parse_comma_list(input, "missing macro argument")?.into_iter();
     let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(Span::call_site(), "param! needs a model and `name = value`")
     })?;
@@ -18,25 +18,19 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let spec = parts
         .next()
         .ok_or_else(|| syn::Error::new_spanned(&model, "param! needs `name = value`"))?;
-    // Tolerate a single trailing empty segment (trailing comma); reject real extra args.
-    for seg in parts {
-        if !seg.is_empty() {
-            return Err(syn::Error::new_spanned(seg, "unexpected trailing tokens in param!"));
-        }
+    if let Some(extra) = parts.next() {
+        return Err(syn::Error::new_spanned(extra, "unexpected trailing tokens in param!"));
     }
 
     let (core, value_ts) = split_assignment(spec)?;
     let Named { name, binds, cond } = parse_named(core)?;
     let name_str = name.to_string();
+    let value = crate::index::parse_value_expr(value_ts)?;
 
     match binds {
-        None => {
-            let value: Expr = syn::parse2(value_ts)?;
-            Ok(quote!( let #name = (#model).__param(#name_str, f64::from(#value)); ))
-        }
+        None => Ok(quote!( let #name = (#model).__param(#name_str, f64::from(#value)); )),
         Some(binds) => {
             let root = oximo_root();
-            let value = crate::index::rewrite_index_subscripts(value_ts);
             let param = family_closure_param(&binds);
             let used = mark_bindings_used(&binds);
             let set = build_set(&binds, &root)?;

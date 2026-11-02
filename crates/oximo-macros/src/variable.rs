@@ -16,10 +16,10 @@ use proc_macro2::{Spacing, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, quote};
 
 use crate::bind::{family_closure_param, filtered_set, mark_bindings_used, references_any};
-use crate::{Named, RelOp, build_set, oximo_root, parse_named, split_relops, split_top_commas};
+use crate::{Named, RelOp, build_set, oximo_root, parse_comma_list, parse_named, split_relops};
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
-    let mut parts = split_top_commas(input).into_iter();
+    let mut parts = parse_comma_list(input, "missing macro argument")?.into_iter();
     let model_ts = parts.next().ok_or_else(|| {
         syn::Error::new(proc_macro2::Span::call_site(), "variable! needs a model expression")
     })?;
@@ -70,8 +70,8 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     }
 
     // Bound expressions are value expressions, so `q[i, j]` index sugar applies.
-    let lb = lb.map(crate::index::rewrite_index_subscripts);
-    let ub = ub.map(crate::index::rewrite_index_subscripts);
+    let lb = lb.map(crate::index::rewrite_index_subscripts).transpose()?;
+    let ub = ub.map(crate::index::rewrite_index_subscripts).transpose()?;
 
     let Named { name, binds, cond } = parse_named(core)?;
     let name_str = name.to_string();
@@ -121,7 +121,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
         bounds.extend(bound_method(ub, BoundKind::Ub));
     }
 
-    let extras = scalar_extras(kw_initial, kw_fix);
+    let extras = scalar_extras(kw_initial, kw_fix)?;
 
     let expanded = match binds {
         None => quote! {
@@ -143,17 +143,17 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
 /// Build the scalar-only `.initial(..)`/`.fix(..)` chain from the keyword args.
 /// Both are empty for an indexed family (rejected in `expand`).
-fn scalar_extras(initial: Option<Kw>, fix: Option<Kw>) -> TokenStream2 {
+fn scalar_extras(initial: Option<Kw>, fix: Option<Kw>) -> syn::Result<TokenStream2> {
     let mut extras = TokenStream2::new();
     if let Some(kw) = initial {
-        let init = crate::index::rewrite_index_subscripts(kw.value);
+        let init = crate::index::parse_value_expr(kw.value)?;
         extras.extend(quote!(.initial(f64::from(#init))));
     }
     if let Some(kw) = fix {
-        let fix_val = crate::index::rewrite_index_subscripts(kw.value);
+        let fix_val = crate::index::parse_value_expr(kw.value)?;
         extras.extend(quote!(.fix(f64::from(#fix_val))));
     }
-    extras
+    Ok(extras)
 }
 
 /// Keyword attribute `kw = value` with the keyword's span preserved for
@@ -187,9 +187,6 @@ fn parse_trailing(parts: impl Iterator<Item = TokenStream2>) -> syn::Result<Trai
     let mut fix: Option<Kw> = None;
 
     for seg in parts {
-        if seg.is_empty() {
-            continue; // tolerate a trailing comma
-        }
         if let Some((kw, val)) = parse_keyword(&seg) {
             let slot = match kw.to_string().as_str() {
                 "lb" => &mut lb,
