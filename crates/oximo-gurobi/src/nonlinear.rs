@@ -689,7 +689,16 @@ pub(crate) fn validate_supported(
             | ExprNode::Mul(children)
             | ExprNode::Min(children)
             | ExprNode::Max(children) => stack.extend(children.iter().copied()),
-            ExprNode::Pow(a, b) | ExprNode::Div(a, b) => {
+            ExprNode::Div(a, b) => {
+                if as_const(arena, *b) == Some(0.0) {
+                    return Err(SolverError::Backend(
+                        "division by zero: constant denominator is 0".into(),
+                    ));
+                }
+                stack.push(*a);
+                stack.push(*b);
+            }
+            ExprNode::Pow(a, b) => {
                 stack.push(*a);
                 stack.push(*b);
             }
