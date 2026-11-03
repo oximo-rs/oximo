@@ -9,6 +9,15 @@ use crate::linear::{LinearTerms, split_linear};
 pub(crate) const PREC_ADD: u8 = 1;
 pub(crate) const PREC_MUL: u8 = 2;
 pub(crate) const PREC_UNARY: u8 = 3;
+/// Atoms bind tightest so a power-base context can force parentheses on
+/// compound bases without wrapping bare variables or constants.
+pub(crate) const PREC_ATOM: u8 = 4;
+/// Parent context for a division denominator: anything at `PREC_MUL` or
+/// below must keep parentheses (`x / (y * z)`, `x / (y / z)`).
+pub(crate) const PREC_DENOM: u8 = PREC_MUL + 1;
+/// Parent context for a power base: compound bases (powers, products,
+/// unary negatives, …) keep parentheses; atoms do not.
+pub(crate) const PREC_POW_BASE: u8 = PREC_UNARY + 1;
 
 /// One additive summand composed by the sign flag and the unsigned rendering.
 type Part = (bool, String);
@@ -129,6 +138,10 @@ pub(crate) fn render_node(
         let prec = match node {
             ExprNode::Add(_) => PREC_ADD,
             ExprNode::Mul(_) | ExprNode::Div(_, _) => PREC_MUL,
+            // Negative atoms behave like unary: `(-2)^2` must keep parentheses.
+            ExprNode::Const(c) if *c < 0.0 => PREC_UNARY,
+            ExprNode::Param(p) if arena.param_value(*p) < 0.0 => PREC_UNARY,
+            ExprNode::Var(_) | ExprNode::Const(_) | ExprNode::Param(_) => PREC_ATOM,
             _ => PREC_UNARY,
         };
         if prec < parent_prec {
@@ -148,10 +161,15 @@ pub(crate) fn render_node(
             ExprNode::Pow(base, exponent) => {
                 pending.push(RenderTask::Node(*exponent, PREC_UNARY));
                 pending.push(RenderTask::Text("^"));
-                pending.push(RenderTask::Node(*base, PREC_UNARY));
+                // Power is right-associative: a compound base must keep its
+                // grouping (`(x^y)^z`, `(-x)^2`), while a simple atom does not.
+                pending.push(RenderTask::Node(*base, PREC_POW_BASE));
             }
             ExprNode::Div(num, den) => {
-                pending.push(RenderTask::Node(*den, PREC_MUL));
+                // Division is left-associative: a compound denominator needs
+                // parentheses (`x / (y / z)`, `x / (y * z)`), while the
+                // numerator can share PREC_MUL without changing grouping.
+                pending.push(RenderTask::Node(*den, PREC_DENOM));
                 pending.push(RenderTask::Text(" / "));
                 pending.push(RenderTask::Node(*num, PREC_MUL));
             }
@@ -405,5 +423,53 @@ mod tests {
         let mut arena = ExprArena::new();
         let c = arena.constant(-0.0);
         assert_eq!(render_expr(&arena, c, &names), "0");
+    }
+
+    #[test]
+    fn division_keeps_denominator_grouping() {
+        let mut arena = ExprArena::new();
+        let x = arena.push(ExprNode::Var(VarId(0)));
+        let y = arena.push(ExprNode::Var(VarId(1)));
+        let z = arena.push(ExprNode::Var(VarId(2)));
+        let y_over_z = arena.push(ExprNode::Div(y, z));
+        let nested = arena.push(ExprNode::Div(x, y_over_z));
+        assert_eq!(render_expr(&arena, nested, &names), "x / (y / z)");
+
+        let y_times_z = arena.push(ExprNode::Mul(smallvec::smallvec![y, z]));
+        let over_prod = arena.push(ExprNode::Div(x, y_times_z));
+        assert_eq!(render_expr(&arena, over_prod, &names), "x / (y * z)");
+
+        // Left-associative numerator needs no extra parentheses.
+        let left = arena.push(ExprNode::Div(y_over_z, x));
+        assert_eq!(render_expr(&arena, left, &names), "y / z / x");
+    }
+
+    #[test]
+    fn power_keeps_compound_base_grouping() {
+        let mut arena = ExprArena::new();
+        let x = arena.push(ExprNode::Var(VarId(0)));
+        let y = arena.push(ExprNode::Var(VarId(1)));
+        let z = arena.push(ExprNode::Var(VarId(2)));
+        let two = arena.constant(2.0);
+        let xy = arena.push(ExprNode::Pow(x, y));
+        let nested = arena.push(ExprNode::Pow(xy, z));
+        assert_eq!(render_expr(&arena, nested, &names), "(x^y)^z");
+
+        let neg_x = arena.push(ExprNode::Unary(UnaryOp::Neg, x));
+        let neg_pow = arena.push(ExprNode::Pow(neg_x, two));
+        assert_eq!(render_expr(&arena, neg_pow, &names), "(-x)^2");
+
+        // Bare atoms stay unwrapped.
+        let plain = arena.push(ExprNode::Pow(x, two));
+        assert_eq!(render_expr(&arena, plain, &names), "x^2");
+
+        // Constant folding would collapse (-2)^2 via render_expr; pin the
+        // node renderer directly for the negative-atom base case.
+        let neg_two = arena.constant(-2.0);
+        let neg_const_pow = arena.push(ExprNode::Pow(neg_two, two));
+        assert_eq!(
+            render_node(&arena, neg_const_pow, &names, PREC_ADD),
+            "(-2)^2"
+        );
     }
 }
