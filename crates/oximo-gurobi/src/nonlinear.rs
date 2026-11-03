@@ -1,12 +1,11 @@
 //! Lower nonlinear oximo expressions onto Gurobi 13 expression trees.
 
-use std::collections::HashMap;
-
 use gurobi_rs::Opcode;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp, VarId, extract_linear};
 use oximo_solver::SolverError;
+use rustc_hash::FxHashMap;
 
 /// A value that can stay on Gurobi's direct linear/quadratic fast path, or a
 /// variable containing a native nonlinear expression-tree result.
@@ -32,8 +31,8 @@ pub(crate) struct LoweringCtx<'a> {
     pub aux_counter: u32,
     pub generated: Vec<GeneratedConstraint>,
     pub generated_variables: Vec<Var>,
-    quadratic_cache: HashMap<ExprId, Option<LoweredExpr>>,
-    materialized: HashMap<ExprId, Var>,
+    quadratic_cache: FxHashMap<ExprId, Option<LoweredExpr>>,
+    materialized: FxHashMap<ExprId, Var>,
     reference_counts: Vec<usize>,
 }
 
@@ -45,8 +44,8 @@ impl<'a> LoweringCtx<'a> {
             aux_counter,
             generated: Vec::new(),
             generated_variables: Vec::new(),
-            quadratic_cache: HashMap::new(),
-            materialized: HashMap::new(),
+            quadratic_cache: FxHashMap::default(),
+            materialized: FxHashMap::default(),
             reference_counts: Vec::new(),
         }
     }
@@ -243,7 +242,7 @@ fn try_quadratic(
         Next { parent: ExprId, child: ExprId, rest: &'a [ExprId] },
     }
     // Visit one child at a time so a failed polynomial child stops its parent.
-    let mut affine = HashMap::new();
+    let mut affine = FxHashMap::default();
     let mut pending = vec![Task::Visit(id)];
     while let Some(task) = pending.pop() {
         let (current, children) = match task {
@@ -305,7 +304,7 @@ fn try_quadratic(
 fn affine_region(
     arena: &ExprArena,
     root: ExprId,
-    cache: &mut HashMap<ExprId, Option<bool>>,
+    cache: &mut FxHashMap<ExprId, Option<bool>>,
 ) -> Option<bool> {
     if let Some(value) = cache.get(&root) {
         return *value;
