@@ -13,9 +13,8 @@ fn preparation_freezes_parameters_and_shares_compound_decompositions() {
     objective!(model, Max, p * x + x.powi(2) + 3.0);
     let prepared = LoweringContext::new(&model).unwrap();
     let expr = prepared.objective().unwrap().expr;
-    assert!(matches!(prepared.quadratic(expr), Some(Extracted::Owned(_))));
     let Extracted::Shared(first) = prepared.quadratic(expr).unwrap() else {
-        panic!("reuse not admitted")
+        panic!("preparation roots must be shared on their first request")
     };
     let Extracted::Shared(second) = prepared.quadratic(expr).unwrap() else { panic!("cache miss") };
     assert!(Arc::ptr_eq(&first, &second));

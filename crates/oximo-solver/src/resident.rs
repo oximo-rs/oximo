@@ -10,7 +10,10 @@ use oximo_expr::{ExprClass, ExprId, LinearTerms, QuadraticTerms, classify};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::{SolverError, prepare::LoweringContext};
+use crate::{
+    SolverError,
+    prepare::{LoweringContext, PreparedExpressions},
+};
 
 /// Native source entities requiring numeric preparation.
 #[doc(hidden)]
@@ -152,16 +155,12 @@ impl PersistentPreparation {
             }
             variables
         };
-        let kind = self.prepare_kind(model, &arena, &variables, &change);
+        let expressions = PreparedExpressions::for_preparation((*arena).clone())
+            .with_resident(Arc::clone(&self.expressions));
+        let kind = self.prepare_kind(model, expressions.arena(), &variables, &change, &expressions);
         self.pending = Some(Baseline { key, parameters, variables: Arc::clone(&variables), kind });
         self.change = Some(change);
-        Ok(LoweringContext::resident(
-            model,
-            (*arena).clone(),
-            variables,
-            kind,
-            Arc::clone(&self.expressions),
-        ))
+        Ok(LoweringContext::resident(model, expressions, variables, kind))
     }
 
     fn prepare_kind(
@@ -170,6 +169,7 @@ impl PersistentPreparation {
         arena: &oximo_expr::ExprArena,
         variables: &[ResolvedVariable],
         change: &PreparationChange,
+        expressions: &PreparedExpressions,
     ) -> ModelKind {
         // SOC recognition can depend on numeric coefficients and bounds.
         // Recheck it on used changes.
@@ -183,12 +183,13 @@ impl PersistentPreparation {
             }),
         };
         let kind = if matches!(change, PreparationChange::Full) {
-            model.__kind_at(arena, variables)
+            model.__kind_with_quadratic_at(arena, variables, &|root| expressions.quadratic(root))
         } else if recheck_kind {
             let constraints = model.constraints();
             let classify_row = |id: oximo_core::ConstraintId| {
                 let row = &constraints.algebraic()[id.index()];
-                oximo_expr::extract_quadratic(arena, row.lhs)
+                expressions
+                    .quadratic(row.lhs)
                     .and_then(|q| oximo_core::__soc_bound_variable(row, &q))
             };
             let all_rows = self.soc_status.is_none();
