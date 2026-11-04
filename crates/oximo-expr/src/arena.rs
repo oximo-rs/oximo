@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::{Mutex, MutexGuard};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -309,6 +309,9 @@ pub struct ExprArena {
     bound_dependencies: Arc<FxHashMap<ParamId, FxHashSet<VarId>>>,
     lock_sources: Arc<FxHashMap<ParamId, String>>,
     classifications: Mutex<Option<Box<ExprClassCache>>>,
+    analysis: OnceLock<Box<Mutex<crate::ExpressionAnalysis>>>,
+    #[cfg(test)]
+    classification_counters: crate::classify::ClassificationCounters,
 }
 
 fn checked_id_range(start: usize, count: usize, kind: &str) -> std::ops::Range<usize> {
@@ -335,11 +338,73 @@ impl Clone for ExprArena {
             bound_dependencies: Arc::clone(&self.bound_dependencies),
             lock_sources: Arc::clone(&self.lock_sources),
             classifications: Mutex::default(),
+            analysis: OnceLock::new(),
+            #[cfg(test)]
+            classification_counters: self.cloned_classification_counters(),
         }
     }
 }
 
 impl ExprArena {
+    /// Retain exact symbolic degrees for at most 131,072 roots in this arena.
+    #[doc(hidden)]
+    pub fn __enable_preparation_classifications(&self) {
+        *self.classifications.lock() = Some(Box::new(ExprClassCache::for_preparation()));
+        self.analysis.get_or_init(|| Box::new(Mutex::default()));
+    }
+
+    /// Snapshot-local structural facts.
+    #[doc(hidden)]
+    pub fn __preparation_expression_summary(
+        &self,
+        root: ExprId,
+    ) -> Option<crate::ExpressionSummary> {
+        self.analysis.get().map(|analysis| {
+            crate::ExpressionAnalysis::leaf(self, root)
+                .unwrap_or_else(|| analysis.lock().summarize(self, root))
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn __cached_expression_summary(&self, root: ExprId) -> Option<crate::ExpressionSummary> {
+        self.analysis.get().and_then(|analysis| {
+            crate::ExpressionAnalysis::leaf(self, root)
+                .or_else(|| analysis.lock().known(self, root))
+        })
+    }
+
+    #[cfg(test)]
+    fn cloned_classification_counters(&self) -> crate::classify::ClassificationCounters {
+        let counters = crate::classify::ClassificationCounters::default();
+        counters
+            .enabled
+            .store(self.classification_counters.enabled.load(Ordering::Relaxed), Ordering::Relaxed);
+        counters
+    }
+
+    /// Enable counters for this arena and later snapshots.
+    #[cfg(test)]
+    pub fn enable_classification_counters(&self) {
+        self.classification_counters.enabled.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn __use_small_classification_cache(&self) {
+        *self.classifications.lock() = None;
+    }
+
+    #[cfg(test)]
+    pub fn classification_stats(&self) -> crate::classify::ClassificationStats {
+        let counters = &self.classification_counters;
+        crate::classify::ClassificationStats {
+            calls: counters.calls.load(Ordering::Relaxed),
+            cache_misses: counters.misses.load(Ordering::Relaxed),
+            visited_nodes: counters.visits.load(Ordering::Relaxed),
+            retained_roots: self.classifications.lock().as_deref().map_or(0, ExprClassCache::len),
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -364,6 +429,9 @@ impl ExprArena {
             bound_dependencies: Arc::clone(&self.bound_dependencies),
             lock_sources: Arc::clone(&self.lock_sources),
             classifications: Mutex::default(),
+            analysis: OnceLock::new(),
+            #[cfg(test)]
+            classification_counters: self.cloned_classification_counters(),
         }
     }
 
@@ -452,6 +520,7 @@ impl ExprArena {
         // A changed child can invalidate any cached root. Appending nodes and
         // rebinding parameters preserve structural degree and need no reset.
         *self.classifications.get_mut() = None;
+        self.analysis.take();
         &mut Arc::make_mut(&mut self.nodes)[id.index()]
     }
 
@@ -681,12 +750,19 @@ impl ExprArena {
 
 /// Read/push surface shared by the canonical and worker-local arenas.
 pub(crate) trait ArenaAccess {
+    #[cfg(test)]
+    fn record_classification(&self, _miss: bool) {}
+    #[cfg(test)]
+    fn record_classification_visit(&self) {}
     fn len(&self) -> usize;
     fn get(&self, id: ExprId) -> &ExprNode;
     fn param_value(&self, id: ParamId) -> f64;
     fn push(&mut self, node: ExprNode) -> ExprId;
     fn cached_degree(&self, id: ExprId) -> Option<Degree>;
     fn cache_degree(&self, id: ExprId, class: Degree);
+    fn preparation_degree(&self, _id: ExprId) -> Option<Degree> {
+        None
+    }
 
     fn constant(&mut self, value: f64) -> ExprId {
         self.push(ExprNode::Const(value))
@@ -698,6 +774,31 @@ pub(crate) trait ArenaAccess {
 }
 
 impl ArenaAccess for ExprArena {
+    fn preparation_degree(&self, id: ExprId) -> Option<Degree> {
+        self.analysis.get()?;
+        let mut budget = 64;
+        crate::classify::degree_hint(self, id, &mut budget, 0)
+    }
+
+    #[cfg(test)]
+    fn record_classification(&self, miss: bool) {
+        let counters = &self.classification_counters;
+        if counters.enabled.load(Ordering::Relaxed) {
+            counters.calls.fetch_add(1, Ordering::Relaxed);
+            if miss {
+                counters.misses.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn record_classification_visit(&self) {
+        let counters = &self.classification_counters;
+        if counters.enabled.load(Ordering::Relaxed) {
+            counters.visits.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn len(&self) -> usize {
         self.len()
     }

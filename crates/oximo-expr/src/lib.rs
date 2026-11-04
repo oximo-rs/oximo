@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod affine_builder;
+mod analysis;
 mod arena;
 mod captured;
 mod classify;
@@ -18,12 +19,17 @@ mod simplify;
 mod visit;
 
 pub use affine_builder::AffineBuilder;
+pub use analysis::ExpressionOperator;
+#[doc(hidden)]
+pub use analysis::{ExpressionAnalysis, ExpressionSummary};
 pub use arena::{
     Children, ExprArena, ExprArenaBatchGuard, ExprArenaCell, ExprArenaSnapshot,
     ExprArenaWriteGuard, ExprId, ExprIdRemap, ExprNode, ForkOutput, FrozenExprArena, ModelId,
     ModelMismatchError, ParamId, ParameterSnapshot, UnaryOp, VarId,
 };
 pub use captured::CapturedExpr;
+#[cfg(test)]
+pub use classify::ClassificationStats;
 pub use classify::{ExprClass, classify};
 pub use degree::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
 pub use eval::{EvalContext, EvalError, WithParameters, evaluate};
