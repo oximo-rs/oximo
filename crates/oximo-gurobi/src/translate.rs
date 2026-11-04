@@ -525,6 +525,14 @@ fn validate_model_operators(prepared: &LoweringContext<'_>) -> Result<(), Solver
             .iter()
             .filter(|constraint| constraint.active)
             .map(|constraint| constraint.lhs)
+            .chain(
+                prepared
+                    .constraints()
+                    .indicators()
+                    .iter()
+                    .filter(|constraint| constraint.active)
+                    .map(|constraint| constraint.lhs),
+            )
             .filter(|&root| !prepared.has_only_polynomial_operators(root)),
     );
     if roots.is_empty() { Ok(()) } else { validate_supported(prepared.arena(), roots) }

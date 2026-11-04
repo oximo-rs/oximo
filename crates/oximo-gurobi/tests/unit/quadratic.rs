@@ -236,6 +236,34 @@ fn shared_operator_proofs_preserve_numeric_and_hidden_operator_checks() {
 }
 
 #[test]
+fn indicator_divisions_are_validated_before_native_rows() {
+    let model = Model::new("indicator zero denominator");
+    variable!(model, b, Binary);
+    variable!(model, x);
+    param!(model, p = 1.0);
+    let lhs = (x + (x / p).powi(0)).try_affine().unwrap();
+    let row = indicator_constraint!(model, row, b == 1 => lhs <= 1.0);
+    objective!(model, Min, x);
+
+    for value in [1.0, 0.0] {
+        p.set_param_value(value).unwrap();
+        let prepared = LoweringContext::new(&model).unwrap();
+        let result = validate_prepared(&model, &prepared);
+        if value == 0.0 {
+            assert!(
+                matches!(result, Err(SolverError::Backend(message)) if message.contains("division by zero"))
+            );
+        } else {
+            result.unwrap();
+        }
+    }
+
+    model.set_constraint_active(row, false).unwrap();
+    let prepared = LoweringContext::new(&model).unwrap();
+    validate_prepared(&model, &prepared).unwrap();
+}
+
+#[test]
 fn sparse_conversion_matches_generic_coefficients_and_evaluations() {
     let model = Model::new("quadratic coefficient convention");
     variable!(model, -2.0 <= x <= 2.0);
