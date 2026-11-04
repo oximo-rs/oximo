@@ -1,16 +1,62 @@
 use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode, UnaryOp};
 use crate::fold::Folder;
 
-/// A small root cache. Most scalar nodes are cheaper to classify directly.
-/// Retaining only eight compound roots keeps per-arena memory bounded.
-/// Store exact degree so symbolic constants remain distinct from affine roots.
+/// Snapshot-local symbolic classification work.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClassificationStats {
+    pub calls: u64,
+    pub cache_misses: u64,
+    pub visited_nodes: u64,
+    pub retained_roots: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ClassificationCounters {
+    pub enabled: std::sync::atomic::AtomicBool,
+    pub calls: std::sync::atomic::AtomicU64,
+    pub misses: std::sync::atomic::AtomicU64,
+    pub visits: std::sync::atomic::AtomicU64,
+}
+
+/// Ordinary arenas retain eight roots. Preparation snapshots opt into a larger
+/// bounded cache.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExprClassCache {
     entries: smallvec::SmallVec<[(ExprId, Degree); 8]>,
+    preparation: Option<Box<PreparationClasses>>,
+}
+
+const PREPARATION_ROOTS: usize = 131_072;
+
+#[derive(Clone, Debug)]
+struct PreparationClasses {
+    entries: rustc_hash::FxHashMap<ExprId, Degree>,
+    order: std::collections::VecDeque<ExprId>,
+    limit: usize,
 }
 
 impl ExprClassCache {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.preparation.as_ref().map_or(self.entries.len(), |p| p.entries.len())
+    }
+
+    pub(crate) fn for_preparation() -> Self {
+        Self {
+            preparation: Some(Box::new(PreparationClasses {
+                entries: rustc_hash::FxHashMap::default(),
+                order: std::collections::VecDeque::new(),
+                limit: PREPARATION_ROOTS,
+            })),
+            ..Self::default()
+        }
+    }
     pub(crate) fn get(&mut self, id: ExprId) -> Option<Degree> {
+        if let Some(preparation) = &self.preparation {
+            return preparation.entries.get(&id).copied();
+        }
         let position = self.entries.iter().rposition(|&(root, _)| root == id)?;
         let entry = self.entries[position];
         if position + 1 != self.entries.len() {
@@ -21,6 +67,19 @@ impl ExprClassCache {
     }
 
     pub(crate) fn insert(&mut self, id: ExprId, class: Degree) {
+        if let Some(preparation) = &mut self.preparation {
+            if let Some(value) = preparation.entries.get_mut(&id) {
+                *value = class;
+                return;
+            }
+            if preparation.entries.len() == preparation.limit {
+                let oldest = preparation.order.pop_front().expect("nonempty bounded cache");
+                preparation.entries.remove(&oldest);
+            }
+            preparation.entries.insert(id, class);
+            preparation.order.push_back(id);
+            return;
+        }
         if let Some(position) = self.entries.iter().position(|&(root, _)| root == id) {
             self.entries.remove(position);
         } else if self.entries.len() == 8 {
@@ -47,8 +106,9 @@ pub enum ExprClass {
 /// Polynomial-degree bucket. `Higher` is a saturating sentinel for "anything
 /// above quadratic". Both polynomial degree > 2 and transcendentals collapse
 /// into it, since neither fits a QP solver's quadratic API.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Degree {
+    #[default]
     Zero,
     One,
     Two,
@@ -65,12 +125,12 @@ impl Degree {
     }
 
     /// `+` on a sum: take the maximum, saturating at `Higher`.
-    fn add(self, other: Degree) -> Degree {
+    pub(crate) fn add(self, other: Degree) -> Degree {
         self.max(other)
     }
 
     /// `*` on a product: add ordinal degrees, saturating at `Higher`.
-    fn mul(self, other: Degree) -> Degree {
+    pub(crate) fn mul(self, other: Degree) -> Degree {
         match (self, other) {
             (Degree::Higher, _) | (_, Degree::Higher) => Degree::Higher,
             (Degree::Zero, x) | (x, Degree::Zero) => x,
@@ -80,7 +140,7 @@ impl Degree {
     }
 
     /// `^n` on a power: multiply by `n`, saturating at `Higher`.
-    fn pow(self, n: u32) -> Degree {
+    pub(crate) fn pow(self, n: u32) -> Degree {
         match (self, n) {
             (_, 0) | (Degree::Zero, _) => Degree::Zero,
             (d, 1) => d,
@@ -169,6 +229,9 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
 
     fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Degree>, Self::State> {
         use std::ops::ControlFlow::{Break, Continue};
+        #[cfg(test)]
+        self.0.record_classification_visit();
+
         if matches!(
             self.0.get(id),
             ExprNode::Add(_)
@@ -250,7 +313,7 @@ fn degree(arena: &(impl ArenaAccess + ?Sized), mut id: ExprId) -> Degree {
 }
 
 pub(crate) fn is_constant_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
-    degree(arena, id) == Degree::Zero
+    classify_degree(arena, id) == Degree::Zero
 }
 
 /// Classify an expression as Linear, Quadratic (polynomial degree <= 2 with at
@@ -261,6 +324,25 @@ pub fn classify(arena: &ExprArena, id: ExprId) -> ExprClass {
 }
 
 pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> ExprClass {
+    classify_degree(arena, id).class()
+}
+
+fn classify_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
+    let cacheable = matches!(
+        arena.get(id),
+        ExprNode::Add(_)
+            | ExprNode::Mul(_)
+            | ExprNode::Pow(_, _)
+            | ExprNode::Unary(UnaryOp::Neg, _)
+    );
+    let cached = if cacheable { arena.cached_degree(id) } else { None };
+    #[cfg(test)]
+    arena.record_classification(cacheable && cached.is_none());
+
+    if let Some(value) = cached {
+        return value;
+    }
+
     // Finish small, shallow expressions without traversal metadata.
     // Remember compound results even when a cached child completes the shallow path.
     let small = match arena.get(id) {
@@ -270,11 +352,11 @@ pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -
     if small {
         let folder = DegreeFolder(arena);
         match folder.start(id) {
-            std::ops::ControlFlow::Break(Some(value)) => return value.class(),
+            std::ops::ControlFlow::Break(Some(value)) => return value,
             std::ops::ControlFlow::Continue(mut state) => {
                 if let std::ops::ControlFlow::Break(Some(value)) = folder.next(&mut state) {
                     arena.cache_degree(id, value);
-                    return value.class();
+                    return value;
                 }
             }
             std::ops::ControlFlow::Break(None) => unreachable!("degree classification is total"),
@@ -282,15 +364,134 @@ pub(crate) fn classify_access(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -
     }
     // Expensive roots are cached independently in canonical arenas, snapshots,
     // and worker forks.
-    if let Some(value) = arena.cached_degree(id) {
-        return value.class();
+    if let Some(value) = arena.preparation_degree(id) {
+        arena.cache_degree(id, value);
+        value
+    } else {
+        degree(arena, id)
     }
-    degree(arena, id).class()
+}
+
+/// Bound the probe so preparation retains early nonlinear exits without doing
+/// a second full degree traversal before structural summary inference.
+pub(crate) fn degree_hint(
+    arena: &(impl ArenaAccess + ?Sized),
+    id: ExprId,
+    budget: &mut usize,
+    depth: usize,
+) -> Option<Degree> {
+    if depth == 8 {
+        return None;
+    }
+
+    *budget = budget.checked_sub(1)?;
+    let value = match arena.get(id) {
+        ExprNode::Const(_) | ExprNode::Param(_) => Degree::Zero,
+        ExprNode::Var(_) => Degree::One,
+        ExprNode::Linear { coeffs, .. } => {
+            if coeffs.is_empty() {
+                Degree::Zero
+            } else {
+                Degree::One
+            }
+        }
+        ExprNode::Add(children) | ExprNode::Mul(children) => {
+            let multiply = matches!(arena.get(id), ExprNode::Mul(_));
+            let mut value = Degree::Zero;
+            for &child in children {
+                let next = degree_hint(arena, child, budget, depth + 1)?;
+                value = if multiply { value.mul(next) } else { value.add(next) };
+                if value == Degree::Higher {
+                    break;
+                }
+            }
+            value
+        }
+        ExprNode::Unary(UnaryOp::Neg, child) => degree_hint(arena, *child, budget, depth + 1)?,
+        ExprNode::Pow(base, exponent) => {
+            let ExprNode::Const(e) = arena.get(*exponent) else { return Some(Degree::Higher) };
+            if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
+                return Some(Degree::Higher);
+            }
+            let n = match e.round() {
+                v if v < 0.5 => 0,
+                v if v < 1.5 => 1,
+                v if v < 2.5 => 2,
+                _ => 3,
+            };
+            degree_hint(arena, *base, budget, depth + 1)?.pow(n)
+        }
+        _ => Degree::Higher,
+    };
+
+    Some(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_retains_101369_roots_without_revisiting_the_graph() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(crate::VarId(0));
+        let roots: Vec<_> =
+            (0..101_369).map(|_| arena.push(ExprNode::Mul(smallvec::smallvec![x, x]))).collect();
+        arena.__enable_preparation_classifications();
+        arena.enable_classification_counters();
+        for &root in &roots {
+            assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+        }
+
+        let before = arena.classification_stats();
+        for &root in &roots {
+            assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+        }
+
+        let after = arena.classification_stats();
+        assert_eq!(after.calls - before.calls, 101_369);
+        assert_eq!(after.cache_misses, before.cache_misses);
+        assert_eq!(after.visited_nodes, before.visited_nodes);
+        assert_eq!(after.retained_roots, 101_369);
+
+        let clone = arena.clone();
+        assert_eq!(clone.classification_stats().retained_roots, 0);
+        assert_eq!(clone.classification_stats().calls, 0);
+    }
+
+    #[test]
+    fn preparation_degrees_remain_symbolic_under_zero_and_cancellation() {
+        let mut arena = ExprArena::new();
+        let p = arena.new_param(0.0);
+        let parameter = arena.param(p);
+        let x = arena.var(crate::VarId(0));
+        let q = arena.push(ExprNode::Mul(smallvec::smallvec![parameter, x, x]));
+        let neg = arena.push(ExprNode::Unary(UnaryOp::Neg, q));
+        let cancel = arena.push(ExprNode::Add(smallvec::smallvec![q, neg]));
+        arena.__enable_preparation_classifications();
+        for value in [0.0, 1.0, -2.0, 0.0] {
+            arena.set_param_value(p, value).unwrap();
+            assert_eq!(classify(&arena, q), ExprClass::Quadratic);
+            assert_eq!(classify(&arena, cancel), ExprClass::Quadratic);
+            assert_eq!(crate::extract_quadratic(&arena, cancel).unwrap().hessian.len(), 0);
+            assert!(is_constant_access(&arena, parameter));
+            assert!(!is_constant_access(&arena, x));
+        }
+    }
+
+    #[test]
+    fn preparation_cache_evicts_at_its_bound() {
+        let mut cache = ExprClassCache::for_preparation();
+        cache.preparation.as_mut().unwrap().limit = 4;
+        for i in 0..20 {
+            cache.insert(ExprId(i), Degree::Two);
+        }
+
+        assert_eq!(cache.len(), 4);
+        assert_eq!(cache.get(ExprId(0)), None);
+        assert_eq!(cache.get(ExprId(19)), Some(Degree::Two));
+        assert_eq!(cache.preparation.as_ref().unwrap().order.len(), 4);
+    }
 
     #[test]
     fn iterative_degree_matches_recursive_classification() {
