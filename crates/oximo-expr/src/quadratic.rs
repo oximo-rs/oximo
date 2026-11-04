@@ -781,6 +781,15 @@ mod tests {
                 assert!(dense_expanded_quadratic(&arena, root).is_some());
             }
         }
+
+        let product = arena.push(ExprNode::Mul(smallvec::smallvec![vars[49], vars[3]]));
+        let zero = arena.push(ExprNode::Const(0.0));
+        let padding = arena.push(ExprNode::Mul(smallvec::smallvec![zero, vars[0], vars[0]]));
+        let mut terms = vec![padding; 650];
+        terms[0] = product;
+        let root = arena.push(ExprNode::Add(terms.into()));
+        let actual = dense_expanded_quadratic(&arena, root).unwrap();
+        assert_eq!(actual.hessian, vec![(VarId(49), VarId(3), 1.0)]);
     }
 
     #[test]
