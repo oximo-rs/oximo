@@ -1,9 +1,8 @@
 use oximo_solver::SolutionValues;
-use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::prepare::{AffineTerms, LoweringContext, PreparedExpressions};
 use oximo_solver::reconstruct::{ObjectiveTransform, finalize_result};
 use std::time::Instant;
 
-use gurobi_rs::constr::RangeExpr;
 use gurobi_rs::expr::{LinExpr, QuadExpr};
 use gurobi_rs::prelude::*;
 use oximo_core::{
@@ -11,7 +10,7 @@ use oximo_core::{
     ModelId, ModelKind, ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId,
     SosConstraint, SosConstraintId, SosType, VarId, var_name,
 };
-use oximo_expr::{ExprArena, ExprId, LinearTerms, describe_nonlinear_term};
+use oximo_expr::{ExprArena, ExprId, LinearTerms, QuadraticTerms, describe_nonlinear_term};
 use oximo_solver::{
     DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
     VarBoundKind,
@@ -39,15 +38,12 @@ pub(crate) fn map_gurobi_err(e: gurobi_rs::Error) -> SolverError {
 ///
 /// Panics if model variable or constraint indices overflow `u32`.
 pub fn solve(model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
-    oximo_solver::Solver::profile(&crate::Gurobi, opts).check_model(model).into_result()?;
-
-    let kind = model.kind();
-    validate_model_operators(model)?;
-    if model.has_active_psd_constraints() {
-        return Err(SolverError::UnsupportedConstraint("PSD"));
-    }
+    let prepared = prepare_model(model)?;
+    let validated = validate_prepared(model, &prepared)?;
+    let kind = prepared.kind();
     let env = default_env()?;
-    let mut built = build(model, opts, &env)?;
+    let mut built = build_validated(model, opts, &env, validated, false)?;
+    drop(prepared);
     run_and_collect(&mut built, kind, model)
 }
 
@@ -75,6 +71,55 @@ pub(crate) struct Built {
 }
 
 impl Built {
+    /// Refresh a polynomial objective without rebuilding generated entities.
+    fn refresh_polynomial_objective(
+        &mut self,
+        prepared: &LoweringContext<'_>,
+    ) -> Result<bool, SolverError> {
+        if !self.objective_generated.is_empty() || !self.objective_variables.is_empty() {
+            return Ok(false);
+        }
+
+        let Some(objective) = prepared.objective() else { return Ok(false) };
+        let affine = prepared.linear(objective.expr);
+        let quadratic =
+            if affine.is_none() { prepared.quadratic_once(objective.expr) } else { None };
+        let (linear, constant) = if let Some(terms) = &affine {
+            (terms.coeffs.as_ref(), terms.constant)
+        } else if let Some(terms) = &quadratic {
+            (terms.linear.as_slice(), terms.constant)
+        } else {
+            return Ok(false);
+        };
+
+        let mut costs = vec![0.0; self.vars.len()];
+        for &(variable, coefficient) in linear {
+            costs[variable.index()] += coefficient;
+        }
+
+        self.model.del_qpterms().map_err(map_gurobi_err)?;
+        if let Some(terms) = &quadratic
+            && !terms.hessian.is_empty()
+        {
+            self.model
+                .add_qpterms(sparse_quadratic_terms(terms, &self.vars))
+                .map_err(map_gurobi_err)?;
+        }
+
+        self.model
+            .set_obj_attr_batch(attr::Obj, self.vars.iter().copied().zip(costs))
+            .map_err(map_gurobi_err)?;
+        self.model.set_attr(attr::ObjCon, constant).map_err(map_gurobi_err)?;
+        let sense = match objective.sense {
+            ObjectiveSense::Minimize => ModelSense::Minimize,
+            ObjectiveSense::Maximize => ModelSense::Maximize,
+        };
+        self.model.set_attr(attr::ModelSense, sense).map_err(map_gurobi_err)?;
+        self.obj_constant = 0.0;
+
+        Ok(true)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one update or replacement case per native source kind"
@@ -128,9 +173,16 @@ impl Built {
                     return Ok(false);
                 }
             }
+            let mut coefficients = Vec::new();
+            let mut right_hand_sides = Vec::new();
+            let mut lower_bounds = Vec::new();
+            let mut upper_bounds = Vec::new();
             for target in targets {
                 match target {
                     ParameterTarget::Objective => {
+                        if self.refresh_polynomial_objective(prepared)? {
+                            continue;
+                        }
                         self.model
                             .set_objective(LinExpr::new(), ModelSense::Minimize)
                             .map_err(map_gurobi_err)?;
@@ -158,12 +210,8 @@ impl Built {
                     }
                     ParameterTarget::VariableBound(id) => {
                         let v = &prepared.variables()[id.index()];
-                        self.model
-                            .set_obj_attr(attr::LB, &self.vars[id.index()], v.lb)
-                            .map_err(map_gurobi_err)?;
-                        self.model
-                            .set_obj_attr(attr::UB, &self.vars[id.index()], v.ub)
-                            .map_err(map_gurobi_err)?;
+                        lower_bounds.push((self.vars[id.index()], v.lb));
+                        upper_bounds.push((self.vars[id.index()], v.ub));
                     }
                     ParameterTarget::Algebraic(id) => {
                         let source = &prepared.constraints().algebraic()[id.index()];
@@ -186,14 +234,10 @@ impl Built {
                             for &(id, c) in terms.coeffs.iter() {
                                 *values.entry(id).or_insert(0.0) += c;
                             }
-                            for (id, c) in values {
-                                self.model
-                                    .set_coeff(&self.vars[id.index()], row, c)
-                                    .map_err(map_gurobi_err)?;
-                            }
-                            self.model
-                                .set_obj_attr(attr::RHS, row, rhs - terms.constant)
-                                .map_err(map_gurobi_err)?;
+                            coefficients.extend(
+                                values.into_iter().map(|(id, c)| (self.vars[id.index()], *row, c)),
+                            );
+                            right_hand_sides.push((*row, rhs - terms.constant));
                             handle.coefficients = Some(terms.coeffs.to_vec());
                         } else {
                             let old = std::mem::replace(
@@ -288,9 +332,13 @@ impl Built {
                     _ => return Ok(false),
                 }
             }
+            self.model.set_coeffs(coefficients).map_err(map_gurobi_err)?;
+            self.model.set_obj_attr_batch(attr::RHS, right_hand_sides).map_err(map_gurobi_err)?;
+            self.model.set_obj_attr_batch(attr::LB, lower_bounds).map_err(map_gurobi_err)?;
+            self.model.set_obj_attr_batch(attr::UB, upper_bounds).map_err(map_gurobi_err)?;
         }
-        self.parameters = prepared.arena().parameter_snapshot();
         self.model.update().map_err(map_gurobi_err)?;
+        self.parameters = prepared.arena().parameter_snapshot();
         Ok(true)
     }
 }
@@ -316,32 +364,70 @@ fn remove_generated(
 ///
 /// Returns a [`SolverError`] if the model contains nonlinear expressions Gurobi
 /// cannot represent or Gurobi reports an error during setup.
+#[cfg(any(test, feature = "benchmark-support"))]
 pub(crate) fn build(model: &Model, opts: &GurobiOptions, env: &Env) -> Result<Built, SolverError> {
-    validate_model_operators(model)?;
-    if model.has_active_psd_constraints() {
-        return Err(SolverError::UnsupportedConstraint("PSD"));
-    }
-    let prepared = LoweringContext::new(model)?;
-    build_view(model, opts, env, &prepared, false)
+    let prepared = prepare_model(model)?;
+    let validated = validate_prepared(model, &prepared)?;
+    build_validated(model, opts, env, validated, false)
 }
 
+#[cfg(test)]
 pub(crate) fn build_prepared(
     model: &Model,
     opts: &GurobiOptions,
     env: &Env,
     prepared: &LoweringContext<'_>,
 ) -> Result<Built, SolverError> {
-    validate_model_operators(model)?;
-    build_view(model, opts, env, prepared, true)
+    let validated = validate_prepared(model, prepared)?;
+    build_validated(model, opts, env, validated, true)
 }
 
-fn build_view(
+/// Proof that capability and operator checks completed before native mutation.
+#[derive(Debug)]
+pub(crate) struct ValidatedPreparation<'p, 'm>(&'p LoweringContext<'m>);
+
+pub(crate) fn validate_declarations(model: &Model) -> Result<(), SolverError> {
+    // Keep complete compatibility diagnostics when no context can be captured.
+    if model.ensure_objective_declared().is_err() || model.has_unreformulated_gdp() {
+        crate::PROFILE.check_model(model).into_result()?;
+    }
+
+    Ok(())
+}
+
+fn prepare_model(model: &Model) -> Result<LoweringContext<'_>, SolverError> {
+    validate_declarations(model)?;
+    LoweringContext::new(model)
+}
+
+impl<'m> std::ops::Deref for ValidatedPreparation<'_, 'm> {
+    type Target = LoweringContext<'m>;
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+pub(crate) fn validate_prepared<'p, 'm>(
+    model: &Model,
+    prepared: &'p LoweringContext<'m>,
+) -> Result<ValidatedPreparation<'p, 'm>, SolverError> {
+    crate::PROFILE.check_prepared(model, prepared)?.into_result()?;
+    validate_model_operators(prepared)?;
+    if model.has_active_psd_constraints() {
+        return Err(SolverError::UnsupportedConstraint("PSD"));
+    }
+
+    Ok(ValidatedPreparation(prepared))
+}
+
+pub(crate) fn build_validated(
     model: &Model,
     opts: &GurobiOptions,
     env: &Env,
-    prepared: &LoweringContext<'_>,
+    validated: ValidatedPreparation<'_, '_>,
     retain_coefficients: bool,
 ) -> Result<Built, SolverError> {
+    let prepared = validated.0;
     let kind = prepared.kind();
     let nonlinear_kind = matches!(
         kind,
@@ -423,21 +509,33 @@ fn build_view(
     })
 }
 
-fn validate_model_operators(model: &Model) -> Result<(), SolverError> {
-    let arena = model.arena();
+fn validate_model_operators(prepared: &LoweringContext<'_>) -> Result<(), SolverError> {
+    // Vocabulary was already checked by compatibility when available.
+    // Division needs the native validator's value-dependent zero-denominator check.
     let mut roots = Vec::new();
-    if let Some(objective) = model.objective().as_ref() {
+    if let Some(objective) = prepared.objective()
+        && !prepared.has_only_polynomial_operators(objective.expr)
+    {
         roots.push(objective.expr);
     }
     roots.extend(
-        model
+        prepared
             .constraints()
             .algebraic()
             .iter()
             .filter(|constraint| constraint.active)
-            .map(|constraint| constraint.lhs),
+            .map(|constraint| constraint.lhs)
+            .chain(
+                prepared
+                    .constraints()
+                    .indicators()
+                    .iter()
+                    .filter(|constraint| constraint.active)
+                    .map(|constraint| constraint.lhs),
+            )
+            .filter(|&root| !prepared.has_only_polynomial_operators(root)),
     );
-    validate_supported(&arena, roots)
+    if roots.is_empty() { Ok(()) } else { validate_supported(prepared.arena(), roots) }
 }
 
 /// Optimize a built model and assemble the generic [`SolverResult`]. Shared by the
@@ -552,14 +650,12 @@ pub fn solve_with_callback<F>(
 where
     F: gurobi_rs::callback::Callback,
 {
-    oximo_solver::Solver::profile(&crate::Gurobi, opts).check_model(model).into_result()?;
-
-    let kind = model.kind();
-    if model.has_active_psd_constraints() {
-        return Err(SolverError::UnsupportedConstraint("PSD"));
-    }
+    let prepared = prepare_model(model)?;
+    let validated = validate_prepared(model, &prepared)?;
+    let kind = prepared.kind();
     let env = default_env()?;
-    let mut built = build(model, opts, &env)?;
+    let mut built = build_validated(model, opts, &env, validated, false)?;
+    drop(prepared);
     run_and_collect_with_callback(&mut built, kind, model, callback, mask)
 }
 
@@ -578,13 +674,11 @@ where
 ///
 /// Panics if a constraint, SOC, or variable index overflows `u32`.
 pub fn compute_iis(model: &Model, opts: &GurobiOptions) -> Result<Iis, SolverError> {
-    oximo_solver::Solver::profile(&crate::Gurobi, opts).check_model(model).into_result()?;
-
-    if model.has_active_psd_constraints() {
-        return Err(SolverError::UnsupportedConstraint("PSD"));
-    }
+    let prepared = prepare_model(model)?;
+    let validated = validate_prepared(model, &prepared)?;
     let env = default_env()?;
-    let mut built = build(model, opts, &env)?;
+    let mut built = build_validated(model, opts, &env, validated, false)?;
+    drop(prepared);
     // Force a definite Infeasible/Unbounded verdict so we don't ask for an IIS on an
     // unbounded model.
     built.model.set_param(gurobi_rs::param::DualReductions, 0).map_err(map_gurobi_err)?;
@@ -888,8 +982,8 @@ pub(crate) struct SocHandle {
 }
 
 /// Add every model constraint, returning the per-constraint row handle.
-/// Each constraint takes the linear fast path when its LHS is linear
-/// and falls back to the general lowering otherwise.
+/// Batch affine rows, translate quadratic polynomials directly, and retain
+/// the general DAG lowerer for expressions containing nonlinear operators.
 #[expect(clippy::too_many_lines)]
 fn add_constraints(
     prepared: &PreparedExpressions,
@@ -900,17 +994,17 @@ fn add_constraints(
     retain_coefficients: bool,
 ) -> Result<Vec<ConstraintHandle>, SolverError> {
     let arena = prepared.arena();
-    struct PendingSingle {
+    struct PendingSingle<'a> {
         index: usize,
         name: String,
-        expr: LinExpr,
+        terms: AffineTerms<'a>,
         sense: Sense,
         rhs: f64,
     }
-    struct PendingRange {
+    struct PendingRange<'a> {
         index: usize,
         name: String,
-        expr: LinExpr,
+        terms: AffineTerms<'a>,
         lower: f64,
         upper: f64,
     }
@@ -923,21 +1017,26 @@ fn add_constraints(
         if retain_coefficients { vec![None; constraints.len()] } else { Vec::new() };
 
     for (index, c) in constraints.iter().enumerate() {
+        if !c.active {
+            slots[index] = Some(ConstraintHandle {
+                rows: Vec::new(),
+                generated: Vec::new(),
+                variables: Vec::new(),
+                coefficients: None,
+            });
+            continue;
+        }
         if let Some((sense, rhs)) = c.as_single() {
             if let Some(t) = prepared.linear(c.lhs) {
                 if retain_coefficients {
                     coefficients[index] = Some(t.coeffs.to_vec());
                 }
-                let mut expr = LinExpr::new();
-                for &(v, coeff) in t.coeffs.iter() {
-                    expr.add_term(coeff, gurobi_vars[v.index()]);
-                }
                 singles.push(PendingSingle {
                     index,
                     name: c.name.to_string(),
-                    expr,
+                    terms: t,
                     sense,
-                    rhs: rhs - t.constant,
+                    rhs,
                 });
             } else {
                 nonlinear.push(index);
@@ -947,16 +1046,12 @@ fn add_constraints(
                 if retain_coefficients {
                     coefficients[index] = Some(t.coeffs.to_vec());
                 }
-                let mut expr = LinExpr::new();
-                for &(v, coeff) in t.coeffs.iter() {
-                    expr.add_term(coeff, gurobi_vars[v.index()]);
-                }
                 ranges.push(PendingRange {
                     index,
                     name: c.name.to_string(),
-                    expr,
-                    lower: c.lower - t.constant,
-                    upper: c.upper - t.constant,
+                    terms: t,
+                    lower: c.lower,
+                    upper: c.upper,
                 });
             } else {
                 nonlinear.push(index);
@@ -973,27 +1068,24 @@ fn add_constraints(
         }
     }
 
-    let mut single_names = Vec::with_capacity(singles.len());
-    let mut single_indices = Vec::with_capacity(singles.len());
-    let single_batch: Vec<_> = singles
-        .into_iter()
-        .map(|p| {
-            single_names.push(p.name);
-            single_indices.push(p.index);
-            let expr = p.expr;
-            match p.sense {
-                Sense::Le => c!(expr <= p.rhs),
-                Sense::Ge => c!(expr >= p.rhs),
-                Sense::Eq => c!(expr == p.rhs),
-            }
-        })
-        .collect();
-    let single_batch_iter = single_batch.into_iter();
     let single_handles = gurobi_model
-        .add_constrs(single_names.iter().zip(single_batch_iter))
+        .add_constrs_sparse(singles.iter().map(|p| {
+            let sense = match p.sense {
+                Sense::Le => gurobi_rs::ConstrSense::Less,
+                Sense::Ge => gurobi_rs::ConstrSense::Greater,
+                Sense::Eq => gurobi_rs::ConstrSense::Equal,
+            };
+            (
+                &p.name,
+                p.terms.coeffs.iter().map(|&(v, c)| (gurobi_vars[v.index()], c)),
+                p.terms.constant,
+                sense,
+                p.rhs,
+            )
+        }))
         .map_err(map_gurobi_err)?;
-    for (index, handle) in single_indices.into_iter().zip(single_handles) {
-        slots[index] = Some(ConstraintHandle {
+    for (pending, handle) in singles.into_iter().zip(single_handles) {
+        slots[pending.index] = Some(ConstraintHandle {
             rows: vec![GurobiRow::Lin(handle)],
             generated: Vec::new(),
             variables: Vec::new(),
@@ -1001,29 +1093,26 @@ fn add_constraints(
         });
     }
 
-    let mut range_names = Vec::with_capacity(ranges.len());
-    let mut range_indices = Vec::with_capacity(ranges.len());
-    let range_batch: Vec<_> = ranges
-        .into_iter()
-        .map(|p| {
-            range_names.push(p.name);
-            range_indices.push(p.index);
-            RangeExpr { expr: p.expr.into(), lb: p.lower, ub: p.upper }
-        })
-        .collect();
-    let range_batch_iter = range_batch.into_iter();
     let range_handles = gurobi_model
-        .add_ranges(range_names.iter().zip(range_batch_iter))
+        .add_ranges_sparse(ranges.iter().map(|p| {
+            (
+                &p.name,
+                p.terms.coeffs.iter().map(|&(v, c)| (gurobi_vars[v.index()], c)),
+                p.terms.constant,
+                p.lower,
+                p.upper,
+            )
+        }))
         .map_err(map_gurobi_err)?;
     if !range_handles.0.is_empty() {
         // Gurobi creates range slacks during update. Materialize them before
         // adding auxiliaries whose native indices appear in nonlinear trees.
         gurobi_model.update().map_err(map_gurobi_err)?;
     }
-    for ((index, handle), variable) in
-        range_indices.into_iter().zip(range_handles.1).zip(range_handles.0)
+    for ((pending, handle), variable) in
+        ranges.into_iter().zip(range_handles.1).zip(range_handles.0)
     {
-        slots[index] = Some(ConstraintHandle {
+        slots[pending.index] = Some(ConstraintHandle {
             rows: vec![GurobiRow::Lin(handle)],
             generated: Vec::new(),
             variables: vec![variable],
@@ -1033,6 +1122,24 @@ fn add_constraints(
 
     for index in nonlinear {
         let c = &constraints[index];
+        if let Some(terms) = prepared.quadratic_once(c.lhs) {
+            let rows = add_sparse_quadratic_rows(
+                gurobi_model,
+                &c.name,
+                &terms,
+                gurobi_vars,
+                c.as_single(),
+                c.lower,
+                c.upper,
+            )?;
+            slots[index] = Some(ConstraintHandle {
+                rows,
+                generated: Vec::new(),
+                variables: Vec::new(),
+                coefficients: None,
+            });
+            continue;
+        }
         let (rows, generated, variables) = add_nonlinear_constraint(
             arena,
             c.lhs,
@@ -1209,6 +1316,86 @@ fn add_comparison_rows(
         .collect()
 }
 
+/// Convert the canonical triangular Hessian convention, f = x'Hx/2 + a'x + c.
+/// Cross entries already include both symmetric positions.
+#[cfg(test)]
+fn quadratic_expression(terms: &QuadraticTerms, variables: &[gurobi_rs::Var]) -> QuadExpr {
+    let mut expression = QuadExpr::new();
+    expression.add_constant(terms.constant);
+    for &(variable, coefficient) in &terms.linear {
+        if coefficient != 0.0 {
+            expression.add_term(coefficient, variables[variable.index()]);
+        }
+    }
+    for &(row, column, coefficient) in &terms.hessian {
+        if coefficient != 0.0 {
+            expression.add_qterm(
+                if row == column { 0.5 * coefficient } else { coefficient },
+                variables[row.index()],
+                variables[column.index()],
+            );
+        }
+    }
+    expression
+}
+
+fn sparse_linear_terms<'a>(
+    terms: &'a QuadraticTerms,
+    variables: &'a [gurobi_rs::Var],
+) -> impl ExactSizeIterator<Item = (gurobi_rs::Var, f64)> + 'a {
+    terms.linear.iter().map(|&(v, c)| (variables[v.index()], c))
+}
+
+fn sparse_quadratic_terms<'a>(
+    terms: &'a QuadraticTerms,
+    variables: &'a [gurobi_rs::Var],
+) -> impl ExactSizeIterator<Item = (gurobi_rs::Var, gurobi_rs::Var, f64)> + 'a {
+    terms.hessian.iter().map(|&(r, c, h)| {
+        (variables[r.index()], variables[c.index()], if r == c { 0.5 * h } else { h })
+    })
+}
+
+fn add_sparse_quadratic_rows(
+    model: &mut gurobi_rs::Model,
+    name: &str,
+    terms: &QuadraticTerms,
+    variables: &[gurobi_rs::Var],
+    single: Option<(Sense, f64)>,
+    lower: f64,
+    upper: f64,
+) -> Result<Vec<GurobiRow>, SolverError> {
+    single
+        .map_or_else(|| vec![(Sense::Ge, lower), (Sense::Le, upper)], |pair| vec![pair])
+        .into_iter()
+        .filter(|(_, rhs)| rhs.is_finite())
+        .enumerate()
+        .map(|(i, (sense, rhs))| {
+            let name =
+                if i == 0 && single.is_some() { name.to_string() } else { format!("{name}_{i}") };
+            let sense = match sense {
+                Sense::Le => gurobi_rs::ConstrSense::Less,
+                Sense::Ge => gurobi_rs::ConstrSense::Greater,
+                Sense::Eq => gurobi_rs::ConstrSense::Equal,
+            };
+            model
+                .add_qconstr_sparse(
+                    &name,
+                    sparse_linear_terms(terms, variables),
+                    sparse_quadratic_terms(terms, variables),
+                    terms.constant,
+                    sense,
+                    rhs,
+                )
+                .map(GurobiRow::Quad)
+                .map_err(map_gurobi_err)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/quadratic.rs"]
+mod quadratic;
+
 fn set_objective(
     prepared: &PreparedExpressions,
     obj_expr: ExprId,
@@ -1223,14 +1410,27 @@ fn set_objective(
         ObjectiveSense::Maximize => ModelSense::Maximize,
     };
     if let Some(t) = prepared.linear(obj_expr) {
-        let mut e = LinExpr::new();
-        for &(v, c) in t.coeffs.iter() {
-            e.add_term(c, gurobi_vars[v.index()]);
-        }
-        // Gurobi's set_objective absorbs LinExpr offsets into ObjCon, so we do
-        // not need to track the constant separately.
-        e.add_constant(t.constant);
-        gurobi_model.set_objective(e, gurobi_sense).map_err(map_gurobi_err)?;
+        gurobi_model
+            .set_objective_sparse(
+                t.coeffs.iter().map(|&(v, c)| (gurobi_vars[v.index()], c)),
+                std::iter::empty(),
+                t.constant,
+                gurobi_sense,
+            )
+            .map_err(map_gurobi_err)?;
+        return Ok((0.0, Vec::new(), Vec::new()));
+    }
+    if let Some(terms) = prepared.quadratic_once(obj_expr) {
+        gurobi_model
+            .set_objective_sparse(
+                sparse_linear_terms(&terms, gurobi_vars),
+                sparse_quadratic_terms(&terms, gurobi_vars),
+                terms.constant,
+                gurobi_sense,
+            )
+            .map_err(map_gurobi_err)?;
+
+        // The sparse objective API absorbs the expression offset into ObjCon.
         return Ok((0.0, Vec::new(), Vec::new()));
     }
     let mut ctx = LoweringCtx::new(gurobi_model, gurobi_vars, *aux_counter);

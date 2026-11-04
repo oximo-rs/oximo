@@ -117,6 +117,8 @@ pub struct PreparedExpressions {
     resident: Option<Arc<crate::resident::ResidentExpressions>>,
     workset: Option<QuadraticWorkset>,
     operators: OnceLock<Arc<crate::requirements::OperatorSummaries>>,
+    #[cfg(test)]
+    affine_extractions: AtomicU64,
 }
 
 const CACHE_EXPRESSIONS: usize = 256;
@@ -160,6 +162,13 @@ fn cache_shards<T>() -> Box<[CacheShard<T>; CACHE_SHARDS]> {
 }
 
 impl<T> ExtractionCache<T> {
+    /// Look up successful terms without initializing storage or changing admission hints.
+    fn lookup(&self, expr: ExprId) -> Option<Arc<T>> {
+        let shards = self.shards.get()?;
+        let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
+        shard.entries.lock().expect("preparation cache poisoned").values.get(&expr)?.clone()
+    }
+
     fn extract(
         &self,
         expr: ExprId,
@@ -180,6 +189,18 @@ impl<T> ExtractionCache<T> {
         };
         let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
         shard.extract(expr, extract, size, admit)
+    }
+
+    /// Publish recovered terms, replacing a cached extraction failure within budget.
+    fn publish(
+        &self,
+        expr: ExprId,
+        value: Option<T>,
+        size: impl FnOnce(&T) -> usize,
+    ) -> Option<Extracted<T>> {
+        let shards = self.shards.get_or_init(cache_shards);
+        let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
+        shard.publish(expr, value, size)
     }
 }
 
@@ -202,14 +223,26 @@ impl<T> CacheShard<T> {
         }
         // Independent misses can be evaluated concurrently. Concurrent misses
         // for the same expression may repeat work, but publish one shared value.
-        let value = extract();
+        self.publish(expr, extract(), size)
+    }
+
+    fn publish(
+        &self,
+        expr: ExprId,
+        value: Option<T>,
+        size: impl FnOnce(&T) -> usize,
+    ) -> Option<Extracted<T>> {
         let coefficients = value.as_ref().map_or(0, size);
         if coefficients > CACHE_COEFFICIENTS / CACHE_SHARDS {
             return value.map(Extracted::Owned);
         }
         let mut cache = self.entries.lock().expect("preparation cache poisoned");
         if let Some(existing) = cache.values.get(&expr) {
-            return existing.clone().map(Extracted::Shared);
+            if existing.is_some() || value.is_none() {
+                return existing.clone().map(Extracted::Shared);
+            }
+            cache.values.remove(&expr);
+            cache.order.retain(|&(root, _)| root != expr);
         }
         while cache.values.len() >= CACHE_EXPRESSIONS / CACHE_SHARDS
             || cache.coefficients + coefficients > CACHE_COEFFICIENTS / CACHE_SHARDS
@@ -457,6 +490,8 @@ impl PreparedExpressions {
             resident: None,
             workset: None,
             operators: OnceLock::new(),
+            #[cfg(test)]
+            affine_extractions: AtomicU64::new(0),
         }
     }
 
@@ -514,7 +549,7 @@ impl PreparedExpressions {
             .and_then(|summaries| summaries.get(root))
             .is_some_and(|operators| operators & !MASK == 0)
     }
-    /// Borrow direct affine terms or extract through the resident or reuse-admitted cache.
+    /// Borrow direct affine terms, reuse cached polynomials, or extract through the affine cache.
     ///
     /// # Panics
     /// Panics for an expression outside this arena or a poisoned cache.
@@ -529,25 +564,71 @@ impl PreparedExpressions {
     // Keep cache admission out of the direct-affine hot loop in each adapter.
     #[inline(never)]
     fn compound_linear(&self, expr: ExprId) -> Option<AffineTerms<'_>> {
-        if let Some(cache) = &self.resident {
-            if !cache.admits(expr) {
-                return extract_linear(&self.arena, expr).map(AffineTerms::Borrowed);
-            }
-            return resident_extract(&cache.linear, expr, || {
-                extract_linear(&self.arena, expr).map(LinearTerms::into_owned)
-            })
-            .map(AffineTerms::Shared);
+        let quadratic = self.cached_quadratic(expr);
+        if quadratic.as_ref().is_some_and(|terms| !terms.hessian.is_empty()) {
+            return None;
         }
-        self.linear
-            .extract(
-                expr,
-                || extract_linear(&self.arena, expr).map(LinearTerms::into_owned),
-                |t| t.coeffs.len(),
-            )
-            .map(|terms| match terms {
+
+        let cached_affine = || {
+            quadratic.as_ref().map(|terms| LinearTerms::owned(terms.linear.clone(), terms.constant))
+        };
+        let extract = || {
+            if let Some(terms) = cached_affine() {
+                return Some(terms);
+            }
+
+            #[cfg(test)]
+            self.affine_extractions.fetch_add(1, Ordering::Relaxed);
+            extract_linear(&self.arena, expr)
+        };
+        let affine = if let Some(cache) = &self.resident {
+            if !cache.admits(expr) {
+                return extract().map(AffineTerms::Borrowed);
+            }
+            resident_extract(&cache.linear, expr, || extract().map(LinearTerms::into_owned))
+                .map(AffineTerms::Shared)
+        } else {
+            self.linear
+                .extract(expr, || extract().map(LinearTerms::into_owned), |t| t.coeffs.len())
+                .map(|terms| match terms {
+                    Extracted::Owned(terms) => AffineTerms::Borrowed(terms),
+                    Extracted::Shared(terms) => AffineTerms::Shared(terms),
+                })
+        };
+
+        affine.or_else(|| {
+            let recovered = cached_affine()?.into_owned();
+            let terms = if let Some(cache) = &self.resident {
+                let mut entries = cache.linear.lock().expect("resident cache poisoned");
+                let terms =
+                    entries.entry(expr).or_default().get_or_insert_with(|| Arc::new(recovered));
+                Extracted::Shared(Arc::clone(terms))
+            } else {
+                self.linear.publish(expr, Some(recovered), |t| t.coeffs.len())?
+            };
+            Some(match terms {
                 Extracted::Owned(terms) => AffineTerms::Borrowed(terms),
                 Extracted::Shared(terms) => AffineTerms::Shared(terms),
             })
+        })
+    }
+
+    /// Look up successful quadratic terms in the workset, resident cache, then reuse-admitted cache.
+    /// Return `None` when no successful result is cached, without extracting coefficients.
+    fn cached_quadratic(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let Some(workset) = &self.workset
+            && let workset::Lookup::Ready(Some(terms)) = workset.lookup(expr)
+        {
+            return Some(terms);
+        }
+        if let Some(cache) = &self.resident
+            && cache.admits(expr)
+            && let Some(Some(terms)) =
+                cache.quadratic.lock().expect("resident cache poisoned").get(&expr)
+        {
+            return Some(Extracted::Shared(Arc::clone(terms)));
+        }
+        self.quadratic.lookup(expr).map(Extracted::Shared)
     }
 
     /// Extract a polynomial of degree at most two, reusing cached results and failures.
@@ -659,6 +740,206 @@ fn resident_extract<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn polynomial_caches(arena: &ExprArena, root: ExprId) -> [PreparedExpressions; 2] {
+        let caches = [
+            PreparedExpressions::for_preparation(arena.clone()),
+            PreparedExpressions::new(arena.clone()),
+        ];
+        for prepared in &caches {
+            prepared.quadratic(root);
+            prepared.quadratic(root);
+        }
+        caches
+    }
+
+    #[test]
+    fn cached_nested_quadratics_skip_affine_extraction() {
+        use oximo_expr::VarId;
+        for coefficient in [1.0, 1e-100] {
+            let mut arena = ExprArena::new();
+            let var = arena.var(VarId(0));
+            let scale = arena.push(ExprNode::Const(coefficient));
+            let mut root = arena.push(ExprNode::Mul(vec![scale, var, var].into()));
+            let affine = arena.linear(vec![(VarId(0), 2.0)], 3.0);
+            for _ in 0..128 {
+                root = arena.push(ExprNode::Add(vec![root, affine].into()));
+            }
+
+            for prepared in polynomial_caches(&arena, root) {
+                let attempts = prepared.quadratic_analysis_stats().attempts;
+                for _ in 0..3 {
+                    assert!(prepared.linear(root).is_none());
+                    assert_eq!(prepared.quadratic_once(root).unwrap().hessian.len(), 1);
+                }
+                assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 0);
+                assert_eq!(prepared.quadratic_analysis_stats().attempts, attempts);
+                assert!(prepared.linear.shards.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn cached_cancellation_yields_affine_terms_without_extraction() {
+        use oximo_expr::{UnaryOp, VarId};
+        let mut arena = ExprArena::new();
+        let var = arena.var(VarId(0));
+        let square = arena.push(ExprNode::Mul(vec![var, var].into()));
+        let negated = arena.push(ExprNode::Unary(UnaryOp::Neg, square));
+        let affine = arena.linear(vec![(VarId(0), 3.0)], 5.0);
+        let sum = arena.push(ExprNode::Add(vec![square, affine].into()));
+        let root = arena.push(ExprNode::Add(vec![sum, negated].into()));
+        for prepared in polynomial_caches(&arena, root) {
+            assert_eq!(prepared.quadratic(root).unwrap().hessian.len(), 0);
+            let terms = prepared.linear(root).unwrap();
+            assert_eq!(terms.coeffs.as_ref(), &[(VarId(0), 3.0)]);
+            assert_eq!(terms.constant, 5.0);
+            assert!(matches!(prepared.linear(root), Some(AffineTerms::Shared(_))));
+            assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn cached_polynomial_affinity_overrides_prior_affine_failure() {
+        use oximo_expr::{UnaryOp, VarId};
+        let mut arena = ExprArena::new();
+        let var = arena.var(VarId(0));
+        let square = arena.push(ExprNode::Mul(vec![var, var].into()));
+        let negated = arena.push(ExprNode::Unary(UnaryOp::Neg, square));
+        let root = arena.push(ExprNode::Add(vec![square, negated, var].into()));
+        for prepared in
+            [PreparedExpressions::for_preparation(arena.clone()), PreparedExpressions::new(arena)]
+        {
+            assert!(prepared.linear(root).is_none());
+            assert!(prepared.linear(root).is_none());
+            prepared.quadratic(root).unwrap();
+            prepared.quadratic(root).unwrap();
+            let recovered = prepared.linear(root).unwrap();
+            assert_eq!(recovered.coeffs.as_ref(), &[(VarId(0), 1.0)]);
+            let AffineTerms::Shared(recovered) = recovered else {
+                panic!("recovered affine terms were not cached")
+            };
+            for _ in 0..3 {
+                let Some(AffineTerms::Shared(repeated)) = prepared.linear(root) else {
+                    panic!("recovered affine terms were not reused")
+                };
+                assert!(Arc::ptr_eq(&recovered, &repeated));
+            }
+            assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    #[test]
+    fn direct_affine_borrows_and_uncached_compounds_still_extract() {
+        use oximo_expr::{UnaryOp, VarId};
+        let mut arena = ExprArena::new();
+        let affine = arena.linear(vec![(VarId(0), 2.0)], 3.0);
+        let negated = arena.push(ExprNode::Unary(UnaryOp::Neg, affine));
+        let prepared = PreparedExpressions::for_preparation(arena);
+        let terms = prepared.linear(affine).unwrap();
+        let ExprNode::Linear { coeffs, .. } = prepared.arena.get(affine) else {
+            panic!("direct affine node")
+        };
+        assert!(matches!(terms, AffineTerms::Borrowed(_)));
+        assert!(std::ptr::eq(terms.coeffs.as_ptr(), coeffs.as_ptr()));
+        assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 0);
+        assert_eq!(prepared.quadratic_analysis_stats().roots, 0);
+
+        let terms = prepared.linear(negated).unwrap();
+        assert_eq!(terms.coeffs.as_ref(), &[(VarId(0), -2.0)]);
+        assert_eq!(terms.constant, -3.0);
+        assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 1);
+        assert_eq!(prepared.quadratic_analysis_stats().attempts, 0);
+        assert!(prepared.quadratic.shards.get().is_none());
+    }
+
+    #[test]
+    fn cached_polynomial_failures_preserve_affine_and_nonlinear_fallback() {
+        use oximo_expr::{UnaryOp, VarId};
+        let mut arena = ExprArena::new();
+        let var = arena.var(VarId(0));
+        let two = arena.push(ExprNode::Const(2.0));
+        let three = arena.push(ExprNode::Const(3.0));
+        let cube = arena.push(ExprNode::Pow(two, three));
+        let affine = arena.push(ExprNode::Add(vec![var, cube].into()));
+        let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, var));
+        for root in [affine, nonlinear] {
+            for prepared in polynomial_caches(&arena, root) {
+                assert!(prepared.quadratic(root).is_none());
+                let terms = prepared.linear(root);
+                if root == affine {
+                    let terms = terms.unwrap();
+                    assert_eq!(terms.coeffs.as_ref(), &[(VarId(0), 1.0)]);
+                    assert_eq!(terms.constant, 8.0);
+                } else {
+                    assert!(terms.is_none());
+                    assert!(prepared.quadratic_once(root).is_none());
+                }
+                assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "exact zero controls polynomial affinity")]
+    fn parameter_changes_refresh_cached_polynomial_affinity() {
+        use crate::resident::PersistentPreparation;
+        use oximo_core::prelude::*;
+
+        let model = Model::new("cached numeric affinity");
+        variable!(model, x);
+        param!(model, p = 1.0);
+        let root = p * x * x + 3.0 * x + p;
+        objective!(model, Min, root);
+
+        let mut persistent = PersistentPreparation::default();
+        for value in [1.0, 0.0, 1e-100, 2.0, 0.0] {
+            model.set_param(p, value).unwrap();
+            let fresh = LoweringContext::new(&model).unwrap();
+            let resident = persistent.prepare(&model).unwrap();
+            for prepared in [&*fresh, &*resident] {
+                if value == 0.0 {
+                    assert!(prepared.linear(root.id()).is_none());
+                    assert!(prepared.linear(root.id()).is_none());
+                }
+                let attempts = prepared.affine_extractions.load(Ordering::Relaxed);
+                let quadratic = prepared.quadratic(root.id()).unwrap();
+                let affine = prepared.linear(root.id());
+                if value == 0.0 {
+                    assert_eq!(quadratic.hessian.len(), 0);
+                    let affine = affine.unwrap();
+                    assert_eq!(affine.coeffs.as_ref(), &[(x.var_id().unwrap(), 3.0)]);
+                    assert_eq!(affine.constant, value);
+                    if prepared.resident.as_ref().is_none_or(|cache| cache.admits(root.id())) {
+                        let AffineTerms::Shared(recovered) = affine else {
+                            panic!("recovered affine terms were not cached")
+                        };
+                        let Some(AffineTerms::Shared(repeated)) = prepared.linear(root.id()) else {
+                            panic!("recovered affine terms were not reused")
+                        };
+                        assert!(Arc::ptr_eq(&recovered, &repeated));
+                    }
+                } else {
+                    assert!(affine.is_none());
+                    assert_eq!(quadratic.hessian[0].2, 2.0 * value);
+                }
+                assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), attempts);
+            }
+            drop(resident);
+            persistent.commit();
+
+            let unchanged = persistent.prepare(&model).unwrap();
+            if value != 1.0 {
+                assert!(unchanged.resident.as_ref().unwrap().admits(root.id()));
+                assert_eq!(unchanged.linear(root.id()).is_some(), value == 0.0);
+                assert_eq!(unchanged.affine_extractions.load(Ordering::Relaxed), 0);
+                assert_eq!(unchanged.quadratic_analysis_stats().attempts, 0);
+            }
+
+            drop(unchanged);
+            persistent.commit();
+        }
+    }
 
     #[test]
     fn classification_matching_and_translation_share_one_snapshot_extraction() {
@@ -777,6 +1058,7 @@ mod tests {
     fn unique_roots_do_not_allocate_cache_entries() {
         let cache = ExtractionCache::default();
         for index in 0..1000 {
+            assert!(cache.lookup(ExprId(index)).is_none());
             assert!(matches!(
                 cache.extract(ExprId(index), || Some(vec![1]), Vec::len),
                 Some(Extracted::Owned(_))
@@ -814,6 +1096,39 @@ mod tests {
         assert!(shards
             .iter()
             .all(|s| s.entries.lock().unwrap().values.len() <= CACHE_EXPRESSIONS / CACHE_SHARDS));
+    }
+
+    #[test]
+    fn recovered_cache_entries_respect_budgets_and_reuse_publication() {
+        let cache = ExtractionCache::default();
+        let roots: Vec<_> = (0u32..1000)
+            .filter(|id| id.wrapping_mul(0x9e37_79b9) >> 28 == 0)
+            .take(CACHE_EXPRESSIONS / CACHE_SHARDS)
+            .map(ExprId)
+            .collect();
+        for &root in &roots {
+            for _ in 0..2 {
+                assert!(cache.extract(root, || None, Vec::<u8>::len).is_none());
+            }
+        }
+        for root in roots {
+            let Some(Extracted::Shared(recovered)) =
+                cache.publish(root, Some(vec![1; 128]), Vec::len)
+            else {
+                panic!("recovered terms were not cached")
+            };
+            let Some(Extracted::Shared(repeated)) =
+                cache.extract(root, || panic!("recovered terms were re-extracted"), Vec::len)
+            else {
+                panic!("recovered terms were not reused")
+            };
+            assert!(Arc::ptr_eq(&recovered, &repeated));
+            let entries = cache.shards.get().unwrap()[0].entries.lock().unwrap();
+            assert_eq!(entries.values.len(), entries.order.len());
+            assert!(entries.values.len() <= CACHE_EXPRESSIONS / CACHE_SHARDS);
+            assert_eq!(entries.coefficients, entries.order.iter().map(|&(_, size)| size).sum());
+            assert!(entries.coefficients <= CACHE_COEFFICIENTS / CACHE_SHARDS);
+        }
     }
 
     #[test]

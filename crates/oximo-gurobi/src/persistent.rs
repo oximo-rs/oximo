@@ -1,14 +1,14 @@
 use gurobi_rs::prelude::*;
 use oximo_core::{Model, ModelKind};
 use oximo_solver::incremental::{refresh_snapshot, snapshot_prepared};
-use oximo_solver::prepare::LoweringContext;
 use oximo_solver::resident::{PersistentPreparation, PreparationChange};
 use oximo_solver::{Iis, Snapshot, Solver, SolverError, SolverResult};
 
 use crate::GurobiOptions;
 use crate::options::apply as apply_options;
 use crate::translate::{
-    Built, build_prepared, compute_iis_resident, default_env, map_gurobi_err, run_and_collect,
+    Built, ValidatedPreparation, build_validated, compute_iis_resident, default_env,
+    map_gurobi_err, run_and_collect, validate_declarations, validate_prepared,
 };
 use crate::{Callback, CallbackMask};
 
@@ -96,26 +96,24 @@ impl GurobiPersistent {
     fn rebuild(
         &mut self,
         model: &Model,
-        prepared: &LoweringContext<'_>,
+        validated: ValidatedPreparation<'_, '_>,
         opts: &GurobiOptions,
     ) -> Result<(), SolverError> {
-        if model.has_active_psd_constraints() {
-            return Err(SolverError::UnsupportedConstraint("PSD"));
-        }
         let env = match self.env.as_ref() {
             Some(env) => env,
             None => self.env.insert(default_env()?),
         };
-        let built = build_prepared(model, opts, env, prepared)?;
         // The fast path needs a linear snapshot and is unsafe for SC/SI variables
         // (whose Gurobi lower bound is the gap floor, not `Variable::lb`), so
         // those rebuild every solve.
-        let snap = if matches!(prepared.kind(), ModelKind::LP | ModelKind::MILP) && !built.has_semi
+        let snap = if matches!(validated.kind(), ModelKind::LP | ModelKind::MILP)
+            && !validated.variables().iter().any(|v| v.domain.semi_threshold().is_some())
         {
-            Some(snapshot_prepared(model, prepared)?)
+            Some(snapshot_prepared(model, &validated)?)
         } else {
             None
         };
+        let built = build_validated(model, opts, env, validated, true)?;
         self.state = Some(State { built, snap });
         self.callback_state = false;
         Ok(())
@@ -138,10 +136,9 @@ impl GurobiPersistent {
         model: &Model,
         opts: &GurobiOptions,
     ) -> Result<ModelKind, SolverError> {
-        if model.has_active_psd_constraints() {
-            return Err(SolverError::UnsupportedConstraint("PSD"));
-        }
+        validate_declarations(model)?;
         let prepared = self.preparation.prepare(model)?;
+        let validated = validate_prepared(model, &prepared)?;
         let kind = prepared.kind();
         let callback_rebuild = self.callback_state
             && !matches!(self.preparation.change(), PreparationChange::Unchanged);
@@ -185,7 +182,7 @@ impl GurobiPersistent {
             }
         }
         if !updated {
-            self.rebuild(model, &prepared, opts)?;
+            self.rebuild(model, validated, opts)?;
         }
         #[cfg(test)]
         if updated {
@@ -225,8 +222,6 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
-        self.profile(opts).check_model(model).into_result()?;
-
         match self.solve_resident_with_callback(model, opts, callback, None) {
             Ok(result) => {
                 self.preparation.commit();
@@ -255,8 +250,6 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
-        self.profile(opts).check_model(model).into_result()?;
-
         match self.solve_resident_with_callback(model, opts, callback, Some(locations.into())) {
             Ok(result) => {
                 self.preparation.commit();
@@ -290,8 +283,6 @@ impl Solver for GurobiPersistent {
     }
 
     fn solve(&mut self, model: &Model, opts: &GurobiOptions) -> Result<SolverResult, SolverError> {
-        self.profile(opts).check_model(model).into_result()?;
-
         // A mid-update failure (a failed rebuild, a partial delta push, or a solve
         // error) can leave the resident model partially modified or its snapshot
         // stale. Drop the resident state on any error so the next solve rebuilds from
@@ -319,25 +310,22 @@ fn push_deltas(
     snap: &Snapshot,
     opts: &GurobiOptions,
 ) -> Result<(), SolverError> {
-    for i in 0..built.vars.len() {
-        if snap.obj_costs[i].to_bits() != base.obj_costs[i].to_bits() {
-            built
-                .model
-                .set_obj_attr(attr::Obj, &built.vars[i], snap.obj_costs[i])
-                .map_err(map_gurobi_err)?;
-        }
-        if snap.lb[i].to_bits() != base.lb[i].to_bits() {
-            built
-                .model
-                .set_obj_attr(attr::LB, &built.vars[i], snap.lb[i])
-                .map_err(map_gurobi_err)?;
-        }
-        if snap.ub[i].to_bits() != base.ub[i].to_bits() {
-            built
-                .model
-                .set_obj_attr(attr::UB, &built.vars[i], snap.ub[i])
-                .map_err(map_gurobi_err)?;
-        }
+    for (attribute, old, new) in [
+        (attr::Obj, &base.obj_costs, &snap.obj_costs),
+        (attr::LB, &base.lb, &snap.lb),
+        (attr::UB, &base.ub, &snap.ub),
+    ] {
+        built
+            .model
+            .set_obj_attr_batch(
+                attribute,
+                built.vars.iter().copied().zip(old.iter().zip(new)).filter_map(
+                    |(variable, (&old, &new))| {
+                        (old.to_bits() != new.to_bits()).then_some((variable, new))
+                    },
+                ),
+            )
+            .map_err(map_gurobi_err)?;
     }
     if snap.obj_constant.to_bits() != base.obj_constant.to_bits() {
         built.model.set_attr(attr::ObjCon, snap.obj_constant).map_err(map_gurobi_err)?;
@@ -348,8 +336,9 @@ fn push_deltas(
 
 #[cfg(test)]
 mod tests {
+    use gurobi_rs::attr;
     use oximo_core::prelude::*;
-    use oximo_solver::{PersistentSolver, Solver};
+    use oximo_solver::{PersistentSolver, Solver, UniversalOptionsExt};
 
     use crate::{Gurobi, GurobiOptions};
 
@@ -437,6 +426,37 @@ mod tests {
         for point in &fourth.solutions {
             assert_eq!(point.parameters.values().as_ptr(), fourth.parameters.values().as_ptr());
         }
+    }
+
+    #[test]
+    fn fast_path_batches_changed_costs_and_bounds_including_zero_costs() {
+        let first = Model::new("linear data");
+        let x1 = first.__var("x").lb(0.0).ub(4.0).build();
+        let y1 = first.__var("y").lb(-2.0).ub(2.0).build();
+        objective!(first, Max, 2.0 * x1 + y1 + 3.0);
+
+        let second = Model::new("linear data");
+        let x2 = second.__var("x").lb(1.0).ub(3.0).build();
+        let y2 = second.__var("y").lb(0.0).ub(1.0).build();
+        objective!(second, Max, 0.0 * x2 + 3.0 * y2 + 5.0);
+
+        let mut solver = Gurobi.persistent();
+        let options = GurobiOptions::default().verbose(false);
+        let result = solver.solve(&first, &options).unwrap();
+        assert!((result.objective().unwrap() - 13.0).abs() < 1e-9);
+
+        let result = solver.solve(&second, &options).unwrap();
+        assert_eq!(solver.updates, 1, "compatible numeric changes reuse the native model");
+        assert!((result.objective().unwrap() - 8.0).abs() < 1e-9);
+
+        let built = &solver.state.as_ref().unwrap().built;
+        assert_eq!(built.model.get_obj_attr(attr::Obj, &built.vars[0]).unwrap(), 0.0);
+        assert_eq!(built.model.get_obj_attr(attr::Obj, &built.vars[1]).unwrap(), 3.0);
+        assert_eq!(built.model.get_obj_attr(attr::LB, &built.vars[0]).unwrap(), 1.0);
+        assert_eq!(built.model.get_obj_attr(attr::UB, &built.vars[0]).unwrap(), 3.0);
+        assert_eq!(built.model.get_obj_attr(attr::LB, &built.vars[1]).unwrap(), 0.0);
+        assert_eq!(built.model.get_obj_attr(attr::UB, &built.vars[1]).unwrap(), 1.0);
+        assert_eq!(built.model.get_attr(attr::ObjCon).unwrap(), 5.0);
     }
 
     #[test]

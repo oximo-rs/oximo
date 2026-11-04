@@ -1482,18 +1482,18 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "guro-sys"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c719ae97ba5186df64e76974ba3ad4d88e4c39f03495bba2871738d9f94a9003"
+checksum = "87a33d4aed4947748bf15be43cf83cf8e02765cff294b1aef4d52795277ce18f"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "gurobi-macro"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9290ea816ed945a7da7b718e7067a845ccaae72237af887c9b977be0fc0f2453"
+checksum = "56cfc181511ccad410975a0ea1cb984d9a7d1da994bb768315c56411e4d2dd24"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1502,9 +1502,9 @@ dependencies = [
 
 [[package]]
 name = "gurobi-rs"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d89767c1c0886f862279124247369d5275fd650a623c98dcc2fab4eb3975657"
+checksum = "d02b8ca461c6d55880a8c849c2b1a54db6bf6b7dc8d4c65a87480d7a99a651ec"
 dependencies = [
  "anyhow",
  "cfg-if",
