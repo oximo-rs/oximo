@@ -1,4 +1,4 @@
-//! Solver-independent model views.
+//! Solver-independent model snapshots and cached expression extraction.
 
 use std::cell::Ref;
 use std::collections::VecDeque;
@@ -17,10 +17,16 @@ use rustc_hash::FxHashMap;
 
 use crate::SolverError;
 
+mod workset;
+
+#[cfg(test)]
+pub use workset::QuadraticAnalysisStats;
+use workset::QuadraticWorkset;
+
 /// Affine coefficients borrowed from the arena or shared with the preparation cache.
 #[derive(Clone, Debug)]
 pub enum AffineTerms<'a> {
-    /// Direct terms, were the inner `Cow` borrows affine nodes or owns uncached folds.
+    /// Borrowed affine nodes or owned, uncached terms.
     Borrowed(LinearTerms<'a>),
     Shared(Arc<LinearTerms<'static>>),
 }
@@ -37,6 +43,7 @@ impl<'a> Deref for AffineTerms<'a> {
 }
 
 impl AffineTerms<'_> {
+    /// Take ownership, cloning shared terms only when needed.
     #[inline]
     pub fn into_owned(self) -> LinearTerms<'static> {
         match self {
@@ -46,7 +53,7 @@ impl AffineTerms<'_> {
     }
 }
 
-/// A one-use decomposition, or a shared decomposition after observed reuse.
+/// An owned decomposition, or immutable terms shared within a preparation.
 #[derive(Clone, Debug)]
 pub enum Extracted<T> {
     Owned(T),
@@ -71,14 +78,11 @@ impl<T> Deref for Extracted<T> {
     }
 }
 
-/// One solve's immutable model metadata and lazy expression decompositions.
-///
-/// Original IDs, expressions, bounds and activity flags are retained.
-/// Native ordering, capability checks and generated entities belong to
-/// the adapter. Create a fresh preparation after model or parameter changes.
-/// Resident solver handles should retain their native state, not this borrowed view.
+/// Model metadata and expression analysis for one solve.
+/// Recreate after model or parameter changes. Adapters own native solver state.
 #[derive(Debug)]
 pub struct LoweringContext<'a> {
+    key: oximo_core::model::ModelUpdateKey,
     expressions: PreparedExpressions,
     variables: PreparedVariables,
     constraints: ModelConstraints<'a>,
@@ -103,21 +107,16 @@ impl Deref for PreparedVariables {
     }
 }
 
-/// A shareable arena snapshot and bounded, reuse-admitted extraction caches.
-/// Each cache has 16 independent shards, each retaining at most 16 expressions
-/// and 1,024 coefficient entries, evicting in insertion order. Before cache
-/// initialization, first encounters return owned terms without locking or
-/// allocating cache storage. Only repeated roots are admitted. A small
-/// direct-mapped history recognizes reuse across interleaved roots, and
-/// collisions may delay admission. Once initialized, cached entries are
-/// always checked independently of admission history.
-/// Larger decompositions are returned uncached.
+/// An arena snapshot with bounded extraction caches and optional resident reuse.
+/// Preparations also share quadratic analysis from the first extraction.
 #[derive(Debug)]
 pub struct PreparedExpressions {
     arena: ExprArena,
     linear: ExtractionCache<LinearTerms<'static>>,
     quadratic: ExtractionCache<QuadraticTerms>,
     resident: Option<Arc<crate::resident::ResidentExpressions>>,
+    workset: Option<QuadraticWorkset>,
+    operators: OnceLock<Arc<crate::requirements::OperatorSummaries>>,
 }
 
 const CACHE_EXPRESSIONS: usize = 256;
@@ -228,18 +227,25 @@ impl<T> CacheShard<T> {
 }
 
 impl<'a> LoweringContext<'a> {
-    /// Validate the objective declaration and capture the current parameter values.
+    /// Validate declarations, snapshot values, and classify the model using shared analysis.
     ///
     /// # Errors
-    /// Returns a core error if neither an objective nor feasibility was declared.
+    /// Returns a core error for unreformulated GDP or a missing objective declaration.
     pub fn new(model: &'a Model) -> Result<Self, SolverError> {
         model.ensure_gdp_reformulated()?;
         model.ensure_objective_declared()?;
         let arena = model.arena();
         let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
-        let kind = model.__kind_at(&arena, &variables);
+        let expressions = PreparedExpressions::for_preparation((*arena).clone());
+
+        // Share classification results with compatibility checks and lowering.
+        let kind = model.__kind_with_quadratic_at(expressions.arena(), &variables, &|root| {
+            expressions.quadratic(root)
+        });
+
         Ok(Self {
-            expressions: PreparedExpressions::new((*arena).clone()),
+            key: model.__update_key(),
+            expressions,
             variables: PreparedVariables::Owned(variables),
             constraints: model.constraints(),
             objective: model.objective(),
@@ -248,16 +254,15 @@ impl<'a> LoweringContext<'a> {
         })
     }
 
+    /// Combine resident expression analysis and resolved variables with model metadata.
     pub(crate) fn resident(
         model: &'a Model,
-        arena: ExprArena,
+        expressions: PreparedExpressions,
         variables: Arc<Vec<ResolvedVariable>>,
         kind: ModelKind,
-        cache: Arc<crate::resident::ResidentExpressions>,
     ) -> Self {
-        let mut expressions = PreparedExpressions::new(arena);
-        expressions.resident = Some(cache);
         Self {
+            key: model.__update_key(),
             expressions,
             variables: PreparedVariables::Shared(variables),
             constraints: model.constraints(),
@@ -267,14 +272,26 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
+    /// Reject a different model or changed model state or parameter values.
+    pub(crate) fn ensure_matches(&self, model: &Model) -> Result<(), SolverError> {
+        if self.key != model.__update_key()
+            || !self.arena().parameter_snapshot().same_bits(&model.arena().parameter_snapshot())
+        {
+            return Err(SolverError::Backend(
+                "prepared context no longer matches model state".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn semantic_constraints(&self) -> &oximo_core::SemanticConstraints<'a> {
         &self.semantic
     }
 
-    /// Extract an active PSD matrix in ordinary upper-column coordinates.
+    /// Extract finite affine PSD entries in upper-column order.
     ///
     /// # Errors
-    /// Returns an expression error if an entry is not affine at current parameter values.
+    /// Returns an error for non-affine or nonfinite entries.
     pub fn explicit_psd(
         &self,
         psd: &oximo_core::PsdConstraint,
@@ -342,11 +359,7 @@ impl<'a> LoweringContext<'a> {
         self.linear(expr).ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
-    /// Require an affine expression for a one-use streaming consumer.
-    ///
-    /// This bypasses reuse admission and returns the expression crate's native
-    /// borrowed/owned representation. Prefer [`Self::require_linear`] when the
-    /// same root is likely to be requested again during this preparation.
+    /// Borrow direct affine terms; otherwise reuse resident terms or extract uncached.
     ///
     /// # Errors
     /// Returns a lazily named nonlinear-expression error when extraction fails.
@@ -379,9 +392,7 @@ impl<'a> LoweringContext<'a> {
         self.quadratic(expr).ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
-    /// Require a polynomial while retaining the direct-affine borrowed path.
-    /// Non-direct nodes are traversed once as quadratics, avoiding a failed
-    /// affine pass before quadratic/SOC handling.
+    /// Borrow direct affine terms or extract a polynomial of degree at most two.
     ///
     /// # Errors
     /// Returns a lazily named nonlinear-expression error when extraction fails.
@@ -398,21 +409,19 @@ impl<'a> LoweringContext<'a> {
             .ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
-    /// An optional alternative, never a replacement for the original row.
+    /// Detect a cone representation of the row using shared quadratic analysis.
     pub fn detected_soc(&self, row: &AlgebraicConstraint) -> Option<SocForm> {
         self.expressions.detected_soc(self.variables(), row)
     }
 }
 
-/// Bounds for a polynomial body with its constant removed. No row is dropped,
-/// split, relaxed or reclassified as feasible/infeasible by this operation.
+/// Subtract the body's constant from both row bounds.
 #[inline]
 pub fn shifted_bounds(row: &AlgebraicConstraint, constant: f64) -> (f64, f64) {
     (row.lower - constant, row.upper - constant)
 }
 
-/// Optional single-sided view, in lower/upper order for a range. Free rows
-/// produce no sides. The caller owns native row ordering and provenance.
+/// Return single-sided bounds, lower first for ranges; free rows have no sides.
 #[inline]
 pub fn row_sides(row: &AlgebraicConstraint) -> [Option<(Sense, f64)>; 2] {
     match row.as_single() {
@@ -439,19 +448,73 @@ impl Deref for PreparedExpressions {
 }
 
 impl PreparedExpressions {
+    /// Wrap an arena with empty reuse-admitted caches.
     pub fn new(arena: ExprArena) -> Self {
         Self {
             arena,
             linear: ExtractionCache::default(),
             quadratic: ExtractionCache::default(),
             resident: None,
+            workset: None,
+            operators: OnceLock::new(),
         }
+    }
+
+    /// Enable cached classification and shared quadratic analysis for a solve.
+    pub(crate) fn for_preparation(arena: ExprArena) -> Self {
+        arena.__enable_preparation_classifications();
+        Self { workset: Some(QuadraticWorkset::default()), ..Self::new(arena) }
+    }
+
+    /// Attach the resident cache for reuse across solves.
+    pub(crate) fn with_resident(
+        mut self,
+        cache: Arc<crate::resident::ResidentExpressions>,
+    ) -> Self {
+        self.resident = Some(cache);
+        self
+    }
+
+    #[cfg(test)]
+    /// Return quadratic analysis counters, or zeros without a workset.
+    pub fn quadratic_analysis_stats(&self) -> QuadraticAnalysisStats {
+        self.workset.as_ref().map_or_else(QuadraticAnalysisStats::default, QuadraticWorkset::stats)
     }
     pub fn arena(&self) -> &ExprArena {
         &self.arena
     }
-    /// Direct affine nodes retain their zero-copy path. Reused compound roots
-    /// may be cached, including failed extractions, within this snapshot's budget.
+
+    /// Retain the first operator summaries supplied by requirement inference.
+    pub(crate) fn set_operator_summaries(
+        &self,
+        summaries: Arc<crate::requirements::OperatorSummaries>,
+    ) {
+        // Compact and detailed checks prove the same operator facts.
+        let _ = self.operators.set(summaries);
+    }
+
+    /// Check for sums, products, negation, and constant powers only, regardless of degree.
+    /// Compound roots without inferred summaries return false.
+    ///
+    /// # Panics
+    /// Panics for a root outside this arena.
+    pub fn has_only_polynomial_operators(&self, root: ExprId) -> bool {
+        if matches!(
+            self.arena.get(root),
+            ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
+        ) {
+            return true;
+        }
+        const MASK: u64 = crate::ExpressionOperator::Add.bit()
+            | crate::ExpressionOperator::Multiply.bit()
+            | crate::ExpressionOperator::Unary(oximo_expr::UnaryOp::Neg).bit()
+            | crate::ExpressionOperator::ConstantPower.bit();
+        self.operators
+            .get()
+            .and_then(|summaries| summaries.get(root))
+            .is_some_and(|operators| operators & !MASK == 0)
+    }
+    /// Borrow direct affine terms or extract through the resident or reuse-admitted cache.
     ///
     /// # Panics
     /// Panics for an expression outside this arena or a poisoned cache.
@@ -487,25 +550,67 @@ impl PreparedExpressions {
             })
     }
 
-    /// Extract a quadratic polynomial, sharing terms only after observed reuse.
+    /// Extract a polynomial of degree at most two, reusing cached results and failures.
+    /// Preparations cache first results within budget. Standalone caches require reuse.
     ///
     /// # Panics
     /// Panics for an expression outside this arena or a poisoned cache.
     pub fn quadratic(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let Some(workset) = &self.workset {
+            if let Some(cache) = &self.resident
+                && cache.admits(expr)
+                && let Some(value) =
+                    cache.quadratic.lock().expect("resident cache poisoned").get(&expr)
+            {
+                return value.clone().map(Extracted::Shared);
+            }
+            return workset.extract(expr, || {
+                if let Some(cache) = &self.resident
+                    && cache.admits(expr)
+                {
+                    resident_extract(&cache.quadratic, expr, || {
+                        extract_quadratic(&self.arena, expr)
+                    })
+                } else {
+                    extract_quadratic(&self.arena, expr).map(Arc::new)
+                }
+            });
+        }
+        self.quadratic_unregistered(expr)
+    }
+
+    /// Reuse registered quadratic analysis or extract without registering the root.
+    #[doc(hidden)]
+    pub fn quadratic_once(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let Some(workset) = &self.workset {
+            match workset.lookup(expr) {
+                workset::Lookup::Ready(value) => return value,
+                workset::Lookup::Retry => return self.quadratic(expr),
+                workset::Lookup::Missing => {}
+            }
+        }
+        if oximo_expr::classify(&self.arena, expr) == oximo_expr::ExprClass::Nonlinear {
+            return None;
+        }
+        self.quadratic_unregistered(expr)
+    }
+
+    /// Extract through resident or reuse-admitted caches without registering analysis.
+    fn quadratic_unregistered(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        let extract = || {
+            #[cfg(test)]
+            if let Some(workset) = &self.workset {
+                workset.record_streamed_attempt();
+            }
+            extract_quadratic(&self.arena, expr)
+        };
         if let Some(cache) = &self.resident {
             if !cache.admits(expr) {
-                return extract_quadratic(&self.arena, expr).map(Extracted::Owned);
+                return extract().map(Extracted::Owned);
             }
-            return resident_extract(&cache.quadratic, expr, || {
-                extract_quadratic(&self.arena, expr)
-            })
-            .map(Extracted::Shared);
+            return resident_extract(&cache.quadratic, expr, extract).map(Extracted::Shared);
         }
-        self.quadratic.extract(
-            expr,
-            || extract_quadratic(&self.arena, expr),
-            |t| t.linear.len() + t.hessian.len(),
-        )
+        self.quadratic.extract(expr, extract, |t| t.linear.len() + t.hessian.len())
     }
 
     /// Detect an optional cone representation using cached polynomial terms.
@@ -518,7 +623,7 @@ impl PreparedExpressions {
         oximo_core::__detect_soc_from_quadratic(variables, row, &q)
     }
 
-    /// Extract an explicit cone in one streaming pass over its affine members.
+    /// Extract owned affine terms for an explicit cone, reusing cached terms.
     ///
     /// # Errors
     /// Returns a backend error for invalid affine cone members.
@@ -554,6 +659,94 @@ fn resident_extract<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classification_matching_and_translation_share_one_snapshot_extraction() {
+        use oximo_core::prelude::*;
+        let model = Model::new("shared analysis");
+        variable!(model, x >= 0.0);
+        variable!(model, t >= 0.0);
+        param!(model, p = 1.0);
+        let root = p * x * x - t * t;
+        constraint!(model, cone, root <= 0.0);
+        objective!(model, Min, t);
+
+        let prepared = LoweringContext::new(&model).unwrap();
+        assert_eq!(prepared.kind(), ModelKind::SOCP);
+
+        let expected = crate::ModelRequirements::infer(&model);
+        let profile = crate::SolverProfile::new("unsupported");
+        let prepared_report = profile.check_prepared(&model, &prepared).unwrap();
+        let standalone_report = profile.check(&expected);
+        assert_eq!(format!("{prepared_report:?}"), format!("{standalone_report:?}"));
+        assert!(prepared.quadratic_once(root.id()).is_some());
+
+        let stats = prepared.quadratic_analysis_stats();
+        assert_eq!(
+            (stats.attempts, stats.roots, stats.re_extractions, stats.bypasses),
+            (1, 1, 0, 0)
+        );
+        model.set_param(p, 0.0).unwrap();
+        assert!(profile.check_prepared(&model, &prepared).is_err());
+        assert_eq!(prepared.quadratic(root.id()).unwrap().hessian.len(), 2);
+
+        drop(prepared);
+        let prepared = LoweringContext::new(&model).unwrap();
+        assert_eq!(prepared.kind(), ModelKind::QCP);
+        assert_eq!(prepared.quadratic(root.id()).unwrap().hessian.len(), 1);
+        assert_eq!(prepared.quadratic_analysis_stats().attempts, 1);
+    }
+
+    #[test]
+    fn nonlinear_translation_roots_skip_speculative_coefficient_folds() {
+        use oximo_core::prelude::*;
+        let model = Model::new("streamed nonlinear failure");
+        variable!(model, x);
+        objective!(model, Min, x * x + x.sin());
+
+        let prepared = LoweringContext::new(&model).unwrap();
+        let root = prepared.objective().unwrap().expr;
+        assert!(prepared.quadratic_once(root).is_none());
+
+        let stats = prepared.quadratic_analysis_stats();
+        assert_eq!((stats.attempts, stats.roots, stats.streamed_attempts), (0, 0, 0));
+        assert_eq!(stats.retained_bytes, 0);
+        assert!(prepared.quadratic(root).is_none());
+        assert_eq!(prepared.quadratic_analysis_stats().attempts, 1);
+        assert!(prepared.quadratic_once(root).is_none());
+        assert_eq!(prepared.quadratic_analysis_stats().attempts, 1);
+    }
+
+    #[test]
+    fn bounds_activity_and_objectives_are_reclassified_without_cross_model_reuse() {
+        use oximo_core::prelude::*;
+        let model = Model::new("snapshot validity");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        let row = constraint!(model, cone, x * x <= t * t);
+        objective!(model, Min, t);
+        assert_eq!(LoweringContext::new(&model).unwrap().kind(), ModelKind::SOCP);
+
+        model.set_bounds(t, -1.0, 2.0).unwrap();
+        assert_eq!(LoweringContext::new(&model).unwrap().kind(), ModelKind::QCP);
+
+        model.set_constraint_active(row, false).unwrap();
+        assert_eq!(LoweringContext::new(&model).unwrap().kind(), ModelKind::LP);
+
+        objective!(model, Min, x * x);
+        assert_eq!(LoweringContext::new(&model).unwrap().kind(), ModelKind::QP);
+
+        let other = Model::new("another snapshot");
+        let y = other.__var("y").integer().build();
+        objective!(other, Min, y * y + 7.0);
+
+        let prepared = LoweringContext::new(&other).unwrap();
+        assert_eq!(prepared.kind(), ModelKind::MIQP);
+        assert!(prepared.ensure_matches(&model).is_err());
+
+        let root = other.objective().as_ref().unwrap().expr;
+        assert_eq!(prepared.quadratic(root).unwrap().constant, 7.0);
+    }
 
     #[test]
     fn interleaved_roots_are_admitted_and_cached_hits_ignore_history() {

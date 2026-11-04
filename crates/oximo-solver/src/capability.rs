@@ -374,10 +374,43 @@ impl SolverProfile {
         self.check_with_origins(model, &requirements)
     }
 
+    /// Match the same requirements and retain the same diagnostic origins using
+    /// a preparation's captured numeric analysis. Reject stale or foreign views.
+    ///
+    /// # Errors
+    /// Returns an error when the preparation no longer describes this model.
+    #[doc(hidden)]
+    pub fn check_prepared(
+        &self,
+        model: &oximo_core::Model,
+        prepared: &crate::prepare::LoweringContext<'_>,
+    ) -> Result<CompatibilityReport, crate::SolverError> {
+        prepared.ensure_matches(model)?;
+        let requirements = crate::requirements::for_prepared(model, prepared, false);
+        let report = self.check_with_prepared_origins(model, &requirements, Some(prepared));
+        prepared.ensure_matches(model)?;
+        Ok(report)
+    }
+
     pub(crate) fn check_with_origins(
         &self,
         model: &oximo_core::Model,
         requirements: &ModelRequirements,
+    ) -> CompatibilityReport {
+        self.check_with_prepared_origins(model, requirements, None)
+    }
+
+    /// Check requirements and ensure errors and conditions identify their model sources.
+    ///
+    /// Return the initial report when every diagnostic already has origins with
+    /// nonempty locations. Otherwise, rebuild requirements with source names and
+    /// check again, reusing captured analysis from `prepared` when supplied or
+    /// reading the current model when it is absent.
+    fn check_with_prepared_origins(
+        &self,
+        model: &oximo_core::Model,
+        requirements: &ModelRequirements,
+        prepared: Option<&crate::prepare::LoweringContext<'_>>,
     ) -> CompatibilityReport {
         let report = self.check(requirements);
         if report.errors.iter().chain(&report.conditions).all(|diagnostic| {
@@ -387,7 +420,10 @@ impl SolverProfile {
             report
         } else {
             // Materialize source names only when we need them.
-            self.check(&crate::requirements::for_validation(model))
+            self.check(&prepared.map_or_else(
+                || crate::requirements::for_validation(model),
+                |p| crate::requirements::for_prepared(model, p, true),
+            ))
         }
     }
 

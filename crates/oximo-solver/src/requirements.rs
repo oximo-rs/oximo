@@ -4,7 +4,7 @@ use oximo_core::{
     Domain, FunctionRepresentationRef, Model, ModelKind, ObjectiveSense, SemanticConstraintId,
     SemanticType, SosType, VarId,
 };
-use oximo_expr::{ExprArena, ExprClass, ExprId, ExprNode, UnaryOp};
+use oximo_expr::{ExprArena, ExprClass, ExprId, ExprNode};
 
 use crate::capability::{ConstraintSignature, scalar_set, scalar_signature};
 
@@ -30,72 +30,7 @@ impl From<Domain> for VariableDomain {
     }
 }
 
-/// Expression vocabulary consumed by an adapter, before constant folding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExpressionOperator {
-    Unary(UnaryOp),
-    Add,
-    Multiply,
-    Divide,
-    ConstantPower,
-    VariablePower,
-    Atan2,
-    Min,
-    Max,
-}
-
-impl ExpressionOperator {
-    /// Complete public expression vocabulary.
-    pub const ALL: &'static [Self] = &[
-        Self::Unary(UnaryOp::Neg),
-        Self::Unary(UnaryOp::Abs),
-        Self::Unary(UnaryOp::Sqrt),
-        Self::Unary(UnaryOp::Cbrt),
-        Self::Unary(UnaryOp::Exp),
-        Self::Unary(UnaryOp::Exp2),
-        Self::Unary(UnaryOp::Expm1),
-        Self::Unary(UnaryOp::Log),
-        Self::Unary(UnaryOp::Log2),
-        Self::Unary(UnaryOp::Log10),
-        Self::Unary(UnaryOp::Log1p),
-        Self::Unary(UnaryOp::Sin),
-        Self::Unary(UnaryOp::Cos),
-        Self::Unary(UnaryOp::Tan),
-        Self::Unary(UnaryOp::Asin),
-        Self::Unary(UnaryOp::Acos),
-        Self::Unary(UnaryOp::Atan),
-        Self::Unary(UnaryOp::Sinh),
-        Self::Unary(UnaryOp::Cosh),
-        Self::Unary(UnaryOp::Tanh),
-        Self::Unary(UnaryOp::Asinh),
-        Self::Unary(UnaryOp::Acosh),
-        Self::Unary(UnaryOp::Atanh),
-        Self::Add,
-        Self::Multiply,
-        Self::Divide,
-        Self::ConstantPower,
-        Self::VariablePower,
-        Self::Atan2,
-        Self::Min,
-        Self::Max,
-    ];
-}
-
-impl std::fmt::Display for ExpressionOperator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unary(op) => write!(f, "{op}"),
-            Self::Add => f.write_str("add"),
-            Self::Multiply => f.write_str("multiply"),
-            Self::Divide => f.write_str("divide"),
-            Self::ConstantPower => f.write_str("constant-exponent pow"),
-            Self::VariablePower => f.write_str("variable-exponent pow"),
-            Self::Atan2 => f.write_str("atan2"),
-            Self::Min => f.write_str("min"),
-            Self::Max => f.write_str("max"),
-        }
-    }
-}
+pub use oximo_expr::ExpressionOperator;
 
 /// Facts retained in addition to the dominant model kind for combination checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,10 +126,14 @@ pub struct ModelRequirements {
 impl ModelRequirements {
     /// Inspect current active native views.
     pub fn infer(model: &Model) -> Self {
-        Self::infer_with_details(model, true).0
+        Self::infer_with_details(model, true, None).0
     }
 
-    fn infer_with_details(model: &Model, details: bool) -> (Self, RequirementFacts) {
+    fn infer_with_details(
+        model: &Model,
+        details: bool,
+        prepared: Option<&crate::prepare::LoweringContext<'_>>,
+    ) -> (Self, RequirementFacts, OperatorSummaries) {
         let mut result = Self::default();
 
         let model_origin = RequirementOrigin {
@@ -209,10 +148,21 @@ impl ModelRequirements {
             result.add([Requirement::GdpReformulated], model_origin.clone());
         }
 
-        let arena = model.arena();
-        let variables: Vec<_> = model.variables().iter().map(|v| v.resolved(&arena)).collect();
-        let mut expressions = ExpressionRequirements::default();
-        for variable in &variables {
+        let live_arena = model.arena();
+        let arena = prepared.map_or(&*live_arena, |p| p.arena());
+        let resolved;
+        let variables = if let Some(prepared) = prepared {
+            prepared.variables()
+        } else {
+            resolved = model.variables().iter().map(|v| v.resolved(arena)).collect::<Vec<_>>();
+            &resolved
+        };
+        let mut expressions = ExpressionRequirements {
+            polynomials: prepared.map(std::ops::Deref::deref),
+            ..ExpressionRequirements::default()
+        };
+
+        for variable in variables {
             result.add(
                 [Requirement::Domain(variable.domain.into())],
                 RequirementOrigin {
@@ -227,7 +177,7 @@ impl ModelRequirements {
             );
         }
 
-        result.infer_constraints(model, &arena, &variables, &mut expressions, details);
+        result.infer_constraints(model, arena, variables, &mut expressions, details);
         if let Some(objective) = model.semantic_objective().as_ref() {
             expressions.facts.uncacheable |= !builtin_scalar(objective.function.signature());
             let origin = RequirementOrigin {
@@ -242,7 +192,7 @@ impl ModelRequirements {
                 }];
             if let FunctionRepresentationRef::Scalar(root) = objective.function.representation() {
                 alternatives.push(Requirement::Objective {
-                    function: scalar_signature(oximo_expr::classify(&arena, root)),
+                    function: scalar_signature(oximo_expr::classify(arena, root)),
                     sense: objective.sense,
                 });
             }
@@ -250,16 +200,19 @@ impl ModelRequirements {
             result.add(alternatives, origin.clone());
             // Consume the native objective.
             if let Some(native) = model.objective().as_ref() {
-                expressions.collect(&arena, &[native.expr], &origin, &mut result);
+                expressions.collect(arena, &[native.expr], &origin, &mut result);
             }
         }
 
         let features = ModelFeatures {
-            kind: model.__kind_at(&arena, &variables),
+            kind: prepared.map_or_else(
+                || model.__kind_at(arena, variables),
+                crate::prepare::LoweringContext::kind,
+            ),
             objective_class: model
                 .objective()
                 .as_ref()
-                .map_or(ExprClass::Linear, |o| oximo_expr::classify(&arena, o.expr)),
+                .map_or(ExprClass::Linear, |o| oximo_expr::classify(arena, o.expr)),
             has_psd: model.has_active_psd_constraints(),
             has_explicit_soc: model.has_active_soc_constraints(),
             has_indicators: model.has_active_indicator_constraints(),
@@ -269,12 +222,12 @@ impl ModelRequirements {
                 .constraints()
                 .algebraic()
                 .iter()
-                .any(|r| r.active && oximo_expr::classify(&arena, r.lhs) != ExprClass::Linear),
+                .any(|r| r.active && oximo_expr::classify(arena, r.lhs) != ExprClass::Linear),
             has_variable_nonsmooth: expressions.nonsmooth,
         };
         result.add([Requirement::Combination(features)], model_origin);
-        expressions.capture_numeric_parameters(model, &arena);
-        (result, expressions.facts)
+        expressions.capture_numeric_parameters(model, arena);
+        (result, expressions.facts, expressions.operators)
     }
 
     fn infer_constraints(
@@ -400,8 +353,13 @@ impl ModelRequirements {
         {
             expressions.facts.parameter_sensitive = true;
             expressions.collect_numeric_parameters(arena, row.lhs);
-            if let Some(quadratic) = oximo_expr::extract_quadratic(arena, row.lhs)
-                && oximo_core::__is_detected_soc_from_quadratic(variables, row, &quadratic)
+            if let Some(quadratic) = expressions.polynomials.map_or_else(
+                || {
+                    oximo_expr::extract_quadratic(arena, row.lhs)
+                        .map(crate::prepare::Extracted::Owned)
+                },
+                |p| p.quadratic(row.lhs),
+            ) && oximo_core::__is_detected_soc_from_quadratic(variables, row, &quadratic)
             {
                 alternatives.push(Requirement::Constraint(ConstraintSignature::of::<
                     oximo_core::VectorAffineData,
@@ -493,9 +451,10 @@ const _: () = assert!(ExpressionOperator::ALL.len() <= u64::BITS as usize);
 
 /// Summaries cover only reachable compound nodes.
 #[derive(Default)]
-struct ExpressionRequirements {
-    summaries: rustc_hash::FxHashMap<ExprId, ExpressionSummary>,
-    stack: Vec<(ExprId, bool)>,
+struct ExpressionRequirements<'a> {
+    polynomials: Option<&'a crate::prepare::PreparedExpressions>,
+    analysis: oximo_expr::ExpressionAnalysis,
+    operators: OperatorSummaries,
     nonsmooth: bool,
     facts: RequirementFacts,
     last_flat_pair: Option<ConstraintSignature>,
@@ -504,19 +463,40 @@ struct ExpressionRequirements {
     numeric_stack: Vec<ExprId>,
 }
 
+/// Immutable after inference and shared with preparation on both cache hits and misses.
+#[derive(Debug, Default)]
+pub(crate) struct OperatorSummaries {
+    roots: rustc_hash::FxHashMap<ExprId, u64>,
+}
+
+const OPERATOR_ROOTS: usize = 16_384;
+
+impl OperatorSummaries {
+    fn record(&mut self, root: ExprId, operators: u64) {
+        if operators != 0 && self.roots.len() < OPERATOR_ROOTS {
+            self.roots.insert(root, operators);
+        }
+    }
+
+    pub(crate) fn get(&self, root: ExprId) -> Option<u64> {
+        self.roots.get(&root).copied()
+    }
+
+    fn retained_bytes(&self) -> usize {
+        // Include spare hash buckets and control bytes conservatively.
+        std::mem::size_of::<Self>()
+            + 2 * std::mem::size_of::<usize>()
+            + self.roots.capacity()
+                * (std::mem::size_of::<(ExprId, u64)>() + std::mem::size_of::<usize>())
+    }
+}
+
 #[derive(Clone, Default)]
 struct RequirementFacts {
     uncacheable: bool,
     parameter_sensitive: bool,
     parameter_revision: u64,
     parameter_values: Vec<(oximo_expr::ParamId, u64)>,
-}
-
-#[derive(Clone, Copy, Default)]
-struct ExpressionSummary {
-    operators: u64,
-    depends_on_variable: bool,
-    nonsmooth: bool,
 }
 
 fn children(node: &ExprNode, mut visit: impl FnMut(ExprId)) {
@@ -538,8 +518,12 @@ fn children(node: &ExprNode, mut visit: impl FnMut(ExprId)) {
     }
 }
 
-impl ExpressionRequirements {
+impl ExpressionRequirements<'_> {
     fn collect_numeric_parameters(&mut self, arena: &ExprArena, root: ExprId) {
+        // The operator pass already visits this DAG.
+        if !self.summarize(arena, root).depends_on_parameter {
+            return;
+        }
         self.numeric_stack.push(root);
         while let Some(id) = self.numeric_stack.pop() {
             if !self.numeric_visited.insert(id) {
@@ -548,7 +532,11 @@ impl ExpressionRequirements {
             if let ExprNode::Param(parameter) = arena.get(id) {
                 self.numeric_parameters.insert(*parameter);
             } else {
-                children(arena.get(id), |child| self.numeric_stack.push(child));
+                children(arena.get(id), |child| {
+                    if self.known(arena, child).expect("summarized child").depends_on_parameter {
+                        self.numeric_stack.push(child);
+                    }
+                });
             }
         }
     }
@@ -602,79 +590,14 @@ impl ExpressionRequirements {
         }
     }
 
-    fn known(&self, arena: &ExprArena, id: ExprId) -> Option<ExpressionSummary> {
-        match arena.get(id) {
-            ExprNode::Const(_) | ExprNode::Param(_) => Some(ExpressionSummary::default()),
-            ExprNode::Var(_) => Some(ExpressionSummary {
-                depends_on_variable: true,
-                ..ExpressionSummary::default()
-            }),
-            ExprNode::Linear { coeffs, .. } => Some(ExpressionSummary {
-                depends_on_variable: !coeffs.is_empty(),
-                ..ExpressionSummary::default()
-            }),
-            _ => self.summaries.get(&id).copied(),
-        }
+    fn known(&self, arena: &ExprArena, id: ExprId) -> Option<oximo_expr::ExpressionSummary> {
+        arena.__cached_expression_summary(id).or_else(|| self.analysis.known(arena, id))
     }
 
-    fn summarize(&mut self, arena: &ExprArena, root: ExprId) -> ExpressionSummary {
-        if let Some(summary) = self.known(arena, root) {
-            return summary;
-        }
-
-        self.stack.push((root, false));
-        while let Some((id, visited)) = self.stack.pop() {
-            if self.known(arena, id).is_some() {
-                continue;
-            }
-            let node = arena.get(id);
-            if !visited {
-                self.stack.push((id, true));
-                children(node, |child| {
-                    if self.known(arena, child).is_none() {
-                        self.stack.push((child, false));
-                    }
-                });
-                continue;
-            }
-
-            let mut summary = ExpressionSummary::default();
-            children(node, |child| {
-                let child = self.known(arena, child).expect("postorder child summary");
-                summary.operators |= child.operators;
-                summary.depends_on_variable |= child.depends_on_variable;
-                summary.nonsmooth |= child.nonsmooth;
-            });
-            let operator = match node {
-                ExprNode::Unary(op, _) => ExpressionOperator::Unary(*op),
-                ExprNode::Add(_) => ExpressionOperator::Add,
-                ExprNode::Mul(_) => ExpressionOperator::Multiply,
-                ExprNode::Div(_, _) => ExpressionOperator::Divide,
-                ExprNode::Pow(_, exponent) => {
-                    if self.known(arena, *exponent).expect("exponent summary").depends_on_variable {
-                        ExpressionOperator::VariablePower
-                    } else {
-                        ExpressionOperator::ConstantPower
-                    }
-                }
-                ExprNode::Atan2(_, _) => ExpressionOperator::Atan2,
-                ExprNode::Min(_) => ExpressionOperator::Min,
-                ExprNode::Max(_) => ExpressionOperator::Max,
-                _ => unreachable!("leaves are handled without traversal"),
-            };
-
-            let bit = ExpressionOperator::ALL
-                .iter()
-                .position(|&op| op == operator)
-                .expect("complete operator vocabulary");
-            summary.operators |= 1_u64 << bit;
-            let nonsmooth = matches!(operator, ExpressionOperator::Min | ExpressionOperator::Max)
-                || matches!(operator, ExpressionOperator::Unary(op) if op.is_nonsmooth());
-            summary.nonsmooth |= nonsmooth && summary.depends_on_variable;
-            self.summaries.insert(id, summary);
-        }
-
-        self.summaries[&root]
+    fn summarize(&mut self, arena: &ExprArena, root: ExprId) -> oximo_expr::ExpressionSummary {
+        arena
+            .__preparation_expression_summary(root)
+            .unwrap_or_else(|| self.analysis.summarize(arena, root))
     }
 
     fn collect(
@@ -687,6 +610,7 @@ impl ExpressionRequirements {
         let mut operators = 0;
         for &root in roots {
             let summary = self.summarize(arena, root);
+            self.operators.record(root, summary.operators);
             operators |= summary.operators;
             self.nonsmooth |= summary.nonsmooth;
         }
@@ -694,8 +618,8 @@ impl ExpressionRequirements {
         if operators == 0 {
             return;
         }
-        for (index, &operator) in ExpressionOperator::ALL.iter().enumerate() {
-            if operators & (1_u64 << index) != 0 {
+        for &operator in ExpressionOperator::ALL {
+            if operators & operator.bit() != 0 {
                 requirements.add([Requirement::Operator(operator)], origin.clone());
             }
         }
@@ -717,6 +641,7 @@ struct CachedRequirements {
     detailed: bool,
     bytes: usize,
     requirements: std::rc::Rc<ModelRequirements>,
+    operators: std::sync::Arc<OperatorSummaries>,
 }
 
 thread_local! {
@@ -726,19 +651,31 @@ thread_local! {
 /// Model mutations invalidate the summary; only proven parameter-independent
 /// built-in interfaces may reuse it across parameter changes.
 pub(crate) fn for_validation(model: &Model) -> std::rc::Rc<ModelRequirements> {
-    cached(model, true)
+    cached(model, true, None)
 }
 
 pub(crate) fn for_matching(model: &Model) -> std::rc::Rc<ModelRequirements> {
-    cached(model, false)
+    cached(model, false, None)
 }
 
-fn cached(model: &Model, detailed: bool) -> std::rc::Rc<ModelRequirements> {
+pub(crate) fn for_prepared(
+    model: &Model,
+    prepared: &crate::prepare::LoweringContext<'_>,
+    detailed: bool,
+) -> std::rc::Rc<ModelRequirements> {
+    cached(model, detailed, Some(prepared))
+}
+
+fn cached(
+    model: &Model,
+    detailed: bool,
+    prepared: Option<&crate::prepare::LoweringContext<'_>>,
+) -> std::rc::Rc<ModelRequirements> {
     let key = model.__update_key();
     let arena = model.arena();
     let parameters = arena.parameter_revision();
     let pending_gdp = model.has_unreformulated_gdp();
-    if let Some(requirements) = VALIDATION_REQUIREMENTS.with(|cache| {
+    if let Some((requirements, operators)) = VALIDATION_REQUIREMENTS.with(|cache| {
         let mut cache = cache.borrow_mut();
         let index = cache.iter().position(|entry| {
             entry.key == key
@@ -754,16 +691,25 @@ fn cached(model: &Model, detailed: bool) -> std::rc::Rc<ModelRequirements> {
         let mut entry = cache.remove(index)?;
         entry.parameters = parameters;
         let requirements = std::rc::Rc::clone(&entry.requirements);
+        let operators = std::sync::Arc::clone(&entry.operators);
         cache.push_front(entry);
-        Some(requirements)
+        Some((requirements, operators))
     }) {
+        if let Some(prepared) = prepared {
+            prepared.set_operator_summaries(operators);
+        }
         return requirements;
     }
     drop(arena);
 
     // Infer outside the RefCell borrow since semantic views can invoke user code.
-    let (requirements, facts) = ModelRequirements::infer_with_details(model, detailed);
+    let (requirements, facts, operators) =
+        ModelRequirements::infer_with_details(model, detailed, prepared);
     let requirements = std::rc::Rc::new(requirements);
+    let operators = std::sync::Arc::new(operators);
+    if let Some(prepared) = prepared {
+        prepared.set_operator_summaries(std::sync::Arc::clone(&operators));
+    }
     if facts.uncacheable {
         return requirements;
     }
@@ -773,6 +719,7 @@ fn cached(model: &Model, detailed: bool) -> std::rc::Rc<ModelRequirements> {
         + std::mem::size_of::<ModelRequirements>()
         + 4 * std::mem::size_of::<usize>()
         + model.name.len()
+        + operators.retained_bytes()
         + facts.parameter_values.capacity() * std::mem::size_of::<(oximo_expr::ParamId, u64)>()
         + requirements.entries.capacity() * std::mem::size_of::<RequirementEntry>();
 
@@ -803,6 +750,7 @@ fn cached(model: &Model, detailed: bool) -> std::rc::Rc<ModelRequirements> {
                 detailed,
                 bytes,
                 requirements: std::rc::Rc::clone(&requirements),
+                operators,
             });
         });
     }
@@ -836,6 +784,119 @@ mod cache_tests {
     use super::*;
     use oximo_core::prelude::*;
     use std::rc::Rc;
+
+    #[test]
+    fn operator_bits_match_the_complete_public_vocabulary() {
+        let mut bits = 0;
+        for (i, &op) in ExpressionOperator::ALL.iter().enumerate() {
+            assert_eq!(op.bit(), 1_u64 << i);
+            assert_eq!(bits & op.bit(), 0);
+            bits |= op.bit();
+        }
+    }
+
+    #[test]
+    fn prepared_and_local_summaries_preserve_operators_and_numeric_dependencies() {
+        let model = Model::new("summary scratch");
+        variable!(model, x);
+        param!(model, p = 2.0);
+
+        let shared = (p * x).sin() + x.abs();
+        let root = shared * shared + x.pow(x) + (p * x * x);
+        let arena = model.arena();
+        let snapshot = (*arena).clone();
+        snapshot.__enable_preparation_classifications();
+        let mut local = ExpressionRequirements::default();
+        let mut prepared = ExpressionRequirements::default();
+        assert_eq!(local.summarize(&arena, root.id()), prepared.summarize(&snapshot, root.id()));
+
+        local.collect_numeric_parameters(&arena, root.id());
+        prepared.collect_numeric_parameters(&snapshot, root.id());
+        assert_eq!(local.numeric_parameters, prepared.numeric_parameters);
+        assert!(snapshot.__cached_expression_summary(root.id()).is_some());
+    }
+
+    #[test]
+    fn numeric_parameters_reuse_summaries_and_skip_parameter_free_dags() {
+        let model = Model::new("shared numeric analysis");
+        variable!(model, x);
+        param!(model, p = 2.0);
+        param!(model, q = 3.0);
+
+        let shared = p * x * x;
+        let root = shared + shared + q * x + x * x;
+        let arena = model.arena();
+        let mut expressions = ExpressionRequirements::default();
+        expressions.collect_numeric_parameters(&arena, root.id());
+        assert_eq!(expressions.numeric_parameters.len(), 2);
+        assert!(expressions.numeric_parameters.contains(&p.param_id().unwrap()));
+        assert!(expressions.numeric_parameters.contains(&q.param_id().unwrap()));
+
+        let summary = expressions.summarize(&arena, root.id());
+        let visited = expressions.numeric_visited.len();
+        expressions.collect_numeric_parameters(&arena, root.id());
+        assert_eq!(expressions.summarize(&arena, root.id()), summary);
+        assert_eq!(expressions.numeric_visited.len(), visited);
+    }
+
+    #[test]
+    fn prepared_operator_proofs_are_snapshot_local_and_keep_hidden_operators() {
+        let model = Model::new("operator proof");
+        variable!(model, x);
+        let root = x * x;
+        objective!(model, Min, root);
+        let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
+        assert!(!prepared.has_only_polynomial_operators(root.id()));
+
+        let first = for_prepared(&model, &prepared, false);
+        assert!(prepared.has_only_polynomial_operators(root.id()));
+
+        let next = crate::prepare::LoweringContext::new(&model).unwrap();
+        assert!(!next.has_only_polynomial_operators(root.id()));
+        assert!(Rc::ptr_eq(&first, &for_prepared(&model, &next, false)));
+        assert!(next.has_only_polynomial_operators(root.id()));
+
+        drop(next);
+        drop(prepared);
+        let hidden = x.sin().powi(0);
+        objective!(model, Min, hidden);
+        let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
+        for_prepared(&model, &prepared, false);
+        assert!(!prepared.has_only_polynomial_operators(hidden.id()));
+    }
+
+    #[test]
+    fn standalone_cache_hits_restore_operator_proofs_and_keep_numeric_validation() {
+        let model = Model::new("standalone operator cache");
+        variable!(model, x);
+        param!(model, p = 1.0);
+        let polynomial = p * x * x;
+        let division = x / p;
+        constraint!(model, division <= 2.0);
+        objective!(model, Min, polynomial);
+
+        let profile = crate::SolverProfile::new("unsupported");
+        for detailed in [false, true] {
+            let first = if detailed { for_validation(&model) } else { for_matching(&model) };
+            for value in [1.0, 0.0, 2.0] {
+                model.set_param(p, value).unwrap();
+                let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
+                assert!(Rc::ptr_eq(&first, &for_prepared(&model, &prepared, detailed)));
+                assert!(prepared.has_only_polynomial_operators(polynomial.id()));
+                assert!(!prepared.has_only_polynomial_operators(division.id()));
+            }
+        }
+
+        let hidden = x.asin().powi(0);
+        objective!(model, Min, hidden);
+        let expected = profile.check_model(&model);
+        for _ in 0..2 {
+            let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
+            let report = profile.check_prepared(&model, &prepared).unwrap();
+            assert_eq!(format!("{expected:?}"), format!("{report:?}"));
+            assert!(!prepared.has_only_polynomial_operators(hidden.id()));
+        }
+    }
 
     #[test]
     fn runtime_classified_builtin_functions_reuse_and_invalidate_the_summary() {
@@ -959,8 +1020,9 @@ mod cache_tests {
         constraint!(model, other_set, x == y);
         objective!(model, Min, x);
 
-        let (compact, compact_facts) = ModelRequirements::infer_with_details(&model, false);
-        let (mut full, full_facts) = ModelRequirements::infer_with_details(&model, true);
+        let (compact, compact_facts, _) =
+            ModelRequirements::infer_with_details(&model, false, None);
+        let (mut full, full_facts, _) = ModelRequirements::infer_with_details(&model, true, None);
         assert!(compact.entries.iter().all(|entry| entry.origins.is_empty()));
 
         for entry in &mut full.entries {
@@ -1148,7 +1210,7 @@ mod cache_tests {
             };
             expressions.collect(&arena, &[shared.id()], &origin, &mut requirements);
         }
-        assert_eq!(expressions.summaries.len(), 1000);
+        assert_eq!(expressions.analysis.cached_nodes(), 1000);
         assert_eq!(requirements.entries.len(), 1);
         assert_eq!(requirements.entries[0].origins.len(), 100);
     }
