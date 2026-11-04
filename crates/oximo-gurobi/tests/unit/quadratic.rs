@@ -95,7 +95,9 @@ fn sparse_affine_batches_keep_duplicates_constants_ranges_and_source_slots() {
 
     let inactive = constraint!(model, inactive, expression <= -100.0);
     model.set_constraint_active(inactive, false).unwrap();
-    objective!(model, Min, x + 2.0);
+    let arena = model.__sum_context();
+    let root = arena.borrow_mut().linear(vec![(x_id, 3.0), (x_id, -2.0)], 2.0);
+    objective!(model, Min, oximo_expr::Expr::new(root, arena));
 
     let mut built = build(&model, &GurobiOptions::default(), &quiet_env()).unwrap();
     built.model.update().unwrap();
@@ -126,6 +128,7 @@ fn sparse_affine_batches_keep_duplicates_constants_ranges_and_source_slots() {
     let [slack] = built.constrs[range.index()].variables.as_slice() else { panic!("range slack") };
     assert_eq!(built.model.get_obj_attr(attr::LB, slack).unwrap(), 0.0);
     assert_eq!(built.model.get_obj_attr(attr::UB, slack).unwrap(), 6.0);
+    assert_eq!(built.model.get_obj_attr(attr::Obj, &built.vars[0]).unwrap(), 1.0);
     assert_eq!(built.model.get_attr(attr::ObjCon).unwrap(), 2.0);
 }
 
@@ -557,12 +560,12 @@ fn persistent_parameter_powers_transition_between_polynomial_and_nonlinear_paths
     variable!(model, 1.0 <= x <= 2.0);
     param!(model, power = 2.0);
     constraint!(model, row, x.pow(power) <= 4.0);
-    objective!(model, Min, x.pow(power) + 3.0);
+    objective!(model, Max, x.pow(power));
 
     let mut solver = crate::GurobiPersistent::new();
-    for value in [2.0, 3.0, 1.0, 2.0] {
+    for (value, expected) in [(2.0, 4.0), (3.0, 4.0), (1.0, 2.0), (2.0, 4.0)] {
         model.set_param(power, value).unwrap();
         let result = solver.solve(&model, &GurobiOptions::default()).unwrap();
-        assert!((result.objective().unwrap() - 4.0).abs() < 1e-6);
+        assert!((result.objective().unwrap() - expected).abs() < 1e-6);
     }
 }
