@@ -153,7 +153,7 @@ impl Model {
         vars: &[ResolvedVariable],
         quadratic: &(impl Fn(ExprId) -> Option<Q> + Sync),
     ) -> ModelKind {
-        self.kind_at_with_soc(arena, vars, &|row| {
+        self.infer_kind_impl(arena, vars, None, &|row| {
             quadratic(row.lhs)
                 .is_some_and(|q| crate::soc::__is_detected_soc_from_quadratic(vars, row, &q))
         })
@@ -276,6 +276,29 @@ mod supplied_analysis_tests {
     use super::*;
     use crate::prelude::*;
     use std::sync::Arc;
+
+    #[test]
+    fn supplied_coefficients_do_not_read_or_update_kind_cache() {
+        let model = Model::new("supplied SOC cache isolation");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        constraint!(model, x * x - t * t <= 0.0);
+
+        let arena = model.arena();
+        let variables = model.resolved_variables();
+        let missing_coefficients = |_: ExprId| None::<Arc<QuadraticTerms>>;
+        assert_eq!(
+            model.__kind_with_quadratic_at(&arena, &variables, &missing_coefficients),
+            ModelKind::QCP
+        );
+        assert_eq!(model.cached_kind.get(), None);
+        assert_eq!(model.kind(), ModelKind::SOCP);
+        assert_eq!(
+            model.__kind_with_quadratic_at(&arena, &variables, &missing_coefficients),
+            ModelKind::QCP
+        );
+        assert_eq!(model.kind(), ModelKind::SOCP);
+    }
 
     #[test]
     fn few_wide_quadratic_rows_use_work_based_parallelism_with_kind_parity() {
