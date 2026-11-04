@@ -372,8 +372,8 @@ fn classify_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
     }
 }
 
-/// Bound the probe so preparation retains early nonlinear exits without doing
-/// a second full degree traversal before structural summary inference.
+/// Bound the probe so preparation retains early nonlinear exits, leaving
+/// larger or deeper expressions to the exact degree fold.
 pub(crate) fn degree_hint(
     arena: &(impl ArenaAccess + ?Sized),
     id: ExprId,
@@ -430,6 +430,27 @@ pub(crate) fn degree_hint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exhausted_preparation_hints_use_the_exact_degree_fold() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let wide = arena.push(ExprNode::Add(vec![x; 65].into()));
+        let mut deep = x;
+        for _ in 0..8 {
+            deep = arena.push(ExprNode::Unary(UnaryOp::Neg, deep));
+        }
+        assert_eq!(arena.preparation_degree(x), None);
+
+        arena.__enable_preparation_classifications();
+        assert_eq!(arena.preparation_degree(x), Some(Degree::One));
+        for root in [wide, deep] {
+            assert_eq!(arena.preparation_degree(root), None);
+            assert_eq!(classify(&arena, root), ExprClass::Linear);
+            assert!(!is_constant_access(&arena, root));
+            assert!(arena.__cached_expression_summary(root).is_none());
+        }
+    }
 
     #[test]
     fn preparation_retains_101369_roots_without_revisiting_the_graph() {

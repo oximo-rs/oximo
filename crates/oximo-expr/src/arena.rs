@@ -775,13 +775,9 @@ pub(crate) trait ArenaAccess {
 
 impl ArenaAccess for ExprArena {
     fn preparation_degree(&self, id: ExprId) -> Option<Degree> {
-        let analysis = self.analysis.get()?;
+        self.analysis.get()?;
         let mut budget = 64;
-        if let Some(value) = crate::classify::degree_hint(self, id, &mut budget, 0) {
-            return Some(value);
-        }
-
-        Some(analysis.lock().summarize(self, id).degree)
+        crate::classify::degree_hint(self, id, &mut budget, 0)
     }
 
     #[cfg(test)]

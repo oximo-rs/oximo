@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_and_requirements_reuse_one_structural_walk() {
+    fn classification_and_requirements_cache_their_walks_independently() {
         let mut arena = ExprArena::new();
         let x = arena.var(VarId(0));
         let terms = (0..150).map(|_| arena.push(ExprNode::Mul(smallvec![x, x]))).collect();
@@ -375,6 +375,7 @@ mod tests {
         arena.__enable_preparation_classifications();
         arena.enable_classification_counters();
         assert_eq!(classify(&arena, root), ExprClass::Quadratic);
+        assert!(arena.__cached_expression_summary(root).is_none());
 
         let before = arena.classification_stats();
         let summary = arena.__preparation_expression_summary(root).unwrap();
@@ -384,9 +385,11 @@ mod tests {
         );
         assert!(summary.depends_on_variable);
         assert!(!summary.depends_on_parameter);
-        assert_eq!(arena.classification_stats().visited_nodes, before.visited_nodes);
+        let after = arena.classification_stats();
+        assert!(after.visited_nodes > before.visited_nodes);
+        assert_eq!(arena.__preparation_expression_summary(root), Some(summary));
         assert_eq!(classify(&arena, root), ExprClass::Quadratic);
-        assert_eq!(arena.classification_stats().visited_nodes, before.visited_nodes);
+        assert_eq!(arena.classification_stats().visited_nodes, after.visited_nodes);
     }
 
     #[test]
