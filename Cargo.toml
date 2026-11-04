@@ -63,7 +63,7 @@ thiserror        = "2.0"
 num-traits       = "0.2"
 parking_lot      = "0.12"
 highs            = "2.4"
-gurobi-rs        = { version = "1.0.0", features = ["gurobi13"] }
+gurobi-rs        = { version = "1.1.0", features = ["gurobi13"] }
 mosek            = "11.2"
 clarabel         = "0.11"
 pounce-rs        = { version = "0.14", features = ["convex", "qp", "minima"] }
