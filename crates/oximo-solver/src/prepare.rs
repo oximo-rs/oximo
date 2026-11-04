@@ -190,6 +190,18 @@ impl<T> ExtractionCache<T> {
         let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
         shard.extract(expr, extract, size, admit)
     }
+
+    /// Publish recovered terms, replacing a cached extraction failure within budget.
+    fn publish(
+        &self,
+        expr: ExprId,
+        value: Option<T>,
+        size: impl FnOnce(&T) -> usize,
+    ) -> Option<Extracted<T>> {
+        let shards = self.shards.get_or_init(cache_shards);
+        let shard = &shards[(expr.0.wrapping_mul(0x9e37_79b9) >> 28) as usize];
+        shard.publish(expr, value, size)
+    }
 }
 
 impl<T> CacheShard<T> {
@@ -211,14 +223,26 @@ impl<T> CacheShard<T> {
         }
         // Independent misses can be evaluated concurrently. Concurrent misses
         // for the same expression may repeat work, but publish one shared value.
-        let value = extract();
+        self.publish(expr, extract(), size)
+    }
+
+    fn publish(
+        &self,
+        expr: ExprId,
+        value: Option<T>,
+        size: impl FnOnce(&T) -> usize,
+    ) -> Option<Extracted<T>> {
         let coefficients = value.as_ref().map_or(0, size);
         if coefficients > CACHE_COEFFICIENTS / CACHE_SHARDS {
             return value.map(Extracted::Owned);
         }
         let mut cache = self.entries.lock().expect("preparation cache poisoned");
         if let Some(existing) = cache.values.get(&expr) {
-            return existing.clone().map(Extracted::Shared);
+            if existing.is_some() || value.is_none() {
+                return existing.clone().map(Extracted::Shared);
+            }
+            cache.values.remove(&expr);
+            cache.order.retain(|&(root, _)| root != expr);
         }
         while cache.values.len() >= CACHE_EXPRESSIONS / CACHE_SHARDS
             || cache.coefficients + coefficients > CACHE_COEFFICIENTS / CACHE_SHARDS
@@ -572,7 +596,21 @@ impl PreparedExpressions {
                 })
         };
 
-        affine.or_else(|| cached_affine().map(AffineTerms::Borrowed))
+        affine.or_else(|| {
+            let recovered = cached_affine()?.into_owned();
+            let terms = if let Some(cache) = &self.resident {
+                let mut entries = cache.linear.lock().expect("resident cache poisoned");
+                let terms =
+                    entries.entry(expr).or_default().get_or_insert_with(|| Arc::new(recovered));
+                Extracted::Shared(Arc::clone(terms))
+            } else {
+                self.linear.publish(expr, Some(recovered), |t| t.coeffs.len())?
+            };
+            Some(match terms {
+                Extracted::Owned(terms) => AffineTerms::Borrowed(terms),
+                Extracted::Shared(terms) => AffineTerms::Shared(terms),
+            })
+        })
     }
 
     /// Look up successful quadratic terms in the workset, resident cache, then reuse-admitted cache.
@@ -776,7 +814,17 @@ mod tests {
             assert!(prepared.linear(root).is_none());
             prepared.quadratic(root).unwrap();
             prepared.quadratic(root).unwrap();
-            assert_eq!(prepared.linear(root).unwrap().coeffs.as_ref(), &[(VarId(0), 1.0)]);
+            let recovered = prepared.linear(root).unwrap();
+            assert_eq!(recovered.coeffs.as_ref(), &[(VarId(0), 1.0)]);
+            let AffineTerms::Shared(recovered) = recovered else {
+                panic!("recovered affine terms were not cached")
+            };
+            for _ in 0..3 {
+                let Some(AffineTerms::Shared(repeated)) = prepared.linear(root) else {
+                    panic!("recovered affine terms were not reused")
+                };
+                assert!(Arc::ptr_eq(&recovered, &repeated));
+            }
             assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 2);
         }
     }
@@ -862,6 +910,15 @@ mod tests {
                     let affine = affine.unwrap();
                     assert_eq!(affine.coeffs.as_ref(), &[(x.var_id().unwrap(), 3.0)]);
                     assert_eq!(affine.constant, value);
+                    if prepared.resident.as_ref().is_none_or(|cache| cache.admits(root.id())) {
+                        let AffineTerms::Shared(recovered) = affine else {
+                            panic!("recovered affine terms were not cached")
+                        };
+                        let Some(AffineTerms::Shared(repeated)) = prepared.linear(root.id()) else {
+                            panic!("recovered affine terms were not reused")
+                        };
+                        assert!(Arc::ptr_eq(&recovered, &repeated));
+                    }
                 } else {
                     assert!(affine.is_none());
                     assert_eq!(quadratic.hessian[0].2, 2.0 * value);
@@ -1039,6 +1096,39 @@ mod tests {
         assert!(shards
             .iter()
             .all(|s| s.entries.lock().unwrap().values.len() <= CACHE_EXPRESSIONS / CACHE_SHARDS));
+    }
+
+    #[test]
+    fn recovered_cache_entries_respect_budgets_and_reuse_publication() {
+        let cache = ExtractionCache::default();
+        let roots: Vec<_> = (0u32..1000)
+            .filter(|id| id.wrapping_mul(0x9e37_79b9) >> 28 == 0)
+            .take(CACHE_EXPRESSIONS / CACHE_SHARDS)
+            .map(ExprId)
+            .collect();
+        for &root in &roots {
+            for _ in 0..2 {
+                assert!(cache.extract(root, || None, Vec::<u8>::len).is_none());
+            }
+        }
+        for root in roots {
+            let Some(Extracted::Shared(recovered)) =
+                cache.publish(root, Some(vec![1; 128]), Vec::len)
+            else {
+                panic!("recovered terms were not cached")
+            };
+            let Some(Extracted::Shared(repeated)) =
+                cache.extract(root, || panic!("recovered terms were re-extracted"), Vec::len)
+            else {
+                panic!("recovered terms were not reused")
+            };
+            assert!(Arc::ptr_eq(&recovered, &repeated));
+            let entries = cache.shards.get().unwrap()[0].entries.lock().unwrap();
+            assert_eq!(entries.values.len(), entries.order.len());
+            assert!(entries.values.len() <= CACHE_EXPRESSIONS / CACHE_SHARDS);
+            assert_eq!(entries.coefficients, entries.order.iter().map(|&(_, size)| size).sum());
+            assert!(entries.coefficients <= CACHE_COEFFICIENTS / CACHE_SHARDS);
+        }
     }
 
     #[test]
