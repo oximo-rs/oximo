@@ -3,11 +3,57 @@
 use super::Model;
 use crate::soc::is_detected_soc;
 use crate::var::ResolvedVariable;
-use oximo_expr::{ExprArena, ExprClass, classify};
+use oximo_expr::{ExprArena, ExprClass, ExprId, QuadraticTerms, classify};
 use rayon::prelude::*;
 use std::fmt;
 
 pub(super) const PAR_KIND_THRESHOLD: usize = 256;
+
+/// Estimate quadratic-analysis work to help decide whether to process rows in parallel.
+///
+/// Inspect at most sixteen nodes, descending through unary nodes and sums with
+/// at most eight terms. Count larger sums and all products by their number of
+/// children, affine nodes by their coefficient count, and other nodes as one
+/// unit. Wide sums and products contribute their width without visiting their
+/// children.
+fn quadratic_work_hint(arena: &ExprArena, root: ExprId) -> usize {
+    use oximo_expr::ExprNode;
+    let mut pending: smallvec::SmallVec<[ExprId; 16]> = smallvec::smallvec![root];
+    let mut work = 0_usize;
+    for _ in 0..16 {
+        let Some(id) = pending.pop() else { break };
+        match arena.get(id) {
+            ExprNode::Add(children) if children.len() <= 8 => {
+                pending.extend_from_slice(children);
+            }
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                work = work.saturating_add(children.len());
+            }
+            ExprNode::Linear { coeffs, .. } => work = work.saturating_add(coeffs.len()),
+            ExprNode::Unary(_, child) => pending.push(*child),
+            _ => work = work.saturating_add(1),
+        }
+    }
+
+    work
+}
+
+/// Decide whether quadratic rows warrant parallel SOC recognition during model classification.
+fn parallel_quadratic_analysis(
+    arena: &ExprArena,
+    rows: &[&crate::AlgebraicConstraint],
+    workers: usize,
+) -> bool {
+    if workers <= 1 || rows.len() < 4 {
+        return false;
+    }
+    let mut work = 0_usize;
+    rows.len() >= PAR_KIND_THRESHOLD
+        || rows.iter().any(|row| {
+            work = work.saturating_add(quadratic_work_hint(arena, row.lhs));
+            work >= 4_096
+        })
+}
 
 /// The kind of mathematical program a `Model` represents.
 ///
@@ -96,13 +142,36 @@ impl Model {
     /// Classify metadata captured from this model at one parameter assignment.
     #[doc(hidden)]
     pub fn __kind_at(&self, arena: &ExprArena, vars: &[ResolvedVariable]) -> ModelKind {
+        self.kind_at_with_soc(arena, vars, &|row| is_detected_soc(arena, vars, row))
+    }
+
+    /// Classify using snapshot-owned coefficients supplied by solver preparation.
+    #[doc(hidden)]
+    pub fn __kind_with_quadratic_at<Q: std::ops::Deref<Target = QuadraticTerms>>(
+        &self,
+        arena: &ExprArena,
+        vars: &[ResolvedVariable],
+        quadratic: &(impl Fn(ExprId) -> Option<Q> + Sync),
+    ) -> ModelKind {
+        self.kind_at_with_soc(arena, vars, &|row| {
+            quadratic(row.lhs)
+                .is_some_and(|q| crate::soc::__is_detected_soc_from_quadratic(vars, row, &q))
+        })
+    }
+
+    fn kind_at_with_soc(
+        &self,
+        arena: &ExprArena,
+        vars: &[ResolvedVariable],
+        is_soc: &(impl Fn(&crate::AlgebraicConstraint) -> bool + Sync),
+    ) -> ModelKind {
         let revision = arena.parameter_revision();
         if let Some(k) = self.cached_kind.get()
             && revision == self.cached_kind_parameter_revision.get()
         {
             return k;
         }
-        let k = self.infer_kind_impl(arena, vars, None);
+        let k = self.infer_kind_impl(arena, vars, None, is_soc);
         self.cached_kind.set(Some(k));
         self.cached_kind_parameter_revision.set(revision);
         k
@@ -111,13 +180,13 @@ impl Model {
     /// Infer the model kind without reading or updating the kind cache.
     ///
     /// Automatic inference keeps the initial classification scan serial, then
-    /// parallelizes only a large set of already-known quadratic candidates for
-    /// SOC recognition. This keeps LP/NLP models off the Rayon path.
+    /// parallelizes sufficiently many or sufficiently wide quadratic candidates
+    /// for SOC recognition. This keeps LP/NLP models off the Rayon path.
     #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn infer_kind_with(&self, parallel: Option<bool>) -> ModelKind {
         let arena = self.arena.borrow();
         let vars = self.variables.borrow().iter().map(|v| v.resolved(&arena)).collect::<Vec<_>>();
-        self.infer_kind_impl(&arena, &vars, parallel)
+        self.infer_kind_impl(&arena, &vars, parallel, &|row| is_detected_soc(&arena, &vars, row))
     }
 
     /// Infer the kind with a forced serial or parallel SOC-recognition pass.
@@ -132,6 +201,7 @@ impl Model {
         arena: &ExprArena,
         vars: &[ResolvedVariable],
         parallel: Option<bool>,
+        is_soc: &(impl Fn(&crate::AlgebraicConstraint) -> bool + Sync),
     ) -> ModelKind {
         let has_int = vars.iter().any(|v| v.domain.requires_discrete_choice())
             || self.sos_constraints.borrow().iter().any(|constraint| constraint.active);
@@ -155,15 +225,15 @@ impl Model {
                 }
             }
             if !any_nonlinear {
-                let use_parallel = parallel.unwrap_or(
-                    quadratic.len() >= PAR_KIND_THRESHOLD && rayon::current_num_threads() > 1,
-                );
+                let use_parallel = parallel.unwrap_or_else(|| {
+                    parallel_quadratic_analysis(arena, &quadratic, rayon::current_num_threads())
+                });
                 if use_parallel {
                     let (has_cone, has_plain) = quadratic
                         .par_iter()
                         .map(|c| {
-                            let is_soc = is_detected_soc(arena, vars, c);
-                            (is_soc, !is_soc)
+                            let detected = is_soc(c);
+                            (detected, !detected)
                         })
                         .reduce(
                             || (false, false),
@@ -173,7 +243,7 @@ impl Model {
                     plain_quad_con = has_plain;
                 } else {
                     for c in quadratic {
-                        if is_detected_soc(arena, vars, c) {
+                        if is_soc(c) {
                             detected_soc = true;
                         } else {
                             plain_quad_con = true;
@@ -197,6 +267,87 @@ impl Model {
             pick(ModelKind::QP, ModelKind::MIQP)
         } else {
             pick(ModelKind::LP, ModelKind::MILP)
+        }
+    }
+}
+
+#[cfg(test)]
+mod supplied_analysis_tests {
+    use super::*;
+    use crate::prelude::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn few_wide_quadratic_rows_use_work_based_parallelism_with_kind_parity() {
+        let model = Model::new("wide quadratic classification");
+        let x: Vec<_> = (0..50).map(|i| model.__var(format!("x{i}")).build()).collect();
+        for row in 0..10 {
+            let terms = (0..650).map(|i| x[i % 50] * x[(i + row) % 50]);
+            let lhs = Expr::__sum_terms_in(model.__sum_context(), terms);
+            model.__add_constraint_auto(lhs.le(1.0));
+        }
+        objective!(model, Min, x[0]);
+
+        let arena = model.arena();
+        let constraints = model.constraints();
+        let rows: Vec<_> = constraints.algebraic().iter().collect();
+        assert!(!parallel_quadratic_analysis(&arena, &rows, 1));
+        assert!(parallel_quadratic_analysis(&arena, &rows, 6));
+        assert!(!parallel_quadratic_analysis(&arena, &rows[..1], 6));
+        assert_eq!(model.infer_kind(false), ModelKind::QCP);
+        assert_eq!(model.infer_kind(true), ModelKind::QCP);
+        assert_eq!(model.infer_kind_with(None), ModelKind::QCP);
+
+        let small = Model::new("small quadratic classification");
+        variable!(small, y);
+        for _ in 0..10 {
+            constraint!(small, y * y <= 1.0);
+        }
+        objective!(small, Min, y);
+
+        let arena = small.arena();
+        let constraints = small.constraints();
+        let rows: Vec<_> = constraints.algebraic().iter().collect();
+        assert!(!parallel_quadratic_analysis(&arena, &rows, 6));
+    }
+
+    #[test]
+    fn supplied_coefficients_preserve_forced_serial_and_parallel_classification() {
+        let model = Model::new("supplied SOC analysis");
+        variable!(model, x);
+        variable!(model, t >= 0.0);
+        param!(model, p = 1.0);
+        for scale in 1..=300 {
+            model.__add_constraint_auto((f64::from(scale) * p * x * x - t * t).le(0.0));
+        }
+        objective!(model, Min, t);
+
+        for value in [1.0, 0.0, 2.0] {
+            model.set_param(p, value).unwrap();
+            let arena = model.arena();
+            let variables = model.resolved_variables();
+            let rows = model.constraints();
+            let coefficients: rustc_hash::FxHashMap<_, _> = rows
+                .algebraic()
+                .iter()
+                .map(|row| {
+                    (row.lhs, Arc::new(oximo_expr::extract_quadratic(&arena, row.lhs).unwrap()))
+                })
+                .collect();
+            let predicate = |row: &crate::AlgebraicConstraint| {
+                crate::__is_detected_soc_from_quadratic(&variables, row, &coefficients[&row.lhs])
+            };
+
+            let serial = model.infer_kind_impl(&arena, &variables, Some(false), &predicate);
+            let parallel = model.infer_kind_impl(&arena, &variables, Some(true), &predicate);
+            assert_eq!(serial, parallel);
+            assert_eq!(serial, model.infer_kind(false));
+            assert_eq!(
+                serial,
+                model.__kind_with_quadratic_at(&arena, &variables, &|id| coefficients
+                    .get(&id)
+                    .cloned())
+            );
         }
     }
 }
