@@ -2376,7 +2376,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oximo"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "oximo-autodiff",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-autodiff"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -2410,7 +2410,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-baron"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-clarabel"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clarabel",
  "criterion",
@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "ndarray",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-expr"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "parking_lot",
  "rustc-hash",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gams"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gdp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "oximo-core",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-gurobi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "gurobi-rs",
  "oximo-core",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-highs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "highs",
  "oximo-core",
@@ -2514,7 +2514,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-io"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -2526,7 +2526,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-macros"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-mosek"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mosek",
  "oximo-core",
@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-pounce"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "oximo-autodiff",
  "oximo-core",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-scip"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "oximo-core",
  "oximo-expr",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "oximo-solver"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "oximo-core",
