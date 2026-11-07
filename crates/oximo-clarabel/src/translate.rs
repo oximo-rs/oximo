@@ -646,10 +646,9 @@ fn build_problem_prepared_with(
 /// `P`/`q` so a maximize is posed as a minimize.), the upper-triangular `P`
 /// triplets, the `q` vector, and the folded constant.
 ///
-/// `extract_quadratic` subsumes the linear case. oximo's Hessian is
-/// lower-triangular with doubled diagonal (the `0.5 x'Qx` convention), matching
-/// Clarabel's `P` up to the triangle side, so entries transpose to
-/// upper-triangular with no scaling.
+/// `extract_quadratic` supplies polynomial coefficients. Clarabel uses
+/// `0.5*x'P*x`, so diagonal entries are doubled at this boundary and
+/// lower-triangle pairs are transposed to the upper triangle.
 fn objective_data(
     prepared: &LoweringContext<'_>,
     n: usize,
@@ -664,12 +663,21 @@ fn objective_data(
     };
     let quad = prepared.require_quadratic(obj.expr, || "the objective".into())?;
     let mut q = vec![0.0; n];
-    for &(var, coef) in &quad.linear {
+    for &(var, coef) in quad.linear() {
         q[var.index()] += sign * coef;
     }
-    let p_trip =
-        quad.hessian.iter().map(|&(row, col, h)| (col.index(), row.index(), sign * h)).collect();
-    Ok((sign, p_trip, q, quad.constant))
+    let p_trip = quad
+        .hessian_entries()
+        .map(|(row, col, h)| {
+            if !h.is_finite() {
+                return Err(SolverError::Backend(
+                    "quadratic objective Hessian exceeds finite f64 range".into(),
+                ));
+            }
+            Ok((col.index(), row.index(), sign * h))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((sign, p_trip, q, quad.constant()))
 }
 
 /// Classify every algebraic constraint as linear or SOC. The kind gate
@@ -1507,7 +1515,7 @@ mod tests {
         model.add_soc_constraint(
             "direct",
             [
-                x,
+                x.into_affine_function().expression(),
                 (x + 2.0),
                 model.__constant(-0.0).into_affine_function().expression(),
                 p.into_affine_function().expression(),

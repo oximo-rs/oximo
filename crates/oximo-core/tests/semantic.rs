@@ -445,12 +445,12 @@ fn unique_functions_remap_in_place_and_shared_functions_remain_independent() {
 
     let model = Model::new("worker roots");
     variable!(model, x);
-    let mut batch = x.arena.__begin_batch();
+    let mut batch = x.arena().__begin_batch();
     let snapshot = batch.snapshot();
     let mut forks: Vec<_> = [1.0, 2.0]
         .into_iter()
         .map(|offset| {
-            x.arena.__with_fork(snapshot.clone(), || {
+            x.arena().__with_fork(snapshot.clone(), || {
                 FunctionValue::new(VectorAffineData {
                     model_id: model.id(),
                     components: vec![(x + offset).id()].into(),
@@ -648,12 +648,12 @@ fn symmetric_worker_remapping_detaches_shared_components() {
 
     let model = Model::new("shared symmetric worker roots");
     variable!(model, x);
-    let mut batch = x.arena.__begin_batch();
+    let mut batch = x.arena().__begin_batch();
     let snapshot = batch.snapshot();
     let mut workers: Vec<_> = [1.0, 2.0]
         .into_iter()
         .map(|offset| {
-            x.arena.__with_fork(snapshot.clone(), || {
+            x.arena().__with_fork(snapshot.clone(), || {
                 FunctionValue::new(SymmetricAffineData {
                     model_id: model.id(),
                     matrix: SymmetricMatrix::from_upper_fn(2, |_, _| (x + offset).id()),
@@ -677,6 +677,10 @@ fn symmetric_worker_remapping_detaches_shared_components() {
 }
 
 #[test]
+#[expect(
+    clippy::redundant_clone,
+    reason = "the regression verifies cloning a type-erased custom set"
+)]
 fn inline_sets_keep_exact_signatures_and_custom_sets_keep_their_values() {
     use oximo_core::SetValue;
 
@@ -1151,7 +1155,7 @@ fn custom_lowering_cannot_hide_invalid_source_bounds() {
     for value in [f64::NAN, f64::NEG_INFINITY] {
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Constraint::new(IgnoresSet(x), LessThan(value)).into_ir();
+                Constraint::new(IgnoresSet(x.into()), LessThan(value)).into_ir();
             }))
             .is_err()
         );
@@ -1159,7 +1163,7 @@ fn custom_lowering_cannot_hide_invalid_source_bounds() {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 model.add_constraints([(
                     "invalid".into(),
-                    Constraint::new(IgnoresSet(x), LessThan(value)),
+                    Constraint::new(IgnoresSet(x.into()), LessThan(value)),
                 )]);
             }))
             .is_err()
@@ -1232,7 +1236,7 @@ fn indicator_edits_can_change_nested_representations_without_losing_sources() {
     assert_eq!(function.consequent.downcast_ref::<NamedAffine>().unwrap().0.root, x.id());
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ScaledLowering<'a>(Expr<'a, Affine>);
 
 #[derive(Clone, Debug)]
@@ -1324,7 +1328,7 @@ impl Function for ScaledLowering<'_> {
     type Owned = ScalarFunctionData<Affine>;
 
     fn semantic_data(&self) -> Self::Owned {
-        ScalarFunctionData::from_expression(self.0)
+        ScalarFunctionData::from_expression(&self.0)
     }
 }
 
@@ -1343,8 +1347,8 @@ fn scalar_ir_conversions_preserve_sources_and_reject_unmapped_edits() {
     let model = Model::new("scalar conversion provenance");
     variable!(model, x);
     let first: oximo_core::function_set::AlgebraicConstraintIr =
-        Constraint::new(ScaledLowering(x), LessThan(2.0)).into_ir();
-    let explicit = Constraint::new(ScaledLowering(x), LessThan(2.0)).into_ir();
+        Constraint::new(ScaledLowering(x.into()), LessThan(2.0)).into_ir();
+    let explicit = Constraint::new(ScaledLowering(x.into()), LessThan(2.0)).into_ir();
 
     for (name, ir) in [("first", first), ("explicit", explicit)] {
         let handle = model.add_lowered_constraint(name, ir);
@@ -1378,7 +1382,7 @@ fn scalar_views_preserve_source_coordinates_and_inactive_bounds() {
     let direct = constraint!(model, direct, x <= 2.0);
     model.add_constraints([(
         "scaled".into(),
-        Constraint::new(ScaledLowering(x), LessThan(2.0)).into_ir(),
+        Constraint::new(ScaledLowering(x.into()), LessThan(2.0)).into_ir(),
     )]);
     let scaled = model.constraint_handle("scaled").unwrap();
 
@@ -1405,11 +1409,11 @@ fn alternative_scalar_lowerings_reject_edits_and_restore_their_exact_view() {
             if rows == 1 {
                 model.add_constraints([(
                     "scaled[0]".into(),
-                    Constraint::new(ScaledLowering(x), LessThan(2.0)).into_ir(),
+                    Constraint::new(ScaledLowering(x.into()), LessThan(2.0)).into_ir(),
                 )]);
             } else {
                 model.__add_constraints_over("scaled", &Set::range(0..rows), |_: usize| {
-                    Constraint::new(ScaledLowering(x), LessThan(2.0)).into_ir()
+                    Constraint::new(ScaledLowering(x.into()), LessThan(2.0)).into_ir()
                 });
             }
 
@@ -1470,7 +1474,7 @@ fn alternatively_lowered_indicator_consequents_reject_typed_edits() {
     variable!(model, x);
     variable!(model, enabled, Binary);
     let lowered: oximo_core::function_set::AlgebraicConstraintIr =
-        Constraint::new(ScaledLowering(x), LessThan(2.0)).into_ir();
+        Constraint::new(ScaledLowering(x.into()), LessThan(2.0)).into_ir();
     let guard = model.add_indicator_constraint("guard", enabled, true, lowered.into_affine());
 
     assert!(matches!(
@@ -1490,7 +1494,7 @@ fn alternatively_lowered_indicator_consequents_reject_typed_edits() {
                 oximo_core::IndicatorFunctionData {
                     model_id: model.id(),
                     trigger: enabled.var_id().unwrap(),
-                    consequent: FunctionValue::new(ScalarFunctionData::from_expression(x)),
+                    consequent: FunctionValue::new(ScalarFunctionData::from_expression(&x)),
                 }
             )
             .is_err()

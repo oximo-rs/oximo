@@ -210,7 +210,7 @@ impl Model {
     /// against this model.
     #[must_use]
     pub fn display_expr<D: oximo_expr::Degree>(&self, e: Expr<'_, D>) -> ExprDisplay<'_> {
-        self.display_expr_id(e.id)
+        self.display_expr_id(e.id())
     }
 
     /// Display adapter for a raw [`ExprId`] (as stored in constraints and the

@@ -283,12 +283,12 @@ fn technological_precedence_closure() -> [[bool; N_TESTS]; N_TESTS] {
 }
 
 fn declare_model_variables<'a>(model: &'a Model, sets: &ModelSets) -> ModelVariables<'a> {
-    let tests = sets.tests.clone();
-    let resources = sets.resources.clone();
-    let products = sets.products.clone();
-    let grid_points = sets.grid_points.clone();
-    let income_segments = sets.income_segments.clone();
-    let new_units = sets.new_units.clone();
+    let tests = &sets.tests;
+    let resources = &sets.resources;
+    let products = &sets.products;
+    let grid_points = &sets.grid_points;
+    let income_segments = &sets.income_segments;
+    let new_units = &sets.new_units;
 
     variable!(model, 0.0 <= start_time[test in tests] <= HORIZON);
     variable!(model, 0.0 <= completion_time[product in products] <= HORIZON);
@@ -327,7 +327,7 @@ fn add_timing_and_sequencing_constraints(
     sets: &ModelSets,
     variables: &ModelVariables<'_>,
 ) {
-    let tests = sets.tests.clone();
+    let tests = &sets.tests;
 
     // (1): each product completes after all of its tests.
     constraint!(model, finish[test in tests],
@@ -368,7 +368,7 @@ fn add_resource_constraints(
     variables: &ModelVariables<'_>,
     case: AcquisitionCase,
 ) {
-    let tests = sets.tests.clone();
+    let tests = &sets.tests;
 
     // (7)-(8): N_min = N_max = 1, so every test uses exactly one scientist
     // group and one equipment unit.
@@ -413,7 +413,7 @@ fn add_discounting_constraints(
     variables: &ModelVariables<'_>,
     discount_grid: &DiscountGrid,
 ) {
-    let grid_points = sets.grid_points.clone();
+    let grid_points = &sets.grid_points;
 
     // (11), (14), and (26)-(29): a test is conducted only if every test
     // scheduled before it in the same product succeeds. The probability in
@@ -474,12 +474,12 @@ fn set_npv_objective(
     variables: &ModelVariables<'_>,
     discount_grid: &DiscountGrid,
 ) {
-    let tests = sets.tests.clone();
-    let resources = sets.resources.clone();
-    let products = sets.products.clone();
-    let grid_points = sets.grid_points.clone();
-    let income_segments = sets.income_segments.clone();
-    let new_units = sets.new_units.clone();
+    let tests = &sets.tests;
+    let resources = &sets.resources;
+    let products = &sets.products;
+    let grid_points = &sets.grid_points;
+    let income_segments = &sets.income_segments;
+    let new_units = &sets.new_units;
 
     // (21) and (22): $5M maximum income, reduced after months 24 and 48.
     constraint!(model,

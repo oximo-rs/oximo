@@ -574,6 +574,7 @@ impl PlanBuilder {
                 ExprNode::Linear { coeffs, .. } => self
                     .locked_variables
                     .extend(coeffs.iter().filter(|(_, c)| *c != 0.0).map(|(v, _)| *v)),
+                ExprNode::Quadratic(q) => self.locked_variables.extend(q.variables()),
                 ExprNode::Add(cs) | ExprNode::Mul(cs) | ExprNode::Min(cs) | ExprNode::Max(cs) => {
                     self.dependency_stack.extend(cs);
                 }

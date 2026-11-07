@@ -297,11 +297,44 @@ pub enum ExprNode {
         coeffs: Vec<(VarId, f64)>,
         constant: f64,
     },
+    /// Immutable numeric quadratic coefficients in Hessian convention.
+    Quadratic(Arc<crate::QuadraticTerms>),
+}
+
+#[derive(Debug, Default)]
+struct QuadraticOwnership {
+    prefix: usize,
+    sealed: FxHashSet<ExprId>,
+    slots: FxHashMap<ExprId, crate::quadratic_builder::QuadraticSlots>,
+}
+
+impl QuadraticOwnership {
+    fn seal(&mut self, id: ExprId) {
+        if !self.contains(id) {
+            self.sealed.insert(id);
+            self.slots.remove(&id);
+        }
+    }
+
+    fn contains(&self, id: ExprId) -> bool {
+        id.index() < self.prefix || self.sealed.contains(&id)
+    }
+
+    fn slots(&mut self, id: ExprId) -> &mut crate::quadratic_builder::QuadraticSlots {
+        self.slots.entry(id).or_default()
+    }
+
+    fn seal_all(&mut self, prefix: usize) {
+        self.prefix = prefix;
+        self.sealed.clear();
+        self.slots.clear();
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct ExprArena {
     nodes: Arc<Vec<ExprNode>>,
+    ownership: OnceLock<Box<Mutex<QuadraticOwnership>>>,
     param_values: Arc<Vec<f64>>,
     parameter_revision: u64,
     locked_parameters: Arc<FxHashSet<ParamId>>,
@@ -329,7 +362,9 @@ impl std::panic::RefUnwindSafe for ExprArena {}
 
 impl Clone for ExprArena {
     fn clone(&self) -> Self {
+        self.seal_all();
         Self {
+            ownership: OnceLock::new(),
             nodes: Arc::clone(&self.nodes),
             param_values: Arc::clone(&self.param_values),
             parameter_revision: self.parameter_revision,
@@ -405,6 +440,12 @@ impl ExprArena {
         }
     }
 
+    fn seal_all(&self) {
+        if let Some(ownership) = self.ownership.get() {
+            ownership.lock().seal_all(self.len());
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -418,10 +459,12 @@ impl ExprArena {
     #[doc(hidden)]
     #[must_use]
     pub fn __clone_with_additional_capacity(&self, additional_nodes: usize) -> Self {
+        self.seal_all();
         let mut nodes = Vec::with_capacity(self.nodes.len().saturating_add(additional_nodes));
         nodes.extend_from_slice(&self.nodes);
         Self {
             nodes: Arc::new(nodes),
+            ownership: OnceLock::new(),
             param_values: Arc::new(self.param_values.as_ref().clone()),
             parameter_revision: self.parameter_revision,
             locked_parameters: Arc::clone(&self.locked_parameters),
@@ -489,6 +532,7 @@ impl ExprArena {
     #[doc(hidden)]
     pub(crate) fn __append_nodes(&mut self, nodes: Vec<ExprNode>) {
         Arc::make_mut(&mut self.nodes).extend(nodes);
+        self.seal_all();
     }
 
     #[inline]
@@ -505,6 +549,29 @@ impl ExprArena {
     ///
     /// Panics if the number of expressions exceeds `u32::MAX` (expression arena overflow).
     pub fn push(&mut self, node: ExprNode) -> ExprId {
+        let id = self.push_internal(node);
+        if let Some(ownership) = self.ownership.get_mut()
+            && matches!(self.nodes[id.index()], ExprNode::Quadratic(_))
+        {
+            ownership.get_mut().seal(id);
+        }
+        id
+    }
+
+    fn push_internal(&mut self, node: ExprNode) -> ExprId {
+        if self.ownership.get_mut().is_some() {
+            seal_children(&node, |id| {
+                if matches!(self.nodes[id.index()], ExprNode::Quadratic(_)) {
+                    self.ownership.get_mut().expect("quadratic ownership").get_mut().seal(id);
+                }
+            });
+        }
+        if matches!(node, ExprNode::Quadratic(_)) {
+            let prefix = ArenaAccess::len(self);
+            self.ownership.get_or_init(|| {
+                Box::new(Mutex::new(QuadraticOwnership { prefix, ..QuadraticOwnership::default() }))
+            });
+        }
         let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
         Arc::make_mut(&mut self.nodes).push(node);
         id
@@ -512,11 +579,21 @@ impl ExprArena {
 
     #[inline]
     pub fn get(&self, id: ExprId) -> &ExprNode {
+        let node = self.node(id);
+        if matches!(node, ExprNode::Quadratic(_)) {
+            ArenaAccess::seal(self, id);
+        }
+        node
+    }
+
+    #[inline]
+    pub(crate) fn node(&self, id: ExprId) -> &ExprNode {
         &self.nodes[id.index()]
     }
 
     #[inline]
     pub fn get_mut(&mut self, id: ExprId) -> &mut ExprNode {
+        self.seal_all();
         // A changed child can invalidate any cached root. Appending nodes and
         // rebinding parameters preserve structural degree and need no reset.
         *self.classifications.get_mut() = None;
@@ -525,6 +602,7 @@ impl ExprArena {
     }
 
     pub fn nodes(&self) -> &[ExprNode] {
+        self.seal_all();
         &self.nodes
     }
 
@@ -756,8 +834,15 @@ pub(crate) trait ArenaAccess {
     fn record_classification_visit(&self) {}
     fn len(&self) -> usize;
     fn get(&self, id: ExprId) -> &ExprNode;
+    fn quadratic_root(&mut self, id: ExprId) -> bool;
+    fn seal(&self, id: ExprId);
+    fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId>;
+    fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId>;
     fn param_value(&self, id: ParamId) -> f64;
     fn push(&mut self, node: ExprNode) -> ExprId;
+    fn push_immutable(&mut self, node: ExprNode) -> ExprId {
+        self.push(node)
+    }
     fn cached_degree(&self, id: ExprId) -> Option<Degree>;
     fn cache_degree(&self, id: ExprId, class: Degree);
     fn preparation_degree(&self, _id: ExprId) -> Option<Degree> {
@@ -765,15 +850,19 @@ pub(crate) trait ArenaAccess {
     }
 
     fn constant(&mut self, value: f64) -> ExprId {
-        self.push(ExprNode::Const(value))
+        self.push_immutable(ExprNode::Const(value))
     }
 
     fn var(&mut self, id: VarId) -> ExprId {
-        self.push(ExprNode::Var(id))
+        self.push_immutable(ExprNode::Var(id))
     }
 }
 
 impl ArenaAccess for ExprArena {
+    fn quadratic_root(&mut self, id: ExprId) -> bool {
+        self.ownership.get_mut().is_some_and(|o| !o.get_mut().contains(id))
+            && matches!(self.node(id), ExprNode::Quadratic(_))
+    }
     fn preparation_degree(&self, id: ExprId) -> Option<Degree> {
         self.analysis.get()?;
         let mut budget = 64;
@@ -811,8 +900,48 @@ impl ArenaAccess for ExprArena {
         self.classifications.lock().get_or_insert_with(Box::default).insert(id, class);
     }
 
+    fn seal(&self, id: ExprId) {
+        if let Some(ownership) = self.ownership.get()
+            && matches!(self.nodes[id.index()], ExprNode::Quadratic(_))
+        {
+            ownership.lock().seal(id);
+        }
+    }
+    fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId> {
+        if self.ownership.get_mut()?.get_mut().contains(lhs)
+            || !matches!(self.nodes[lhs.index()], ExprNode::Quadratic(_))
+        {
+            return None;
+        }
+        crate::quadratic_builder::accumulate_nodes(
+            Arc::get_mut(&mut self.nodes)?,
+            lhs.index(),
+            rhs.index(),
+            self.ownership.get_mut()?.get_mut().slots(lhs),
+            scale,
+        )?;
+        *self.classifications.get_mut() = None;
+        self.analysis.take();
+        Some(lhs)
+    }
+    fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId> {
+        if self.ownership.get_mut()?.get_mut().contains(id) {
+            return None;
+        }
+        let ExprNode::Quadratic(q) = &mut Arc::get_mut(&mut self.nodes)?[id.index()] else {
+            return None;
+        };
+        crate::quadratic_builder::scale_unique(
+            Arc::get_mut(q)?,
+            self.ownership.get_mut()?.get_mut().slots(id),
+            scale,
+        )?;
+        *self.classifications.get_mut() = None;
+        self.analysis.take();
+        Some(id)
+    }
     fn get(&self, id: ExprId) -> &ExprNode {
-        self.get(id)
+        &self.nodes[id.index()]
     }
 
     fn param_value(&self, id: ParamId) -> f64 {
@@ -820,7 +949,14 @@ impl ArenaAccess for ExprArena {
     }
 
     fn push(&mut self, node: ExprNode) -> ExprId {
-        self.push(node)
+        self.push_internal(node)
+    }
+
+    fn push_immutable(&mut self, node: ExprNode) -> ExprId {
+        debug_assert!(!matches!(node, ExprNode::Quadratic(_)));
+        let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
+        Arc::make_mut(&mut self.nodes).push(node);
+        id
     }
 }
 
@@ -840,6 +976,7 @@ impl FrozenExprArena {
 
 #[derive(Debug)]
 struct ForkedExprArena {
+    ownership: OnceLock<Box<Mutex<QuadraticOwnership>>>,
     base: FrozenExprArena,
     nodes: Vec<ExprNode>,
     classifications: RefCell<ExprClassCache>,
@@ -848,11 +985,77 @@ struct ForkedExprArena {
 impl ForkedExprArena {
     fn new(base: FrozenExprArena) -> Self {
         let classifications = RefCell::new(base.classifications.clone());
-        Self { base, nodes: Vec::new(), classifications }
+        Self { ownership: OnceLock::new(), base, nodes: Vec::new(), classifications }
     }
 }
 
 impl ArenaAccess for ForkedExprArena {
+    fn push_immutable(&mut self, node: ExprNode) -> ExprId {
+        debug_assert!(!matches!(node, ExprNode::Quadratic(_)));
+        let index =
+            self.base.len().checked_add(self.nodes.len()).expect("expression arena overflow");
+        let id = ExprId(u32::try_from(index).expect("expression arena overflow"));
+        self.nodes.push(node);
+        id
+    }
+    fn quadratic_root(&mut self, id: ExprId) -> bool {
+        self.ownership.get_mut().is_some_and(|o| !o.get_mut().contains(id))
+            && matches!(self.get(id), ExprNode::Quadratic(_))
+    }
+    fn seal(&self, id: ExprId) {
+        if let Some(ownership) = self.ownership.get()
+            && matches!(self.get(id), ExprNode::Quadratic(_))
+        {
+            ownership.lock().seal(id);
+        }
+    }
+    fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId> {
+        if self.ownership.get_mut()?.get_mut().contains(lhs)
+            || !matches!(self.get(lhs), ExprNode::Quadratic(_))
+        {
+            return None;
+        }
+        let index = lhs.index().checked_sub(self.base.len())?;
+        let slots = self.ownership.get_mut()?.get_mut().slots(lhs);
+        if let Some(right) = rhs.index().checked_sub(self.base.len()) {
+            crate::quadratic_builder::accumulate_nodes(
+                &mut self.nodes,
+                index,
+                right,
+                slots,
+                scale,
+            )?;
+        } else {
+            let ExprNode::Quadratic(left) = &mut self.nodes[index] else {
+                return None;
+            };
+            crate::quadratic_builder::merge_unique(
+                Arc::get_mut(left)?,
+                slots,
+                crate::quadratic_builder::numeric_leaf(&self.base.nodes[rhs.index()])?,
+                scale,
+            )?;
+        }
+        *self.classifications.get_mut() = ExprClassCache::default();
+        Some(lhs)
+    }
+
+    fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId> {
+        if self.ownership.get_mut()?.get_mut().contains(id) {
+            return None;
+        }
+        let index = id.index().checked_sub(self.base.len())?;
+        let ExprNode::Quadratic(q) = &mut self.nodes[index] else {
+            return None;
+        };
+        crate::quadratic_builder::scale_unique(
+            Arc::get_mut(q)?,
+            self.ownership.get_mut()?.get_mut().slots(id),
+            scale,
+        )?;
+        *self.classifications.get_mut() = ExprClassCache::default();
+        Some(id)
+    }
     fn len(&self) -> usize {
         self.base.len() + self.nodes.len()
     }
@@ -879,6 +1082,19 @@ impl ArenaAccess for ForkedExprArena {
     }
 
     fn push(&mut self, node: ExprNode) -> ExprId {
+        if self.ownership.get_mut().is_some() {
+            seal_children(&node, |id| {
+                if matches!(self.get(id), ExprNode::Quadratic(_)) {
+                    self.ownership.get_mut().expect("quadratic ownership").get_mut().seal(id);
+                }
+            });
+        }
+        if matches!(node, ExprNode::Quadratic(_)) {
+            let prefix = ArenaAccess::len(self);
+            self.ownership.get_or_init(|| {
+                Box::new(Mutex::new(QuadraticOwnership { prefix, ..QuadraticOwnership::default() }))
+            });
+        }
         let index =
             self.base.nodes.len().checked_add(self.nodes.len()).expect("expression arena overflow");
         let id = ExprId(u32::try_from(index).expect("expression arena overflow"));
@@ -939,11 +1155,29 @@ pub struct ExprArenaCell {
     model_id: ModelId,
     inner: Mutex<ExprArena>,
     state: AtomicU8,
+    #[cfg(test)]
+    access_count: AtomicU32,
 }
 
 impl ExprArenaCell {
     pub fn new(arena: ExprArena) -> Self {
-        Self { model_id: ModelId::fresh(), inner: Mutex::new(arena), state: AtomicU8::new(0) }
+        Self {
+            model_id: ModelId::fresh(),
+            inner: Mutex::new(arena),
+            state: AtomicU8::new(0),
+            #[cfg(test)]
+            access_count: AtomicU32::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_access_count(&self) {
+        self.access_count.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn access_count(&self) -> u32 {
+        self.access_count.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -1018,6 +1252,8 @@ impl ExprArenaCell {
 
     #[inline]
     pub(crate) fn with_ref<R>(&self, f: impl FnOnce(&dyn ArenaAccess) -> R) -> R {
+        #[cfg(test)]
+        self.access_count.fetch_add(1, Ordering::Relaxed);
         let state = self.state.load(Ordering::Acquire);
 
         if state & BATCH_ACTIVE == 0 {
@@ -1041,7 +1277,30 @@ impl ExprArenaCell {
     }
 
     #[inline]
+    pub(crate) fn build_expr(
+        &self,
+        may_be_quadratic: bool,
+        construct: impl FnOnce(&mut dyn ArenaAccess) -> ExprId,
+    ) -> (ExprId, bool) {
+        let state = self.state.load(Ordering::Acquire);
+        if state & BATCH_ACTIVE == 0 {
+            self.assert_no_write_reentry(state);
+            #[cfg(test)]
+            self.access_count.fetch_add(1, Ordering::Relaxed);
+            let mut arena = self.inner.lock();
+            let id = construct(&mut *arena);
+            return (id, may_be_quadratic && arena.quadratic_root(id));
+        }
+        self.with_mut(|arena| {
+            let id = construct(arena);
+            (id, may_be_quadratic && arena.quadratic_root(id))
+        })
+    }
+
+    #[inline]
     pub(crate) fn with_mut<R>(&self, f: impl FnOnce(&mut dyn ArenaAccess) -> R) -> R {
+        #[cfg(test)]
+        self.access_count.fetch_add(1, Ordering::Relaxed);
         let state = self.state.load(Ordering::Acquire);
 
         if state & BATCH_ACTIVE == 0 {
@@ -1299,7 +1558,7 @@ impl<'a> ExprArenaWriteGuard<'a> {
     pub fn __extend_vars(
         &mut self,
         variables: std::ops::Range<usize>,
-    ) -> impl ExactSizeIterator<Item = crate::Expr<'a, crate::Affine>> + use<'a> {
+    ) -> impl ExactSizeIterator<Item = crate::VariableHandle<'a>> + use<'a> {
         let cell = self.cell;
         self.guard.__extend_vars(variables).map(move |id| {
             crate::Expr::from_id(ExprId(u32::try_from(id).expect("checked expression count")), cell)
@@ -1310,8 +1569,7 @@ impl<'a> ExprArenaWriteGuard<'a> {
     pub fn __extend_params<I: ExactSizeIterator<Item = f64>>(
         &mut self,
         values: I,
-    ) -> impl ExactSizeIterator<Item = (ParamId, crate::Expr<'a, crate::Constant>)> + use<'a, I>
-    {
+    ) -> impl ExactSizeIterator<Item = (ParamId, crate::ParameterHandle<'a>)> + use<'a, I> {
         let cell = self.cell;
         let (parameters, expressions) = self.guard.__extend_params(values);
         parameters.zip(expressions).map(move |(parameter, expression)| {
@@ -1325,12 +1583,12 @@ impl<'a> ExprArenaWriteGuard<'a> {
         })
     }
 
-    pub fn var_expr(&mut self, var: VarId) -> crate::Expr<'a, crate::Affine> {
+    pub fn var_expr(&mut self, var: VarId) -> crate::VariableHandle<'a> {
         let id = self.guard.var(var);
         crate::Expr::from_id(id, self.cell)
     }
 
-    pub fn param_expr(&mut self, param: ParamId) -> crate::Expr<'a, crate::Constant> {
+    pub fn param_expr(&mut self, param: ParamId) -> crate::ParameterHandle<'a> {
         let id = self.guard.param(param);
         crate::Expr::from_id(id, self.cell)
     }
@@ -1350,6 +1608,7 @@ impl std::fmt::Debug for ExprArenaBatchGuard<'_> {
 
 impl ExprArenaBatchGuard<'_> {
     pub fn snapshot(&self) -> FrozenExprArena {
+        self.arena.seal_all();
         FrozenExprArena {
             nodes: Arc::clone(&self.arena.nodes),
             param_values: Arc::clone(&self.arena.param_values),
@@ -1420,6 +1679,22 @@ impl ExprArenaBatchGuard<'_> {
     }
 }
 
+fn seal_children(node: &ExprNode, mut seal: impl FnMut(ExprId)) {
+    match node {
+        ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::Min(c) | ExprNode::Max(c) => {
+            for &id in c {
+                seal(id);
+            }
+        }
+        ExprNode::Unary(_, id) => seal(*id),
+        ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => {
+            seal(*a);
+            seal(*b);
+        }
+        _ => {}
+    }
+}
+
 fn validate_node(node: &ExprNode, remap: ExprIdRemap) {
     match node {
         ExprNode::Add(children)
@@ -1435,7 +1710,11 @@ fn validate_node(node: &ExprNode, remap: ExprIdRemap) {
             remap.validate(*left);
             remap.validate(*right);
         }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Var(_)
+        | ExprNode::Param(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }
 
@@ -1460,7 +1739,11 @@ fn remap_node(node: &mut ExprNode, remap: ExprIdRemap) {
             *left = remap.apply(*left);
             *right = remap.apply(*right);
         }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Var(_)
+        | ExprNode::Param(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }
 
@@ -1471,6 +1754,70 @@ mod tests {
 
     use super::*;
     use crate::{Expr, evaluate, extract_linear};
+
+    #[test]
+    fn coefficient_queries_seal_direct_quadratic_roots() {
+        for query in 0..4 {
+            let mut arena = ExprArena::new();
+            let x = arena.var(VarId(0));
+            let root = ArenaAccess::push(
+                &mut arena,
+                ExprNode::Quadratic(Arc::new(
+                    crate::QuadraticTerms::from_hessian(
+                        vec![(VarId(0), VarId(0), 2.0)],
+                        Vec::new(),
+                        0.0,
+                    )
+                    .unwrap(),
+                )),
+            );
+            match query {
+                0 => {
+                    let _ = arena.get(root);
+                }
+                1 => {
+                    let _ = crate::ExpressionAnalysis::default().known(&arena, root);
+                }
+                2 => {
+                    let _ = crate::ExpressionAnalysis::default().summarize(&arena, root);
+                }
+                _ => {
+                    let _ = crate::extract_quadratic(&arena, root);
+                }
+            }
+            assert!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0).is_none());
+            let ExprNode::Quadratic(q) = arena.node(root) else { panic!("quadratic root") };
+            assert!(q.linear.is_empty());
+        }
+    }
+
+    #[test]
+    fn nonquadratic_snapshots_preserve_the_raw_mutation_barrier() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let root = arena.linear(vec![(VarId(0), 1.0)], 0.0);
+        let snapshot = arena.clone();
+        *arena.get_mut(root) = ExprNode::Quadratic(Arc::new(
+            crate::QuadraticTerms::from_hessian(vec![(VarId(0), VarId(0), 2.0)], Vec::new(), 0.0)
+                .unwrap(),
+        ));
+        assert!(matches!(snapshot.get(root), ExprNode::Linear { .. }));
+        assert!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0).is_none());
+
+        let fresh = ArenaAccess::push(
+            &mut arena,
+            ExprNode::Quadratic(Arc::new(
+                crate::QuadraticTerms::from_hessian(
+                    vec![(VarId(0), VarId(0), 2.0)],
+                    Vec::new(),
+                    0.0,
+                )
+                .unwrap(),
+            )),
+        );
+        assert!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0).is_none());
+        assert_eq!(ArenaAccess::accumulate_quadratic(&mut arena, fresh, x, 1.0), Some(fresh));
+    }
 
     fn assert_send_sync<T: Send + Sync>() {}
 
@@ -1644,7 +1991,7 @@ mod tests {
                 root.id()
             }),
             cell.__with_fork(snapshot.clone(), || {
-                let root = (x.sin() + x).erase();
+                let root = x.sin().erase();
                 for _ in 0..2 {
                     assert_eq!(root.__class(), ExprClass::Nonlinear);
                 }

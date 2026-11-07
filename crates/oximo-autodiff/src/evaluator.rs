@@ -14,8 +14,8 @@ use oximo_expr::ExprId;
 use crate::enzyme::{tape_gradient, tape_hvp};
 use crate::error::AutodiffError;
 use crate::slot::{
-    FunctionSlot, SlotKind, linear_gradient_add, linear_value, quadratic_gradient_add,
-    quadratic_value,
+    FunctionSlot, SlotKind, linear_gradient_add, linear_value, quadratic_diagonal_hessian,
+    quadratic_gradient_add, quadratic_value,
 };
 use crate::sparsity::{
     SparsityWorkspace, hessian_lagrangian_patterns, hessian_lagrangian_structure,
@@ -179,7 +179,7 @@ impl ConstraintWork {
         let cost = |slot: &FunctionSlot| match &slot.kind {
             SlotKind::Linear(t) => (t.coeffs.len() + 1, t.coeffs.len() + slot.support.len()),
             SlotKind::Quadratic(q) => {
-                let terms = q.linear.len() + 2 * q.hessian.len();
+                let terms = q.linear().len() + 2 * q.quadratic().len();
                 (terms + 1, terms + 2 * slot.support.len())
             }
             SlotKind::Nonlinear(t) => {
@@ -277,7 +277,7 @@ pub struct NlpEvaluator {
     jac_structure: Vec<(usize, usize)>,
     hess_structure: Vec<(usize, usize)>,
     /// Position in `hess_structure` of each entry of the objective's quadratic
-    /// Hessian (in `QuadraticTerms::hessian` order). Empty unless the objective
+    /// Hessian (in `QuadraticTerms::quadratic` order). Empty unless the objective
     /// is quadratic.
     obj_hess_pos: Vec<usize>,
     /// Same as `obj_hess_pos`, per constraint.
@@ -801,16 +801,24 @@ impl NlpEvaluator {
         // scatter positions are cached (see `obj_hess_pos`/`con_hess_pos`), so
         // this reads `h` live but does no per-call binary search.
         if let SlotKind::Quadratic(q) = &self.objective.kind {
-            for (&pos, &(_, _, h)) in self.obj_hess_pos.iter().zip(&q.hessian) {
-                vals[pos] += obj_factor * h;
+            for (&pos, &(r, c, coefficient)) in self.obj_hess_pos.iter().zip(q.quadratic()) {
+                vals[pos] += if r == c {
+                    quadratic_diagonal_hessian(coefficient, obj_factor)
+                } else {
+                    obj_factor * coefficient
+                };
             }
         }
         for ((slot, positions), &mult) in
             self.constraints.iter().zip(&self.con_hess_pos).zip(lambda)
         {
             if let SlotKind::Quadratic(q) = &slot.kind {
-                for (&pos, &(_, _, h)) in positions.iter().zip(&q.hessian) {
-                    vals[pos] += mult * h;
+                for (&pos, &(r, c, coefficient)) in positions.iter().zip(q.quadratic()) {
+                    vals[pos] += if r == c {
+                        quadratic_diagonal_hessian(coefficient, mult)
+                    } else {
+                        mult * coefficient
+                    };
                 }
             }
         }
@@ -972,13 +980,13 @@ fn mult_of(source: &NlSource, obj_factor: f64, lambda: &[f64]) -> f64 {
 }
 
 /// Position in `hess` of each entry of `slot`'s quadratic Hessian, in
-/// `QuadraticTerms::hessian` order, so `eval_hessian_lagrangian` can scatter the
+/// `QuadraticTerms::quadratic` order, so `eval_hessian_lagrangian` can scatter the
 /// constant quadratic terms without a per-call binary search. Empty for
 /// non-quadratic slots.
 fn quad_scatter_positions(slot: &FunctionSlot, hess: &[(usize, usize)]) -> Vec<usize> {
     match &slot.kind {
         SlotKind::Quadratic(q) => q
-            .hessian
+            .quadratic()
             .iter()
             .map(|&(r, c, _)| {
                 hess.binary_search(&(r.index(), c.index()))
@@ -1367,11 +1375,8 @@ mod tests {
     fn wide_sparse_objective_builds_the_expected_pattern() {
         let model = Model::new("wide_sparse");
         let vars: Vec<_> = (0..1_025).map(|i| model.__var(format!("x{i}")).build()).collect();
-        let mut linear = vars[0];
-        for &var in &vars[1..] {
-            linear = linear + var;
-        }
-        model.__minimize((vars[0] + vars[1_024]).sin() + linear);
+        let linear: oximo_expr::Expr<'_, oximo_expr::Affine> = vars.iter().sum();
+        model.__minimize((&vars[0] + &vars[1_024]).sin() + linear);
 
         let evaluator = NlpEvaluator::new(&model).unwrap();
         assert_eq!(evaluator.num_variables(), 1_025);

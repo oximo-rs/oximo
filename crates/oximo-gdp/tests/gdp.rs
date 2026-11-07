@@ -21,6 +21,28 @@ fn auxiliary_feasible(model: &Model, a: bool, b: bool) -> bool {
 }
 
 #[test]
+fn logical_negation_consumes_a_stored_formula() {
+    for named in [false, true] {
+        let model = Model::new("stored negation");
+        boolean_variable!(model, a);
+        boolean_variable!(model, b);
+        let formula = a & b;
+        if named {
+            logical_constraint!(model, negated, !formula);
+        } else {
+            logical_constraint!(model, !formula);
+        }
+
+        let lowered = model.to_reformulated_gdp_model(BigM::default()).unwrap();
+        for a in [false, true] {
+            for b in [false, true] {
+                assert_eq!(auxiliary_feasible(&lowered, a, b), !(a && b));
+            }
+        }
+    }
+}
+
+#[test]
 fn named_blocks_preserve_sources_ids_and_history() {
     let m = Model::new("blocks");
     variable!(m,0.0<=x<=10.0);
@@ -1325,7 +1347,7 @@ fn mixed_nonlinear_rows_preserve_affine_terms_constants_and_residual_signs() {
     param!(model, offset = 0.125);
     boolean_variable!(model, active);
     let body = x.square() - ((rate * x).exp() + coefficient * active.binary() + offset + z);
-    disjunct_constraint!(model, active, interval, -2.0 <= body <= 3.0);
+    disjunct_constraint!(model, active, interval, -2.0 <= body.clone() <= 3.0);
     let report = model.reformulate_gdp(BigM::default()).unwrap();
     assert_eq!(report.rows.len(), 1);
     assert_eq!(report.rows[0].constraints.len(), 2);

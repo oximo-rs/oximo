@@ -697,6 +697,14 @@ fn write_bar_expr(bar: &mut String, arena: &ExprArena, id: ExprId) -> Result<(),
                     write_linear(bar, &LinearTerms::borrowed(coeffs, *constant), true);
                     bar.push(')');
                 }
+                ExprNode::Quadratic(q) => {
+                    bar.push('(');
+                    write_linear(bar, &LinearTerms::borrowed(q.linear(), q.constant()), true);
+                    for (a, b, c) in q.quadratic().iter().copied() {
+                        write!(bar, " + ({} * x{} * x{})", fmt(c), a.index(), b.index()).unwrap();
+                    }
+                    bar.push(')');
+                }
                 ExprNode::Add(children) | ExprNode::Mul(children) => {
                     let separator =
                         if matches!(arena.get(id), ExprNode::Add(_)) { " + " } else { " * " };
@@ -801,6 +809,11 @@ fn expr_has_var(arena: &ExprArena, id: ExprId) -> bool {
             ExprNode::Var(_) => return true,
             ExprNode::Linear { coeffs, .. } => {
                 if coeffs.iter().any(|(_, c)| *c != 0.0) {
+                    return true;
+                }
+            }
+            ExprNode::Quadratic(q) => {
+                if q.variables().next().is_some() {
                     return true;
                 }
             }
@@ -1590,12 +1603,12 @@ mod tests {
         let model = Model::new("parsed result fixture");
         let variables: Vec<_> =
             (0..num_variables).map(|index| model.__var(format!("x{index}")).build()).collect();
-        if let Some(&x) = variables.first() {
+        if let Some(x) = variables.first() {
             for index in 0..result.dual.slot_count() {
-                model.add_constraint(format!("row{index}"), x.le(1.0));
+                model.add_constraint(format!("row{index}"), (*x).le(1.0));
             }
             for index in 0..result.soc_dual.slot_count() {
-                model.add_soc_constraint(format!("cone{index}"), [x], x);
+                model.add_soc_constraint(format!("cone{index}"), [*x], x);
             }
         }
         for (index, &value) in result.parameters.values().iter().enumerate() {
@@ -1626,7 +1639,10 @@ mod tests {
     fn deferred_affine_sum_in_nonlinear_row_renders_without_stack_overflow() {
         let m = Model::new("deep affine row");
         variable!(m, x[i in 0..20_000]);
-        let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+        let sum = (0..20_000)
+            .map(|i| oximo_expr::Expr::<oximo_expr::Affine>::from(x[i]))
+            .reduce(|a, b| a + b)
+            .unwrap();
         m.add_constraint("row", sum.exp().le(1.0));
         objective!(m, Min, x[0]);
         let output = render(&m);
@@ -1642,7 +1658,7 @@ mod tests {
         for _ in 0..20_000 {
             expression = expression.exp();
         }
-        m.add_constraint("row", expression.le(1.0));
+        m.add_constraint("row", expression.clone().le(1.0));
         objective!(m, Min, expression);
         let output = render(&m);
         assert_eq!(output.matches("exp(").count(), 2 * 20_001);
@@ -1657,7 +1673,7 @@ mod tests {
             constant = constant.exp();
         }
         for _ in 0..40 {
-            constant = constant + constant;
+            constant = constant.clone() + constant;
         }
         let arena = m.arena();
         assert!(!expr_has_var(&arena, constant.id()));
@@ -1840,7 +1856,7 @@ mod tests {
     fn constant_base_uses_native_caret() {
         let m = Model::new("cbpow");
         variable!(m, 0.0 <= x <= 5.0);
-        let two = Expr::constant(x.arena, 2.0);
+        let two = Expr::constant(x.arena(), 2.0);
         objective!(m, Min, two.pow(x));
         let bar = render(&m);
         assert!(bar.contains("2 ^ x0"), "expected native b^x:\n{bar}");

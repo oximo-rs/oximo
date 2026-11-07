@@ -38,7 +38,8 @@ pub fn walk<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
             ExprNode::Const(_)
             | ExprNode::Var(_)
             | ExprNode::Param(_)
-            | ExprNode::Linear { .. } => {}
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_) => {}
         }
     }
 }
@@ -77,7 +78,8 @@ pub fn walk_shared<V: Visitor>(arena: &ExprArena, id: ExprId, visitor: &mut V) {
             ExprNode::Const(_)
             | ExprNode::Var(_)
             | ExprNode::Param(_)
-            | ExprNode::Linear { .. } => {}
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_) => {}
         }
     }
 }

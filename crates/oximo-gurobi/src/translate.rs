@@ -87,7 +87,7 @@ impl Built {
         let (linear, constant) = if let Some(terms) = &affine {
             (terms.coeffs.as_ref(), terms.constant)
         } else if let Some(terms) = &quadratic {
-            (terms.linear.as_slice(), terms.constant)
+            (terms.linear(), terms.constant())
         } else {
             return Ok(false);
         };
@@ -99,7 +99,7 @@ impl Built {
 
         self.model.del_qpterms().map_err(map_gurobi_err)?;
         if let Some(terms) = &quadratic
-            && !terms.hessian.is_empty()
+            && !terms.quadratic().is_empty()
         {
             self.model
                 .add_qpterms(sparse_quadratic_terms(terms, &self.vars))
@@ -1321,19 +1321,15 @@ fn add_comparison_rows(
 #[cfg(test)]
 fn quadratic_expression(terms: &QuadraticTerms, variables: &[gurobi_rs::Var]) -> QuadExpr {
     let mut expression = QuadExpr::new();
-    expression.add_constant(terms.constant);
-    for &(variable, coefficient) in &terms.linear {
+    expression.add_constant(terms.constant());
+    for &(variable, coefficient) in terms.linear() {
         if coefficient != 0.0 {
             expression.add_term(coefficient, variables[variable.index()]);
         }
     }
-    for &(row, column, coefficient) in &terms.hessian {
+    for &(row, column, coefficient) in terms.quadratic() {
         if coefficient != 0.0 {
-            expression.add_qterm(
-                if row == column { 0.5 * coefficient } else { coefficient },
-                variables[row.index()],
-                variables[column.index()],
-            );
+            expression.add_qterm(coefficient, variables[row.index()], variables[column.index()]);
         }
     }
     expression
@@ -1343,16 +1339,14 @@ fn sparse_linear_terms<'a>(
     terms: &'a QuadraticTerms,
     variables: &'a [gurobi_rs::Var],
 ) -> impl ExactSizeIterator<Item = (gurobi_rs::Var, f64)> + 'a {
-    terms.linear.iter().map(|&(v, c)| (variables[v.index()], c))
+    terms.linear().iter().map(|&(v, c)| (variables[v.index()], c))
 }
 
 fn sparse_quadratic_terms<'a>(
     terms: &'a QuadraticTerms,
     variables: &'a [gurobi_rs::Var],
 ) -> impl ExactSizeIterator<Item = (gurobi_rs::Var, gurobi_rs::Var, f64)> + 'a {
-    terms.hessian.iter().map(|&(r, c, h)| {
-        (variables[r.index()], variables[c.index()], if r == c { 0.5 * h } else { h })
-    })
+    terms.quadratic().iter().map(|&(r, c, h)| (variables[r.index()], variables[c.index()], h))
 }
 
 fn add_sparse_quadratic_rows(
@@ -1382,7 +1376,7 @@ fn add_sparse_quadratic_rows(
                     &name,
                     sparse_linear_terms(terms, variables),
                     sparse_quadratic_terms(terms, variables),
-                    terms.constant,
+                    terms.constant(),
                     sense,
                     rhs,
                 )
@@ -1425,7 +1419,7 @@ fn set_objective(
             .set_objective_sparse(
                 sparse_linear_terms(&terms, gurobi_vars),
                 sparse_quadratic_terms(&terms, gurobi_vars),
-                terms.constant,
+                terms.constant(),
                 gurobi_sense,
             )
             .map_err(map_gurobi_err)?;

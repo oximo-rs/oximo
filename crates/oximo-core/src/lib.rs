@@ -94,8 +94,8 @@ pub use var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable, var_name
 pub use oximo_expr::{
     AffineBuilder, CapturedExpr, Children, EvalError, Expr, ExprArena, ExprArenaCell,
     ExprArenaSnapshot, ExprArenaWriteGuard, ExprId, ExprNode, ModelId, ModelMismatchError, ParamId,
-    ParameterSnapshot, UnaryOp, VarId, describe_nonlinear_term, dot, render_expr,
-    render_linear_terms,
+    ParameterHandle, ParameterSnapshot, QuadraticBuildError, QuadraticBuilder, UnaryOp, VarId,
+    VariableHandle, describe_nonlinear_term, dot, render_expr, render_linear_terms,
 };
 
 pub use oximo_macros::{

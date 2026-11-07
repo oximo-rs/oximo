@@ -7,7 +7,7 @@ struct MustNotLower<'a>(Expr<'a, Affine>);
 impl Function for MustNotLower<'_> {
     type Owned = ScalarFunctionData<Affine>;
     fn semantic_data(&self) -> Self::Owned {
-        ScalarFunctionData::from_expression(self.0)
+        ScalarFunctionData::from_expression(&self.0)
     }
 }
 impl FunctionInSet<LessThan> for MustNotLower<'_> {}
@@ -24,7 +24,7 @@ fn direct_macro_bulk_and_indexed_registration_never_invoke_alternative_lowering(
         rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
             let m = Model::new("one registration contract");
             variable!(m, x);
-            let input = || Constraint::new(MustNotLower(x), LessThan(2.0));
+            let input = || Constraint::new(MustNotLower(x.into()), LessThan(2.0));
             let direct = m.add_constraint("direct", input());
             let scalar = m.__add_constraint("scalar", input());
             m.add_constraints([("bulk".into(), input())]);
@@ -130,7 +130,7 @@ fn conditional_registration_uses_the_declared_representation() {
     let m = Model::new("conditional scalar semantics");
     variable!(m, x);
     let branch = m.add_boolean("branch");
-    branch.context().add_constraint("row", Constraint::new(MustNotLower(x), LessThan(2.0)));
+    branch.context().add_constraint("row", Constraint::new(MustNotLower(x.into()), LessThan(2.0)));
     let snapshot = m.gdp_snapshot();
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.rows[0].lhs, x.id());
@@ -162,7 +162,8 @@ fn indicators_preserve_the_declared_function_and_check_its_ownership() {
     variable!(m, x);
     variable!(m, enabled, Binary);
     let foreign = Model::new("foreign");
-    let input = |owner| Constraint::new(ScalarViewFunction { expression: x, owner }, LessThan(2.0));
+    let input =
+        |owner| Constraint::new(ScalarViewFunction { expression: x.into(), owner }, LessThan(2.0));
     assert!(
         catch_unwind(AssertUnwindSafe(|| m.add_indicator_constraint(
             "row",

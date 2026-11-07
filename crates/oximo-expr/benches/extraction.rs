@@ -39,9 +39,14 @@ fn main() {
     for depth in [10, 14, 18] {
         let cell = ExprArenaCell::new(ExprArena::new());
         let vars: Vec<_> = (0..64).map(|i| Expr::from_var(&cell, VarId(i))).collect();
-        let mut sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+        let mut sum = vars
+            .iter()
+            .copied()
+            .map(Expr::<oximo_expr::Affine>::from)
+            .reduce(|a, b| a + b)
+            .unwrap();
         for _ in 0..depth {
-            sum = sum + sum;
+            sum = sum.clone() + sum;
         }
         let mixed = sum + vars[0].sin();
         let snapshot = cell.borrow();
@@ -50,7 +55,12 @@ fn main() {
     for n in [32, 512, 4096, 20_000] {
         let cell = ExprArenaCell::new(ExprArena::new());
         let vars: Vec<_> = (0..n).map(|i| Expr::from_var(&cell, VarId(i))).collect();
-        let sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+        let sum = vars
+            .iter()
+            .copied()
+            .map(Expr::<oximo_expr::Affine>::from)
+            .reduce(|a, b| a + b)
+            .unwrap();
         let nonlinear = sum.sin();
         let compact = sum.compact();
         let snapshot = cell.borrow();
@@ -75,8 +85,9 @@ fn main() {
     }
     let cell = ExprArenaCell::new(ExprArena::new());
     let vars: Vec<_> = (0..64).map(|i| Expr::from_var(&cell, VarId(i))).collect();
-    let sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
-    let overflow = -1e308 * sum + (1e308 * sum + 1e308 * sum);
+    let sum =
+        vars.iter().copied().map(Expr::<oximo_expr::Affine>::from).reduce(|a, b| a + b).unwrap();
+    let overflow = -1e308 * &sum + (1e308 * &sum + 1e308 * sum);
     let snapshot = cell.borrow();
     support::measure("linear_hidden_overflow/64", || {
         extract_linear(&snapshot, overflow.id()).unwrap()

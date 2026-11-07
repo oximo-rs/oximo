@@ -80,8 +80,8 @@ fn arena_key(arena: &ExprArenaCell) -> usize {
     std::ptr::from_ref(arena) as usize
 }
 
-fn assert_expr_arena<D: Degree>(expr: Expr<'_, D>, expected: usize) {
-    assert_eq!(arena_key(expr.arena), expected, "expression belongs to a different model");
+fn assert_expr_arena<D: Degree>(expr: &Expr<'_, D>, expected: usize) {
+    assert_eq!(arena_key(expr.arena()), expected, "expression belongs to a different model");
 }
 
 fn validate_batch_names<'a>(
@@ -230,7 +230,7 @@ impl Model {
         Ok(())
     }
 
-    fn assert_expr_belongs<'a, D: Degree>(&self, expr: Expr<'a, D>) {
+    fn assert_expr_belongs<'a, D: Degree>(&self, expr: &Expr<'a, D>) {
         assert_expr_arena(expr, arena_key(&self.arena));
     }
 
@@ -247,7 +247,7 @@ impl Model {
     #[inline]
     fn ensure_expr_model<'a, D: Degree>(
         &self,
-        expr: Expr<'a, D>,
+        expr: &Expr<'a, D>,
     ) -> std::result::Result<(), ModelMismatchError> {
         self.ensure_model_id(expr.model_id())
     }
@@ -366,6 +366,12 @@ impl Model {
         self.arena.model_id()
     }
 
+    /// Accumulate validated numeric quadratic coefficients and affine products.
+    /// Call `build()` to emit an expression and reset the reusable builder.
+    pub fn quadratic_builder(&self) -> oximo_expr::QuadraticBuilder<'_> {
+        oximo_expr::QuadraticBuilder::new(&self.arena)
+    }
+
     /// Accumulate affine terms incrementally without copying every prefix.
     /// Call `build()` to emit an expression and reset the reusable builder.
     pub fn affine_builder(&self) -> oximo_expr::AffineBuilder<'_> {
@@ -456,15 +462,16 @@ impl Model {
         sense: ObjectiveSense,
     ) {
         let expr = expr.into_objective_expression(&self.arena);
+        self.assert_expr_belongs(&expr);
+        let expr_id = expr.id();
         let semantic_function =
             <E::Degree as crate::function_set::FunctionDegree>::relation_function(expr);
         let function =
             crate::FunctionValue::new(crate::Function::semantic_data(&semantic_function));
-        self.assert_expr_belongs(expr);
         self.objective.assert_mutable();
         self.semantic_objective.clear();
         self.objective_signature.set(semantic::storage::ScalarKind::of(&function));
-        *self.objective.borrow_mut() = Some(Objective { expr: expr.id, sense });
+        *self.objective.borrow_mut() = Some(Objective { expr: expr_id, sense });
         self.objective_declared.set(true);
         self.cached_kind.set(None);
     }

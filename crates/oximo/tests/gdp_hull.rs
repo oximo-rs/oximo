@@ -120,7 +120,7 @@ fn flattened_inclusive_relaxation(inner: &Model) -> Model {
                 .linear(terms.coeffs.into_owned(), terms.constant);
             let body: Expr = Expr::new(id, model.__sum_context());
             if row.lower.is_finite() {
-                branch.context().add_constraint(format!("inner lower {i}"), body.ge(row.lower));
+                branch.context().add_constraint(format!("inner lower {i}"), (&body).ge(row.lower));
             }
             if row.upper.is_finite() {
                 branch.context().add_constraint(format!("inner upper {i}"), body.le(row.upper));
@@ -390,7 +390,7 @@ fn sparse_flat_model(full_copies: bool, selectors: Option<[f64; 5]>) -> Model {
             branch.context().add_constraint("z box", z.le(6.0));
         }
     }
-    disjunction!(model, branches.clone());
+    disjunction!(model, branches.iter().copied());
 
     let report = model
         .reformulate_gdp(

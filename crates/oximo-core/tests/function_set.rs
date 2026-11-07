@@ -15,7 +15,7 @@ fn affine_builder_registers_typed_and_parallel_constraints() {
     }
     builder.add_term(3.0, p * x[0]).add_constant(5.0);
     let expression: Expr<'_, Affine> = builder.build();
-    m.add_constraint("row", expression.le(100.0));
+    m.add_constraint("row", expression.clone().le(100.0));
     p.set_param_value(4.0).unwrap();
     let snapshot = m.arena();
     let terms = extract_linear(&snapshot, expression.id()).unwrap();
@@ -55,19 +55,19 @@ fn operators_and_families_carry_static_degree() {
     let m = Model::new("degrees");
     variable!(m, x[i in 0..3]);
     param!(m, p[i in 0..3] = 2.0);
-    let _: Expr<'_, Affine> = p[0] * x[0] + x[1] + 3.0;
-    let _: Expr<'_, Quadratic> = x[0] * x[1] + x[2];
+    let _: Expr<'_, Affine> = (p[0]) * (x[0]) + (x[1]) + 3.0;
+    let _: Expr<'_, Quadratic> = (x[0]) * (x[1]) + (x[2]);
     let _: Expr<'_, Quadratic> = x[0].square();
-    let _: Expr<'_, Nonlinear> = x[0] * x[1] * x[2];
+    let _: Expr<'_, Nonlinear> = (x[0]) * (x[1]) * (x[2]);
     let _: Expr<'_, Nonlinear> = x[0].sin();
     let _: Expr<'_, Dynamic> = x[0].powi(2);
     let _: Expr<'_, Affine> = sum!(m, p[i] * x[i] for i in 0..3);
     let _: Expr<'_, Quadratic> = sum!(m, x[i].square() for i in 0..3);
-    let _: Expr<'_, Affine> = dot(&[x[0], x[1]], &[1.0, 2.0]);
+    let _: Expr<'_, Affine> = dot(&[(x[0]), (x[1])], &[1.0, 2.0]);
     let mixed = [x[0].erase(), x[1].square().erase(), x[2].sin().erase()];
-    assert!(matches!(mixed[0].into_function(), AnyScalarFunction::Affine(_)));
-    assert!(matches!(mixed[1].into_function(), AnyScalarFunction::Quadratic(_)));
-    assert!(matches!(mixed[2].into_function(), AnyScalarFunction::Nonlinear(_)));
+    assert!(matches!((mixed[0]).clone().into_function(), AnyScalarFunction::Affine(_)));
+    assert!(matches!((mixed[1]).clone().into_function(), AnyScalarFunction::Quadratic(_)));
+    assert!(matches!((mixed[2]).clone().into_function(), AnyScalarFunction::Nonlinear(_)));
     assert_eq!(mixed[1].try_affine().unwrap_err(), ExprClass::Quadratic);
     assert_eq!(mixed[2].try_quadratic().unwrap_err(), ExprClass::Nonlinear);
 }
@@ -78,11 +78,11 @@ fn dynamic_relations_retain_expressions_and_checked_classification() {
     variable!(m, x);
     let expressions = [x.erase(), x.square().erase(), x.sin().erase()];
     let before = m.arena().len();
-    for expr in expressions {
-        let le: Constraint<ScalarDynamicFunction<'_>, LessThan> = expr.le(3.0);
-        let ge: Constraint<ScalarDynamicFunction<'_>, GreaterThan> = expr.ge(-2.0);
-        let eq: Constraint<ScalarDynamicFunction<'_>, EqualTo> = expr.eq(1.0);
-        assert_eq!(le.function.expression().id(), expr.id());
+    for expr in &expressions {
+        let le: Constraint<ScalarDynamicFunction<'_>, LessThan> = expr.clone().le(3.0);
+        let ge: Constraint<ScalarDynamicFunction<'_>, GreaterThan> = expr.clone().ge(-2.0);
+        let eq: Constraint<ScalarDynamicFunction<'_>, EqualTo> = expr.clone().eq(1.0);
+        assert_eq!(le.function.clone().expression().id(), expr.id());
         let handles = [
             m.__add_constraint_auto(le).erase(),
             m.__add_constraint_auto(ge).erase(),
@@ -98,9 +98,9 @@ fn dynamic_relations_retain_expressions_and_checked_classification() {
         }
     }
     assert_eq!(m.arena().len(), before);
-    assert!(matches!(expressions[0].into_function(), AnyScalarFunction::Affine(_)));
-    assert!(matches!(expressions[1].into_function(), AnyScalarFunction::Quadratic(_)));
-    assert!(matches!(expressions[2].into_function(), AnyScalarFunction::Nonlinear(_)));
+    assert!(matches!((expressions[0]).clone().into_function(), AnyScalarFunction::Affine(_)));
+    assert!(matches!((expressions[1]).clone().into_function(), AnyScalarFunction::Quadratic(_)));
+    assert!(matches!((expressions[2]).clone().into_function(), AnyScalarFunction::Nonlinear(_)));
     assert_eq!(m.kind(), ModelKind::NLP);
 }
 
@@ -135,12 +135,14 @@ fn static_lowering_reuses_nodes_and_matches_macro_rows() {
     variable!(m, x);
     variable!(m, y);
     let affine = x + 2.0 * y + 3.0;
-    let quadratic = x.square() + 4.0 * x * y + affine;
+    let quadratic = x.square() + 4.0 * x * y + affine.clone();
     let nonlinear = x.sin() + y;
     let before = m.arena().len();
-    let a = m.add_constraint("a", Constraint::new(affine.into_function(), LessThan(10.0)));
-    let q = m.add_constraint("q", Constraint::new(quadratic.into_function(), EqualTo(11.0)));
-    let n = m.add_constraint("n", Constraint::new(nonlinear.into_function(), GreaterThan(0.0)));
+    let a = m.add_constraint("a", Constraint::new(affine.clone().into_function(), LessThan(10.0)));
+    let q =
+        m.add_constraint("q", Constraint::new(quadratic.clone().into_function(), EqualTo(11.0)));
+    let n =
+        m.add_constraint("n", Constraint::new(nonlinear.clone().into_function(), GreaterThan(0.0)));
     assert_eq!(m.arena().len(), before);
     let am = constraint!(m, am, affine <= 10.0);
     let qm = constraint!(m, qm, quadratic == 11.0);
@@ -158,7 +160,11 @@ fn static_lowering_reuses_nodes_and_matches_macro_rows() {
     assert_eq!(terms.constant, 3.0);
     assert_eq!(&*terms.coeffs, &[(x.var_id().unwrap(), 1.0), (y.var_id().unwrap(), 2.0)]);
     let terms = extract_quadratic(&arena, rows.algebraic()[q.index()].lhs).unwrap();
-    assert!(terms.hessian.contains(&(x.var_id().unwrap(), x.var_id().unwrap(), 2.0)));
+    assert!(terms.hessian_entries().collect::<Vec<_>>().contains(&(
+        x.var_id().unwrap(),
+        x.var_id().unwrap(),
+        2.0
+    )));
     assert_eq!(evaluate(&arena, rows.algebraic()[n.index()].lhs, &&[0.0, 2.0][..]).unwrap(), 2.0);
 }
 
@@ -185,16 +191,18 @@ fn constant_arithmetic_agrees_with_checked_degrees_and_extraction() {
     let m = Model::new("constant arithmetic");
     variable!(m, x);
     let c = Expr::constant(x.arena(), 2.0);
-    for coefficient in [-c, c + 3.0, c * c, c / 2.0, c.neg()] {
+    for coefficient in
+        [-c.clone(), c.clone() + 3.0, c.clone() * c.clone(), c.clone() / 2.0, c.neg()]
+    {
         let affine: Expr<'_, Affine> = coefficient * x;
-        let quadratic: Expr<'_, Quadratic> = affine * x;
+        let quadratic: Expr<'_, Quadratic> = affine.clone() * x;
         assert_eq!(affine.__class(), ExprClass::Linear);
         assert_eq!(quadratic.__class(), ExprClass::Quadratic);
         assert!(affine.erase().try_affine().is_ok());
         assert!(quadratic.erase().try_quadratic().is_ok());
         let arena = m.arena();
-        assert!(extract_linear(&arena, affine.id).is_some());
-        assert!(extract_quadratic(&arena, quadratic.id).is_some());
+        assert!(extract_linear(&arena, affine.id()).is_some());
+        assert!(extract_quadratic(&arena, quadratic.id()).is_some());
     }
 }
 

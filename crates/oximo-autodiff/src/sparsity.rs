@@ -30,6 +30,7 @@ pub fn variable_support(arena: &ExprArena, root: ExprId) -> Vec<u32> {
             ExprNode::Linear { coeffs, .. } => {
                 support.extend(coeffs.iter().map(|(v, _)| v.0));
             }
+            ExprNode::Quadratic(q) => support.extend(q.variables().map(|v| v.0)),
             ExprNode::Add(children)
             | ExprNode::Mul(children)
             | ExprNode::Min(children)
@@ -293,6 +294,7 @@ fn collect_node_vars(node: &ExprNode, vars: &mut Vec<u32>) {
         ExprNode::Linear { coeffs, .. } => {
             vars.extend(coeffs.iter().map(|(v, _)| v.0));
         }
+        ExprNode::Quadratic(q) => vars.extend(q.variables().map(|v| v.0)),
         _ => {}
     }
 }
@@ -322,7 +324,11 @@ fn push_active_children(arena: &ExprArena, id: ExprId, walk: &mut Vec<WalkAction
             walk.push(WalkAction::ActiveEnter(*x));
             walk.push(WalkAction::ActiveEnter(*y));
         }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Var(_)
+        | ExprNode::Param(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }
 
@@ -398,6 +404,33 @@ fn build_dense_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspace
                     let bit =
                         workspace.active_vars.binary_search(&v.0).expect("collected variable");
                     set_bit(dst, bit);
+                }
+                row
+            }
+            ExprNode::Quadratic(q) => {
+                let row = workspace.alloc_row(words);
+                let dst = &mut workspace.supports[row_start(row, words)..][..words];
+                for v in q.variables() {
+                    let bit =
+                        workspace.active_vars.binary_search(&v.0).expect("collected variable");
+                    set_bit(dst, bit);
+                }
+
+                for &(row_var, column_var, _) in q.quadratic() {
+                    let row_bit = workspace
+                        .active_vars
+                        .binary_search(&row_var.0)
+                        .expect("collected variable");
+                    let column_bit = workspace
+                        .active_vars
+                        .binary_search(&column_var.0)
+                        .expect("collected variable");
+                    let (row_bit, column_bit) = if row_bit >= column_bit {
+                        (row_bit, column_bit)
+                    } else {
+                        (column_bit, row_bit)
+                    };
+                    set_bit(&mut workspace.pairs, row_bit * (row_bit + 1) / 2 + column_bit);
                 }
                 row
             }
@@ -582,6 +615,19 @@ fn build_sparse_support_rows(arena: &ExprArena, workspace: &mut SparsityWorkspac
                 finish_sparse_union(&mut workspace.sparse_scratch);
                 store_sparse_scratch(workspace)
             }
+            ExprNode::Quadratic(q) => {
+                workspace.sparse_scratch.clear();
+                workspace.sparse_scratch.extend(q.variables().map(|v| {
+                    workspace.active_vars.binary_search(&v.0).expect("collected variable")
+                }));
+                finish_sparse_union(&mut workspace.sparse_scratch);
+                for &(a, b, _) in q.quadratic() {
+                    let a = workspace.active_vars.binary_search(&a.0).expect("collected variable");
+                    let b = workspace.active_vars.binary_search(&b.0).expect("collected variable");
+                    workspace.sparse_pairs.insert(if a >= b { (a, b) } else { (b, a) });
+                }
+                store_sparse_scratch(workspace)
+            }
             ExprNode::Unary(UnaryOp::Neg | UnaryOp::Abs, inner) => {
                 workspace.meta[inner.index()].row
             }
@@ -713,7 +759,7 @@ fn hessian_patterns_impl(slots: &[&FunctionSlot], include_nonlinear: bool) -> He
         match &slot.kind {
             SlotKind::Linear(_) => {}
             SlotKind::Quadratic(q) => {
-                for &(r, c, _) in &q.hessian {
+                for &(r, c, _) in q.quadratic() {
                     max_variable = max_variable.max(Some(r.index().max(c.index())));
                 }
             }
@@ -734,7 +780,7 @@ fn hessian_patterns_impl(slots: &[&FunctionSlot], include_nonlinear: bool) -> He
             match &slot.kind {
                 SlotKind::Linear(_) => {}
                 SlotKind::Quadratic(q) => {
-                    for &(r, c, _) in &q.hessian {
+                    for &(r, c, _) in q.quadratic() {
                         set_pair(&mut pairs, r.index(), c.index());
                     }
                 }
@@ -776,7 +822,7 @@ fn hessian_patterns_impl(slots: &[&FunctionSlot], include_nonlinear: bool) -> He
         match &slot.kind {
             SlotKind::Linear(_) => {}
             SlotKind::Quadratic(q) => {
-                for &(r, c, _) in &q.hessian {
+                for &(r, c, _) in q.quadratic() {
                     entries.insert((r.index(), c.index()));
                 }
             }

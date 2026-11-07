@@ -78,8 +78,8 @@ ENDATA
     );
 
     let objective = quadratic_terms(&model, true);
-    assert_eq!(objective.linear, vec![(model.resolved_variables()[0].id, 3.0)]);
-    assert!(close(objective.constant, 5.0));
+    assert_eq!(objective.linear(), vec![(model.resolved_variables()[0].id, 3.0)]);
+    assert!(close(objective.constant(), 5.0));
     let constraints = model.constraints();
     assert!(close(constraints.algebraic()[0].lower, 6.0));
     assert!(close(constraints.algebraic()[0].upper, 10.0));
@@ -95,8 +95,8 @@ fn upstream_stacked_data_fixture_with_tabs_and_extra_row_fields() {
     assert_eq!(model.num_variables(), 2);
     assert_eq!(model.num_constraints(), 1);
     let objective = quadratic_terms(&model, true);
-    assert_eq!(objective.linear.len(), 2);
-    assert!(close(objective.constant, -4.0));
+    assert_eq!(objective.linear().len(), 2);
+    assert!(close(objective.constant(), -4.0));
     let constraints = model.constraints();
     let row = &constraints.algebraic()[0];
     assert!(row.lower.is_infinite() && row.lower.is_sign_negative());
@@ -248,7 +248,7 @@ fn writer_round_trips_max_binary_semi_range_and_unused_variables() {
     assert_eq!(imported.try_objective().expect("objective").sense, ObjectiveSense::Maximize);
     let constraints = imported.constraints();
     assert_eq!((constraints.algebraic()[0].lower, constraints.algebraic()[0].upper), (1.0, 6.0));
-    assert!(close(quadratic_terms(&imported, true).constant, 4.0));
+    assert!(close(quadratic_terms(&imported, true).constant(), 4.0));
 }
 
 #[test]
@@ -294,15 +294,18 @@ fn writer_round_trips_quadratic_objective_and_constraints_for_mps_dialects() {
             .expect("read quadratic MPS");
         let actual_objective = quadratic_terms(&imported, true);
         let actual_constraint = quadratic_terms(&imported, false);
-        assert_eq!(actual_objective.hessian.len(), expected_objective.hessian.len());
-        assert_eq!(actual_constraint.hessian.len(), expected_constraint.hessian.len());
+        assert_eq!(actual_objective.quadratic().len(), expected_objective.quadratic().len());
+        assert_eq!(actual_constraint.quadratic().len(), expected_constraint.quadratic().len());
         let actual_objective_hessian: HashMap<_, _> = actual_objective
-            .hessian
-            .into_iter()
+            .hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .copied()
             .map(|(row, col, value)| ((row, col), value))
             .collect();
         let expected_objective_hessian: HashMap<_, _> = expected_objective
-            .hessian
+            .hessian_entries()
+            .collect::<Vec<_>>()
             .iter()
             .map(|&(row, col, value)| ((row, col), value))
             .collect();
@@ -317,12 +320,15 @@ fn writer_round_trips_quadratic_objective_and_constraints_for_mps_dialects() {
         }
 
         let actual_constraint_hessian: HashMap<_, _> = actual_constraint
-            .hessian
-            .into_iter()
+            .hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .copied()
             .map(|(row, col, value)| ((row, col), value))
             .collect();
         let expected_constraint_hessian: HashMap<_, _> = expected_constraint
-            .hessian
+            .hessian_entries()
+            .collect::<Vec<_>>()
             .iter()
             .map(|&(row, col, value)| ((row, col), value))
             .collect();
@@ -384,10 +390,22 @@ ENDATA
 ";
     let model = read_mps(text.as_bytes()).expect("QMATRIX");
     let q = quadratic_terms(&model, true);
-    assert_eq!(q.hessian.len(), 3);
-    assert!(q.hessian.iter().any(|(_, _, value)| close(*value, 10.0)));
-    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 2.0)));
-    assert!(q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 2.0)));
+    assert_eq!(q.quadratic().len(), 3);
+    assert!(
+        q.hessian_entries().collect::<Vec<_>>().iter().any(|(_, _, value)| close(*value, 10.0))
+    );
+    assert!(
+        q.hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row != col && close(*value, 2.0))
+    );
+    assert!(
+        q.hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row == col && close(*value, 2.0))
+    );
 }
 
 #[test]
@@ -396,8 +414,98 @@ fn reads_quadobj_triangular_objective() {
         "NAME qp\nROWS\n N obj\nCOLUMNS\n x obj 0\n y obj 0\nQUADOBJ\n x x 8\n x y 3\nENDATA\n";
     let model = read_mps(text.as_bytes()).expect("QUADOBJ");
     let q = quadratic_terms(&model, true);
-    assert!(q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 8.0)));
-    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 3.0)));
+    assert!(
+        q.hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row == col && close(*value, 8.0))
+    );
+    assert!(
+        q.hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row != col && close(*value, 3.0))
+    );
+}
+
+#[test]
+fn matrix_diagonals_are_aggregated_before_checked_conversion() {
+    let tiny = f64::from_bits(1);
+    for (section, objective, format) in [
+        ("QUADOBJ", true, MpsQuadraticFormat::Gurobi),
+        ("QMATRIX", true, MpsQuadraticFormat::Gurobi),
+        ("QSECTION obj", true, MpsQuadraticFormat::Mosek),
+        ("QCMATRIX row", false, MpsQuadraticFormat::Cplex),
+        ("QSECTION row", false, MpsQuadraticFormat::Mosek),
+    ] {
+        let text = |records: &str| {
+            format!(
+                "NAME tiny\nROWS\n N obj\n L row\nCOLUMNS\n x obj 0\nRHS\n rhs row 1\n{section}\n{records}ENDATA\n"
+            )
+        };
+
+        let options = MpsReadOptions { quadratic_format: format };
+        for value in [tiny, 3.0 * tiny, f64::from_bits(f64::MIN_POSITIVE.to_bits() + 1)] {
+            let error =
+                read_mps_with(text(&format!(" x x {value:e}\n")).as_bytes(), &options).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("representable") && message.contains('x'), "{message}");
+        }
+
+        let records = format!(" x x {tiny:e}\n x x {tiny:e}\n");
+        let model = read_mps_with(text(&records).as_bytes(), &options).unwrap();
+        let terms = quadratic_terms(&model, objective);
+        assert_eq!(terms.quadratic().len(), 1);
+        assert_eq!(terms.quadratic()[0].2.to_bits(), tiny.to_bits(), "{section}");
+    }
+}
+
+#[test]
+fn repeated_symmetric_records_count_each_triangle_only_once() {
+    let twice_tiny = f64::from_bits(2);
+    for (section, objective, expected) in [("QMATRIX", true, 4_u64), ("QCMATRIX row", false, 8)] {
+        let text = format!(
+            "NAME tiny\nROWS\n N obj\n L row\nCOLUMNS\n x obj 0\n y obj 0\nRHS\n rhs row 1\n{section}\n x y {twice_tiny:e}\n x y {twice_tiny:e}\n y x {twice_tiny:e}\n y x {twice_tiny:e}\nENDATA\n"
+        );
+        let model = read_mps(text.as_bytes()).unwrap();
+        assert_eq!(quadratic_terms(&model, objective).quadratic()[0].2.to_bits(), expected);
+    }
+}
+
+#[test]
+fn gurobi_matrix_exports_reject_inexact_cross_coefficient_scaling() {
+    for bits in [1_u64, 2, 3, 4, f64::MIN_POSITIVE.to_bits() + 1] {
+        let model = Model::new("small cross coefficient");
+        variable!(model, x);
+        variable!(model, y);
+        let coefficient = f64::from_bits(bits);
+        constraint!(model, row, coefficient * x * y <= 1.0);
+        objective!(model, Feasibility);
+
+        let result = to_mps_string_with(
+            &model,
+            &MpsWriteOptions { quadratic_format: MpsQuadraticFormat::Gurobi },
+        );
+        if bits & 1 == 1 {
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains("representable") && message.contains('x') && message.contains('y'),
+                "{message}"
+            );
+        } else {
+            let text = result.unwrap();
+            let imported = read_mps(text.as_bytes()).unwrap();
+            assert_eq!(quadratic_terms(&imported, false).quadratic()[0].2.to_bits(), bits);
+        }
+        for format in [MpsQuadraticFormat::Cplex, MpsQuadraticFormat::Mosek] {
+            let text =
+                to_mps_string_with(&model, &MpsWriteOptions { quadratic_format: format }).unwrap();
+            let imported =
+                read_mps_with(text.as_bytes(), &MpsReadOptions { quadratic_format: format })
+                    .unwrap();
+            assert_eq!(quadratic_terms(&imported, false).quadratic()[0].2.to_bits(), bits);
+        }
+    }
 }
 
 #[test]
@@ -405,12 +513,22 @@ fn preserves_lower_triangle_records_in_qmatrix_and_qcmatrix() {
     let objective = "NAME qp\nROWS\n N obj\nCOLUMNS\n x obj 0\n y obj 0\nQMATRIX\n y x 3\nENDATA\n";
     let model = read_mps(objective.as_bytes()).expect("lower QMATRIX record");
     let q = quadratic_terms(&model, true);
-    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 3.0)));
+    assert!(
+        q.hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row != col && close(*value, 3.0))
+    );
 
     let constraint = "NAME qcp\nROWS\n N obj\n L q\nCOLUMNS\n x q 0\n y q 0\nRHS\n rhs q 1\nQCMATRIX q\n y x 2\nENDATA\n";
     let model = read_mps(constraint.as_bytes()).expect("lower QCMATRIX record");
     let q = quadratic_terms(&model, false);
-    assert!(q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 4.0)));
+    assert!(
+        q.hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row != col && close(*value, 4.0))
+    );
 }
 
 #[test]
@@ -442,30 +560,54 @@ ENDATA
 ";
     let gurobi = read_mps(text.as_bytes()).expect("Gurobi scaling");
     let gurobi_q = quadratic_terms(&gurobi, false);
-    assert!(gurobi_q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 20.0)));
-    assert!(gurobi_q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 4.0)));
+    assert!(
+        gurobi_q
+            .hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row == col && close(*value, 20.0))
+    );
+    assert!(
+        gurobi_q
+            .hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row != col && close(*value, 4.0))
+    );
 
     let options = MpsReadOptions { quadratic_format: MpsQuadraticFormat::Cplex };
     let cplex = read_mps_with(text.as_bytes(), &options).expect("CPLEX scaling");
     let cplex_q = quadratic_terms(&cplex, false);
-    assert!(cplex_q.hessian.iter().any(|(row, col, value)| row == col && close(*value, 10.0)));
-    assert!(cplex_q.hessian.iter().any(|(row, col, value)| row != col && close(*value, 2.0)));
+    assert!(
+        cplex_q
+            .hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row == col && close(*value, 10.0))
+    );
+    assert!(
+        cplex_q
+            .hessian_entries()
+            .collect::<Vec<_>>()
+            .iter()
+            .any(|(row, col, value)| row != col && close(*value, 2.0))
+    );
 }
 
 #[test]
 fn qsection_supports_objective_and_constraint_targets() {
     let declared = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION cost\n x x 6\nENDATA\n";
     let model = read_mps(declared.as_bytes()).expect("declared objective QSECTION");
-    assert!(close(quadratic_terms(&model, true).hessian[0].2, 6.0));
+    assert!(close(quadratic_terms(&model, true).hessian_entries().collect::<Vec<_>>()[0].2, 6.0));
 
     let obj_alias = "NAME q\nROWS\n N cost\nCOLUMNS\n x cost 0\nQSECTION OBJ\n x x 8\nENDATA\n";
     let model = read_mps(obj_alias.as_bytes()).expect("OBJ objective QSECTION");
-    assert!(close(quadratic_terms(&model, true).hessian[0].2, 8.0));
+    assert!(close(quadratic_terms(&model, true).hessian_entries().collect::<Vec<_>>()[0].2, 8.0));
 
     let constraint =
         "NAME q\nROWS\n N obj\n L row\nCOLUMNS\n x row 0\nQSECTION row\n x x 3\nENDATA\n";
     let model = read_mps(constraint.as_bytes()).expect("constraint QSECTION");
-    assert!(close(quadratic_terms(&model, false).hessian[0].2, 6.0));
+    assert!(close(quadratic_terms(&model, false).hessian_entries().collect::<Vec<_>>()[0].2, 6.0));
 }
 
 #[test]
@@ -492,8 +634,8 @@ fn feasibility_mps_gets_zero_minimization_objective() {
     let model = read_mps(text.as_bytes()).expect("feasibility MPS");
     assert_eq!(model.try_objective().expect("objective").sense, ObjectiveSense::Minimize);
     let objective = quadratic_terms(&model, true);
-    assert_eq!(objective.linear, Vec::<(VarId, f64)>::new());
-    assert!(close(objective.constant, 0.0));
+    assert_eq!(objective.linear(), Vec::<(VarId, f64)>::new());
+    assert!(close(objective.constant(), 0.0));
 }
 
 #[test]

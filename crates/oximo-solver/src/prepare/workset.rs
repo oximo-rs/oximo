@@ -140,11 +140,7 @@ impl QuadraticWorkset {
             .get_or_init(|| {
                 count!(self, attempts);
                 let result = extract();
-                let bytes = result.as_ref().map_or(0, |q| {
-                    q.linear.capacity() * std::mem::size_of::<(oximo_expr::VarId, f64)>()
-                        + q.hessian.capacity()
-                            * std::mem::size_of::<(oximo_expr::VarId, oximo_expr::VarId, f64)>()
-                });
+                let bytes = result.as_ref().map_or(0, |q| q.coefficient_storage_bytes());
                 let mut entries = shard.0.lock().expect("polynomial workset poisoned");
                 if bytes > BYTES_PER_SHARD {
                     entries.roots.get_mut(&expr).expect("admitted root").value = None;
@@ -219,10 +215,19 @@ mod tests {
         reason = "test extractor has the fallible production signature"
     )]
     fn polynomial(entries: usize) -> Option<Arc<QuadraticTerms>> {
-        Some(Arc::new(QuadraticTerms {
-            hessian: vec![(VarId(0), VarId(0), 2.0); entries],
-            ..QuadraticTerms::default()
-        }))
+        Some(Arc::new(
+            QuadraticTerms::from_hessian(
+                (0..entries)
+                    .map(|i| {
+                        let v = VarId(u32::try_from(i).unwrap());
+                        (v, v, 2.0)
+                    })
+                    .collect(),
+                Vec::new(),
+                0.0,
+            )
+            .unwrap(),
+        ))
     }
 
     #[test]
@@ -255,7 +260,7 @@ mod tests {
                 })
                 .collect();
             for thread in threads {
-                assert_eq!(thread.join().unwrap().hessian.len(), 10);
+                assert_eq!(thread.join().unwrap().quadratic().len(), 10);
             }
         });
         assert_eq!(workset.stats().attempts, 1);
@@ -284,7 +289,7 @@ mod tests {
         let size = BYTES_PER_SHARD / std::mem::size_of::<(VarId, VarId, f64)>() / 2 + 1;
         let first = workset.extract(ExprId(ids[0]), || polynomial(size)).unwrap();
         workset.extract(ExprId(ids[1]), || polynomial(size));
-        assert_eq!(first.hessian.len(), size);
+        assert_eq!(first.quadratic().len(), size);
         assert_eq!(workset.stats().evictions, 1);
 
         workset.extract(ExprId(ids[0]), || polynomial(size));

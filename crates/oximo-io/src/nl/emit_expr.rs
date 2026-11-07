@@ -89,7 +89,11 @@ fn emit_signed<'a, W: Write>(
     if s.neg {
         w.op(16)?;
     }
-    emit_expr(w, arena, var_index, s.id, cache)
+    if let ExprNode::Quadratic(q) = arena.get(s.id) {
+        emit_quadratic(w, var_index, q, false)
+    } else {
+        emit_expr(w, arena, var_index, s.id, cache)
+    }
 }
 
 pub(crate) fn emit_expr<'a, W: Write>(
@@ -181,7 +185,36 @@ pub(crate) fn emit_expr<'a, W: Write>(
             ExprNode::Linear { coeffs, constant } => {
                 emit_linear_inline(w, var_index, coeffs, *constant)?;
             }
+            ExprNode::Quadratic(q) => emit_quadratic(w, var_index, q, true)?,
         }
+    }
+    Ok(())
+}
+
+fn emit_quadratic<W: Write>(
+    w: &mut Writer<'_, W>,
+    var_index: &FxHashMap<VarId, u32>,
+    q: &oximo_expr::QuadraticTerms,
+    include_affine: bool,
+) -> Result<(), IoError> {
+    let n = q.quadratic().len() + usize::from(include_affine);
+    match n {
+        0 => return w.num(0.0),
+        1 => {}
+        2 => w.op(0)?,
+        _ => {
+            w.op(54)?;
+            w.int(i64::try_from(n).expect("arity"))?;
+            w.eor()?;
+        }
+    }
+    if include_affine {
+        emit_linear_inline(w, var_index, q.linear(), q.constant())?;
+    }
+    for (a, b, c) in q.quadratic().iter().copied() {
+        w.op(2)?;
+        emit_term(w, var_index, a, c)?;
+        emit_term(w, var_index, b, 1.0)?;
     }
     Ok(())
 }

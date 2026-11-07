@@ -6,7 +6,7 @@ use smallvec::smallvec;
 use crate::arena::{ArenaAccess, ExprId, ExprNode, VarId};
 use crate::degree::AddDegree;
 use crate::linear::{CoeffAccum, LinearTerms, add_n, as_linear, push_linear};
-use crate::{Affine, Degree, Expr, ExprArenaCell};
+use crate::{Affine, Expr, ExprArenaCell};
 
 /// Reusable accumulator for incremental affine construction.
 ///
@@ -71,10 +71,12 @@ impl<'a> AffineBuilder<'a> {
     ///
     /// # Panics
     /// Panics before changing the builder if the expression belongs to another arena.
-    pub fn add_term<D>(&mut self, coefficient: f64, expression: Expr<'a, D>) -> &mut Self
+    pub fn add_term<E>(&mut self, coefficient: f64, expression: E) -> &mut Self
     where
-        D: Degree + AddDegree<Affine, Output = Affine>,
+        E: crate::ExprInput<'a>,
+        E::Degree: AddDegree<Affine, Output = Affine>,
     {
+        let expression = expression.as_expression();
         assert!(
             std::ptr::eq(self.arena, expression.arena()),
             "expressions belong to different arenas"
@@ -134,7 +136,7 @@ impl<'a> AffineBuilder<'a> {
                 return match self.children.as_slice() {
                     [] => arena.constant(0.0),
                     [one] => *one,
-                    _ => add_n(arena, self.children.iter().copied().collect()),
+                    _ => add_n(arena, self.children.iter().copied().collect()).0,
                 };
             }
             let mut constant = self.constant;
@@ -162,7 +164,7 @@ impl<'a> AffineBuilder<'a> {
             match self.children.as_slice() {
                 [] => arena.constant(constant),
                 [one] => *one,
-                _ => add_n(arena, self.children.iter().copied().collect()),
+                _ => add_n(arena, self.children.iter().copied().collect()).0,
             }
         });
         self.clear();

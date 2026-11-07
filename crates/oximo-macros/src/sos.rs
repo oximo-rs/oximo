@@ -163,14 +163,14 @@ fn parse_members(tokens: &TokenStream2) -> syn::Result<Members> {
                 ));
             }
             let components = parse_comma_list(pair.stream(), "missing SOS variable or weight")?;
-            let [expr, weight] = components.as_slice() else {
-                return Err(syn::Error::new_spanned(
+            let [expr, weight]: [TokenStream2; 2] = components.try_into().map_err(|_| {
+                syn::Error::new_spanned(
                     &part,
                     "sos_constraint! SOS member needs exactly `(var, weight)`",
-                ));
-            };
-            let expr = crate::index::parse_value_expr(expr.clone())?;
-            let weight = crate::index::parse_value_expr(weight.clone())?;
+                )
+            })?;
+            let expr = crate::index::parse_value_expr(expr)?;
+            let weight = crate::index::parse_value_expr(weight)?;
             Ok(quote!((#expr, #weight)))
         })
         .collect::<syn::Result<Vec<_>>>()

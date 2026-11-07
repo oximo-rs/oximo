@@ -38,14 +38,14 @@ fn shared(rows: usize, depth: usize) -> Model {
     variable!(model, 0.0 <= x <= 1.0);
     let indicator = model.add_boolean("active");
     let mut arena = model.__sum_context().borrow_mut();
-    let mut source = x.id;
+    let mut source = x.id();
     for _ in 0..depth {
         source = arena.push(ExprNode::Unary(UnaryOp::Neg, source));
     }
     drop(arena);
     let expression: Expr = Expr::new(source, model.__sum_context());
     for i in 0..rows {
-        indicator.context().add_constraint(format!("r{i}"), expression.le(2.0));
+        indicator.context().add_constraint(format!("r{i}"), expression.clone().le(2.0));
     }
     model
 }
@@ -57,7 +57,7 @@ fn shared_shifted(rows: usize, depth: usize) -> Model {
     let indicator = model.add_boolean("active");
 
     let mut arena = model.__sum_context().borrow_mut();
-    let mut source = x.id;
+    let mut source = x.id();
     for _ in 0..depth {
         source = arena.push(ExprNode::Unary(UnaryOp::Neg, source));
     }
@@ -67,7 +67,7 @@ fn shared_shifted(rows: usize, depth: usize) -> Model {
         let root = model
             .__sum_context()
             .borrow_mut()
-            .push(ExprNode::Add([source, offset.id].into_iter().collect()));
+            .push(ExprNode::Add([source, offset.id()].into_iter().collect()));
         let expression: Expr = Expr::new(root, model.__sum_context());
         indicator.context().add_constraint(format!("r{i}"), expression.le(2.0));
     }
@@ -96,7 +96,7 @@ fn sparse_arena(unrelated: usize) -> Model {
     for _ in 0..unrelated {
         arena.push(ExprNode::Const(0.0));
     }
-    let source = arena.push(ExprNode::Unary(UnaryOp::Neg, x.id));
+    let source = arena.push(ExprNode::Unary(UnaryOp::Neg, x.id()));
     drop(arena);
     let expression: Expr = Expr::new(source, model.__sum_context());
     active.context().add_constraint("row", expression.ge(-2.0));

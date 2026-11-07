@@ -255,7 +255,10 @@ fn deep_deferred_sum_inside_exp_translates_on_small_stack() {
         .spawn(|| {
             let m = Model::new("deep_deferred_sum");
             variable!(m, x[i in 0..4096], lb = 0.0, ub = 0.0);
-            let sum = (0..4096).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+            let sum = (0..4096)
+                .map(|i| oximo_expr::Expr::<oximo_expr::Affine>::from(x[i]))
+                .reduce(|a, b| a + b)
+                .unwrap();
             m.add_constraint("row", sum.exp().le(1.0));
             objective!(m, Min, x[0]);
             let options =

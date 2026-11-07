@@ -62,11 +62,11 @@ fn scalar_model(rows: usize) -> Model {
 fn worker_remapping(structure: Structure, shared: bool) {
     let model = Model::new("worker remapping");
     variable!(model, x);
-    let mut batch = x.arena.__begin_batch();
+    let mut batch = x.arena().__begin_batch();
     let snapshot = batch.snapshot();
     let mut forks: Vec<_> = (0..4)
         .map(|i| {
-            x.arena
+            x.arena()
                 .__with_fork(snapshot.clone(), || structure.pair(&model, (x + f64::from(i)).id()))
         })
         .collect();

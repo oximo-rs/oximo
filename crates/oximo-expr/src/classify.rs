@@ -162,6 +162,15 @@ fn recursive_degree(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Degree {
                 Degree::One
             }
         }
+        ExprNode::Quadratic(q) => {
+            if !q.quadratic.is_empty() {
+                Degree::Two
+            } else if !q.linear.is_empty() {
+                Degree::One
+            } else {
+                Degree::Zero
+            }
+        }
         ExprNode::Unary(UnaryOp::Neg, inner) => recursive_degree(arena, *inner),
         ExprNode::Add(children) => {
             let mut d = Degree::Zero;
@@ -247,6 +256,15 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for DegreeFolder<'a, A> {
             ExprNode::Var(_) => return Break(Some(Degree::One)),
             ExprNode::Linear { coeffs, .. } => {
                 return Break(Some(if coeffs.is_empty() { Degree::Zero } else { Degree::One }));
+            }
+            ExprNode::Quadratic(q) => {
+                return Break(Some(if !q.quadratic.is_empty() {
+                    Degree::Two
+                } else if !q.linear.is_empty() {
+                    Degree::One
+                } else {
+                    Degree::Zero
+                }));
             }
             ExprNode::Add(c) => (c.as_slice(), DegreeOp::Add),
             ExprNode::Mul(c) => (c.as_slice(), DegreeOp::Mul),
@@ -395,6 +413,15 @@ pub(crate) fn degree_hint(
                 Degree::One
             }
         }
+        ExprNode::Quadratic(q) => {
+            if !q.quadratic.is_empty() {
+                Degree::Two
+            } else if !q.linear.is_empty() {
+                Degree::One
+            } else {
+                Degree::Zero
+            }
+        }
         ExprNode::Add(children) | ExprNode::Mul(children) => {
             let multiply = matches!(arena.get(id), ExprNode::Mul(_));
             let mut value = Degree::Zero;
@@ -494,7 +521,7 @@ mod tests {
             arena.set_param_value(p, value).unwrap();
             assert_eq!(classify(&arena, q), ExprClass::Quadratic);
             assert_eq!(classify(&arena, cancel), ExprClass::Quadratic);
-            assert_eq!(crate::extract_quadratic(&arena, cancel).unwrap().hessian.len(), 0);
+            assert_eq!(crate::extract_quadratic(&arena, cancel).unwrap().quadratic.len(), 0);
             assert!(is_constant_access(&arena, parameter));
             assert!(!is_constant_access(&arena, x));
         }

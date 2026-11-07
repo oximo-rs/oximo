@@ -114,8 +114,8 @@ fn nl_nlp_rosenbrock() {
     assert!(s.contains(" 0 2 0\t# nonlinear vars in constraints, objectives, both\n"));
     // No J segments.
     assert!(!s.contains("\nJ"));
-    // G has 2 entries with coef 0 (both vars nonlinear in obj).
-    assert!(s.contains("\nG0 2\n0 0\n1 0\n"));
+    // The compact first square contributes -2*x to G.
+    assert!(s.contains("\nG0 2\n0 -2\n1 0\n"));
     // Objective body starts with O0 0 followed by an expression.
     assert!(s.contains("O0 0\n"));
 }
@@ -189,4 +189,43 @@ fn nl_nonlinear_integer_order() {
     // The b segment is emitted in NL variable order. y (bounds [0,5]) before
     // x (free) proves the interleaved ordering: NlBothI precedes NlOnlyC.
     assert!(s.contains("\nb\n0 0 5\n3\n"), "y must precede x in var order:\n{s}");
+}
+
+#[test]
+fn compact_quadratics_preserve_affine_parts_and_objective_offsets_in_nl() {
+    use oximo_expr::evaluate;
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+
+    let model = Model::new("compact NL roundtrip");
+    variable!(model, x);
+    variable!(model, y);
+    let mut builder = model.quadratic_builder();
+    builder.add_product(2.0, x, x).unwrap();
+    builder.add_product(3.0, x, y).unwrap();
+    builder.add_term(4.0, x).unwrap();
+    builder.add_constant(5.0).unwrap();
+    let q = builder.build();
+    objective!(model, Min, &q);
+    constraint!(model, row, q <= 20.0);
+
+    for options in [WriteOptions::default(), WriteOptions::binary()] {
+        let mut bytes = Vec::new();
+        write_nl_with(&model, &mut bytes, &options).unwrap();
+        let imported = read_nl(bytes.as_slice()).unwrap();
+        for values in [[1.0, 2.0], [-2.0, 3.0], [0.0, 0.0]] {
+            let expected =
+                2.0 * values[0] * values[0] + 3.0 * values[0] * values[1] + 4.0 * values[0] + 5.0;
+            let actual = evaluate(
+                &imported.arena(),
+                imported.objective().as_ref().unwrap().expr,
+                &&values[..],
+            )
+            .unwrap();
+            assert!((actual - expected).abs() < 1e-12);
+            let rows = imported.constraints();
+            let row = &rows.algebraic()[0];
+            let value = evaluate(&imported.arena(), row.lhs, &&values[..]).unwrap();
+            assert_eq!(value <= row.upper, expected <= 20.0);
+        }
+    }
 }

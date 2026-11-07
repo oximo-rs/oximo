@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::ops::{BitAnd, BitOr, BitXor, Index, Not};
 use std::sync::Arc;
 
-use oximo_expr::{Affine, Expr, ExprArenaCell, ExprId, ModelId, ParamId, VarId};
+use oximo_expr::{Expr, ExprArenaCell, ExprId, ModelId, ParamId, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
 
@@ -58,7 +58,7 @@ impl<'a> BooleanHandle<'a> {
         self
     }
 
-    pub fn binary(self) -> Expr<'a, Affine> {
+    pub fn binary(self) -> oximo_expr::VariableHandle<'a> {
         self.model.variable_handle(self.model.gdp.borrow().booleans[self.id.index()].binary)
     }
 
@@ -1460,7 +1460,7 @@ impl<'a> DisjunctContext<'a> {
             ))
         } else {
             GdpRangeHandles::Split {
-                lower: self.add_constraint(format!("{name}_lo"), mid.ge(lo)),
+                lower: self.add_constraint(format!("{name}_lo"), mid.clone().ge(lo)),
                 upper: self.add_constraint(format!("{name}_hi"), mid.le(hi)),
             }
         }
@@ -1477,7 +1477,7 @@ impl<'a> DisjunctContext<'a> {
             self.__add_range(&self.__gdp_auto_name("c"), mid, lo, hi)
         } else {
             GdpRangeHandles::Split {
-                lower: self.__add_constraint_auto(mid.ge(lo)),
+                lower: self.__add_constraint_auto(mid.clone().ge(lo)),
                 upper: self.__add_constraint_auto(mid.le(hi)),
             }
         }
@@ -1583,6 +1583,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::redundant_clone,
+        reason = "the regression verifies Clone preserves logical expressions"
+    )]
     fn logical_clone_preserves_variants_child_order_and_provenance() {
         let model = Model::new("logical cloning");
         let a = model.add_boolean("a");

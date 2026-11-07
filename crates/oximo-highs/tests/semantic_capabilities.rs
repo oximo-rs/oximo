@@ -7,7 +7,7 @@ struct Scaled<'a>(Expr<'a, Affine>);
 impl Function for Scaled<'_> {
     type Owned = ScalarFunctionData<Affine>;
     fn semantic_data(&self) -> Self::Owned {
-        ScalarFunctionData::from_expression(self.0)
+        ScalarFunctionData::from_expression(&self.0)
     }
 }
 impl FunctionInSet<LessThan> for Scaled<'_> {}
@@ -132,7 +132,10 @@ fn alternative_lowering_updates_fail_before_changing_the_native_optimum() {
 
     variable!(model, 0.0 <= x <= 10.0);
     objective!(model, Max, x);
-    model.add_constraints([("row".into(), Constraint::new(Scaled(x), LessThan(2.0)).into_ir())]);
+    model.add_constraints([(
+        "row".into(),
+        Constraint::new(Scaled(x.into()), LessThan(2.0)).into_ir(),
+    )]);
 
     let handle =
         model.typed_constraint_handle::<ScalarFunctionData<Affine>, LessThan>("row").unwrap();
@@ -147,7 +150,8 @@ fn alternative_lowering_updates_fail_before_changing_the_native_optimum() {
     let direct_model = Model::new("direct semantic registration");
     variable!(direct_model, 0.0 <= y <= 10.0);
     objective!(direct_model, Max, y);
-    let direct = direct_model.add_constraint("row", Constraint::new(Scaled(y), LessThan(2.0)));
+    let direct =
+        direct_model.add_constraint("row", Constraint::new(Scaled(y.into()), LessThan(2.0)));
     direct_model.set_constraint_set(direct, LessThan(3.0)).unwrap();
     let result = Highs.solve(&direct_model, &HighsOptions::default()).unwrap();
     assert!((result.value_of(y).unwrap().unwrap() - 3.0).abs() < 1e-9);
@@ -164,7 +168,10 @@ fn alternative_lowering_duals_do_not_inherit_native_row_coordinates() {
     objective!(model, Max, cost * (x + y));
 
     let direct = model.add_constraint("direct", x.le(2.0));
-    model.add_constraints([("scaled".into(), Constraint::new(Scaled(y), LessThan(2.0)).into_ir())]);
+    model.add_constraints([(
+        "scaled".into(),
+        Constraint::new(Scaled(y.into()), LessThan(2.0)).into_ir(),
+    )]);
     let scaled =
         model.typed_constraint_handle::<ScalarFunctionData<Affine>, LessThan>("scaled").unwrap();
     let erased = model.constraint_handle("scaled").unwrap();

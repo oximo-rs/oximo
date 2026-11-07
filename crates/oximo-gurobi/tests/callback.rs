@@ -67,7 +67,7 @@ struct RebindParameter<'a> {
 
 impl Callback for RebindParameter<'_> {
     fn callback(&mut self, _: Where) -> CbResult {
-        self.model.set_param(self.parameter, self.value)?;
+        self.model.set_param(&self.parameter, self.value)?;
         self.calls += 1;
         Ok(())
     }
@@ -80,7 +80,7 @@ fn callback_parameter_rebinding_does_not_change_solved_snapshot() {
     variable!(model, 0.0 <= x <= 3.0);
     objective!(model, Max, p * x);
     let opts = GurobiOptions::default().presolve(GurobiPresolve::Off).threads(1);
-    let mut callback = RebindParameter { model: &model, parameter: p, value: 4.0, calls: 0 };
+    let mut callback = RebindParameter { model: &model, parameter: p.into(), value: 4.0, calls: 0 };
     let first = Gurobi.solve_with_callback(&model, &opts, &mut callback).unwrap();
     assert!(callback.calls > 0);
     let value = first.value_of(x).unwrap().unwrap();

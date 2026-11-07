@@ -137,8 +137,11 @@ pub struct ScalarFunctionData<D: Degree> {
 }
 
 impl<D: Degree> ScalarFunctionData<D> {
-    pub fn from_expression(expression: oximo_expr::Expr<'_, D>) -> Self {
-        Self::new(expression.model_id(), expression.id())
+    pub fn from_expression<'a, E: oximo_expr::ExprInput<'a, Degree = D>>(
+        expression: E,
+    ) -> ScalarFunctionData<D::Computed> {
+        let expression = expression.as_expression();
+        ScalarFunctionData::new(expression.model_id(), expression.id())
     }
 
     pub fn expression(&self) -> ExprId {

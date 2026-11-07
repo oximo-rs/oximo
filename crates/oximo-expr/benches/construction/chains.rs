@@ -5,14 +5,14 @@ use oximo_expr::{Expr, ExprArena, ExprArenaCell, ExprId, VarId, evaluate, extrac
 
 use crate::allocation;
 
-#[expect(clippy::eq_op, reason = "same-sum cancellation is the regression fixture")]
 fn cancellation_fixture(kind: &str, n: u32) -> (ExprArena, ExprId) {
     let cell = ExprArenaCell::new(ExprArena::new());
     let vars: Vec<_> = (0..n).map(|i| Expr::from_var(&cell, VarId(i))).collect();
-    let sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+    let sum =
+        vars.iter().copied().map(Expr::<oximo_expr::Affine>::from).reduce(|a, b| a + b).unwrap();
     let pid = cell.borrow_mut().new_param(2.0);
     let p = Expr::from_param(&cell, pid);
-    let input = if kind == "cancel_add" { sum - sum + p } else { (sum - sum) * p };
+    let input = if kind == "cancel_add" { sum.clone() - sum + p } else { (sum.clone() - sum) * p };
     let arena = (*cell.borrow()).clone();
     (arena, input.id())
 }
@@ -34,7 +34,7 @@ fn construct(kind: &str, n: u32, fixture: Option<&(ExprArena, ExprId)>) -> (u128
         let expression = (0..n)
             .map(|i| {
                 let x = Expr::from_var(&cell, VarId(i));
-                if kind == "symbolic_sum" { (p * x).erase() } else { x.erase() }
+                if kind == "symbolic_sum" { (p * x).into_dynamic() } else { x.erase() }
             })
             .reduce(|a, b| a + b)
             .unwrap();

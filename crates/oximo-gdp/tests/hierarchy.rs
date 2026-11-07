@@ -224,7 +224,7 @@ fn shared_nonlinear_rows_use_each_parents_bounds_in_small_and_large_models() {
         let body = x.exp();
         disjunct_constraint!(model, left, x <= 1.0);
         disjunct_constraint!(model, right, x <= 2.0);
-        disjunct_constraint!(model, left_child, body <= 1.0);
+        disjunct_constraint!(model, left_child, &body <= 1.0);
         disjunct_constraint!(model, right_child, body <= 1.0);
         disjunction!(model, [left, right]);
         disjunction!(model, [left_child, left_other], parent = left);

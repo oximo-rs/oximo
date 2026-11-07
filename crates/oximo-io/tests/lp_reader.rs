@@ -89,9 +89,9 @@ fn flat_sum_preserves_subtraction_parentheses_and_variable_order() {
     let arena = model.arena();
     let objective = model.try_objective().unwrap();
     let terms = oximo_expr::extract_quadratic(&arena, objective.expr).unwrap();
-    assert_eq!(terms.hessian, Vec::<(VarId, VarId, f64)>::new());
-    assert_eq!(terms.constant.to_bits(), 7.0_f64.to_bits());
-    assert_eq!(terms.linear, vec![(oximo_expr::VarId(1), 2.0), (oximo_expr::VarId(2), 2.0)]);
+    assert_eq!(terms.hessian_entries().collect::<Vec<_>>(), Vec::<(VarId, VarId, f64)>::new());
+    assert_eq!(terms.constant().to_bits(), 7.0_f64.to_bits());
+    assert_eq!(terms.linear(), vec![(oximo_expr::VarId(1), 2.0), (oximo_expr::VarId(2), 2.0)]);
 }
 
 #[test]
@@ -390,18 +390,18 @@ fn missing_objective_section_is_reported_with_position() {
 fn leading_negative_coefficient_uses_implicit_multiplication() {
     let model = read_lp("Minimize\n obj: - 2 x + y\nEnd\n".as_bytes()).expect("negative objective");
     let vars = model.resolved_variables();
-    assert_eq!(objective_terms(&model).linear, vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
+    assert_eq!(objective_terms(&model).linear(), vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
 
     let model = read_lp("Minimize\n obj: x\nSubject To\n c1: - 2 x + y >= 3\nEnd\n".as_bytes())
         .expect("negative row coefficient");
     let vars = model.resolved_variables();
     let first_cstr_term = constraint_terms(&model, 0);
-    assert_eq!(first_cstr_term.linear, vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
+    assert_eq!(first_cstr_term.linear(), vec![(vars[0].id, -2.0), (vars[1].id, 1.0)]);
 
     let model = read_lp("Minimize\n obj: [ - 2 x^2 ]/2\nEnd\n".as_bytes())
         .expect("negative bracket coefficient");
     assert_eq!(
-        objective_terms(&model).hessian,
+        objective_terms(&model).hessian_entries().collect::<Vec<_>>(),
         vec![(model.resolved_variables()[0].id, model.resolved_variables()[0].id, -2.0)]
     );
 }

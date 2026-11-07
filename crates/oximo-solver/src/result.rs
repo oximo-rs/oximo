@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use crate::SolutionValues;
 use oximo_core::{
-    ConstraintHandle, ConstraintId, Expr, IndexKey, IndexedVar, Model, ModelId, ModelMismatchError,
+    ConstraintHandle, ConstraintId, IndexKey, IndexedVar, Model, ModelId, ModelMismatchError,
     SocConstraintHandle, SocConstraintId, VarId,
 };
-use oximo_expr::{ExprArena, ExprId, ExprNode, WithParameters, evaluate};
+use oximo_expr::{ExprArena, ExprId, ExprInput, ExprNode, WithParameters, evaluate};
 use rustc_hash::FxHashMap;
 
 pub use oximo_expr::ParameterSnapshot;
@@ -75,9 +75,9 @@ impl SolutionPoint {
     ///
     /// # Errors
     /// Returns a model ownership error for any foreign expression.
-    pub fn value_of_matrix<D: oximo_expr::Degree>(
+    pub fn value_of_matrix<'a, E: ExprInput<'a>>(
         &self,
-        matrix: &SymmetricMatrix<Expr<'_, D>>,
+        matrix: &SymmetricMatrix<E>,
     ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
         self.value_of_matrix_using_parameters(matrix, false)
     }
@@ -87,27 +87,28 @@ impl SolutionPoint {
     ///
     /// # Errors
     /// Returns a model ownership error for any foreign expression.
-    pub fn value_of_matrix_with_current_parameters<D: oximo_expr::Degree>(
+    pub fn value_of_matrix_with_current_parameters<'a, E: ExprInput<'a>>(
         &self,
-        matrix: &SymmetricMatrix<Expr<'_, D>>,
+        matrix: &SymmetricMatrix<E>,
     ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
         self.value_of_matrix_using_parameters(matrix, true)
     }
 
-    fn value_of_matrix_using_parameters<D: oximo_expr::Degree>(
+    fn value_of_matrix_using_parameters<'a, E: ExprInput<'a>>(
         &self,
-        matrix: &SymmetricMatrix<Expr<'_, D>>,
+        matrix: &SymmetricMatrix<E>,
         current_parameters: bool,
     ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
         // We validate every owner even if a previous entry has no primal value.
         for entry in matrix.upper_triangle() {
+            let entry = entry.as_expression();
             ensure_model_id(self.model_id, entry.model_id())?;
         }
-        let arena = matrix[(0, 0)].arena.borrow();
+        let arena = matrix[(0, 0)].as_expression().arena().borrow();
         let entries = matrix
             .upper_triangle()
             .iter()
-            .map(|entry| evaluate_at(&arena, entry.id(), self, current_parameters))
+            .map(|entry| evaluate_at(&arena, entry.as_expression().id(), self, current_parameters))
             .collect::<Option<Vec<_>>>();
         Ok(entries
             .map(|entries| SymmetricMatrix::from_upper_triangle(matrix.side_dimension(), entries)))
@@ -129,9 +130,9 @@ impl SolutionPoint {
     ///
     /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
     #[inline]
-    pub fn value_of<D: oximo_expr::Degree>(
+    pub fn value_of<'a, E: ExprInput<'a>>(
         &self,
-        expr: Expr<'_, D>,
+        expr: E,
     ) -> Result<Option<f64>, ModelMismatchError> {
         self.value_of_using_parameters(expr, false)
     }
@@ -142,25 +143,26 @@ impl SolutionPoint {
     /// # Errors
     /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
     #[inline]
-    pub fn value_of_with_current_parameters<D: oximo_expr::Degree>(
+    pub fn value_of_with_current_parameters<'a, E: ExprInput<'a>>(
         &self,
-        expr: Expr<'_, D>,
+        expr: E,
     ) -> Result<Option<f64>, ModelMismatchError> {
         self.value_of_using_parameters(expr, true)
     }
 
     #[inline]
-    fn value_of_using_parameters<D: oximo_expr::Degree>(
+    fn value_of_using_parameters<'a, E: ExprInput<'a>>(
         &self,
-        expr: Expr<'_, D>,
+        expr: E,
         current_parameters: bool,
     ) -> Result<Option<f64>, ModelMismatchError> {
+        let expr = expr.as_expression();
         ensure_model_id(self.model_id, expr.model_id())?;
-        let arena = expr.arena.borrow();
-        if let ExprNode::Var(id) = arena.get(expr.id) {
+        let arena = expr.arena().borrow();
+        if let ExprNode::Var(id) = arena.get(expr.id()) {
             return Ok(self.value(*id));
         }
-        Ok(evaluate_at(&arena, expr.id, self, current_parameters))
+        Ok(evaluate_at(&arena, expr.id(), self, current_parameters))
     }
 
     /// Look up the primal value for a specific index of an [`IndexedVar`].
@@ -495,10 +497,11 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `expr` belongs to another model.
     #[inline]
-    pub fn value_of<D: oximo_expr::Degree>(
+    pub fn value_of<'a, E: ExprInput<'a>>(
         &self,
-        expr: Expr<'_, D>,
+        expr: E,
     ) -> Result<Option<f64>, ModelMismatchError> {
+        let expr = expr.as_expression();
         ensure_model_id(self.model_id, expr.model_id())?;
         self.solutions.first().map_or(Ok(None), |s| s.value_of(expr))
     }
@@ -522,10 +525,11 @@ impl SolverResult {
     /// # Errors
     /// Returns [`ModelMismatchError`] for a foreign expression or point.
     #[inline]
-    pub fn value_of_with_current_parameters<D: oximo_expr::Degree>(
+    pub fn value_of_with_current_parameters<'a, E: ExprInput<'a>>(
         &self,
-        expr: Expr<'_, D>,
+        expr: E,
     ) -> Result<Option<f64>, ModelMismatchError> {
+        let expr = expr.as_expression();
         ensure_model_id(self.model_id, expr.model_id())?;
         self.best().map_or(Ok(None), |point| point.value_of_with_current_parameters(expr))
     }
@@ -683,11 +687,12 @@ impl SolverResult {
     ///
     /// # Errors
     /// Returns a model ownership error for a foreign matrix.
-    pub fn value_of_matrix<D: oximo_expr::Degree>(
+    pub fn value_of_matrix<'a, E: ExprInput<'a>>(
         &self,
-        matrix: &SymmetricMatrix<Expr<'_, D>>,
+        matrix: &SymmetricMatrix<E>,
     ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
         for entry in matrix.upper_triangle() {
+            let entry = entry.as_expression();
             ensure_model_id(self.model_id, entry.model_id())?;
         }
         self.best().map_or(Ok(None), |point| point.value_of_matrix(matrix))
@@ -697,11 +702,12 @@ impl SolverResult {
     ///
     /// # Errors
     /// Returns a model ownership error for any foreign expression or point.
-    pub fn value_of_matrix_with_current_parameters<D: oximo_expr::Degree>(
+    pub fn value_of_matrix_with_current_parameters<'a, E: ExprInput<'a>>(
         &self,
-        matrix: &SymmetricMatrix<Expr<'_, D>>,
+        matrix: &SymmetricMatrix<E>,
     ) -> Result<Option<SymmetricMatrix<f64>>, ModelMismatchError> {
         for entry in matrix.upper_triangle() {
+            let entry = entry.as_expression();
             ensure_model_id(self.model_id, entry.model_id())?;
         }
         self.best().map_or(Ok(None), |point| point.value_of_matrix_with_current_parameters(matrix))

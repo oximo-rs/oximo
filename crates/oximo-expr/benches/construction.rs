@@ -63,8 +63,8 @@ fn build<'a>(
     method: Method,
 ) -> Expr<'a, Affine> {
     match method {
-        Method::Left => terms.iter().copied().reduce(|a, b| a + b).unwrap(),
-        Method::Right => terms.iter().rev().copied().reduce(|a, b| b + a).unwrap(),
+        Method::Left => terms.iter().cloned().reduce(|a, b| a + b).unwrap(),
+        Method::Right => terms.iter().rev().cloned().reduce(|a, b| b + a).unwrap(),
         Method::Flat => build_flat(terms),
         Method::Builder | Method::BuilderCompensated => {
             let mut builder = if matches!(method, Method::BuilderCompensated) {
@@ -72,16 +72,16 @@ fn build<'a>(
             } else {
                 AffineBuilder::with_capacity(arena, terms.len())
             };
-            for &term in terms {
+            for term in terms {
                 builder.add_term(1.0, term);
             }
             builder.build()
         }
         Method::Shared => {
             let middle = terms.len() / 2;
-            let prefix: Expr<'_, Affine> = terms[..middle].iter().copied().sum();
-            let left = terms[middle..].iter().copied().fold(prefix, |a, b| a + b);
-            let right = terms[middle..].iter().copied().fold(prefix, |a, b| a + b);
+            let prefix: Expr<'_, Affine> = terms[..middle].iter().cloned().sum();
+            let left = terms[middle..].iter().cloned().fold(prefix.clone(), |a, b| a + b);
+            let right = terms[middle..].iter().cloned().fold(prefix, |a, b| a + b);
             left + right
         }
     }
@@ -90,7 +90,7 @@ fn build<'a>(
 // Keep builder/binary-operator branches out of flat-sum benchmark codegen.
 #[inline(never)]
 fn build_flat<'a>(terms: &[Expr<'a, Affine>]) -> Expr<'a, Affine> {
-    terms.iter().copied().sum()
+    terms.iter().cloned().sum()
 }
 
 fn run(n: usize, workload: &str, method: Method, phase: &str) -> u128 {
@@ -99,9 +99,9 @@ fn run(n: usize, workload: &str, method: Method, phase: &str) -> u128 {
     let start = Instant::now();
     let expr = build(&arena, &terms, method);
     if phase == "linear" {
-        black_box(extract_linear(&arena.borrow(), expr.id).unwrap());
+        black_box(extract_linear(&arena.borrow(), expr.id()).unwrap());
     } else if phase == "quadratic" {
-        black_box(extract_quadratic(&arena.borrow(), expr.id).unwrap());
+        black_box(extract_quadratic(&arena.borrow(), expr.id()).unwrap());
     }
     black_box(expr);
     start.elapsed().as_nanos()
@@ -171,9 +171,9 @@ fn main() {
                             })
                             .sum::<usize>();
                         if phase == "linear" {
-                            black_box(extract_linear(&snapshot, expr.id).unwrap());
+                            black_box(extract_linear(&snapshot, expr.id()).unwrap());
                         } else if phase == "quadratic" {
-                            black_box(extract_quadratic(&snapshot, expr.id).unwrap());
+                            black_box(extract_quadratic(&snapshot, expr.id()).unwrap());
                         }
                     });
                     println!(
@@ -207,13 +207,13 @@ fn measure_reuse(n: usize) {
         let terms: Vec<_> =
             ids.iter().map(|&id| Expr::new(id, &arena).try_affine().unwrap()).collect();
         let mut builder = AffineBuilder::with_capacity(&arena, n);
-        for &term in &terms {
+        for term in &terms {
             builder.add_term(1.0, term);
         }
         black_box(builder.build());
         let start = Instant::now();
         for _ in 0..32 {
-            for &term in &terms {
+            for term in &terms {
                 builder.add_term(1.0, term);
             }
             black_box(builder.build());

@@ -43,14 +43,19 @@ fn run_case(case: &str) {
     let n: usize = count.parse().unwrap();
     let model = Model::new("affine_consumers");
     let vars: Vec<_> = (0..n).map(|i| model.__var(format!("x{i}")).build()).collect();
-    let sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+    let sum = vars
+        .iter()
+        .copied()
+        .map(oximo_expr::Expr::<oximo_expr::Affine>::from)
+        .reduce(|a, b| a + b)
+        .unwrap();
     let expression = if consumer == "nl_sum" { sum.sin() } else { sum.exp() };
     if consumer == "nl_export_unique" {
         // Distinct affine regions in the row/objective exercise cache misses.
-        let row_sum = vars.iter().map(|&x| 2.0 * x).reduce(|a, b| a + b).unwrap();
+        let row_sum = vars.iter().map(|x| 2.0 * x).reduce(|a, b| a + b).unwrap();
         model.add_constraint("row", row_sum.exp().le(1.0));
     } else if consumer != "nl_sum" {
-        model.add_constraint("row", expression.le(1.0));
+        model.add_constraint("row", expression.clone().le(1.0));
     }
     model.__minimize(expression);
     match consumer {

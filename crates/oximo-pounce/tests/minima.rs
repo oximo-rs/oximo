@@ -567,7 +567,7 @@ fn minima_fbbt_validation_respects_effective_options() {
         search.clone().presolve(true).presolve_fbbt(true).set("presolve_fbbt", "no"),
         search.clone().presolve(true).presolve_fbbt(true).set("presolve", false),
         search.clone().presolve(true).presolve_fbbt(true).set("PRESOLVE_FBBT", "NO"),
-        search.clone().set("presolve", true).set("presolve", false).presolve_fbbt(true),
+        search.set("presolve", true).set("presolve", false).presolve_fbbt(true),
     ] {
         assert!(Pounce.validate_model(&model, &options).is_supported());
         assert!(Pounce.persistent().validate_model(&model, &options).is_supported());
@@ -681,7 +681,6 @@ fn mixed_case_route_and_algorithm_overrides_work_for_minima_search() {
         search.clone().set("SOLVER_SELECTION", "qp-ipm"),
         search.clone().set("SoLvEr_SeLeCtIoN", "QP-IPM"),
         search
-            .clone()
             .solver_selection(PounceSolverSelection::Nlp)
             .set("solver_selection", "NLP")
             .set("SOLVER_SELECTION", "QP-IPM"),

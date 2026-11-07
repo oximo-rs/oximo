@@ -930,6 +930,7 @@ fn analyze_gams_expressions(prepared: &LoweringContext<'_>) -> Result<bool, Solv
             ExprNode::Const(_) | ExprNode::Param(_) => false,
             ExprNode::Var(_) => true,
             ExprNode::Linear { coeffs, .. } => !coeffs.is_empty(),
+            ExprNode::Quadratic(q) => q.variables().next().is_some(),
             ExprNode::Unary(_, child) => dep(*child),
             ExprNode::Pow(a, b) | ExprNode::Div(a, b) | ExprNode::Atan2(a, b) => dep(*a) || dep(*b),
             ExprNode::Add(children)
@@ -982,7 +983,8 @@ fn analyze_gams_expressions(prepared: &LoweringContext<'_>) -> Result<bool, Solv
             ExprNode::Const(_)
             | ExprNode::Var(_)
             | ExprNode::Param(_)
-            | ExprNode::Linear { .. } => {}
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_) => {}
         }
     }
     Ok(nonsmooth)
@@ -1468,6 +1470,14 @@ fn write_gams_expr(gms: &mut String, arena: &ExprArena, id: ExprId, leading_spac
                     write_linear(gms, &LinearTerms::borrowed(coeffs, *constant), true);
                     gms.push_str(" )");
                 }
+                ExprNode::Quadratic(q) => {
+                    gms.push('(');
+                    write_linear(gms, &LinearTerms::borrowed(q.linear(), q.constant()), true);
+                    for (a, b, c) in q.quadratic().iter().copied() {
+                        write!(gms, " + ({} * v{} * v{})", fmt(c), a.index(), b.index()).unwrap();
+                    }
+                    gms.push_str(" )");
+                }
                 ExprNode::Unary(UnaryOp::Neg, inner) => {
                     gms.push_str("(-");
                     pending.extend([Task::Text(")"), Task::Node(*inner, true)]);
@@ -1754,12 +1764,12 @@ mod tests {
         let model = Model::new("parsed result fixture");
         let variables: Vec<_> =
             (0..num_variables).map(|index| model.__var(format!("x{index}")).build()).collect();
-        if let Some(&x) = variables.first() {
+        if let Some(x) = variables.first() {
             for index in 0..result.dual.slot_count() {
-                model.add_constraint(format!("row{index}"), x.le(1.0));
+                model.add_constraint(format!("row{index}"), (*x).le(1.0));
             }
             for index in 0..result.soc_dual.slot_count() {
-                model.add_soc_constraint(format!("cone{index}"), [x], x);
+                model.add_soc_constraint(format!("cone{index}"), [*x], x);
             }
         }
         for (index, &value) in result.parameters.values().iter().enumerate() {
@@ -1864,7 +1874,10 @@ mod tests {
     fn deferred_affine_sum_in_nonlinear_row_renders_without_stack_overflow() {
         let m = Model::new("deep affine row");
         variable!(m, x[i in 0..20_000]);
-        let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+        let sum = (0..20_000)
+            .map(|i| oximo_expr::Expr::<oximo_expr::Affine>::from(x[i]))
+            .reduce(|a, b| a + b)
+            .unwrap();
         m.add_constraint("row", sum.exp().le(1.0));
         objective!(m, Min, x[0]);
         let output = render(&m, &GamsOptions::default());
@@ -1880,7 +1893,7 @@ mod tests {
         for _ in 0..20_000 {
             expression = expression.exp();
         }
-        m.add_constraint("row", expression.le(1.0));
+        m.add_constraint("row", expression.clone().le(1.0));
         objective!(m, Min, expression);
         let output = render(&m, &GamsOptions::default());
         assert_eq!(output.matches("exp(").count(), 2 * 20_001);

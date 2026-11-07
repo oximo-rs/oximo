@@ -15,7 +15,19 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
-help: consider removing this method call, as the receiver has type `Expr<'_, oximo_core::Affine>` and `Expr<'_, oximo_core::Affine>: IntoAffineFunction<'_>` trivially holds
+...
+  |         impl<'a> IntoAffineFunction<'a> for Expr<'a, $degree> {
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |         |
+  |         `Expr<'_, oximo_expr::degree::ParameterDegree>`
+  |         `Expr<'_, oximo_expr::degree::VariableDegree>`
+...
+  | leaf_functions!(oximo_expr::VariableDegree);
+  | ------------------------------------------- in this macro invocation
+  | leaf_functions!(oximo_expr::ParameterDegree);
+  | -------------------------------------------- in this macro invocation
+  = note: this error originates in the macro `leaf_functions` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider removing this method call, as the receiver has type `Expr<'_, oximo_expr::degree::VariableDegree>` and `Expr<'_, oximo_expr::degree::VariableDegree>: IntoAffineFunction<'_>` trivially holds
   |
 8 -     soc_constraint!(model, cone, [x.erase()] <= x);
 8 +     soc_constraint!(model, cone, [x] <= x);

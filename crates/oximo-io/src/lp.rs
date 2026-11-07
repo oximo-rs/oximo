@@ -389,7 +389,7 @@ fn lower<'a>(m: &'a Model, vars: &HashMap<String, Expr<'a>>, a: Ast) -> Result<E
     match a {
         Ast::Const(x) => Ok(m.__constant(x).erase()),
         Ast::Var(v) => {
-            vars.get(&v).copied().ok_or_else(|| invalid_lp(1, 1, format!("unknown variable {v}")))
+            vars.get(&v).cloned().ok_or_else(|| invalid_lp(1, 1, format!("unknown variable {v}")))
         }
         Ast::Sum(terms) => {
             let terms = terms
@@ -868,7 +868,7 @@ fn build_model(
             .into_iter()
             .map(|(var, weight)| {
                 vars.get(&var)
-                    .copied()
+                    .cloned()
                     .ok_or_else(|| invalid_lp(1, 1, format!("unknown SOS variable {var:?}")))
                     .map(|v| (v, weight))
             })
@@ -890,7 +890,7 @@ fn build_model(
         if degree(&indicator.expr) > 1 {
             return Err(invalid_lp(1, 1, "indicator consequent must be affine"));
         }
-        let trigger = vars.get(&indicator.trigger).copied().ok_or_else(|| {
+        let trigger = vars.get(&indicator.trigger).cloned().ok_or_else(|| {
             invalid_lp(1, 1, format!("unknown indicator trigger {:?}", indicator.trigger))
         })?;
         if !binary_names.contains(&indicator.trigger) {
@@ -1189,9 +1189,9 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
     writeln!(out, "{sense_kw}")?;
     write!(out, " obj:")?;
     write_quadratic(out, &obj_terms, &vars, false)?;
-    if obj_terms.constant != 0.0 {
-        let sign = if obj_terms.constant < 0.0 { '-' } else { '+' };
-        write!(out, " {sign} {}", obj_terms.constant.abs())?;
+    if obj_terms.constant() != 0.0 {
+        let sign = if obj_terms.constant() < 0.0 { '-' } else { '+' };
+        write!(out, " {sign} {}", obj_terms.constant().abs())?;
     }
     writeln!(out)?;
 
@@ -1226,13 +1226,13 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
                 Sense::Ge => ">=",
                 Sense::Eq => "=",
             };
-            let adjusted_rhs = rhs - t.constant;
+            let adjusted_rhs = rhs - t.constant();
             write!(out, " {}:", c.name)?;
             write_quadratic(out, &t, &vars, true)?;
             writeln!(out, " {op} {adjusted_rhs}")?;
         } else if c.is_range() {
-            let lo = c.lower - t.constant;
-            let hi = c.upper - t.constant;
+            let lo = c.lower - t.constant();
+            let hi = c.upper - t.constant();
             let lo_label = unique_label(&mut used_labels, &format!("{}_lo", c.name));
             write!(out, " {lo_label}:")?;
             write_quadratic(out, &t, &vars, true)?;
@@ -1255,7 +1255,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             term: describe_nonlinear_term(&arena, c.lhs, &|v| var_name(&vars, v))
                 .unwrap_or_else(|| "<nonlinear>".into()),
         })?;
-        if !t.hessian.is_empty() {
+        if !t.quadratic().is_empty() {
             return Err(IoError::Nonlinear {
                 location: format!("indicator constraint {:?}", c.name),
                 term: "quadratic indicator consequent".into(),
@@ -1271,16 +1271,16 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
             };
             write!(out, " {}: {prefix}", c.name)?;
             write_quadratic(out, &t, &vars, true)?;
-            writeln!(out, " {op} {}", rhs - t.constant)?;
+            writeln!(out, " {op} {}", rhs - t.constant())?;
         } else if c.is_range() {
             let lo_label = unique_label(&mut used_labels, &format!("{}_lo", c.name));
             write!(out, " {lo_label}: {prefix}")?;
             write_quadratic(out, &t, &vars, true)?;
-            writeln!(out, " >= {}", c.lower - t.constant)?;
+            writeln!(out, " >= {}", c.lower - t.constant())?;
             let hi_label = unique_label(&mut used_labels, &format!("{}_hi", c.name));
             write!(out, " {hi_label}: {prefix}")?;
             write_quadratic(out, &t, &vars, true)?;
-            writeln!(out, " <= {}", c.upper - t.constant)?;
+            writeln!(out, " <= {}", c.upper - t.constant())?;
         }
     }
 
@@ -1424,7 +1424,7 @@ fn unique_label(used: &mut FxHashSet<String>, base: &str) -> String {
 }
 
 /// Write a quadratic expression using CPLEX's bracket notation. Objective
-/// brackets contain the Hessian coefficients and are divided by two; a
+/// brackets contain twice the polynomial coefficients and are divided by two; a
 /// constraint bracket contains the polynomial coefficients directly.
 fn write_quadratic<W: Write>(
     out: &mut W,
@@ -1433,24 +1433,24 @@ fn write_quadratic<W: Write>(
     constraint: bool,
 ) -> std::io::Result<()> {
     let mut first = true;
-    for &(v, coef) in &t.linear {
+    for &(v, coef) in t.linear() {
         write_signed_term(out, &mut first, coef, vars[v.index()].name.as_str())?;
     }
-    if !t.hessian.is_empty() {
+    if !t.quadratic().is_empty() {
         if first {
             write!(out, " [")?;
         } else {
             write!(out, " + [")?;
         }
         let mut first_quad = true;
-        for &(row, col, hessian) in &t.hessian {
-            let coefficient = if constraint {
-                if row == col { hessian / 2.0 } else { hessian }
-            } else if row == col {
-                hessian
-            } else {
-                2.0 * hessian
-            };
+        for &(row, col, hessian) in t.quadratic() {
+            let coefficient = if constraint { hessian } else { 2.0 * hessian };
+            if !coefficient.is_finite() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "LP quadratic bracket coefficient exceeds finite f64 range",
+                ));
+            }
             let body = if row == col {
                 format!("{}^2", vars[row.index()].name)
             } else {

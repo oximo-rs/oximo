@@ -28,7 +28,7 @@ fn shared_rows(width: usize, dynamic: bool, indexed: bool) -> u128 {
             if dynamic {
                 black_box(model.__add_constraint_auto(expr.erase().le(10.0)));
             } else {
-                black_box(model.__add_constraint_auto(expr.le(10.0)));
+                black_box(model.__add_constraint_auto(expr.clone().le(10.0)));
             }
         }
     }

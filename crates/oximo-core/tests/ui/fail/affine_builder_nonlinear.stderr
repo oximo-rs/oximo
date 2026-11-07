@@ -9,8 +9,8 @@ error[E0271]: type mismatch resolving `<Nonlinear as AddDegree<Affine>>::Output 
 note: required by a bound in `AffineBuilder::<'a>::add_term`
  --> $WORKSPACE/crates/oximo-expr/src/affine_builder.rs
   |
-  |     pub fn add_term<D>(&mut self, coefficient: f64, expression: Expr<'a, D>) -> &mut Self
+  |     pub fn add_term<E>(&mut self, coefficient: f64, expression: E) -> &mut Self
   |            -------- required by a bound in this associated function
-  |     where
-  |         D: Degree + AddDegree<Affine, Output = Affine>,
-  |                                       ^^^^^^^^^^^^^^^ required by this bound in `AffineBuilder::<'a>::add_term`
+...
+  |         E::Degree: AddDegree<Affine, Output = Affine>,
+  |                                      ^^^^^^^^^^^^^^^ required by this bound in `AffineBuilder::<'a>::add_term`

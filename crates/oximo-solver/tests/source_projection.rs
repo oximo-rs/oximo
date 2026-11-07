@@ -351,7 +351,7 @@ fn expression_projection_keeps_the_captured_function_and_solve_parameters() {
     param!(source, p = 2.0);
     variable!(source, x);
     let expression = p * x * x;
-    objective!(source, Min, expression);
+    objective!(source, Min, &expression);
     let transformed = source.fork();
     let projection = SourceProjection::capture(&source)
         .from_transformed(&transformed)
@@ -670,7 +670,7 @@ fn captured_expression_queries_validate_point_ownership_and_saved_parameters() {
     let mut result = SolverResult::for_model(&source);
     result.add_solution([(x.var_id().unwrap(), 3.0)].into_iter().collect(), None);
     let projection =
-        SourceProjection::capture(&source).reevaluate_objective_expr(expression).unwrap();
+        SourceProjection::capture(&source).reevaluate_objective_expr(&expression).unwrap();
     expression.arena().borrow_mut().constant(99.0);
     source.set_param(p, 7.0).unwrap();
     let projected = projection.project(result).unwrap();

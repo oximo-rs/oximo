@@ -60,7 +60,7 @@ impl Function for SymmetricAffineFunction<'_> {
     type Owned = crate::semantic::SymmetricAffineData;
 
     fn semantic_data(&self) -> Self::Owned {
-        Self::Owned { model_id: self.0[(0, 0)].model_id(), matrix: self.0.map(|entry| entry.id()) }
+        Self::Owned { model_id: self.0[(0, 0)].model_id(), matrix: self.0.map(Expr::id) }
     }
 }
 
@@ -71,10 +71,10 @@ impl<'a> SymmetricAffineFunction<'a> {
     /// # Panics
     /// Panics when entries belong to different arenas.
     pub fn new(matrix: SymmetricMatrix<Expr<'a, Affine>>) -> Self {
-        let first = matrix[(0, 0)];
+        let first = &matrix[(0, 0)];
         for entry in matrix.upper_triangle() {
             assert!(
-                std::ptr::eq(first.arena, entry.arena),
+                std::ptr::eq(first.arena(), entry.arena()),
                 "matrix entries belong to different models"
             );
         }
@@ -87,18 +87,18 @@ impl<'a> SymmetricAffineFunction<'a> {
 }
 
 /// Entry conversion for an affine matrix. Static quadratic/nonlinear entries are excluded.
-pub trait IntoAffineMatrixEntry<'a>: Copy {
+pub trait IntoAffineMatrixEntry<'a>: Clone {
     fn into_affine_matrix_entry(self, arena: &'a ExprArenaCell) -> Expr<'a, Affine>;
 }
 macro_rules! expression_entries {
     ($($d:ty),*) => { $(impl<'a> IntoAffineMatrixEntry<'a> for Expr<'a, $d> {
         fn into_affine_matrix_entry(self, arena: &'a ExprArenaCell) -> Expr<'a, Affine> {
-            assert!(std::ptr::eq(self.arena, arena), "matrix belongs to a different model");
+            assert!(std::ptr::eq(self.arena(), arena), "matrix belongs to a different model");
             self.into_affine_function().expression()
         }
     })* };
 }
-expression_entries!(Constant, Affine);
+expression_entries!(Constant, Affine, oximo_expr::VariableDegree, oximo_expr::ParameterDegree);
 macro_rules! numeric_entries {
     ($($t:ty),*) => { $(impl<'a> IntoAffineMatrixEntry<'a> for $t {
         fn into_affine_matrix_entry(self, arena: &'a ExprArenaCell) -> Expr<'a, Affine> {
@@ -127,7 +127,9 @@ impl<'a, T: IntoAffineMatrixEntry<'a>> IntoSymmetricAffineFunction<'a> for &Symm
         self,
         arena: &'a ExprArenaCell,
     ) -> SymmetricAffineFunction<'a> {
-        SymmetricAffineFunction::new(self.map(|&entry| entry.into_affine_matrix_entry(arena)))
+        SymmetricAffineFunction::new(
+            self.map(|entry| entry.clone().into_affine_matrix_entry(arena)),
+        )
     }
 }
 impl<'a, T: IntoAffineMatrixEntry<'a>> IntoSymmetricAffineFunction<'a> for SymmetricMatrix<T> {
@@ -135,13 +137,13 @@ impl<'a, T: IntoAffineMatrixEntry<'a>> IntoSymmetricAffineFunction<'a> for Symme
         self,
         arena: &'a ExprArenaCell,
     ) -> SymmetricAffineFunction<'a> {
-        (&self).__into_symmetric_affine_function(arena)
+        SymmetricAffineFunction::new(self.map_owned(|entry| entry.into_affine_matrix_entry(arena)))
     }
 }
 impl<'a> IntoSymmetricAffineFunction<'a> for SymmetricAffineFunction<'a> {
     fn __into_symmetric_affine_function(self, arena: &'a ExprArenaCell) -> Self {
         for entry in self.0.upper_triangle() {
-            let _ = entry.into_affine_matrix_entry(arena);
+            assert!(std::ptr::eq(entry.arena(), arena), "matrix belongs to a different model");
         }
         self
     }
@@ -191,6 +193,14 @@ where
 {
     type Function = SymmetricAffineFunction<'a>;
     fn into_function(self) -> Self::Function {
-        SymmetricAffineFunction::new(self.map(|&entry| entry.into_affine_function().expression()))
+        SymmetricAffineFunction::new(
+            self.map_owned(|entry| entry.into_affine_function().expression()),
+        )
+    }
+}
+
+impl<'a, T: IntoAffineMatrixEntry<'a>> IntoAffineMatrixEntry<'a> for &T {
+    fn into_affine_matrix_entry(self, arena: &'a ExprArenaCell) -> Expr<'a, Affine> {
+        self.clone().into_affine_matrix_entry(arena)
     }
 }

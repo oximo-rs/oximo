@@ -15,6 +15,17 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
+...
+  |         impl<'a> IntoAffineFunction<'a> for Expr<'a, $degree> {
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |         |
+  |         `Expr<'_, oximo_expr::degree::ParameterDegree>`
+  |         `Expr<'_, oximo_expr::degree::VariableDegree>`
+...
+  | leaf_functions!(oximo_expr::VariableDegree);
+  | ------------------------------------------- in this macro invocation
+  | leaf_functions!(oximo_expr::ParameterDegree);
+  | -------------------------------------------- in this macro invocation
 note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_indicator_range`
  --> src/model/constraints.rs
   |
@@ -23,7 +34,8 @@ note: required by a bound in `model::constraints::<impl oximo_core::Model>::__ad
 ...
   |         mid: impl IntoAffineFunction<'a>,
   |                   ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::constraints::<impl Model>::__add_indicator_range`
-help: consider removing this method call, as the receiver has type `Expr<'_, oximo_core::Affine>` and `Expr<'_, oximo_core::Affine>: IntoAffineFunction<'_>` trivially holds
+  = note: this error originates in the macro `leaf_functions` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider removing this method call, as the receiver has type `Expr<'_, oximo_expr::degree::VariableDegree>` and `Expr<'_, oximo_expr::degree::VariableDegree>: IntoAffineFunction<'_>` trivially holds
   |
 6 -     indicator_constraint!(m, bad, b == 1 => 0.0 <= x.square() <= 1.0);
 6 +     indicator_constraint!(m, bad, b == 1 => 0.0 <= x <= 1.0);

@@ -113,10 +113,10 @@ fn affine_powers_extract_and_rebind_without_freezing_parameters() {
     for parameter in [2.0, 3.0] {
         m.set_param(p, parameter).unwrap();
         for (expr, coefficient, constant) in [
-            (expressions[0], 0.0, 1.0),
-            (expressions[1], 1.0, 0.0),
-            (expressions[2], parameter.powi(3), 0.0),
-            (expressions[3], 0.0, 1.0),
+            ((expressions[0]).clone(), 0.0, 1.0),
+            ((expressions[1]).clone(), 1.0, 0.0),
+            ((expressions[2]).clone(), parameter.powi(3), 0.0),
+            ((expressions[3]).clone(), 0.0, 1.0),
         ] {
             let affine = expr.try_affine().unwrap();
             let arena = m.arena();
@@ -139,7 +139,7 @@ fn scalar_zero_division_is_rejected_before_emitting_nodes() {
     let before = m.arena().len();
     for divisor in [0.0, -0.0] {
         assert!(catch_unwind(AssertUnwindSafe(|| x / divisor)).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| quadratic / divisor)).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| quadratic.clone() / divisor)).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| x.erase() / divisor)).is_err());
     }
     assert!(catch_unwind(AssertUnwindSafe(|| x / 0)).is_err());

@@ -59,11 +59,11 @@ fn shared(rows: usize) -> (Model, GdpReformulationOptions) {
     variable!(model, 0.0 <= x <= 1.0);
     let mut body = x.erase();
     for _ in 0..20 {
-        body = (body * body + 0.1).erase();
+        body = (body.clone() * body + 0.1).erase();
     }
     let active = model.add_boolean("active");
     for i in 0..rows {
-        active.context().add_constraint(format!("r{i}"), body.le(2.0));
+        active.context().add_constraint(format!("r{i}"), body.clone().le(2.0));
     }
     (model, Hull::default().into())
 }

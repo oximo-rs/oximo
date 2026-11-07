@@ -25,8 +25,8 @@ fn full_model() -> Model {
         + x.asinh()
         + positive.acosh()
         + x.atanh()
-        + x.atan2(positive)
-        + x.min(positive)
+        + x.atan2(&positive)
+        + x.min(&positive)
         + x.max(positive);
     objective!(m, Min, e);
     m

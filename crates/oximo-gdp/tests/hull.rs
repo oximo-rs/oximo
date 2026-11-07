@@ -1343,7 +1343,7 @@ fn distinct_sparse_coordinates_use_two_copies_each_with_bulk_references() {
     let coordinates: Vec<_> =
         (0..1000).map(|i| model.__var(format!("x{i}")).bounds(-2.0, 2.0).build()).collect();
     let branches: Vec<_> = (0..1000).map(|i| model.add_boolean(format!("b{i}"))).collect();
-    for (&x, branch) in coordinates.iter().zip(&branches) {
+    for (x, branch) in coordinates.iter().zip(&branches) {
         branch.context().add_constraint("limit", x.le(1.0));
     }
     disjunction!(model, branches.clone());
@@ -1396,7 +1396,7 @@ fn shared_nonlinear_source_preparation_keeps_each_bound_and_parameter_snapshot()
     param!(model, factor = 1.0);
     boolean_variable!(model, active);
     let body = factor * x * x + 1e16 * active.binary() - 1.0;
-    disjunct_constraint!(model, active, first, body <= 1e16);
+    disjunct_constraint!(model, active, first, &body <= 1e16);
     disjunct_constraint!(model, active, second, body <= 1e16 + 2.0);
     model.plan_gdp(Hull::default()).unwrap();
     factor.set_param_value(2.0).unwrap();

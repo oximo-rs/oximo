@@ -35,14 +35,7 @@ impl Body {
             return Ok(Self::Linear(l.coeffs.to_vec(), l.constant));
         }
         if let Some(q) = p.quadratic(id) {
-            return Ok(Self::Quadratic(
-                q.linear.clone(),
-                q.hessian
-                    .iter()
-                    .map(|&(a, b, c)| (a, b, if a == b { c / 2.0 } else { c }))
-                    .collect(),
-                q.constant,
-            ));
+            return Ok(Self::Quadratic(q.linear().to_vec(), q.quadratic().to_vec(), q.constant()));
         }
         Ok(Self::Nonlinear(formula))
     }

@@ -23,7 +23,7 @@ use crate::{
     PsdConstraintIr,
 };
 use oximo_expr::{
-    Degree, Expr, ExprClass, ExprId, ExprIdRemap, ModelMismatchError, VarId, classify,
+    Expr, ExprClass, ExprId, ExprIdRemap, ExprInput, ModelMismatchError, VarId, classify,
 };
 use smol_str::SmolStr;
 use std::cell::Ref;
@@ -238,12 +238,12 @@ impl PendingSoc {
         expected_arena: usize,
     ) -> Self {
         let bound = bound.into_affine_function().expression();
-        super::assert_expr_arena(bound, expected_arena);
+        super::assert_expr_arena(&bound, expected_arena);
         let components: crate::SharedSlice<_> = std::iter::once(bound.id())
             .chain(terms.into_iter().map(|term| {
                 let term = term.into_affine_function().expression();
                 assert_eq!(
-                    super::arena_key(term.arena),
+                    super::arena_key(term.arena()),
                     expected_arena,
                     "SOC components must belong to the same model"
                 );
@@ -595,7 +595,7 @@ impl Model {
         upper: f64,
     ) -> ConstraintId {
         let lhs: Expr = lhs.into();
-        self.assert_expr_belongs(lhs);
+        self.assert_expr_belongs(&lhs);
         self.add_constraint(name, Constraint::new(lhs.into_function(), Interval { lower, upper }))
             .row_id()
     }
@@ -619,10 +619,16 @@ impl Model {
     /// bounds are pure constants and the body is linear (the condition under which
     /// one two-sided row is representable).
     #[doc(hidden)]
-    pub fn __add_range<'a, B1, B2, D: crate::function_set::FunctionDegree>(
+    pub fn __add_range<
+        'a,
+        B1,
+        B2,
+        D: crate::function_set::FunctionDegree,
+        E: ExprInput<'a, Degree = D>,
+    >(
         &'a self,
         name: &str,
-        mid: Expr<'a, D>,
+        mid: E,
         lo: B1,
         hi: B2,
     ) -> RangeConstraintHandles
@@ -630,9 +636,11 @@ impl Model {
         B1: IntoRhs<'a, D>,
         B2: IntoRhs<'a, D>,
     {
-        self.assert_expr_belongs(mid);
+        self.assert_expr_belongs(mid.as_expression());
+        let mid = mid.into_expression();
         let handles = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
             validate_bounds(lower, upper);
+            let mid_id = mid.id();
             let function = mid.into_function();
 
             if function.is_affine() {
@@ -653,7 +661,7 @@ impl Model {
                     &mut rows,
                     AlgebraicConstraint {
                         name: name.clone(),
-                        lhs: mid.id(),
+                        lhs: mid_id,
                         lower,
                         upper,
                         active: true,
@@ -673,13 +681,13 @@ impl Model {
 
             let lower = self.__add_constraint(
                 format!("{name}_lo"),
-                Constraint::new(function, GreaterThan(lower)),
+                Constraint::new(function.clone(), GreaterThan(lower)),
             );
             let upper = self
                 .__add_constraint(format!("{name}_hi"), Constraint::new(function, LessThan(upper)));
             RangeConstraintHandles::Split { lower: lower.scalar_view(), upper: upper.scalar_view() }
         } else {
-            let lower = self.__add_constraint(format!("{name}_lo"), mid.ge(lo));
+            let lower = self.__add_constraint(format!("{name}_lo"), mid.clone().ge(lo));
             let upper = self.__add_constraint(format!("{name}_hi"), mid.le(hi));
             RangeConstraintHandles::Split { lower: lower.scalar_view(), upper: upper.scalar_view() }
         };
@@ -707,9 +715,15 @@ impl Model {
 
     /// Anonymous form of [`Self::__add_range`] (auto-named rows).
     #[doc(hidden)]
-    pub fn __add_range_auto<'a, B1, B2, D: crate::function_set::FunctionDegree>(
+    pub fn __add_range_auto<
+        'a,
+        B1,
+        B2,
+        D: crate::function_set::FunctionDegree,
+        E: ExprInput<'a, Degree = D>,
+    >(
         &'a self,
-        mid: Expr<'a, D>,
+        mid: E,
         lo: B1,
         hi: B2,
     ) -> RangeConstraintHandles
@@ -717,7 +731,8 @@ impl Model {
         B1: IntoRhs<'a, D>,
         B2: IntoRhs<'a, D>,
     {
-        self.assert_expr_belongs(mid);
+        self.assert_expr_belongs(mid.as_expression());
+        let mid = mid.into_expression();
         let handles = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
             validate_bounds(lower, upper);
             let function = mid.into_function();
@@ -731,8 +746,8 @@ impl Model {
                     .scalar_view(),
                 )
             } else {
-                let lower =
-                    self.__add_constraint_auto(Constraint::new(function, GreaterThan(lower)));
+                let lower = self
+                    .__add_constraint_auto(Constraint::new(function.clone(), GreaterThan(lower)));
                 let upper = self.__add_constraint_auto(Constraint::new(function, LessThan(upper)));
                 RangeConstraintHandles::Split {
                     lower: lower.scalar_view(),
@@ -740,7 +755,7 @@ impl Model {
                 }
             }
         } else {
-            let lower = self.__add_constraint_auto(mid.ge(lo));
+            let lower = self.__add_constraint_auto(mid.clone().ge(lo));
             let upper = self.__add_constraint_auto(mid.le(hi));
             RangeConstraintHandles::Split { lower: lower.scalar_view(), upper: upper.scalar_view() }
         };
@@ -824,16 +839,12 @@ impl Model {
         name: SmolStr,
         ir: PsdConstraintIr<'_>,
     ) -> PsdConstraintHandle {
-        self.assert_expr_belongs(ir.0.matrix()[(0, 0)]);
+        self.assert_expr_belongs(&ir.0.matrix()[(0, 0)]);
         let mut names = self.psd_names_mut();
         let mut rows = self.psd_constraints.borrow_mut();
         let id = PsdConstraintId(u32::try_from(rows.len()).expect("PSD count overflow"));
         names.insert_unique(name.clone(), id);
-        rows.push(PsdConstraint {
-            name: name.clone(),
-            matrix: ir.0.matrix().map(|entry| entry.id()),
-            active: true,
-        });
+        rows.push(PsdConstraint { name, matrix: ir.0.matrix().map(Expr::id), active: true });
         self.record_declared_native(id.into(), super::semantic::Representation::Psd);
         self.invalidate_kind();
         PsdConstraintHandle::new(id, self.id())
@@ -957,7 +968,7 @@ impl Model {
         let bound = components[0];
         let dimension = components.len();
         let terms = components.into_slice(1..dimension);
-        rows.push(SocConstraint { name: name.clone(), bound, terms, active: true });
+        rows.push(SocConstraint { name, bound, terms, active: true });
         self.record_declared_native(id.into(), super::semantic::Representation::Soc);
         self.invalidate_kind();
         SocConstraintHandle::new(id, self.id())
@@ -1080,18 +1091,19 @@ impl Model {
     ///
     /// Panics when a member belongs to another model, is not a bare variable,
     /// or the name, members, variables, or weights violate SOS invariants.
-    pub fn add_sos_constraint<'a, D: Degree>(
+    pub fn add_sos_constraint<'a, V: ExprInput<'a>>(
         &'a self,
         name: impl Into<SmolStr>,
         sos_type: SosType,
-        members: impl IntoIterator<Item = (Expr<'a, D>, f64)>,
+        members: impl IntoIterator<Item = (V, f64)>,
     ) -> SosConstraintHandle {
         let name = name.into();
         let members: Vec<SosMember> = members
             .into_iter()
             .map(|(expr, weight)| {
+                let expr = expr.as_expression();
                 assert!(
-                    std::ptr::eq(expr.arena, &raw const self.arena),
+                    std::ptr::eq(expr.arena(), &raw const self.arena),
                     "SOS member belongs to another model"
                 );
                 let variable = expr.var_id().expect("SOS members must be bare variables");
@@ -1180,11 +1192,11 @@ impl Model {
     ///
     /// Panics under the same conditions as [`Self::add_sos_constraint`], or
     /// when the iterator contains more than `u32::MAX` members.
-    pub fn add_sos_constraint_auto_weights<'a, D: Degree>(
+    pub fn add_sos_constraint_auto_weights<'a, V: ExprInput<'a>>(
         &'a self,
         name: impl Into<SmolStr>,
         sos_type: SosType,
-        variables: impl IntoIterator<Item = Expr<'a, D>>,
+        variables: impl IntoIterator<Item = V>,
     ) -> SosConstraintHandle {
         self.add_sos_constraint(
             name,
@@ -1214,20 +1226,20 @@ impl Model {
 
     /// Register an SOS constraint with supplied weights and an automatically generated name.
     #[doc(hidden)]
-    pub fn __add_sos_constraint_auto<'a, D: Degree>(
+    pub fn __add_sos_constraint_auto<'a, V: ExprInput<'a>>(
         &'a self,
         sos_type: SosType,
-        members: impl IntoIterator<Item = (Expr<'a, D>, f64)>,
+        members: impl IntoIterator<Item = (V, f64)>,
     ) -> SosConstraintHandle {
         self.add_sos_constraint(self.next_auto_sos_name(), sos_type, members)
     }
 
     /// Register an SOS constraint with automatic weights and an automatically generated name.
     #[doc(hidden)]
-    pub fn __add_sos_constraint_auto_weights<'a, D: Degree>(
+    pub fn __add_sos_constraint_auto_weights<'a, V: ExprInput<'a>>(
         &'a self,
         sos_type: SosType,
-        variables: impl IntoIterator<Item = Expr<'a, D>>,
+        variables: impl IntoIterator<Item = V>,
     ) -> SosConstraintHandle {
         self.add_sos_constraint_auto_weights(self.next_auto_sos_name(), sos_type, variables)
     }
@@ -1264,7 +1276,7 @@ impl Model {
     /// Check that the trigger belongs to this model and is a bare binary variable.
     pub(super) fn indicator_trigger<'a>(&self, trigger: impl Into<Expr<'a>>) -> VarId {
         let trigger: Expr = trigger.into();
-        self.assert_expr_belongs(trigger);
+        self.assert_expr_belongs(&trigger);
         let id = trigger.var_id().expect("indicator trigger must be a bare binary variable");
         assert!(
             self.variables.borrow()[id.index()].domain == Domain::Binary,
@@ -1332,13 +1344,13 @@ impl Model {
         consequent: impl IntoAffineConstraint<'a>,
     ) -> PendingIndicator {
         let consequent = consequent.into_affine_constraint().0;
-        self.assert_expr_belongs(consequent.lhs);
+        self.assert_expr_belongs(&consequent.lhs);
         let (lower, upper) = (consequent.lower, consequent.upper);
         let mut pending = self.prepare_indicator_interval(
             name,
             trigger,
             active_value,
-            consequent.lhs.id,
+            consequent.lhs.id(),
             lower,
             upper,
         );
@@ -1469,12 +1481,12 @@ impl Model {
     ) -> IndicatorConstraintHandle {
         let trigger = self.indicator_trigger(trigger);
         let consequent = consequent.into_affine_constraint().0;
-        self.assert_expr_belongs(consequent.lhs);
+        self.assert_expr_belongs(&consequent.lhs);
         let id = self.register_indicator(
             name.into(),
             trigger,
             active_value,
-            consequent.lhs.id,
+            consequent.lhs.id(),
             (consequent.lower, consequent.upper),
             Some(consequent.semantic.into_pair()),
         );
@@ -1537,13 +1549,13 @@ impl Model {
     ) -> IndicatorConstraintHandle {
         let trigger: Expr = trigger.into();
         let lhs: Expr = lhs.into();
-        self.assert_expr_belongs(lhs);
+        self.assert_expr_belongs(&lhs);
         let trigger = self.indicator_trigger(trigger.erase());
         let id = self.register_indicator(
             name.into(),
             trigger,
             active_value,
-            lhs.id,
+            lhs.id(),
             (lower, upper),
             None,
         );
@@ -1563,7 +1575,7 @@ impl Model {
     ) -> RangeIndicatorConstraintHandles {
         let trigger: Expr = trigger.into();
         let mid = mid.into_affine_function().expression().erase();
-        self.assert_expr_belongs(mid);
+        self.assert_expr_belongs(&mid);
         let trigger = self.indicator_trigger(trigger.erase());
         if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
             && mid.__class() == ExprClass::Linear
@@ -1572,7 +1584,7 @@ impl Model {
                 name.into(),
                 trigger,
                 active_value,
-                mid.id,
+                mid.id(),
                 lower,
                 upper,
             );
@@ -1583,7 +1595,7 @@ impl Model {
                 format!("{name}_lo").into(),
                 trigger,
                 active_value,
-                mid.ge(lo).into_checked_affine(),
+                mid.clone().ge(lo).into_checked_affine(),
             );
             let upper = self.prepare_indicator(
                 format!("{name}_hi").into(),

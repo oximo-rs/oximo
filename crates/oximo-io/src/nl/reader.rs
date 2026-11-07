@@ -772,7 +772,7 @@ fn build_model(
         vars.push(b.build().erase());
     }
     let mut exprs = Vec::with_capacity(h.n_con);
-    let c_nodes = p.c_expr.iter().cloned().chain(std::iter::repeat(None));
+    let c_nodes = p.c_expr.into_iter().chain(std::iter::repeat_with(|| None));
     for (j, base) in c_nodes.take(h.n_con).enumerate() {
         let base = base.unwrap_or(Node::Const(0.0));
         let mut e = lower(&m, &vars, base, 0)?;
@@ -781,12 +781,12 @@ fn build_model(
                 if v >= vars.len() {
                     return Err(invalid("J", "variable index out of range"));
                 }
-                e = e + c * vars[v];
+                e = e + c * &vars[v];
             }
         }
         exprs.push(e);
     }
-    for (j, expr) in exprs.iter().enumerate() {
+    for (j, expr) in exprs.into_iter().enumerate() {
         let (kind, vals) = &p.rows[j];
         let (lo, hi) = match (*kind, vals.as_slice()) {
             (0, x) if x.len() == 2 => (x[0], x[1]),
@@ -797,7 +797,7 @@ fn build_model(
             _ => return Err(invalid("r", "invalid row type")),
         };
         let name = rows.get(j).cloned().unwrap_or_else(|| format!("c{j}"));
-        m.__add_constraint_interval(name, *expr, lo, hi);
+        m.__add_constraint_interval(name, expr, lo, hi);
     }
     if h.n_obj == 0 {
         if p.objective.is_some() {
@@ -811,7 +811,7 @@ fn build_model(
             if v >= vars.len() {
                 return Err(invalid("G", "variable index out of range"));
             }
-            e = e + c * vars[v];
+            e = e + c * &vars[v];
         }
         match sense {
             ObjectiveSense::Minimize => m.__minimize(e),
@@ -825,7 +825,7 @@ fn lower<'a>(m: &'a Model, vars: &[Expr<'a>], n: Node, depth: usize) -> Result<E
     match n {
         Node::Const(x) => Ok(m.__constant(x).erase()),
         Node::Var(i) => {
-            vars.get(i).copied().ok_or_else(|| invalid("expression", "variable index out of range"))
+            vars.get(i).cloned().ok_or_else(|| invalid("expression", "variable index out of range"))
         }
         Node::Unary(c, a) => {
             let child_depth = next_expression_depth(depth)?;
@@ -1083,7 +1083,7 @@ mod tests {
         let m = Model::new("binary");
         let x = m.__var("x").bounds(0.0, 10.0).build().erase();
         let y = m.__var("y").bounds(-2.0, 2.0).build().erase();
-        m.__add_constraint("row", (x.sin() + 2.0 * y).le(4.0));
+        m.__add_constraint("row", (x.sin() + 2.0 * y.clone()).le(4.0));
         m.__minimize(x.powi(2) + y);
         let mut bytes = Vec::new();
         super::super::write_nl_with(&m, &mut bytes, &super::super::WriteOptions::binary()).unwrap();
@@ -1097,7 +1097,7 @@ mod tests {
     fn preserves_range_rows() {
         let m = Model::new("range");
         let x = m.__var("x").bounds(-10.0, 10.0).build().erase();
-        m.__add_range("band", x, -1.0, 2.0);
+        m.__add_range("band", x.clone(), -1.0, 2.0);
         m.__minimize(x);
         let text = super::super::to_nl_string(&m).unwrap();
         let got = read_nl(text.as_bytes()).unwrap();
@@ -1110,7 +1110,7 @@ mod tests {
         let m = Model::new("integer");
         let x = m.__var("x").binary().build().erase();
         let y = m.__var("y").integer().bounds(-3.0, 3.0).build().erase();
-        m.__add_constraint("row", (x + y).ge(0.0));
+        m.__add_constraint("row", (x.clone() + y.clone()).ge(0.0));
         m.__minimize(x + y);
         let text = super::super::to_nl_string(&m).unwrap();
         let got = read_nl(text.as_bytes()).unwrap();

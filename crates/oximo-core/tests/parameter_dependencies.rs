@@ -285,7 +285,7 @@ impl Function for ReplacedLowering<'_> {
     type Owned = oximo_core::ScalarFunctionData<oximo_expr::Dynamic>;
 
     fn semantic_data(&self) -> Self::Owned {
-        oximo_core::ScalarFunctionData::from_expression(self.declared)
+        oximo_core::ScalarFunctionData::from_expression(&self.declared)
     }
 }
 
@@ -384,8 +384,8 @@ fn long_parameter_chains_and_shared_roots_produce_complete_deduplicated_dependen
         parameters.push(parameter.param_id().unwrap());
         root = (root.sin() + parameter).erase();
     }
-    let shared = (root * root + root).erase();
-    objective!(model, Min, shared);
+    let shared = (root.clone() * root.clone() + root).erase();
+    objective!(model, Min, &shared);
     let row = constraint!(model, row, shared <= 1.0);
     let dependencies = model.parameter_dependencies();
     assert_eq!(dependencies.parameters_for(ParameterTarget::Objective), parameters);
@@ -411,7 +411,7 @@ fn distinct_roots_sharing_different_prefixes_keep_complete_dependencies() {
         parameters.push(parameter.param_id().unwrap());
         root = (root.sin() + parameter).erase();
         if (i + 1) % 8 == 0 {
-            prefixes.push((root, parameters.len()));
+            prefixes.push((root.clone(), parameters.len()));
         }
     }
     let rows: Vec<_> = prefixes

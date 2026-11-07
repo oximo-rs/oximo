@@ -30,6 +30,9 @@ fn quadratic_work_hint(arena: &ExprArena, root: ExprId) -> usize {
                 work = work.saturating_add(children.len());
             }
             ExprNode::Linear { coeffs, .. } => work = work.saturating_add(coeffs.len()),
+            ExprNode::Quadratic(q) => {
+                work = work.saturating_add(q.linear().len()).saturating_add(q.quadratic().len());
+            }
             ExprNode::Unary(_, child) => pending.push(*child),
             _ => work = work.saturating_add(1),
         }
@@ -305,7 +308,7 @@ mod supplied_analysis_tests {
         let model = Model::new("wide quadratic classification");
         let x: Vec<_> = (0..50).map(|i| model.__var(format!("x{i}")).build()).collect();
         for row in 0..10 {
-            let terms = (0..650).map(|i| x[i % 50] * x[(i + row) % 50]);
+            let terms = (0..650).map(|i| x[i % 50] * x[(i / 50 + row) % 50]);
             let lhs = Expr::__sum_terms_in(model.__sum_context(), terms);
             model.__add_constraint_auto(lhs.le(1.0));
         }

@@ -21,7 +21,7 @@ fn sample(case: &str, size: usize) -> u128 {
             let body = if case == "split" || (case == "mixed" && i % 2 != 0) {
                 x[i].powi(2)
             } else {
-                (x[i] + 1.0).erase()
+                (x[i] + 1.0).into_dynamic()
             };
             (body, 0.0, 10.0)
         })

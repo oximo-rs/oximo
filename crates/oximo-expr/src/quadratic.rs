@@ -2,34 +2,198 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::arena::{ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 
-/// Quadratic decomposition of an expression: its Hessian, gradient-linear
-/// part, and constant.
-///
-/// For a degree-`<= 2` polynomial `f(x)`, this holds the exact Taylor data
+/// Canonical polynomial coefficients of a degree-at-most-two expression.
 ///
 /// ```text
-/// f(x) = constant + sum_i linear_i * x_i + 0.5 * x' Q x
+/// f(x) = constant + sum_i linear_i * x_i + sum_(i,j) quadratic_ij * x_i * x_j
 /// ```
-///
-/// where `Q` is the (constant) Hessian. Returned by
-/// [`extract_quadratic`].
-#[derive(Clone, Debug, Default)]
+/// Each unordered variable pair is stored once, with the larger variable first.
+/// Diagonal and off-diagonal entries both carry the coefficient as written.
+/// Derivatives and solver matrices are derived explicitly at their respective boundaries.
+#[derive(Clone, Debug)]
 pub struct QuadraticTerms {
-    /// Lower-triangle Hessian entries `(row, col, h)` with `row >= col`, where
-    /// `h = partial^2 f / partial x_row partial x_col`. Diagonal entries are the full second
-    /// derivative, so `a * x^2` yields `(x, x, 2a)`. This matches the
-    /// `0.5 * x' Q x` convention used by QP solvers.
-    pub hessian: Vec<(VarId, VarId, f64)>,
+    /// Polynomial terms `(row, col, coefficient)`, where `row >= col`.
+    pub(crate) quadratic: Vec<(VarId, VarId, f64)>,
     /// Linear coefficients `(var, coeff)`, the gradient of `f` at the origin.
-    pub linear: Vec<(VarId, f64)>,
+    pub(crate) linear: Vec<(VarId, f64)>,
     /// The constant term `f(0)`.
-    pub constant: f64,
+    pub(crate) constant: f64,
+    ordered: bool,
+    canonical: std::sync::OnceLock<Box<CanonicalCoefficients>>,
+}
+
+impl Default for QuadraticTerms {
+    fn default() -> Self {
+        Self::from_canonical_parts(Vec::new(), Vec::new(), 0.0)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct CanonicalCoefficients {
+    linear: Vec<(VarId, f64)>,
+    quadratic: Vec<(VarId, VarId, f64)>,
+    diagonal_magnitudes: Option<(f64, f64)>,
+}
+
+impl QuadraticTerms {
+    /// Construct from ordinary quadratic and linear coefficients and a constant.
+    /// Merge duplicates, orient unordered pairs, sort by column then row, and
+    /// remove exact zeros. A diagonal coefficient `c` means `c*x*x`.
+    ///
+    /// # Errors
+    /// Rejects nonfinite input or coefficient accumulation overflow.
+    pub fn from_coefficients(
+        quadratic: Vec<(VarId, VarId, f64)>,
+        linear: Vec<(VarId, f64)>,
+        constant: f64,
+    ) -> Result<Self, crate::QuadraticBuildError> {
+        let mut acc = crate::quadratic_builder::Accumulator::default();
+        if !constant.is_finite() {
+            return Err(crate::QuadraticBuildError::NonFiniteInput);
+        }
+        acc.constant = constant;
+        for (v, c) in linear {
+            acc.add_linear(v, c)?;
+        }
+        for (a, b, c) in quadratic {
+            acc.add_quadratic(a, b, c)?;
+        }
+        Ok(acc.finish())
+    }
+
+    /// Import full lower-triangle Hessian entries explicitly.
+    /// Diagonals are halved once.
+    ///
+    /// # Errors
+    /// Rejects nonfinite input, accumulation overflow, or a diagonal whose exact
+    /// half is unrepresentable (including odd subnormal Hessian entries).
+    pub fn from_hessian(
+        hessian: Vec<(VarId, VarId, f64)>,
+        linear: Vec<(VarId, f64)>,
+        constant: f64,
+    ) -> Result<Self, crate::QuadraticImportError> {
+        let hessian = crate::LowerTriangularHessian::new(hessian)?;
+        let mut terms = Self::from_coefficients(Vec::new(), linear, constant)?;
+        terms.quadratic = hessian.into_polynomial_coefficients()?;
+        Ok(terms)
+    }
+
+    pub(crate) fn from_canonical_parts(
+        quadratic: Vec<(VarId, VarId, f64)>,
+        linear: Vec<(VarId, f64)>,
+        constant: f64,
+    ) -> Self {
+        Self { quadratic, linear, constant, ordered: true, canonical: std::sync::OnceLock::new() }
+    }
+
+    /// Sorted, unique, nonzero linear coefficients.
+    pub fn linear(&self) -> &[(VarId, f64)] {
+        if self.ordered { &self.linear } else { &self.canonical().linear }
+    }
+
+    /// Sorted, unique, nonzero polynomial coefficients, each unordered pair once.
+    pub fn quadratic(&self) -> &[(VarId, VarId, f64)] {
+        if self.ordered { &self.quadratic } else { &self.canonical().quadratic }
+    }
+
+    /// Minimum and maximum absolute diagonal polynomial coefficient, or `None`
+    /// when there are no diagonal terms.
+    pub fn diagonal_coefficient_magnitude_bounds(&self) -> Option<(f64, f64)> {
+        self.canonical().diagonal_magnitudes
+    }
+
+    /// Allocated coefficient storage, including cached views and summaries.
+    pub fn coefficient_storage_bytes(&self) -> usize {
+        let bytes = |linear: usize, quadratic: usize| {
+            linear * std::mem::size_of::<(VarId, f64)>()
+                + quadratic * std::mem::size_of::<(VarId, VarId, f64)>()
+        };
+        bytes(self.linear.capacity(), self.quadratic.capacity())
+            + self.canonical.get().map_or(0, |v| {
+                std::mem::size_of::<CanonicalCoefficients>()
+                    + bytes(v.linear.capacity(), v.quadratic.capacity())
+            })
+    }
+
+    pub fn constant(&self) -> f64 {
+        self.constant
+    }
+
+    /// Whether the public coefficient view is canonical and finite.
+    pub fn is_canonical(&self) -> bool {
+        self.constant.is_finite()
+            && self.linear().iter().all(|&(_, c)| c.is_finite() && c != 0.0)
+            && self.linear().windows(2).all(|w| w[0].0.0 < w[1].0.0)
+            && self.quadratic().iter().all(|&(a, b, h)| a.0 >= b.0 && h.is_finite() && h != 0.0)
+            && self.quadratic().windows(2).all(|w| (w[0].1.0, w[0].0.0) < (w[1].1.0, w[1].0.0))
+    }
+
+    fn canonical(&self) -> &CanonicalCoefficients {
+        self.canonical.get_or_init(|| {
+            let mut minimum = f64::INFINITY;
+            let mut maximum: f64 = 0.0;
+            for &(row, column, coefficient) in &self.quadratic {
+                if row == column {
+                    minimum = minimum.min(coefficient.abs());
+                    maximum = maximum.max(coefficient.abs());
+                }
+            }
+            let mut view = Box::new(CanonicalCoefficients {
+                linear: if self.ordered { Vec::new() } else { self.linear.clone() },
+                quadratic: if self.ordered { Vec::new() } else { self.quadratic.clone() },
+                diagonal_magnitudes: (maximum != 0.0).then_some((minimum, maximum)),
+            });
+            view.linear.sort_unstable_by_key(|(v, _)| v.0);
+            view.quadratic.sort_unstable_by_key(|(a, b, _)| (b.0, a.0));
+            view
+        })
+    }
+
+    pub(crate) fn invalidate_order(&mut self) {
+        self.ordered = false;
+        self.invalidate_view();
+    }
+
+    pub(crate) fn invalidate_view(&mut self) {
+        self.canonical.take();
+    }
+
+    fn canonical_clone(&self) -> Self {
+        Self::from_canonical_parts(self.quadratic().to_vec(), self.linear().to_vec(), self.constant)
+    }
+
+    /// Full lower-triangle second derivatives.
+    ///
+    /// The mathematical Hessian can overflow even when the polynomial coefficients are finite.
+    /// Consumers requiring a finite solver matrix must validate the resulting values.
+    pub fn hessian_entries(&self) -> impl ExactSizeIterator<Item = (VarId, VarId, f64)> + '_ {
+        self.quadratic().iter().map(|&(a, b, c)| (a, b, if a == b { 2.0 * c } else { c }))
+    }
+
+    /// Variable IDs used by the affine and quadratic coefficients (duplicates allowed).
+    pub fn variables(&self) -> impl Iterator<Item = VarId> + '_ {
+        self.linear()
+            .iter()
+            .map(|&(v, _)| v)
+            .chain(self.quadratic().iter().flat_map(|&(a, b, _)| [a, b]))
+    }
+
+    fn polynomial(&self) -> Poly {
+        let mut poly = Poly {
+            linear: self.linear.iter().copied().collect(),
+            constant: self.constant,
+            ..Poly::default()
+        };
+        for &(a, b, c) in &self.quadratic {
+            poly.quad.insert(pair(a, b), c);
+        }
+        poly
+    }
 }
 
 /// Internal accumulator while walking the expression. `quad` keys are ordered
 /// `(min, max)` variable pairs and hold the polynomial coefficient of
-/// `x_i * x_j` (i.e. the coefficient of `x_i^2` on the diagonal), not yet the
-/// doubled Hessian value.
+/// `x_i * x_j`, including the coefficient of `x_i^2` on the diagonal.
 #[derive(Clone, Default)]
 struct Poly {
     quad: FxHashMap<(VarId, VarId), f64>,
@@ -70,19 +234,24 @@ impl Poly {
     }
 
     fn is_constant(&self) -> bool {
-        self.quad.is_empty() && self.linear.is_empty()
+        self.is_linear() && self.linear.is_empty()
     }
 
     fn is_linear(&self) -> bool {
         self.quad.is_empty()
     }
 
+    fn coefficients(&self) -> impl Iterator<Item = &f64> {
+        self.linear.values().chain(self.quad.values())
+    }
+
+    fn coefficients_mut(&mut self) -> impl Iterator<Item = &mut f64> {
+        self.linear.values_mut().chain(self.quad.values_mut())
+    }
+
     fn scale(mut self, s: f64) -> Self {
         self.constant *= s;
-        for c in self.linear.values_mut() {
-            *c *= s;
-        }
-        for c in self.quad.values_mut() {
+        for c in self.coefficients_mut() {
             *c *= s;
         }
         self
@@ -156,7 +325,7 @@ fn square_linear(p: &Poly) -> Poly {
 /// to their live arena value (a degree-0 constant).
 #[cfg(test)]
 fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
-    match arena.get(id) {
+    match arena.node(id) {
         ExprNode::Const(c) => Some(Poly::constant(*c)),
         ExprNode::Var(v) => Some(Poly::var(*v)),
         ExprNode::Linear { coeffs, constant } => {
@@ -165,8 +334,9 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
             for (v, c) in coeffs {
                 *linear.entry(*v).or_insert(0.0) += *c;
             }
-            Some(Poly { quad: FxHashMap::default(), linear, constant: *constant })
+            Some(Poly { linear, constant: *constant, ..Poly::default() })
         }
+        ExprNode::Quadratic(q) => Some(q.polynomial()),
         ExprNode::Unary(UnaryOp::Neg, inner) => recursive_poly(arena, *inner).map(Poly::neg),
         ExprNode::Add(children) => {
             let mut acc = Poly::default();
@@ -192,7 +362,7 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
             Some(acc)
         }
         ExprNode::Pow(base, exp) => {
-            let ExprNode::Const(e) = arena.get(*exp) else { return None };
+            let ExprNode::Const(e) = arena.node(*exp) else { return None };
             if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                 return None;
             }
@@ -254,7 +424,7 @@ fn monomial_with_budget(
     // Depth alone cannot bound repeated visits to shared, wide products.
     *remaining = remaining.checked_sub(1)?;
     let constant = |coefficient| Monomial { variables: [VarId(0); 2], degree: 0, coefficient };
-    let term = match arena.get(id) {
+    let term = match arena.node(id) {
         ExprNode::Const(c) => constant(*c),
         ExprNode::Param(p) => constant(arena.param_value(*p)),
         ExprNode::Var(v) => Monomial { variables: [*v, *v], degree: 1, coefficient: 1.0 },
@@ -293,7 +463,7 @@ fn monomial_with_budget(
 
             acc
         }
-        ExprNode::Pow(base, exponent) if matches!(arena.get(*exponent), ExprNode::Const(e) if *e == 2.0) =>
+        ExprNode::Pow(base, exponent) if matches!(arena.node(*exponent), ExprNode::Const(e) if *e == 2.0) =>
         {
             let mut term = monomial_with_budget(arena, *base, depth + 1, remaining)?;
             if term.degree > 1 {
@@ -314,7 +484,7 @@ fn monomial_with_budget(
 fn flat_monomials(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
     if !children.first().into_iter().chain(children.last()).any(|&id| {
         matches!(
-            arena.get(id),
+            arena.node(id),
             ExprNode::Mul(_) | ExprNode::Pow(_, _) | ExprNode::Unary(UnaryOp::Neg, _)
         )
     }) {
@@ -337,7 +507,7 @@ fn flat_monomials(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
 
 #[inline(never)]
 fn flat_poly(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
-    let terminal = |id| match arena.get(id) {
+    let terminal = |id| match arena.node(id) {
         ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) => true,
         ExprNode::Linear { coeffs, .. } => coeffs.len() <= 1,
         _ => false,
@@ -349,7 +519,7 @@ fn flat_poly(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
     }
     let mut acc = Poly::default();
     for &child in children {
-        match arena.get(child) {
+        match arena.node(child) {
             ExprNode::Var(var) => {
                 *acc.linear.entry(*var).or_insert(0.0) += 1.0;
                 acc.constant += 0.0;
@@ -389,7 +559,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
 
     fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Poly>, Self::State> {
         use std::ops::ControlFlow::{Break, Continue};
-        let (rest, op, value) = match self.arena.get(id) {
+        let (rest, op, value) = match self.arena.node(id) {
             ExprNode::Const(c) => return Break(Some(Poly::constant(*c))),
             ExprNode::Param(p) => return Break(Some(Poly::constant(self.arena.param_value(*p)))),
             ExprNode::Var(v) => return Break(Some(Poly::var(*v))),
@@ -400,6 +570,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
                 }
                 return Break(Some(Poly { linear, constant: *constant, ..Poly::default() }));
             }
+            ExprNode::Quadratic(q) => return Break(Some(q.polynomial())),
             ExprNode::Add(c) => {
                 if let Some(poly) = flat_monomials(self.arena, c) {
                     return Break(Some(poly));
@@ -414,7 +585,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
                 (std::slice::from_ref(c), PolyOp::Neg, Poly::default())
             }
             ExprNode::Pow(base, exp) => {
-                let ExprNode::Const(e) = self.arena.get(*exp) else { return Break(None) };
+                let ExprNode::Const(e) = self.arena.node(*exp) else { return Break(None) };
                 if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                     return Break(None);
                 }
@@ -452,7 +623,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
             if matches!(state.op, PolyOp::Add) {
                 let acc = state.value.as_mut().expect("checked above");
                 // Avoid creating a one-entry hash table for every variable in a sum.
-                match self.arena.get(child) {
+                match self.arena.node(child) {
                     ExprNode::Var(v) => {
                         acc.constant += 0.0;
                         *acc.linear.entry(*v).or_insert(0.0) += 1.0;
@@ -495,8 +666,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
         if matches!(state.op, PolyOp::Add) {
             crate::fold::record_sum_magnitude(
                 self.sum_magnitude,
-                p.constant.abs()
-                    + p.linear.values().chain(p.quad.values()).map(|c| c.abs()).sum::<f64>(),
+                p.constant.abs() + p.coefficients().map(|c| c.abs()).sum::<f64>(),
             );
             state.value.as_mut().expect("successful sum").add_assign(p);
             return;
@@ -516,7 +686,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
 
     fn inline(&self, state: &mut Self::State, child: ExprId) -> bool {
         if matches!(state.op, PolyOp::Add)
-            && let ExprNode::Add(children) = self.arena.get(child)
+            && let ExprNode::Add(children) = self.arena.node(child)
         {
             let flatten = self.flatten_sums.get().unwrap_or_else(|| {
                 let flatten = !crate::linear::bounded_affine(self.arena, &[self.root], true);
@@ -538,12 +708,12 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
 
 fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
     let mut negations = 0;
-    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.get(id) {
+    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.node(id) {
         id = *child;
         negations += 1;
     }
     if negations == 0
-        && let ExprNode::Add(children) = arena.get(id)
+        && let ExprNode::Add(children) = arena.node(id)
         && let Some(poly) = flat_poly(arena, children)
     {
         return Some(poly);
@@ -558,7 +728,7 @@ fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
     if flatten_sums.get() == Some(true)
         && (!sum_magnitude.get().is_finite()
             || !value.constant.is_finite()
-            || value.linear.values().chain(value.quad.values()).any(|c| !c.is_finite()))
+            || value.coefficients().any(|c| !c.is_finite()))
         && crate::fold::finite_inputs(arena, id, true)
     {
         value = crate::fold::fold(
@@ -573,7 +743,7 @@ fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
         )?;
     }
     if negations != 0 {
-        for coefficient in value.linear.values_mut().chain(value.quad.values_mut()) {
+        for coefficient in value.coefficients_mut() {
             for _ in 0..negations {
                 *coefficient *= -1.0;
             }
@@ -586,7 +756,7 @@ fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
 }
 
 /// Snapshot the quadratic structure of `id`, if it is a polynomial of degree
-/// `<= 2`. Returns the Hessian (lower triangle), the linear
+/// `<= 2`. Returns the polynomial quadratic and linear
 /// coefficients, and the constant (see [`QuadraticTerms`]).
 ///
 /// `None` is returned for any expression `classify` would call
@@ -594,39 +764,42 @@ fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
 /// division). Parameters are folded to their current arena values, so a
 /// polynomial whose coefficients are parameters is still extracted.
 ///
-/// A purely linear (or constant) expression yields an empty `hessian`.
+/// A purely linear (or constant) expression yields no quadratic terms.
+/// Nonfinite extracted coefficients (including arithmetic overflow) return `None`.
 pub fn extract_quadratic(arena: &ExprArena, id: ExprId) -> Option<QuadraticTerms> {
-    dense_expanded_quadratic(arena, id).or_else(|| as_poly(arena, id).map(canonicalize))
+    if let ExprNode::Quadratic(q) = arena.get(id) {
+        return Some(q.canonical_clone());
+    }
+    dense_expanded_quadratic(arena, id)
+        .or_else(|| as_poly(arena, id).map(canonicalize))
+        .filter(QuadraticTerms::is_canonical)
+}
+
+/// Share compact coefficients without copying their vectors.
+pub fn extract_quadratic_shared(
+    arena: &ExprArena,
+    id: ExprId,
+) -> Option<std::sync::Arc<QuadraticTerms>> {
+    if let ExprNode::Quadratic(terms) = arena.get(id) {
+        return Some(std::sync::Arc::clone(terms));
+    }
+    extract_quadratic(arena, id).map(std::sync::Arc::new)
 }
 
 fn canonicalize(poly: Poly) -> QuadraticTerms {
-    let mut hessian: Vec<(VarId, VarId, f64)> = Vec::with_capacity(poly.quad.len());
-    for ((lo, hi), c) in poly.quad {
-        if c == 0.0 {
-            continue;
-        }
-        if lo == hi {
-            // Diagonal: partial^2 (c x^2)/partial x^2 = 2c.
-            hessian.push((lo, lo, 2.0 * c));
-        } else {
-            // Off-diagonal: store in the lower triangle (row = larger index).
-            hessian.push((hi, lo, c));
-        }
-    }
-
-    let mut linear: Vec<(VarId, f64)> =
-        poly.linear.into_iter().filter(|(_, c)| *c != 0.0).collect();
+    let mut quadratic: Vec<_> =
+        poly.quad.into_iter().filter(|(_, c)| *c != 0.0).map(|((lo, hi), c)| (hi, lo, c)).collect();
+    let mut linear: Vec<_> = poly.linear.into_iter().filter(|(_, c)| *c != 0.0).collect();
     linear.sort_unstable_by_key(|(v, _)| v.0);
-    hessian.sort_unstable_by_key(|(r, c, _)| (c.0, r.0));
-
-    QuadraticTerms { hessian, linear, constant: poly.constant }
+    quadratic.sort_unstable_by_key(|(r, c, _)| (c.0, r.0));
+    QuadraticTerms::from_canonical_parts(quadratic, linear, poly.constant)
 }
 
 /// Extract canonical quadratic coefficients from a wide sum of quadratic
 /// monomials, optionally combined with a leading affine node.
 ///
 /// Accumulate duplicate terms in a dense triangular buffer for variable IDs
-/// `0..64`, remove exact zeros, and emit the lower-triangular Hessian, linear
+/// `0..64`, remove exact zeros, and emit canonical polynomial pairs, linear
 /// coefficients, and constant in canonical order without hashing or sorting.
 ///
 /// Return `None` when the expression shape, variable IDs, or finite accumulation
@@ -637,16 +810,16 @@ fn dense_expanded_quadratic(arena: &ExprArena, root: ExprId) -> Option<Quadratic
     const TRIANGLE: usize = VARIABLES * (VARIABLES + 1) / 2;
     const MIN_TERMS: usize = 128;
 
-    let ExprNode::Add(children) = arena.get(root) else { return None };
+    let ExprNode::Add(children) = arena.node(root) else { return None };
     let (affine, terms) = if children.len() >= MIN_TERMS {
-        if let ExprNode::Linear { coeffs, constant } = arena.get(children[0]) {
+        if let ExprNode::Linear { coeffs, constant } = arena.node(children[0]) {
             (Some((coeffs, *constant)), &children[1..])
         } else {
             (None, children.as_slice())
         }
     } else if let [linear, quadratic] = children.as_slice()
-        && let ExprNode::Linear { coeffs, constant } = arena.get(*linear)
-        && let ExprNode::Add(terms) = arena.get(*quadratic)
+        && let ExprNode::Linear { coeffs, constant } = arena.node(*linear)
+        && let ExprNode::Add(terms) = arena.node(*quadratic)
         && terms.len() >= MIN_TERMS
     {
         (Some((coeffs, *constant)), terms.as_slice())
@@ -700,17 +873,17 @@ fn dense_expanded_quadratic(arena: &ExprArena, root: ExprId) -> Option<Quadratic
         }
     }
 
-    let mut hessian = Vec::with_capacity(terms.len().min(TRIANGLE));
+    let mut output = Vec::with_capacity(terms.len().min(TRIANGLE));
     let mut index = 0;
     for col in 0..VARIABLES {
         for row in col..VARIABLES {
             let coefficient = quadratic[index];
             index += 1;
             if coefficient != 0.0 {
-                hessian.push((
+                output.push((
                     VarId(u32::try_from(row).expect("bounded dense row")),
                     VarId(u32::try_from(col).expect("bounded dense column")),
-                    if row == col { 2.0 * coefficient } else { coefficient },
+                    coefficient,
                 ));
             }
         }
@@ -725,23 +898,86 @@ fn dense_expanded_quadratic(arena: &ExprArena, root: ExprId) -> Option<Quadratic
         })
         .collect();
 
-    Some(QuadraticTerms { hessian, linear, constant })
+    Some(QuadraticTerms::from_canonical_parts(output, linear, constant))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn coefficient_construction_accepts_finite_diagonals_without_doubling() {
+        let mut arena = ExprArena::new();
+        let cell = crate::ExprArenaCell::new(ExprArena::new());
+        let mut builder = crate::QuadraticBuilder::new(&cell);
+        builder.add_monomial(1e308, VarId(0), VarId(0)).unwrap();
+        assert_eq!(builder.build_terms().quadratic(), [(VarId(0), VarId(0), 1e308)]);
+
+        builder.add_monomial(1e308, VarId(0), VarId(0)).unwrap();
+        builder.add_monomial(-1e308, VarId(0), VarId(0)).unwrap();
+        assert!(builder.build_terms().quadratic().is_empty());
+
+        builder.add_monomial(f64::MAX, VarId(0), VarId(0)).unwrap();
+        assert_eq!(
+            builder.add_monomial(f64::MAX, VarId(0), VarId(0)).unwrap_err(),
+            crate::QuadraticBuildError::AccumulationOverflow
+        );
+        assert_eq!(builder.build_terms().quadratic()[0].2, f64::MAX);
+
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1e308)], Vec::new(), 0.0)
+                .unwrap();
+        assert_eq!(terms.quadratic(), [(VarId(0), VarId(0), 1e308)]);
+        assert!(terms.hessian_entries().next().unwrap().2.is_infinite());
+
+        let root = arena.push(ExprNode::Quadratic(std::sync::Arc::new(terms)));
+        assert_eq!(crate::evaluate(&arena, root, &&[0.0][..]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn hessian_import_is_explicit_and_rejects_lossy_diagonal_conversion() {
+        let tiny = f64::from_bits(1);
+        for h in [tiny, 3.0 * tiny, f64::from_bits(f64::MIN_POSITIVE.to_bits() + 1)] {
+            assert_eq!(
+                QuadraticTerms::from_hessian(vec![(VarId(0), VarId(0), h)], Vec::new(), 0.0)
+                    .unwrap_err(),
+                crate::QuadraticImportError::Hessian(crate::HessianConversionError {
+                    row: VarId(0),
+                    column: VarId(0),
+                    value: h,
+                    kind: crate::HessianConversionErrorKind::InexactDiagonal
+                })
+            );
+        }
+
+        let terms = QuadraticTerms::from_hessian(
+            vec![(VarId(0), VarId(0), tiny), (VarId(0), VarId(0), tiny)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(terms.quadratic()[0].2.to_bits(), tiny.to_bits());
+
+        let terms = QuadraticTerms::from_hessian(
+            vec![(VarId(0), VarId(0), 6.0), (VarId(1), VarId(0), 5.0)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(terms.quadratic(), [(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)]);
+    }
+
     fn assert_same_terms(actual: &QuadraticTerms, expected: &QuadraticTerms) {
         let same = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
         assert!(same(actual.constant, expected.constant), "constant");
         assert_eq!(actual.linear.len(), expected.linear.len());
-        assert_eq!(actual.hessian.len(), expected.hessian.len());
+        assert_eq!(actual.quadratic.len(), expected.quadratic.len());
+
         for (&(v, a), &(w, b)) in actual.linear.iter().zip(&expected.linear) {
             assert_eq!(v, w);
             assert!(same(a, b), "linear {v:?}: {a} != {b}");
         }
-        for (&(r, c, a), &(s, d, b)) in actual.hessian.iter().zip(&expected.hessian) {
+        for (&(r, c, a), &(s, d, b)) in actual.quadratic.iter().zip(&expected.quadratic) {
             assert_eq!((r, c), (s, d));
             assert!(same(a, b), "Hessian ({r:?}, {c:?}): {a} != {b}");
         }
@@ -789,7 +1025,7 @@ mod tests {
         terms[0] = product;
         let root = arena.push(ExprNode::Add(terms.into()));
         let actual = dense_expanded_quadratic(&arena, root).unwrap();
-        assert_eq!(actual.hessian, vec![(VarId(49), VarId(3), 1.0)]);
+        assert_eq!(actual.quadratic, vec![(VarId(49), VarId(3), 1.0)]);
     }
 
     #[test]
@@ -817,7 +1053,8 @@ mod tests {
             let root = arena.push(ExprNode::Add(terms));
             assert!(dense_expanded_quadratic(&arena, root).is_none());
 
-            let expected = as_poly(&arena, root).map(canonicalize);
+            let expected =
+                as_poly(&arena, root).map(canonicalize).filter(QuadraticTerms::is_canonical);
             let actual = extract_quadratic(&arena, root);
             match (actual, expected) {
                 (Some(a), Some(b)) => assert_same_terms(&a, &b),
@@ -865,6 +1102,135 @@ mod tests {
     }
 
     #[test]
+    fn compact_diagonal_bits_survive_general_parent_extraction() {
+        for h in
+            [f64::from_bits(1), f64::from_bits(3), f64::from_bits(f64::MIN_POSITIVE.to_bits() + 1)]
+        {
+            let mut arena = ExprArena::new();
+            let parameter = arena.new_param(1.0);
+            let p = arena.param(parameter);
+            let x = arena.var(VarId(0));
+            let three = arena.constant(3.0);
+            let q = arena.push(ExprNode::Quadratic(std::sync::Arc::new(
+                QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), h)], Vec::new(), 0.0)
+                    .unwrap(),
+            )));
+            let neg = arena.push(ExprNode::Unary(UnaryOp::Neg, q));
+            let scaled = arena.push(ExprNode::Mul(smallvec![p, q]));
+            let reversed = arena.push(ExprNode::Mul(smallvec![q, p]));
+            let offset = arena.push(ExprNode::Add(smallvec![q, three]));
+            let wide = arena.push(ExprNode::Add(vec![q; 65].into()));
+            let square = arena.push(ExprNode::Mul(smallvec![x, x]));
+            let minus_square = arena.push(ExprNode::Unary(UnaryOp::Neg, square));
+            let mixed = arena.push(ExprNode::Add(smallvec![square, minus_square, q]));
+            let shared = arena.push(ExprNode::Add(smallvec![scaled, reversed]));
+            for (root, expected) in [
+                (neg, -h),
+                (scaled, h),
+                (reversed, h),
+                (offset, h),
+                (wide, 65.0 * h),
+                (mixed, h),
+                (shared, 2.0 * h),
+            ] {
+                let terms = extract_quadratic(&arena, root).unwrap();
+                assert_eq!(terms.quadratic().len(), 1, "root {root:?}, h={h:e}");
+                assert_eq!(
+                    terms.quadratic()[0].2.to_bits(),
+                    expected.to_bits(),
+                    "root {root:?}, h={h:e}"
+                );
+                assert_same_poly(
+                    &as_poly(&arena, root).unwrap(),
+                    &recursive_poly(&arena, root).unwrap(),
+                );
+            }
+
+            arena.set_param_value(parameter, -1.0).unwrap();
+            assert_eq!(
+                extract_quadratic(&arena, scaled).unwrap().quadratic()[0].2.to_bits(),
+                (-h).to_bits()
+            );
+
+            let cubic = arena.push(ExprNode::Mul(smallvec![q, x]));
+            assert!(extract_quadratic(&arena, cubic).is_none());
+        }
+    }
+
+    #[test]
+    fn diagonal_bounds_follow_mutations_without_copying_ordered_coefficients() {
+        use crate::quadratic_builder::{NumericLeaf, QuadraticSlots, merge_unique, scale_unique};
+        let mut q = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), -2.0), (VarId(1), VarId(1), 4.0)],
+            vec![],
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((2.0, 4.0)));
+
+        let cache = q.canonical.get().unwrap();
+        assert_eq!(cache.linear.capacity() + cache.quadratic.capacity(), 0);
+
+        let mut slots = QuadraticSlots::default();
+        scale_unique(&mut q, &mut slots, 0.5).unwrap();
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((1.0, 2.0)));
+
+        let delta = QuadraticTerms::from_coefficients(
+            vec![(VarId(1), VarId(1), -2.0), (VarId(2), VarId(2), 3.0)],
+            vec![],
+            0.0,
+        )
+        .unwrap();
+        merge_unique(&mut q, &mut slots, NumericLeaf::Quadratic(&delta), 1.0).unwrap();
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((1.0, 3.0)));
+        assert!(q.is_canonical());
+
+        scale_unique(&mut q, &mut slots, 0.0).unwrap();
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), None);
+        assert!(q.quadratic().is_empty());
+    }
+
+    #[test]
+    fn merge_invalidates_only_the_affected_canonical_state() {
+        use crate::quadratic_builder::{NumericLeaf, QuadraticSlots, merge_unique};
+        let mut q = QuadraticTerms::from_hessian(
+            vec![(VarId(0), VarId(0), 2.0)],
+            vec![(VarId(0), 1.0)],
+            0.0,
+        )
+        .unwrap();
+        let mut slots = QuadraticSlots::default();
+        merge_unique(&mut q, &mut slots, NumericLeaf::Affine(&[], 3.0), 1.0).unwrap();
+        assert!(q.ordered);
+        assert!(q.canonical.get().is_none());
+
+        merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(0)), 1.0).unwrap();
+        assert!(q.ordered, "existing-key updates retain vector order");
+        assert_eq!(q.linear(), [(VarId(0), 2.0)]);
+
+        merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), 1.0).unwrap();
+        assert!(!q.ordered);
+
+        let pointer = q.linear().as_ptr();
+        merge_unique(&mut q, &mut slots, NumericLeaf::Affine(&[], 4.0), 1.0).unwrap();
+        assert_eq!(q.linear().as_ptr(), pointer, "constant-only updates retain the cached view");
+
+        merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(5)), 0.0).unwrap();
+        assert_eq!(q.linear().as_ptr(), pointer, "zero-weight updates retain the cached view");
+
+        merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), f64::from_bits(1)).unwrap();
+        assert_eq!(q.linear().as_ptr(), pointer, "rounded-away changes retain the cached view");
+
+        merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), 2.0).unwrap();
+        assert!(q.canonical.get().is_none(), "changed values discard stale cached values");
+        assert_eq!(q.linear(), [(VarId(0), 2.0), (VarId(2), 3.0)]);
+
+        merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), -3.0).unwrap();
+        assert!(q.is_canonical());
+        assert_eq!(q.linear(), [(VarId(0), 2.0)]);
+    }
+
+    #[test]
     fn monomial_sums_preserve_grouping_parameters_and_ieee_fallbacks() {
         use smallvec::smallvec;
         let mut arena = ExprArena::new();
@@ -887,7 +1253,7 @@ mod tests {
         assert!(
             flat_monomials(
                 &arena,
-                match arena.get(sum) {
+                match arena.node(sum) {
                     ExprNode::Add(c) => c,
                     _ => unreachable!(),
                 }
@@ -949,7 +1315,7 @@ mod tests {
         assert!(monomial(&arena, term).is_none());
 
         let result = extract_quadratic(&arena, root).unwrap();
-        assert_eq!(result.hessian, vec![(VarId(0), VarId(0), 2.0)]);
+        assert_eq!(result.quadratic, vec![(VarId(0), VarId(0), 1.0)]);
         assert_eq!(result.linear, vec![(VarId(0), 1.0)]);
     }
 
@@ -974,7 +1340,7 @@ mod tests {
             for value in [-1.0, 0.0, 1.0] {
                 arena.set_param_value(parameter, value).unwrap();
                 let result = extract_quadratic(&arena, root).unwrap();
-                assert_eq!(result.hessian, Vec::<(VarId, VarId, f64)>::new());
+                assert_eq!(result.quadratic, Vec::<(VarId, VarId, f64)>::new());
                 assert_eq!(result.linear, vec![(VarId(0), 1.0)]);
                 assert_eq!(result.constant, value.abs());
             }
@@ -1012,14 +1378,14 @@ mod tests {
     }
 
     #[test]
-    fn square_doubles_diagonal() {
+    fn square_stores_its_polynomial_coefficient() {
         // x0^2 -> Hessian (0,0,2), no linear, constant 0.
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
         let two = a.push(ExprNode::Const(2.0));
         let sq = a.push(ExprNode::Pow(x, two));
         let q = extract_quadratic(&a, sq).unwrap();
-        assert_eq!(q.hessian, vec![(v(0), v(0), 2.0)]);
+        assert_eq!(q.quadratic, vec![(v(0), v(0), 1.0)]);
         assert_eq!(q.linear, Vec::<(VarId, f64)>::new());
         assert!(q.constant.abs() < f64::EPSILON);
     }
@@ -1031,7 +1397,7 @@ mod tests {
         let y = var(&mut a, 1);
         let xy = a.push(ExprNode::Mul(smallvec![x, y]));
         let q = extract_quadratic(&a, xy).unwrap();
-        assert_eq!(q.hessian, vec![(v(1), v(0), 1.0)]);
+        assert_eq!(q.quadratic, vec![(v(1), v(0), 1.0)]);
         assert_eq!(q.linear, Vec::<(VarId, f64)>::new());
     }
 
@@ -1049,7 +1415,7 @@ mod tests {
         let x1sq = a.push(ExprNode::Pow(x1, two_b));
         let sum = a.push(ExprNode::Add(smallvec![term0, x0x1, x1sq, x0, x1]));
         let q = extract_quadratic(&a, sum).unwrap();
-        assert_eq!(q.hessian, vec![(v(0), v(0), 4.0), (v(1), v(0), 1.0), (v(1), v(1), 2.0)]);
+        assert_eq!(q.quadratic, vec![(v(0), v(0), 2.0), (v(1), v(0), 1.0), (v(1), v(1), 1.0)]);
         assert_eq!(q.linear, vec![(v(0), 1.0), (v(1), 1.0)]);
         assert!(q.constant.abs() < f64::EPSILON);
     }
@@ -1064,12 +1430,12 @@ mod tests {
         let two = a.push(ExprNode::Const(2.0));
         let sq = a.push(ExprNode::Pow(sum, two));
         let q = extract_quadratic(&a, sq).unwrap();
-        assert_eq!(q.hessian, vec![(v(0), v(0), 2.0), (v(1), v(0), 2.0), (v(1), v(1), 2.0)]);
+        assert_eq!(q.quadratic, vec![(v(0), v(0), 1.0), (v(1), v(0), 2.0), (v(1), v(1), 1.0)]);
     }
 
     #[test]
     fn linear_only_has_empty_hessian() {
-        // 3*x0 + 5 -> empty hessian, linear [(0,3)], constant 5.
+        // 3*x0 + 5 -> empty quadratic, linear [(0,3)], constant 5.
         let mut a = ExprArena::new();
         let x = var(&mut a, 0);
         let three = a.push(ExprNode::Const(3.0));
@@ -1077,7 +1443,7 @@ mod tests {
         let five = a.push(ExprNode::Const(5.0));
         let expr = a.push(ExprNode::Add(smallvec![mul, five]));
         let q = extract_quadratic(&a, expr).unwrap();
-        assert_eq!(q.hessian, Vec::<(VarId, VarId, f64)>::new());
+        assert_eq!(q.quadratic, Vec::<(VarId, VarId, f64)>::new());
         assert_eq!(q.linear, vec![(v(0), 3.0)]);
         assert!((q.constant - 5.0).abs() < f64::EPSILON);
     }
@@ -1087,7 +1453,7 @@ mod tests {
         let mut a = ExprArena::new();
         let c = a.push(ExprNode::Const(7.0));
         let q = extract_quadratic(&a, c).unwrap();
-        assert_eq!(q.hessian, Vec::<(VarId, VarId, f64)>::new());
+        assert_eq!(q.quadratic, Vec::<(VarId, VarId, f64)>::new());
         assert_eq!(q.linear, Vec::<(VarId, f64)>::new());
         assert!((q.constant - 7.0).abs() < f64::EPSILON);
     }
@@ -1101,7 +1467,7 @@ mod tests {
         let inner = a.push(ExprNode::Add(smallvec![sq, x]));
         let neg = a.push(ExprNode::Unary(UnaryOp::Neg, inner));
         let q = extract_quadratic(&a, neg).unwrap();
-        assert_eq!(q.hessian, vec![(v(0), v(0), -2.0)]);
+        assert_eq!(q.quadratic, vec![(v(0), v(0), -1.0)]);
         assert_eq!(q.linear, vec![(v(0), -1.0)]);
     }
 
@@ -1141,6 +1507,6 @@ mod tests {
         let three = a.push(ExprNode::Const(3.0));
         let scaled = a.push(ExprNode::Mul(smallvec![three, xy]));
         let q = extract_quadratic(&a, scaled).unwrap();
-        assert_eq!(q.hessian, vec![(v(1), v(0), 3.0)]);
+        assert_eq!(q.quadratic, vec![(v(1), v(0), 3.0)]);
     }
 }

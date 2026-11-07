@@ -9,6 +9,7 @@ enum Op {
     Constant(f64),
     Variable(VarId),
     Linear(Vec<(VarId, f64)>, f64),
+    Quadratic(Vec<(VarId, f64)>, Vec<(VarId, VarId, f64)>, f64),
     Add(Vec<usize>),
     Mul(Vec<usize>),
     Unary(UnaryOp, usize),
@@ -103,6 +104,19 @@ impl Formula {
                         }
                         Op::Linear(coeffs.clone(), *constant)
                     }
+                    ExprNode::Quadratic(q) => {
+                        crate::finite(q.constant())?;
+                        for v in q.variables() {
+                            check_var(v, nvars)?;
+                        }
+                        for &(_, c) in q.linear() {
+                            crate::finite(c)?;
+                        }
+                        for &(_, _, c) in q.quadratic() {
+                            crate::finite(c)?;
+                        }
+                        Op::Quadratic(q.linear().to_vec(), q.quadratic().to_vec(), q.constant())
+                    }
                     ExprNode::Add(_) => Op::Add(args),
                     ExprNode::Mul(_) => Op::Mul(args),
                     ExprNode::Unary(op, _) => {
@@ -137,6 +151,15 @@ impl Formula {
                 Op::Linear(cs, k) => {
                     Expr::sum_weighted(cs.iter().map(|(v, c)| (*c, Expr::var(&vars[v.index()]))))
                         + *k
+                }
+                Op::Quadratic(linear, quadratic, k) => {
+                    let affine = Expr::sum_weighted(
+                        linear.iter().map(|(v, c)| (*c, Expr::var(&vars[v.index()]))),
+                    ) + *k;
+                    affine
+                        + Expr::sum_weighted(quadratic.iter().map(|&(a, b, c)| {
+                            (c, Expr::var(&vars[a.index()]) * Expr::var(&vars[b.index()]))
+                        }))
                 }
                 Op::Add(cs) => Expr::sum(cs.iter().map(|&i| values[i].clone())),
                 Op::Mul(cs) => Expr::product(cs.iter().map(|&i| values[i].clone())),

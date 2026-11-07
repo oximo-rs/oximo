@@ -70,7 +70,8 @@ impl CapturedExpr {
                 ExprNode::Const(_)
                 | ExprNode::Var(_)
                 | ExprNode::Param(_)
-                | ExprNode::Linear { .. } => {}
+                | ExprNode::Linear { .. }
+                | ExprNode::Quadratic(_) => {}
             }
             arena.push(node);
         }

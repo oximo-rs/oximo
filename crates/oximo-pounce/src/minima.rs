@@ -227,7 +227,7 @@ impl SearchResult {
         // The common dual fields belong to solution zero.
         // Additional minima contribute only their primal points.
         let mut result = match minima.next() {
-            Some(best) => assemble_minimum(best, prep, model, empty.parameters.clone()),
+            Some(best) => assemble_minimum(best, prep, model, empty.parameters),
             None => empty,
         };
 

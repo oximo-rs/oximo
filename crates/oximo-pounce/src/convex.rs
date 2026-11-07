@@ -181,13 +181,13 @@ fn classify(model: &LoweringContext<'_>) -> Class {
                 .objective()
                 .as_ref()
                 .and_then(|obj| model.quadratic(obj.expr))
-                .is_some_and(|q| hessian_is_psd(&q.hessian, sign));
+                .is_some_and(|q| hessian_is_psd(q.quadratic(), sign));
             if psd { Class::ConvexQp } else { Class::General }
         }
         ModelKind::SOCP => {
             let sign = objective_sign(model);
             let convex = model.objective().as_ref().is_none_or(|obj| {
-                model.quadratic(obj.expr).is_some_and(|q| hessian_is_psd(&q.hessian, sign))
+                model.quadratic(obj.expr).is_some_and(|q| hessian_is_psd(q.quadratic(), sign))
             });
             if convex { Class::Socp } else { Class::General }
         }
@@ -203,6 +203,25 @@ fn objective_sign(model: &LoweringContext<'_>) -> f64 {
     }
 }
 
+/// Convert polynomial coefficients to the finite Hessian required by the QP solver.
+fn append_hessian(
+    terms: &oximo_expr::QuadraticTerms,
+    sign: f64,
+    output: &mut Vec<Triplet>,
+) -> Result<(), SolverError> {
+    output.reserve(terms.quadratic().len());
+    for (row, col, h) in terms.hessian_entries() {
+        if !h.is_finite() {
+            return Err(SolverError::Backend(
+                "quadratic objective Hessian exceeds finite f64 range".into(),
+            ));
+        }
+        output.push(Triplet::new(row.index(), col.index(), sign * h));
+    }
+
+    Ok(())
+}
+
 /// POUNCE's safe classifier using the reusable PSD certificate.
 fn hessian_is_psd(hessian: &[(oximo_expr::VarId, oximo_expr::VarId, f64)], sign: f64) -> bool {
     let n = hessian
@@ -213,7 +232,11 @@ fn hessian_is_psd(hessian: &[(oximo_expr::VarId, oximo_expr::VarId, f64)], sign:
     let triplets = hessian
         .iter()
         .map(|&(row, col, value)| {
-            Triplet::new(row.index().max(col.index()), row.index().min(col.index()), sign * value)
+            Triplet::new(
+                row.index().max(col.index()),
+                row.index().min(col.index()),
+                sign * if row == col { 2.0 * value } else { value },
+            )
         })
         .collect::<Vec<_>>();
     pounce_rs::convex::certify_psd_lower_triangle(n, &triplets, PSD_TOL, backend).unwrap_or(false)
@@ -269,13 +292,11 @@ impl Problem {
                         if let Some(o) = prepared.objective() {
                             let q =
                                 prepared.require_quadratic(o.expr, || "the objective".into())?;
-                            for &(id, c) in &q.linear {
+                            for &(id, c) in q.linear() {
                                 fresh.qp.c[id.index()] = fresh.sign * c;
                             }
-                            fresh.qp.p_lower.extend(q.hessian.iter().map(|&(a, b, c)| {
-                                Triplet::new(a.index(), b.index(), fresh.sign * c)
-                            }));
-                            fresh.objective_constant = fresh.sign * q.constant;
+                            append_hessian(&q, fresh.sign, &mut fresh.qp.p_lower)?;
+                            fresh.objective_constant = fresh.sign * q.constant();
                         }
                     }
                     ParameterTarget::VariableBound(id) => {
@@ -432,15 +453,11 @@ pub(crate) fn build_problem(
         let q = prepared.quadratic(obj.expr).ok_or_else(|| {
             SolverError::Backend("pounce convex route requires a quadratic objective".into())
         })?;
-        p_lower.extend(
-            q.hessian
-                .iter()
-                .map(|&(row, col, value)| Triplet::new(row.index(), col.index(), sign * value)),
-        );
-        for &(var, value) in &q.linear {
+        append_hessian(&q, sign, &mut p_lower)?;
+        for &(var, value) in q.linear() {
             c[var.index()] += sign * value;
         }
-        objective_constant = sign * q.constant;
+        objective_constant = sign * q.constant();
     }
 
     let model_constraints = prepared.constraints();

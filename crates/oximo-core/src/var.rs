@@ -63,14 +63,14 @@ pub trait IntoBound<'a>: sealed::Sealed {
         self.__into_bound_for_model(model.id())
     }
     #[doc(hidden)]
-    fn __into_bound_for_model(self, model: oximo_expr::ModelId) -> Result<Bound, ModelError>;
+    fn __into_bound_for_model(&self, model: oximo_expr::ModelId) -> Result<Bound, ModelError>;
 }
 
 macro_rules! numeric_bounds {
     ($($t:ty),*) => { $(
         impl sealed::Sealed for $t {}
         impl IntoBound<'_> for $t {
-            fn __into_bound_for_model(self, _: oximo_expr::ModelId) -> Result<Bound, ModelError> { Ok(Bound::Constant(f64::from(self))) }
+            fn __into_bound_for_model(&self, _: oximo_expr::ModelId) -> Result<Bound, ModelError> { Ok(Bound::Constant(f64::from(*self))) }
         }
     )* };
 }
@@ -81,17 +81,17 @@ macro_rules! wide_numeric_bounds {
         impl sealed::Sealed for $t {}
         impl IntoBound<'_> for $t {
             #[expect(clippy::cast_precision_loss, reason = "variable bounds use f64 numeric precision")]
-            fn __into_bound_for_model(self, _: oximo_expr::ModelId) -> Result<Bound, ModelError> {
-                Ok(Bound::Constant(self as f64))
+            fn __into_bound_for_model(&self, _: oximo_expr::ModelId) -> Result<Bound, ModelError> {
+                Ok(Bound::Constant(*self as f64))
             }
         }
     )* };
 }
 wide_numeric_bounds!(i64, u64, usize, isize);
 
-impl sealed::Sealed for Expr<'_, Constant> {}
-impl<'a> IntoBound<'a> for Expr<'a, Constant> {
-    fn __into_bound_for_model(self, model: oximo_expr::ModelId) -> Result<Bound, ModelError> {
+impl<D: oximo_expr::Degree<Computed = Constant>> sealed::Sealed for Expr<'_, D> {}
+impl<'a, D: oximo_expr::Degree<Computed = Constant>> IntoBound<'a> for Expr<'a, D> {
+    fn __into_bound_for_model(&self, model: oximo_expr::ModelId) -> Result<Bound, ModelError> {
         if self.model_id() != model {
             return Err(oximo_expr::ModelMismatchError::new(model, self.model_id()).into());
         }
@@ -252,7 +252,14 @@ impl<'a> VarBuilder<'a> {
     }
 
     #[inline]
-    pub fn build(self) -> Expr<'a, oximo_expr::Affine> {
+    pub fn build(self) -> oximo_expr::VariableHandle<'a> {
         self.model.register_var(self)
+    }
+}
+
+impl<T: sealed::Sealed> sealed::Sealed for &T {}
+impl<'a, T: IntoBound<'a>> IntoBound<'a> for &T {
+    fn __into_bound_for_model(&self, model: oximo_expr::ModelId) -> Result<Bound, ModelError> {
+        T::__into_bound_for_model(*self, model)
     }
 }

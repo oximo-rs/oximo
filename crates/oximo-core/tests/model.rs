@@ -437,6 +437,31 @@ fn fix_pins_var_expr_and_indexed_entry() {
 }
 
 #[test]
+#[expect(
+    clippy::needless_borrows_for_generic_args,
+    reason = "this regression explicitly covers borrowed variable-handle inputs"
+)]
+fn indexed_variable_mutations_accept_borrowed_handles() {
+    let m = Model::new("borrowed_mutations");
+    let keys = Set::strings(["a", "b"]);
+    variable!(m, 0.0 <= w[k in keys] <= 10.0);
+
+    m.fix(&w["a"], 1.0).unwrap();
+    m.set_bounds(&w["a"], 0.0, 5.0).unwrap();
+    m.set_initial(&w["a"], 2.0).unwrap();
+    m.fix(&w["a"], 3.0).unwrap();
+
+    let id = w["a"].var_id().unwrap();
+    let vars = m.resolved_variables();
+    assert_eq!(
+        (vars[id.index()].lb, vars[id.index()].ub, vars[id.index()].initial),
+        (3.0, 3.0, Some(2.0))
+    );
+    drop(vars);
+    constraint!(m, still_usable, w["a"] + w["b"] <= 10.0);
+}
+
+#[test]
 fn var_id_is_none_for_compound_expr() {
     let m = Model::new("var_id");
     variable!(m, x);

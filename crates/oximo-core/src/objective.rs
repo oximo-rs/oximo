@@ -88,3 +88,13 @@ mod tests {
         assert!(labels.iter().all(|label| label.is_ascii()));
     }
 }
+
+impl<'a, T: Clone + IntoObjectiveExpression<'a>> IntoObjectiveExpression<'a> for &T {
+    type Degree = T::Degree;
+    fn into_objective_expression(
+        self,
+        arena: &'a oximo_expr::ExprArenaCell,
+    ) -> oximo_expr::Expr<'a, Self::Degree> {
+        self.clone().into_objective_expression(arena)
+    }
+}

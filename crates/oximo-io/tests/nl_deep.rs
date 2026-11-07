@@ -6,7 +6,10 @@ use oximo_io::{NlFormat, WriteOptions, read_nl, to_nl_string, write_nl_with};
 fn deferred_affine_sum_inside_nonlinear_objective_roundtrips() {
     let m = Model::new("deep affine NL");
     variable!(m, x[i in 0..20_000]);
-    let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+    let sum = (0..20_000)
+        .map(|i| oximo_expr::Expr::<oximo_expr::Affine>::from(x[i]))
+        .reduce(|a, b| a + b)
+        .unwrap();
     objective!(m, Min, sum.sin());
     let ascii = to_nl_string(&m).unwrap();
     assert!(ascii.contains("O0 0\no41\n"));
@@ -45,9 +48,9 @@ fn deferred_parameter_affine_subtree_roundtrips_after_rebinding() {
     let m = Model::new("parameter affine NL");
     variable!(m, x[i in 0..512]);
     param!(m, p = 2.0);
-    let sum = (0..512).map(|i| p * x[i]).reduce(|a, b| a + b).unwrap();
+    let sum = (0..512).map(|i| p * (x[i])).reduce(|a, b| a + b).unwrap();
     let expression = sum.sin();
-    m.add_constraint("shared", expression.le(1.0));
+    m.add_constraint("shared", expression.clone().le(1.0));
     objective!(m, Min, expression);
     for coefficient in [2.0_f64, 3.0] {
         m.set_param(p, coefficient).unwrap();
@@ -72,7 +75,10 @@ fn deferred_parameter_affine_subtree_roundtrips_after_rebinding() {
 fn mixed_additive_subtree_keeps_its_nonlinear_term_when_exported() {
     let m = Model::new("mixed inline NL");
     variable!(m, x[i in 0..512]);
-    let sum = (0..512).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+    let sum = (0..512)
+        .map(|i| oximo_expr::Expr::<oximo_expr::Affine>::from(x[i]))
+        .reduce(|a, b| a + b)
+        .unwrap();
     objective!(m, Min, (sum + x[0].sin()).exp());
     let bytes = to_nl_string(&m).unwrap();
     let imported = read_nl(bytes.as_bytes()).unwrap();

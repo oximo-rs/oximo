@@ -15,7 +15,7 @@ use syn::{Expr, Token};
 
 use crate::parse_comma_list;
 
-/// Parse a value expression.
+/// Parse a Rust value expression, retaining only multi-index syntax sugar.
 pub(crate) fn parse_value_expr(ts: TokenStream2) -> syn::Result<syn::Expr> {
     syn::parse2(rewrite_index_subscripts(ts)?)
 }

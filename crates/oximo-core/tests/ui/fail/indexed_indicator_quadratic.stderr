@@ -4,22 +4,18 @@ error[E0277]: the trait bound `ScalarQuadraticFunction<'_>: IntoAffineFunction<'
 6 |     indicator_constraint!(m, bad[i in 0..2], b[i] == 1 => x[i].square() <= 1.0);
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarQuadraticFunction<'_>`
   |
-help: the following other types implement trait `IntoAffineFunction<'a>`
- --> src/function_set.rs
-  |
-  | impl<'a> IntoAffineFunction<'a> for ScalarAffineFunction<'a> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ScalarAffineFunction<'a>`
-...
-  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, oximo_core::Affine>`
-...
-  | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, oximo_core::Constant>`
+  = help: the following other types implement trait `IntoAffineFunction<'a>`:
+            &T
+            Expr<'a, oximo_core::Affine>
+            Expr<'a, oximo_core::Constant>
+            Expr<'a, oximo_expr::degree::ParameterDegree>
+            Expr<'a, oximo_expr::degree::VariableDegree>
+            ScalarAffineFunction<'a>
   = note: required for `Constraint<ScalarQuadraticFunction<'_>, LessThan>` to implement `IntoAffineConstraint<'_>`
 note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_indicator_constraints_over`
  --> src/model/indexed.rs
   |
-  |     pub fn __add_indicator_constraints_over<'a, K, F, C, D: Degree>(
+  |     pub fn __add_indicator_constraints_over<'a, K, F, C, E: ExprInput<'a>>(
   |            -------------------------------- required by a bound in this associated function
 ...
   |         C: IntoAffineConstraint<'a>,

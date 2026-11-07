@@ -625,7 +625,7 @@ fn smooth_unary_gradients_and_hessians_match_analytic() {
             UnaryOp::Atanh => expr.atanh().into(),
             _ => unreachable!("nonsmooth/binary operation in smooth test"),
         };
-        let grad = gradient_at(&m, expr.into(), &[point]).unwrap();
+        let grad = gradient_at(&m, expr.erase(), &[point]).unwrap();
         assert_close(grad[0], expected_grad, 1e-10, &format!("{op} gradient"));
 
         objective!(m, Min, expr);
@@ -646,7 +646,7 @@ fn atan2_and_branch_derivatives_match_away_from_kinks() {
     let (xv, yv) = (2.0, 1.0);
     let r2 = xv * xv + yv * yv;
     let atan2 = y.atan2(x);
-    let grad = gradient_at(&m, atan2.into(), &[xv, yv]).unwrap();
+    let grad = gradient_at(&m, atan2.erase(), &[xv, yv]).unwrap();
     assert_close(grad[0], -yv / r2, 1e-10, "atan2 dx");
     assert_close(grad[1], xv / r2, 1e-10, "atan2 dy");
     objective!(m, Min, atan2);
@@ -664,7 +664,7 @@ fn atan2_and_branch_derivatives_match_away_from_kinks() {
         ("min", x.min(y), [1.0, 2.0], [1.0, 0.0]),
         ("max", x.max(y), [2.0, 1.0], [1.0, 0.0]),
     ] {
-        let grad = gradient_at(&m, expr.into(), &point).unwrap();
+        let grad = gradient_at(&m, expr.erase(), &point).unwrap();
         for (got, want) in grad.iter().zip(expected) {
             assert_close(*got, want, 1e-10, &format!("{name} gradient"));
         }

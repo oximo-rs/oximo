@@ -170,6 +170,28 @@ fn emit(
             }
             acc
         }
+        ExprNode::Quadratic(q) => {
+            let mut acc = push(ops, FbbtOp::Const(q.constant()));
+            for &(v, c) in q.linear() {
+                let x = push(ops, FbbtOp::Var(v.index()));
+                let c = push(ops, FbbtOp::Const(c));
+                let term = push(ops, FbbtOp::Mul(c, x));
+                acc = push(ops, FbbtOp::Add(acc, term));
+            }
+            for (a, b, c) in q.quadratic().iter().copied() {
+                let x = push(ops, FbbtOp::Var(a.index()));
+                let product = if a == b {
+                    push(ops, FbbtOp::PowInt(x, 2))
+                } else {
+                    let y = push(ops, FbbtOp::Var(b.index()));
+                    push(ops, FbbtOp::Mul(x, y))
+                };
+                let c = push(ops, FbbtOp::Const(c));
+                let term = push(ops, FbbtOp::Mul(c, product));
+                acc = push(ops, FbbtOp::Add(acc, term));
+            }
+            acc
+        }
     };
     slots.insert(id, slot);
     slot
@@ -224,7 +246,10 @@ mod tests {
     fn deep_affine_and_nonlinear_tapes_are_stack_safe_and_valid() {
         let model = Model::new("deep_fbbt");
         variable!(model, x[i in 0..20_000]);
-        let sum = (0..20_000).map(|i| x[i]).reduce(|a, b| a + b).unwrap();
+        let sum = (0..20_000)
+            .map(|i| oximo_expr::Expr::<oximo_expr::Affine>::from(x[i]))
+            .reduce(|a, b| a + b)
+            .unwrap();
         constraint!(model, row, sum.exp() <= 1.0);
         let mut nested = x[0].sin();
         for _ in 0..20_000 {
@@ -247,7 +272,7 @@ mod tests {
         param!(model, p = 2.0);
         variable!(model, x);
         let shared = x.pow(p);
-        constraint!(model, first, shared <= 1.0);
+        constraint!(model, first, &shared <= 1.0);
         constraint!(model, second, shared <= 2.0);
 
         for (expected, exponent) in [(2, 2.0), (3, 3.0)] {
@@ -282,7 +307,7 @@ mod tests {
 
         let constant = model.__constant(4.0);
         let arena = model.arena();
-        let constant_tape = tape_for(&arena, constant.id, &mut FxHashMap::default());
+        let constant_tape = tape_for(&arena, constant.id(), &mut FxHashMap::default());
         assert!(matches!(constant_tape.ops.as_slice(), [FbbtOp::Const(4.0)]));
 
         let shared = x.sin();
@@ -319,7 +344,7 @@ mod tests {
         let model = Model::new("fbbt_memo");
         variable!(model, -2.0 <= x <= 2.0);
         let shared = x.sin();
-        constraint!(model, reused, shared + shared <= 1.0);
+        constraint!(model, reused, &shared + &shared <= 1.0);
 
         let tape = constraint_tapes(&model).remove(0).unwrap();
         let sin_slot = tape.ops.iter().position(|op| matches!(op, FbbtOp::Sin(..))).unwrap();

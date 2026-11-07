@@ -94,6 +94,44 @@ impl PlanningArena {
         Ok(RowBody::normalized_affine(linear))
     }
 
+    /// Expose affine coefficients before substituting active selectors.
+    fn split_source(
+        &mut self,
+        root: ExprId,
+    ) -> Result<(LinearTerms<'static>, Vec<SignedExpr>), GdpError> {
+        let (affine, residual) = split_linear(self, root);
+        let mut affine = affine.into_owned();
+        let mut constant = RecoverySum::default();
+        constant.add(affine.constant)?;
+
+        let mut parts = Vec::with_capacity(residual.len());
+        for mut term in residual {
+            let ExprNode::Quadratic(q) = self.get(term.id).clone() else {
+                parts.push(term);
+                continue;
+            };
+            let sign = if term.neg { -1.0 } else { 1.0 };
+            affine.coeffs.to_mut().extend(q.linear().iter().map(|&(v, c)| (v, sign * c)));
+            constant.add(sign * q.constant())?;
+            if !q.quadratic().is_empty() {
+                if !q.linear().is_empty() || q.constant() != 0.0 {
+                    term.id = self.push(ExprNode::Quadratic(Arc::new(
+                        oximo_expr::QuadraticTerms::from_coefficients(
+                            q.quadratic().to_vec(),
+                            Vec::new(),
+                            0.0,
+                        )
+                        .expect("validated Hessian subset"),
+                    )))?;
+                }
+                parts.push(term);
+            }
+        }
+        affine.constant = constant.value()?;
+
+        Ok((affine, parts))
+    }
+
     fn constant(&mut self, value: f64) -> Result<ExprId, GdpError> {
         self.push(ExprNode::Const(value))
     }
@@ -748,7 +786,7 @@ impl Compiler<'_> {
 
         // Split before selector substitution: rewriting the whole affine body
         // first can round away a small constant next to a large selector term.
-        let (terms, residual) = split_linear(&self.arena, source.lhs);
+        let (terms, residual) = self.arena.split_source(source.lhs)?;
         let nonlinear_source = !residual.is_empty();
         let constant = terms.constant;
         let coefficients = terms.coeffs.into_owned();
@@ -2032,6 +2070,7 @@ fn variables(arena: &ExprArena, root: ExprId) -> Vec<VarId> {
             ExprNode::Linear { coeffs, .. } => {
                 variables.extend(coeffs.iter().filter(|(_, c)| *c != 0.0).map(|(v, _)| *v));
             }
+            ExprNode::Quadratic(q) => variables.extend(q.variables()),
             ExprNode::Add(cs) | ExprNode::Mul(cs) | ExprNode::Min(cs) | ExprNode::Max(cs) => {
                 stack.extend(cs);
             }
@@ -2086,6 +2125,7 @@ fn rewrite(
         let child = |c| cache[&c];
         let unchanged = match &node {
             ExprNode::Linear { coeffs, .. } => !coeffs.iter().any(|(v, _)| map.contains_key(v)),
+            ExprNode::Quadratic(q) => !q.variables().any(|v| map.contains_key(&v)),
             ExprNode::Add(cs) | ExprNode::Mul(cs) | ExprNode::Min(cs) | ExprNode::Max(cs) => {
                 cs.iter().all(|&c| child(c) == c)
             }
@@ -2143,6 +2183,8 @@ fn rewrite(
                     arena.push(ExprNode::Add(residual.into_iter().collect()))?
                 }
             }
+            ExprNode::Quadratic(q) => substitute_quadratic(arena, &q, map)?,
+
             ExprNode::Add(cs) => arena.push(ExprNode::Add(cs.into_iter().map(child).collect()))?,
             ExprNode::Mul(cs) => arena.push(ExprNode::Mul(cs.into_iter().map(child).collect()))?,
             ExprNode::Min(cs) => arena.push(ExprNode::Min(cs.into_iter().map(child).collect()))?,
@@ -2157,4 +2199,25 @@ fn rewrite(
     }
 
     Ok(cache[&root])
+}
+
+fn substitute_quadratic(
+    arena: &mut PlanningArena,
+    q: &oximo_expr::QuadraticTerms,
+    map: &FxHashMap<VarId, ExprId>,
+) -> Result<ExprId, GdpError> {
+    let mut terms = vec![arena.constant(q.constant())?];
+    for &(v, c) in q.linear() {
+        let x = if let Some(&id) = map.get(&v) { id } else { arena.var(v)? };
+        let c = arena.constant(c)?;
+        terms.push(arena.push(ExprNode::Mul([c, x].into_iter().collect()))?);
+    }
+    for (a, b, c) in q.quadratic().iter().copied() {
+        let x = if let Some(&id) = map.get(&a) { id } else { arena.var(a)? };
+        let y = if let Some(&id) = map.get(&b) { id } else { arena.var(b)? };
+        let c = arena.constant(c)?;
+        terms.push(arena.push(ExprNode::Mul([c, x, y].into_iter().collect()))?);
+    }
+
+    arena.push(ExprNode::Add(terms.into_iter().collect()))
 }
