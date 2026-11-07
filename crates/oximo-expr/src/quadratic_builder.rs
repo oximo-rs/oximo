@@ -612,6 +612,23 @@ pub(crate) fn product_small(
         return None;
     }
 
+    if let (
+        ExprNode::Linear { coeffs: left, constant: left_constant },
+        ExprNode::Linear { coeffs: right, constant: right_constant },
+    ) = (arena.get(lhs), arena.get(rhs))
+        && (lhs == rhs
+            || (left_constant.to_bits() == right_constant.to_bits()
+                && left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(&(a, x), &(b, y))| a == b && x.to_bits() == y.to_bits())))
+    {
+        // Retain a shared factor for domain checks and stable nonlinear
+        // evaluation.
+        return Some(arena.push(ExprNode::Mul([lhs, lhs].into_iter().collect())));
+    }
+
     let monomial = |id| match arena.get(id) {
         ExprNode::Var(v) => Some((*v, 1.0)),
         ExprNode::Linear { coeffs, constant } if *constant == 0.0 && coeffs.len() == 1 => {

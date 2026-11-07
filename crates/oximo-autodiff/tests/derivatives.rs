@@ -83,6 +83,43 @@ fn objective_gradient_matches_fd() {
 }
 
 #[test]
+fn shifted_square_nonlinear_values_and_derivatives_survive_cancellation() {
+    let model = Model::new("shifted square derivatives");
+    let shift = 100_000_000.0;
+    variable!(model, shift - 2.0 <= x <= shift + 2.0);
+    objective!(model, Min, (x - shift).square().ln());
+    constraint!(model, (x - shift).powi(2).sqrt() <= 2.0);
+
+    let evaluator = NlpEvaluator::new(&model).unwrap();
+    assert_eq!(evaluator.jacobian_structure(), [(0, 0)]);
+    assert_eq!(evaluator.hessian_lagrangian_structure(), [(0, 0)]);
+
+    for offset in [-1.0_f64, 1.0] {
+        let point = [shift + offset];
+        assert_close(evaluator.eval_objective(&point), 0.0, 1e-12, "log value");
+
+        let mut gradient = [f64::NAN];
+        evaluator.eval_objective_gradient(&point, &mut gradient);
+        assert_close(gradient[0], 2.0 / offset, 1e-12, "log gradient");
+
+        let mut value = [f64::NAN];
+        evaluator.eval_constraint(&point, &mut value);
+        assert_close(value[0], 1.0, 1e-12, "square root value");
+
+        let mut jacobian = [f64::NAN];
+        evaluator.eval_constraint_jacobian(&point, &mut jacobian);
+        assert_close(jacobian[0], offset.signum(), 1e-12, "square root gradient");
+
+        let mut hessian = [f64::NAN];
+        evaluator.eval_hessian_lagrangian(&point, 1.0, &[0.0], &mut hessian);
+        assert_close(hessian[0], -2.0, 1e-12, "log Hessian");
+
+        evaluator.eval_hessian_lagrangian(&point, 0.0, &[1.0], &mut hessian);
+        assert_close(hessian[0], 0.0, 1e-12, "square root Hessian");
+    }
+}
+
+#[test]
 fn constraint_jacobian_matches_fd() {
     let m = Model::new("jac");
     variable!(m, -5.0 <= x <= 5.0);

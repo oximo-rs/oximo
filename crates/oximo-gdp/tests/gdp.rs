@@ -1036,6 +1036,45 @@ fn nonnegative_sums_keep_safe_square_root_domains() {
 }
 
 #[test]
+fn compound_affine_squares_keep_safe_square_root_domains() {
+    for multiple_variables in [false, true] {
+        for construction in 0..7 {
+            let model = Model::new("factored affine square domain");
+            variable!(model, 0.0 <= x <= 2.0);
+            variable!(model, 0.0 <= y <= 2.0);
+            boolean_variable!(model, active);
+
+            let factor = if multiple_variables { x - y } else { x - 1.0 };
+            let square = match construction {
+                0 => factor.square().into_dynamic(),
+                1 => factor.powi(2),
+                2 => factor.powf(2.0),
+                3 => factor.pow(Expr::constant(model.__sum_context(), 2.0)),
+                4 => (&factor * &factor).into_dynamic(),
+                5 => (factor.clone() * factor).into_dynamic(),
+                _ => {
+                    if multiple_variables {
+                        ((x - y) * (x - y)).into_dynamic()
+                    } else {
+                        ((x - 1.0) * (x - 1.0)).into_dynamic()
+                    }
+                }
+            };
+
+            disjunct_constraint!(model, active, square.sqrt() <= 0.5);
+            model.reformulate_gdp(BigM::default()).unwrap();
+            for xv in [0.0_f64, 0.5, 1.0, 1.5, 2.0] {
+                for yv in [0.0, 0.5, 1.0, 1.5, 2.0] {
+                    let expected = (xv - if multiple_variables { yv } else { 1.0 }).abs() <= 0.5;
+                    assert_eq!(satisfied(&model, &[xv, yv, 1.0]), expected);
+                    assert!(satisfied(&model, &[xv, yv, 0.0]));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn global_zero_domain_bounds_work_with_either_coefficient_sign() {
     for negative in [false, true] {
         let model = Model::new("global zero domain");

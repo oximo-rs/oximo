@@ -114,8 +114,7 @@ fn nl_nlp_rosenbrock() {
     assert!(s.contains(" 0 2 0\t# nonlinear vars in constraints, objectives, both\n"));
     // No J segments.
     assert!(!s.contains("\nJ"));
-    // The compact first square contributes -2*x to G.
-    assert!(s.contains("\nG0 2\n0 -2\n1 0\n"));
+    assert!(s.contains("\nG0 2\n0 0\n1 0\n"), "nl body:\n{s}");
     // Objective body starts with O0 0 followed by an expression.
     assert!(s.contains("O0 0\n"));
 }
@@ -189,6 +188,33 @@ fn nl_nonlinear_integer_order() {
     // The b segment is emitted in NL variable order. y (bounds [0,5]) before
     // x (free) proves the interleaved ordering: NlBothI precedes NlOnlyC.
     assert!(s.contains("\nb\n0 0 5\n3\n"), "y must precede x in var order:\n{s}");
+}
+
+#[test]
+fn shifted_square_nonlinear_values_survive_nl_roundtrips() {
+    use oximo_expr::evaluate;
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+
+    let model = Model::new("shifted square NL roundtrip");
+    variable!(model, x);
+    let shift = 100_000_000.0_f64;
+    objective!(model, Min, (x - shift).square().ln());
+
+    for options in [WriteOptions::default(), WriteOptions::binary()] {
+        let mut bytes = Vec::new();
+        write_nl_with(&model, &mut bytes, &options).unwrap();
+        let imported = read_nl(bytes.as_slice()).unwrap();
+        for point in [shift - 1.0, shift + 1.0, shift + 2.0] {
+            let expected = ((point - shift) * (point - shift)).ln();
+            let actual = evaluate(
+                &imported.arena(),
+                imported.objective().as_ref().unwrap().expr,
+                &&[point][..],
+            )
+            .unwrap();
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
 }
 
 #[test]

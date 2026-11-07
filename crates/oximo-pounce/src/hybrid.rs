@@ -993,8 +993,7 @@ mod tests {
         let model = Model::new("isolated valid point");
 
         variable!(model, x);
-        param!(model, p = 1.0);
-        objective!(model, Min, (-(p * (x - 1.0)).powi(2)).sqrt());
+        objective!(model, Min, (-(x - 1.0).powi(2)).sqrt());
         let mut oracle = HybridOracle::new(&model);
         let mut gradient = [0.0];
         oracle.eval_objective_gradient(&[1.0], &mut gradient);

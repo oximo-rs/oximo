@@ -219,6 +219,8 @@ impl<'a, D: Degree> Expr<'a, D> {
     }
 
     /// Square with a statically determined degree.
+    /// Compound affine factors stay factored to preserve nonlinear domains and
+    /// evaluation order. Use [`crate::QuadraticBuilder`] for explicit expansion.
     pub fn square(&self) -> Expr<'a, <D as MulDegree<D>>::Output>
     where
         D: MulDegree<D>,
@@ -228,7 +230,8 @@ impl<'a, D: Degree> Expr<'a, D> {
 
     /// Preserve the multiplication for evaluation instead of eagerly expanding
     /// numeric affine factors.
-    /// Prefer this when coefficient cancellation would change a nonlinear domain.
+    /// Compound affine squares already retain their factors automatically.
+    /// Use this to retain factors for other products as well.
     pub fn mul_factored<E: ExprInput<'a>>(
         &self,
         rhs: E,

@@ -68,6 +68,35 @@ fn large_square_remains_finite_in_expression_tape_and_slot() {
 }
 
 #[test]
+fn ordinary_affine_squares_preserve_nonlinear_values_in_the_tape() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let x = Expr::from_var(&arena, VarId(0));
+    let factor = x - 100_000_000.0;
+    let squares = [
+        factor.square().into_dynamic(),
+        factor.powi(2),
+        factor.powf(2.0),
+        factor.pow(Expr::constant(&arena, 2.0)),
+        (&factor * &factor).into_dynamic(),
+        (factor.clone() * factor).into_dynamic(),
+        ((x - 100_000_000.0) * (x - 100_000_000.0)).into_dynamic(),
+    ];
+
+    for square in squares {
+        let expression = square.ln();
+        let snapshot = arena.borrow();
+        let point = [100_000_001.0];
+        let direct = evaluate(&snapshot, expression.id(), &&point[..]).unwrap();
+        assert_eq!(direct.to_bits(), 0.0_f64.to_bits());
+
+        let tape = Tape::compile(&snapshot, expression.id());
+        let mut registers = vec![0.0; tape.n_regs()];
+        let taped = tape.value(&point, &[], &[], &mut registers);
+        assert_eq!(taped.to_bits(), direct.to_bits());
+    }
+}
+
+#[test]
 fn factored_square_preserves_a_nonlinear_domain_in_expression_and_tape() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let x = Expr::from_var(&arena, VarId(0));
