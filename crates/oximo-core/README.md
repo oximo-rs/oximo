@@ -52,7 +52,7 @@ locals you can use immediately.
 
 ```rust,ignore
 let m = Model::new("my_model");
-variable!(m, x >= 0.0);        // binds a local `x: Expr<'_>`
+variable!(m, x >= 0.0);        // binds a reusable Copy VariableHandle
 constraint!(m, cap, x <= 5.0); // uses x while holding &m
 ```
 
@@ -135,8 +135,8 @@ variable!(m, y[k in i] >= 0.0, Int);        // integer family
 variable!(m, z[a in rows, b in cols], Bin); // multi-index (Cartesian product)
 
 // Access by key (panics on missing key):
-let expr = x[2];  // single key (usize / "name" / (a, b))
-let e2 = z[a, b]; // inside the macros: multi-index sugar == z[(&a, &b)]
+let expr = x[2];     // single key (usize / "name" / (a, b))
+let e2 = z[(a, b)];  // tuple subscript in ordinary Rust
 
 // Bounds may reference the index -> lowered to per-key bounds:
 variable!(m, lower[k] <= w[k in i] <= upper[k]);
@@ -411,7 +411,7 @@ syntax as `sum!` and preserve deterministic child order.
 ## Parameters
 
 ```rust,ignore
-param!(m, rate = 0.05);     // binds a re-bindable `rate: Expr<'_>`
+param!(m, rate = 0.05);     // binds a reusable Copy ParameterHandle
 rate.set_param_value(0.07)?; // rebind before the next solve
 ```
 
@@ -427,7 +427,7 @@ param!(m, cost[i in items] = base_cost[i]); // one parameter per key
 param!(m, w[(i, j) in rc] = weight(i, j));  // multi-index
 param!(m, c[p in plants] = price[p]);       // string-keyed (sparse)
 
-let unit = cost[1];             // index for a param `Expr`
+let unit = cost[1];             // reusable parameter handle
 cost[1].set_param_value(9.0)?;   // re-bind one entry via its handle
 m.set_param_idx(&cost, 1, 9.0)?; // ...or by key on the model
 m.param_value_idx(&cost, 1);    // -> Some(9.0)
