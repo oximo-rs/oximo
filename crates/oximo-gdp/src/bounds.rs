@@ -110,11 +110,13 @@ impl Bounds {
 }
 
 fn down(x: f64) -> f64 {
-    if x.is_finite() { x.next_down() } else { x }
+    // An overflowing lower endpoint must stay below the exact result.
+    // Positive overflow rounds down to f64::MAX.
+    x.next_down()
 }
 
 fn up(x: f64) -> f64 {
-    if x.is_finite() { x.next_up() } else { x }
+    x.next_up()
 }
 
 // Transcendental functions use a numerical guard in addition to directed
@@ -123,8 +125,8 @@ fn up(x: f64) -> f64 {
 fn libm_bounds(a: f64, b: f64) -> Bounds {
     let margin = |x: f64| 64.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE);
     Bounds::new(
-        if a.is_finite() { down(a - margin(a)) } else { a },
-        if b.is_finite() { up(b + margin(b)) } else { b },
+        down(if a.is_finite() { a - margin(a) } else { a }),
+        up(if b.is_finite() { b + margin(b) } else { b }),
     )
 }
 
@@ -888,9 +890,19 @@ impl<'a> Bounder<'a> {
                 return Err(BoundError::InvalidNumber);
             }
             let left = self.variable(a)?;
-            let product =
-                if a == b { pow(left, Bounds::point(2.0))? } else { left.mul(self.variable(b)?) };
-            bounds = bounds.add(product.mul(Bounds::point(c)));
+            let right = if a == b { left } else { self.variable(b)? };
+
+            // Match coefficient-first evaluation, avoiding overflow or underflow
+            // in an unscaled square or bilinear product.
+            let mut term = Bounds::point(c).mul(left).mul(right);
+            if a == b {
+                if c > 0.0 {
+                    term.lower = term.lower.max(0.0);
+                } else {
+                    term.upper = term.upper.min(0.0);
+                }
+            }
+            bounds = bounds.add(term);
         }
         Ok(bounds)
     }
@@ -986,6 +998,10 @@ impl<'a> Bounder<'a> {
     }
 }
 
+fn checked_point(value: f64) -> Result<Bounds, BoundError> {
+    if value.is_finite() { Ok(Bounds::point(value)) } else { Err(BoundError::InvalidNumber) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,6 +1025,67 @@ mod tests {
             let rounded = Bounds::point(f64::from_bits(1)).divide_scalar(divisor);
             assert!(rounded.lower < 0.0 && rounded.upper > 0.0);
         }
+    }
+
+    #[test]
+    fn scaled_quadratic_bounds_enclose_extreme_coefficients_and_variable_boxes() {
+        for (coefficient, lower, upper) in [
+            (1e-200, 1e199, 1e200),
+            (-1e-200, -1e200, -1e199),
+            (1e200, 1e-200, 2e-200),
+            (-1e200, -2e-200, 1e-200),
+            (f64::from_bits(1), -2.0, 2.0),
+            (1.0, -2.0, 3.0),
+        ] {
+            for diagonal in [false, true] {
+                let model = oximo_core::Model::new("scaled quadratic enclosure");
+                let x = model.__var("x").bounds(lower, upper).build();
+                let y = model.__var("y").bounds(lower, upper).build();
+                let mut builder = model.quadratic_builder();
+                builder.add_product(coefficient, x, if diagonal { x } else { y }).unwrap();
+                let expression = builder.build();
+                let arena = model.arena();
+                let variables = model.resolved_variables();
+                let bounds = Bounder::new(&arena, &variables).bound(expression.id()).unwrap();
+                assert!(bounds.lower.is_finite() && bounds.upper.is_finite(), "{bounds:?}");
+
+                if diagonal {
+                    assert!(if coefficient > 0.0 {
+                        bounds.lower >= 0.0
+                    } else {
+                        bounds.upper <= 0.0
+                    });
+                }
+
+                for xv in [lower, f64::midpoint(lower, upper), upper] {
+                    for yv in [lower, f64::midpoint(lower, upper), upper] {
+                        encloses(
+                            bounds,
+                            evaluate(&arena, expression.id(), &&[xv, yv][..]).unwrap(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflowed_interval_endpoints_remain_conservative_after_rescaling() {
+        for sign in [-1.0, 1.0] {
+            let value = sign * f64::MAX;
+            let expected = value * 0.5;
+            let product = Bounds::point(value).mul(Bounds::point(2.0));
+            encloses(product.mul(Bounds::point(0.25)), expected);
+            let quotient = Bounds::point(value).divide_scalar(0.5);
+            encloses(quotient.mul(Bounds::point(0.25)), expected);
+            let sum = Bounds::point(value).add(Bounds::point(value));
+            encloses(sum.add(Bounds::point(-value)), value);
+        }
+
+        let square = pow(Bounds::new(1e199, 1e200), Bounds::point(2.0)).unwrap();
+        let scaled = square.mul(Bounds::point(1e-200));
+        encloses(scaled, 1e198);
+        encloses(scaled, 1e200);
     }
 
     #[test]
@@ -1265,8 +1342,4 @@ mod tests {
         }
         assert!(!bounder.supporting_roots().contains(&rows.last().unwrap().lhs));
     }
-}
-
-fn checked_point(value: f64) -> Result<Bounds, BoundError> {
-    if value.is_finite() { Ok(Bounds::point(value)) } else { Err(BoundError::InvalidNumber) }
 }

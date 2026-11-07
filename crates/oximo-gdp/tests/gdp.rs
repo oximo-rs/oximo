@@ -1093,6 +1093,61 @@ fn affine_constant_normalization_avoids_big_m_overflow() {
 }
 
 #[test]
+fn scaled_quadratic_bounds_preserve_active_and_inactive_big_m_rows() {
+    for coefficient in [-1e-200_f64, 1e-200] {
+        for diagonal in [false, true] {
+            for negative_variables in [false, true] {
+                for lower_side in [false, true] {
+                    let model = Model::new("scaled quadratic bounds");
+                    let (lower, upper) =
+                        if negative_variables { (-1e200, -1e199) } else { (1e199, 1e200) };
+                    variable!(model, lower <= x <= upper);
+                    variable!(model, lower <= y <= upper);
+                    boolean_variable!(model, active);
+                    let body = if diagonal { coefficient * x * x } else { coefficient * x * y };
+                    let bound = coefficient.signum() * 2e200;
+
+                    if lower_side {
+                        disjunct_constraint!(model, active, body >= bound);
+                    } else {
+                        disjunct_constraint!(model, active, body <= bound);
+                    }
+
+                    let report = model.reformulate_gdp(BigM::default()).unwrap();
+                    let amount = if lower_side {
+                        report.rows[0].lower_m.unwrap()
+                    } else {
+                        report.rows[0].upper_m.unwrap()
+                    };
+                    assert!(amount.value.is_finite());
+
+                    if lower_side == (coefficient > 0.0) {
+                        assert!((amount.value / 1.99e200 - 1.0).abs() < 1e-12);
+                    } else {
+                        assert!(amount.value.abs() < f64::EPSILON);
+                    }
+
+                    for xv in [lower, f64::midpoint(lower, upper), upper] {
+                        for yv in [lower, f64::midpoint(lower, upper), upper] {
+                            let value = (coefficient * xv) * if diagonal { xv } else { yv };
+                            let source_satisfied =
+                                if lower_side { value >= bound } else { value <= bound };
+                            for selected in [false, true] {
+                                assert_eq!(
+                                    satisfied(&model, &[xv, yv, f64::from(selected)]),
+                                    !selected || source_satisfied,
+                                    "coefficient={coefficient}, diagonal={diagonal}, lower_side={lower_side}, x={xv}, y={yv}, selected={selected}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn generated_numeric_overflow_is_rejected_before_any_mutation() {
     for case in 0..3 {
         let model = Model::new("numeric overflow");
