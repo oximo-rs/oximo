@@ -1,0 +1,16 @@
+error[E0271]: type mismatch resolving `<Nonlinear as AddDegree<Affine>>::Output == Affine`
+ --> tests/ui/fail/quadratic_builder_nonlinear.rs:6:51
+  |
+6 |     model.quadratic_builder().add_product(1.0, x, &x.sin()).unwrap();
+  |                               -----------         ^^^^^^^^ expected `Affine`, found `Nonlinear`
+  |                               |
+  |                               required by a bound introduced by this call
+  |
+note: required by a bound in `QuadraticBuilder::<'a>::add_product`
+ --> $WORKSPACE/crates/oximo-expr/src/quadratic_builder.rs
+  |
+  |     pub fn add_product<L, R>(
+  |            ----------- required by a bound in this associated function
+...
+  |         R::Degree: AddDegree<Affine, Output = Affine>,
+  |                                      ^^^^^^^^^^^^^^^ required by this bound in `QuadraticBuilder::<'a>::add_product`
