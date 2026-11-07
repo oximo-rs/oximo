@@ -2,7 +2,7 @@
 
 Arena-allocated expression tree for [oximo](https://github.com/oximo-rs/oximo).
 
-All expressions in oximo are nodes in a single `ExprArena` owned by the `Model` through an `ExprArenaCell`. User code holds lightweight `Expr` handles, an `(ExprId, &ExprArenaCell)` pair. Copying an `Expr` copies an ID, not a subtree. Operator overloads collapse small numeric affine combinations into a `Linear` node. Large combinations retain immutable expression nodes to avoid repeatedly copying coefficient prefixes.
+All expressions in oximo are nodes in a single `ExprArena` owned by the `Model` through an `ExprArenaCell`. Variables and parameters use lightweight `Copy` `VariableHandle` and `ParameterHandle` identities. Arithmetic produces non-`Copy` `Expr` handles. Owned arithmetic consumes its operands, while borrowed arithmetic reuses them. Cloning shares a node and permanently seals it against in-place accumulation. Operator overloads collapse small numeric affine combinations into a `Linear` node. Large combinations retain immutable expression nodes to avoid repeatedly copying coefficient prefixes.
 
 `ExprArenaCell` provides synchronized interior mutability, so expression handles can be shared by indexed-family callbacks. Large indexed builds use isolated worker-local arena forks and merge their nodes in set order before serial model registration. Ordinary scalar expression construction keeps the same arena-backed API.
 
@@ -13,19 +13,20 @@ This crate is the fundamental layer. End users depend on `oximo-core`, which re-
 
 ## Key types
 
-| Type              | Description                                                           |
-|-------------------|-----------------------------------------------------------------------|
-| `ExprArena`       | Contiguous backing store of `ExprNode` values                         |
-| `ExprArenaCell`   | Synchronized owner used by expression handles                         |
-| `ExprId`          | Newtype `u32` index into an arena                                     |
-| `ExprNode`        | Enum of all node kinds (see below)                                    |
-| `UnaryOp`         | Public enum of unary scalar operations                                |
-| `Expr<'a>`        | Lightweight handle: `id` + borrow of the arena. `Copy`.               |
-| `CapturedExpr`    | Owned, immutable reachable graph with original variable/parameter IDs |
-| `VarId`           | Opaque variable index                                                 |
-| `ParamId`         | Opaque parameter index                                                |
-| `LinearTerms<'a>` | Extracted `Cow<'a, [(VarId, f64)]>` (borrowed or owned) + constant    |
-| `AffineBuilder`   | Reusable accumulator for incremental affine expressions               |
+| Type               | Description                                                               |
+|--------------------|---------------------------------------------------------------------------|
+| `ExprArena`        | Contiguous backing store of `ExprNode` values                             |
+| `ExprArenaCell`    | Synchronized owner used by expression handles                             |
+| `ExprId`           | Newtype `u32` index into an arena                                         |
+| `ExprNode`         | Enum of all node kinds (see below)                                        |
+| `UnaryOp`          | Public enum of unary scalar operations                                    |
+| `Expr<'a>`         | Consuming handle with arena identity and permanent sealing.               |
+| `CapturedExpr`     | Owned, immutable reachable graph with original variable/parameter IDs     |
+| `VarId`            | Opaque variable index                                                     |
+| `ParamId`          | Opaque parameter index                                                    |
+| `LinearTerms<'a>`  | Extracted `Cow<'a, [(VarId, f64)]>` (borrowed or owned) + constant        |
+| `QuadraticBuilder` | Validated numeric affine products and quadratic coefficient accumulation  |
+| `AffineBuilder`    | Reusable accumulator for incremental affine expressions                   |
 
 ### `ExprNode` variants
 
@@ -41,6 +42,7 @@ Div(ExprId, ExprId) // numerator / denominator
 Atan2(ExprId, ExprId) // y, x order
 Min(Children) / Max(Children)
 Linear { coeffs: Vec<(VarId, f64)>, constant: f64 } // LP fast-path
+Quadratic(Arc<QuadraticTerms>) // shared numeric coefficients
 ```
 
 `Linear` is produced automatically for small numeric affine operations, and by `AffineBuilder` for large numeric sums. LP/MILP backends detect it and skip tree traversal entirely. Large operator-built sums are extracted by accumulating unshared nested additions directly, with memoization for shared subexpressions.
@@ -118,7 +120,7 @@ be collapsed with the standard `.sum()`. The arena is taken from the first
 element, empty iterators panic.
 
 ```rust,ignore
-let total: Expr = vars.iter().copied().sum();
+let total: Expr = vars.iter().sum();
 ```
 
 For coefficient-weighted sums (`sum_{i} c_i * e_i`) use the `dot` helper:
