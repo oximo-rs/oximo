@@ -12,13 +12,16 @@ use crate::arena::{ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 /// Derivatives and solver matrices are derived explicitly at their respective boundaries.
 #[derive(Clone, Debug)]
 pub struct QuadraticTerms {
-    /// Polynomial terms `(row, col, coefficient)`, where `row >= col`.
+    /// Stored terms `(row, col, coefficient)`.
+    /// Each pair has `row >= col`.
     pub(crate) quadratic: Vec<(VarId, VarId, f64)>,
-    /// Linear coefficients `(var, coeff)`, the gradient of `f` at the origin.
+    /// Stored linear coefficients.
     pub(crate) linear: Vec<(VarId, f64)>,
     /// The constant term `f(0)`.
     pub(crate) constant: f64,
     ordered: bool,
+    // Shared sign of the nonconstant coefficients.
+    negated: bool,
     canonical: std::sync::OnceLock<Box<CanonicalCoefficients>>,
 }
 
@@ -83,17 +86,24 @@ impl QuadraticTerms {
         linear: Vec<(VarId, f64)>,
         constant: f64,
     ) -> Self {
-        Self { quadratic, linear, constant, ordered: true, canonical: std::sync::OnceLock::new() }
+        Self {
+            quadratic,
+            linear,
+            constant,
+            ordered: true,
+            negated: false,
+            canonical: std::sync::OnceLock::new(),
+        }
     }
 
     /// Sorted, unique, nonzero linear coefficients.
     pub fn linear(&self) -> &[(VarId, f64)] {
-        if self.ordered { &self.linear } else { &self.canonical().linear }
+        if self.ordered && !self.negated { &self.linear } else { &self.canonical().linear }
     }
 
     /// Sorted, unique, nonzero polynomial coefficients, each unordered pair once.
     pub fn quadratic(&self) -> &[(VarId, VarId, f64)] {
-        if self.ordered { &self.quadratic } else { &self.canonical().quadratic }
+        if self.ordered && !self.negated { &self.quadratic } else { &self.canonical().quadratic }
     }
 
     /// Minimum and maximum absolute diagonal polynomial coefficient, or `None`
@@ -138,13 +148,24 @@ impl QuadraticTerms {
                     maximum = maximum.max(coefficient.abs());
                 }
             }
+            let needs_view = !self.ordered || self.negated;
             let mut view = Box::new(CanonicalCoefficients {
-                linear: if self.ordered { Vec::new() } else { self.linear.clone() },
-                quadratic: if self.ordered { Vec::new() } else { self.quadratic.clone() },
+                linear: if needs_view { self.linear.clone() } else { Vec::new() },
+                quadratic: if needs_view { self.quadratic.clone() } else { Vec::new() },
                 diagonal_magnitudes: (maximum != 0.0).then_some((minimum, maximum)),
             });
-            view.linear.sort_unstable_by_key(|(v, _)| v.0);
-            view.quadratic.sort_unstable_by_key(|(a, b, _)| (b.0, a.0));
+            if self.negated {
+                for (_, coefficient) in &mut view.linear {
+                    *coefficient = -*coefficient;
+                }
+                for (_, _, coefficient) in &mut view.quadratic {
+                    *coefficient = -*coefficient;
+                }
+            }
+            if !self.ordered {
+                view.linear.sort_unstable_by_key(|(v, _)| v.0);
+                view.quadratic.sort_unstable_by_key(|(a, b, _)| (b.0, a.0));
+            }
             view
         })
     }
@@ -156,6 +177,17 @@ impl QuadraticTerms {
 
     pub(crate) fn invalidate_view(&mut self) {
         self.canonical.take();
+    }
+
+    pub(crate) fn coefficient_sign(&self) -> f64 {
+        if self.negated { -1.0 } else { 1.0 }
+    }
+
+    /// Negate validated finite coefficients.
+    pub(crate) fn negate(&mut self) {
+        self.negated = !self.negated;
+        self.constant = -self.constant;
+        self.invalidate_view();
     }
 
     fn canonical_clone(&self) -> Self {
@@ -179,13 +211,14 @@ impl QuadraticTerms {
     }
 
     fn polynomial(&self) -> Poly {
+        let sign = self.coefficient_sign();
         let mut poly = Poly {
-            linear: self.linear.iter().copied().collect(),
+            linear: self.linear.iter().map(|&(v, c)| (v, sign * c)).collect(),
             constant: self.constant,
             ..Poly::default()
         };
         for &(a, b, c) in &self.quadratic {
-            poly.quad.insert(pair(a, b), c);
+            poly.quad.insert(pair(a, b), sign * c);
         }
         poly
     }
@@ -904,6 +937,78 @@ fn dense_expanded_quadratic(arena: &ExprArena, root: ExprId) -> Option<Quadratic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coefficient_views_follow_negation_scaling_and_cancellation() {
+        use crate::quadratic_builder::{NumericLeaf, QuadraticSlots, merge_unique, scale_unique};
+
+        let mut terms = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 2.0), (VarId(1), VarId(1), 3.0)],
+            vec![(VarId(0), 4.0)],
+            5.0,
+        )
+        .unwrap();
+        let mut slots = QuadraticSlots::default();
+        assert_eq!(terms.diagonal_coefficient_magnitude_bounds(), Some((2.0, 3.0)));
+
+        scale_unique(&mut terms, &mut slots, -1.0).unwrap();
+        assert_eq!(terms.linear(), [(VarId(0), -4.0)]);
+        assert_eq!(
+            terms.hessian_entries().collect::<Vec<_>>(),
+            [(VarId(0), VarId(0), -4.0), (VarId(1), VarId(1), -6.0)]
+        );
+        assert_eq!(terms.constant().to_bits(), (-5.0_f64).to_bits());
+        assert_eq!(terms.diagonal_coefficient_magnitude_bounds(), Some((2.0, 3.0)));
+
+        scale_unique(&mut terms, &mut slots, 2.0).unwrap();
+        let delta = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 4.0), (VarId(1), VarId(1), 6.0)],
+            vec![(VarId(0), 8.0)],
+            0.0,
+        )
+        .unwrap();
+        merge_unique(&mut terms, &mut slots, NumericLeaf::Quadratic(&delta), 1.0).unwrap();
+        assert_eq!(terms.linear(), []);
+        assert_eq!(terms.quadratic(), []);
+        assert_eq!(terms.diagonal_coefficient_magnitude_bounds(), None);
+        assert_eq!(terms.constant().to_bits(), (-10.0_f64).to_bits());
+
+        scale_unique(&mut terms, &mut slots, -1.0).unwrap();
+        assert_eq!(terms.constant().to_bits(), 10.0_f64.to_bits());
+        assert!(terms.is_canonical());
+    }
+
+    #[test]
+    fn negated_coefficients_survive_general_parent_extraction() {
+        let arena = crate::ExprArenaCell::new(ExprArena::new());
+        let x = crate::Expr::from_var(&arena, VarId(0));
+        let y = crate::Expr::from_var(&arena, VarId(1));
+        let parameter = arena.borrow_mut().new_param(2.0);
+        let p = crate::Expr::from_param(&arena, parameter);
+        let expression = p * (3.0 - (x.square() + y.square() + 2.0 * x + 5.0));
+        let terms = extract_quadratic(&arena.borrow(), expression.id()).unwrap();
+        assert_eq!(terms.quadratic(), [(VarId(0), VarId(0), -2.0), (VarId(1), VarId(1), -2.0)]);
+        assert_eq!(terms.linear(), [(VarId(0), -4.0)]);
+        assert_eq!(terms.constant().to_bits(), (-4.0_f64).to_bits());
+    }
+
+    #[test]
+    fn negated_affine_coefficients_survive_node_emission() {
+        use crate::quadratic_builder::{QuadraticSlots, push_quadratic, scale_unique};
+
+        let mut terms =
+            QuadraticTerms::from_coefficients(vec![], vec![(VarId(0), 2.0)], 3.0).unwrap();
+        scale_unique(&mut terms, &mut QuadraticSlots::default(), -1.0).unwrap();
+        let mut arena = ExprArena::new();
+        let root = push_quadratic(&mut arena, terms);
+        let linear = crate::extract_linear(&arena, root).unwrap();
+        assert_eq!(linear.coeffs.as_ref(), [(VarId(0), -2.0)]);
+        assert_eq!(linear.constant.to_bits(), (-3.0_f64).to_bits());
+        assert_eq!(
+            crate::evaluate(&arena, root, &&[4.0][..]).unwrap().to_bits(),
+            (-11.0_f64).to_bits()
+        );
+    }
 
     #[test]
     fn coefficient_construction_accepts_finite_diagonals_without_doubling() {

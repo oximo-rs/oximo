@@ -182,7 +182,7 @@ fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
         }
         ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
         ExprNode::Quadratic(q) if q.quadratic.is_empty() => {
-            Some(LinearTerms::borrowed(&q.linear, q.constant))
+            Some(LinearTerms::borrowed(q.linear(), q.constant()))
         }
         ExprNode::Unary(UnaryOp::Neg, inner) => {
             let inner = *inner;
@@ -355,7 +355,7 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, '_, A
             ExprNode::Var(v) => Some(LinearTerms::owned(vec![(*v, 1.0)], 0.0)),
             ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
             ExprNode::Quadratic(q) if q.quadratic.is_empty() => {
-                Some(LinearTerms::borrowed(&q.linear, q.constant))
+                Some(LinearTerms::borrowed(q.linear(), q.constant()))
             }
             ExprNode::Add(children) => {
                 return Continue(LinearState::Sum {

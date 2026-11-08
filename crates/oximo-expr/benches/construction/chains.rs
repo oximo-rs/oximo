@@ -28,6 +28,17 @@ fn construct(kind: &str, n: u32, fixture: Option<&(ExprArena, ExprId)>) -> (u128
         return (start.elapsed().as_nanos(), nodes);
     }
     let cell = ExprArenaCell::new(ExprArena::new());
+    if kind == "right_subtraction" {
+        let variables: Vec<_> = (0..n).map(|i| Expr::from_var(&cell, VarId(i))).collect();
+        let mut expression = variables[0].square();
+        for variable in &variables[1..] {
+            expression = variable.square() - expression;
+        }
+        black_box(expression);
+        let nodes = cell.borrow().len();
+        drop(cell);
+        return (start.elapsed().as_nanos(), nodes);
+    }
     if matches!(kind, "sum" | "symbolic_sum") {
         let pid = cell.borrow_mut().new_param(2.0);
         let p = Expr::from_param(&cell, pid);
@@ -64,6 +75,7 @@ pub fn measure_cases(filter: Option<&str>) {
         ("product", &[32, 500, 1000, 2000, 4000][..]),
         ("powers", &[32, 1000, 4000][..]),
         ("quadratic", &[32, 4096][..]),
+        ("right_subtraction", &[256, 1024, 4096][..]),
         ("sum", &[32, 4096][..]),
         ("symbolic_sum", &[32, 4096][..]),
         ("cancel_add", &[64, 4096][..]),

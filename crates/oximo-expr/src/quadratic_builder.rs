@@ -378,7 +378,14 @@ pub(crate) fn push_quadratic(
     terms: QuadraticTerms,
 ) -> crate::ExprId {
     if terms.quadratic.is_empty() {
-        crate::linear::push_linear(arena, crate::LinearTerms::owned(terms.linear, terms.constant))
+        let sign = terms.coefficient_sign();
+        let mut linear = terms.linear;
+        if sign.is_sign_negative() {
+            for (_, coefficient) in &mut linear {
+                *coefficient = -*coefficient;
+            }
+        }
+        crate::linear::push_linear(arena, crate::LinearTerms::owned(linear, terms.constant))
     } else {
         arena.push(ExprNode::Quadratic(std::sync::Arc::new(terms)))
     }
@@ -447,12 +454,13 @@ pub(crate) fn merge_unique(
     }
 
     let constant = sum(left.constant, product(finite(offset).ok()?, scale).ok()?).ok()?;
+    let coefficient_scale = scale * left.coefficient_sign();
     let mut values_changed = false;
     let mut order_changed = false;
     for &(v, c) in linear {
         let slot = slots.linear.get(&v);
         let current = slot.map_or(0.0, |&i| left.linear[i].1);
-        let value = sum(current, product(finite(c).ok()?, scale).ok()?).ok()?;
+        let value = sum(current, product(finite(c).ok()?, coefficient_scale).ok()?).ok()?;
         values_changed |= value.to_bits() != current.to_bits();
         order_changed |= if slot.is_some() { value == 0.0 } else { value != 0.0 };
     }
@@ -460,7 +468,7 @@ pub(crate) fn merge_unique(
     for &(a, b, h) in quadratic {
         let slot = slots.quadratic.get(&(a, b));
         let current = slot.map_or(0.0, |&i| left.quadratic[i].2);
-        let value = sum(current, product(h, scale).ok()?).ok()?;
+        let value = sum(current, product(h, coefficient_scale).ok()?).ok()?;
         values_changed |= value.to_bits() != current.to_bits();
         order_changed |= if slot.is_some() { value == 0.0 } else { value != 0.0 };
     }
@@ -473,7 +481,7 @@ pub(crate) fn merge_unique(
 
     left.constant = constant;
     for &(v, c) in linear {
-        let delta = c * scale;
+        let delta = c * coefficient_scale;
         if let Some(&i) = slots.linear.get(&v) {
             left.linear[i].1 += delta;
             if left.linear[i].1 == 0.0 {
@@ -490,7 +498,7 @@ pub(crate) fn merge_unique(
     }
 
     for &(a, b, h) in quadratic {
-        let delta = h * scale;
+        let delta = h * coefficient_scale;
         if let Some(&i) = slots.quadratic.get(&(a, b)) {
             left.quadratic[i].2 += delta;
             if left.quadratic[i].2 == 0.0 {
@@ -538,6 +546,7 @@ pub(crate) fn accumulate_nodes(
     merge_unique(std::sync::Arc::get_mut(left)?, slots, numeric_leaf(right)?, scale)
 }
 
+#[expect(clippy::float_cmp, reason = "exact negation can flip the stored coefficient sign")]
 pub(crate) fn scale_unique(
     left: &mut QuadraticTerms,
     slots: &mut QuadraticSlots,
@@ -545,6 +554,10 @@ pub(crate) fn scale_unique(
 ) -> Option<()> {
     finite(scale).ok()?;
     let constant = product(left.constant, scale).ok()?;
+    if scale == -1.0 {
+        left.negate();
+        return Some(());
+    }
     for c in left.linear.iter().map(|&(_, c)| c).chain(left.quadratic.iter().map(|&(_, _, h)| h)) {
         product(c, scale).ok()?;
     }

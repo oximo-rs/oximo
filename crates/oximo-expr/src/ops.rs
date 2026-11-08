@@ -63,6 +63,20 @@ fn build_unary<'a, D: Degree>(
 }
 
 #[inline]
+fn prefer_right_destination(
+    arena: &dyn crate::arena::ArenaAccess,
+    lhs: &Operand<'_>,
+    rhs: &Operand<'_>,
+) -> bool {
+    rhs.owned
+        && (!lhs.owned
+            || matches!((arena.get(lhs.id), arena.get(rhs.id)),
+                (ExprNode::Quadratic(left), ExprNode::Quadratic(right))
+                    if right.linear.len().saturating_add(right.quadratic.len())
+                        > left.linear.len().saturating_add(left.quadratic.len())))
+}
+
+#[inline]
 fn add_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
     lhs.assert_same_arena(&rhs);
 
@@ -71,16 +85,19 @@ fn add_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
     let (id, owned) = lhs.arena.with_mut(|arena| {
         lhs.seal_in(arena);
         rhs.seal_in(arena);
-        let prefer_right = rhs.owned && (!lhs.owned || matches!((arena.get(lhs.id), arena.get(rhs.id)),
-            (ExprNode::Quadratic(left), ExprNode::Quadratic(right))
-                if right.linear.len().saturating_add(right.quadratic.len()) > left.linear.len().saturating_add(left.quadratic.len())));
+        let prefer_right = prefer_right_destination(arena, &lhs, &rhs);
         if prefer_right && let Some(id) = arena.accumulate_quadratic(rhs.id, lhs.id, 1.0) {
             return (id, true);
         }
-        if lhs.owned && let Some(id) = arena.accumulate_quadratic(lhs.id, rhs.id, 1.0) {
+        if lhs.owned
+            && let Some(id) = arena.accumulate_quadratic(lhs.id, rhs.id, 1.0)
+        {
             return (id, true);
         }
-        if rhs.owned && !prefer_right && let Some(id) = arena.accumulate_quadratic(rhs.id, lhs.id, 1.0) {
+        if rhs.owned
+            && !prefer_right
+            && let Some(id) = arena.accumulate_quadratic(rhs.id, lhs.id, 1.0)
+        {
             return (id, true);
         }
         add_with_ownership(arena, lhs.id, rhs.id, !lhs.owned && !rhs.owned)
@@ -91,14 +108,44 @@ fn add_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
 
 #[inline]
 fn sub_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
-    build_binary(lhs, rhs, |arena, lhs, rhs| {
+    lhs.assert_same_arena(&rhs);
+    let (id, owned) = lhs.arena.with_mut(|arena| {
+        lhs.seal_in(arena);
+        rhs.seal_in(arena);
+        let prefer_right = prefer_right_destination(arena, &lhs, &rhs);
+        if prefer_right && let Some(id) = subtract_into_right(arena, lhs.id, rhs.id) {
+            return (id, true);
+        }
         if lhs.owned
             && let Some(id) = arena.accumulate_quadratic(lhs.id, rhs.id, -1.0)
         {
-            return id;
+            return (id, true);
         }
-        sub_into(arena, lhs.id, rhs.id)
-    })
+        if rhs.owned
+            && !prefer_right
+            && let Some(id) = subtract_into_right(arena, lhs.id, rhs.id)
+        {
+            return (id, true);
+        }
+        let id = sub_into(arena, lhs.id, rhs.id);
+        (id, crate::degree::may_be_quadratic::<D>() && arena.quadratic_root(id))
+    });
+    Expr::from_construction(id, owned, lhs.arena)
+}
+
+/// Store `lhs - rhs` in the uniquely owned right operand.
+fn subtract_into_right(
+    arena: &mut dyn crate::arena::ArenaAccess,
+    lhs: ExprId,
+    rhs: ExprId,
+) -> Option<ExprId> {
+    arena.scale_quadratic(rhs, -1.0)?;
+    if let Some(id) = arena.accumulate_quadratic(rhs, lhs, 1.0) {
+        return Some(id);
+    }
+
+    arena.scale_quadratic(rhs, -1.0).expect("failed accumulation preserves the unique quadratic");
+    None
 }
 
 #[inline]
@@ -236,10 +283,19 @@ macro_rules! impl_scalar_ops {
         impl<'a, D: Degree> Sub<Expr<'a, D>> for $scalar {
             type Output = Expr<'a, D::Computed>;
             fn sub(self, rhs: Expr<'a, D>) -> Expr<'a, D::Computed> {
-                Expr::build(rhs.arena, |arena| {
-                    let lhs_id = arena.constant($to_f64(self));
-                    sub_into(arena, lhs_id, rhs.id)
-                })
+                let (id, owned) = rhs.arena.build_expr(
+                    crate::degree::may_be_quadratic::<D::Computed>() || rhs.owned,
+                    |arena| {
+                        let lhs_id = arena.constant($to_f64(self));
+                        if rhs.owned
+                            && let Some(id) = subtract_into_right(arena, lhs_id, rhs.id)
+                        {
+                            return id;
+                        }
+                        sub_into(arena, lhs_id, rhs.id)
+                    },
+                );
+                Expr::from_construction(id, owned, rhs.arena)
             }
         }
 
@@ -606,6 +662,172 @@ sum_leaves!(crate::ParameterDegree => crate::Constant);
 mod tests {
     use super::*;
     use crate::{ExprArena, VarId, evaluate};
+
+    #[test]
+    fn subtraction_reuses_the_larger_consumed_quadratic_with_one_guard() {
+        for larger_right in [false, true] {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let x = Expr::from_var(&arena, VarId(0));
+            let y = Expr::from_var(&arena, VarId(1));
+            let small = x.square();
+            let large = x.square() + y.square() + 2.0 * x + 3.0;
+            let root = large.id;
+            arena.reset_access_count();
+            let difference = if larger_right { small - large } else { large - small };
+            assert_eq!(arena.access_count(), 1);
+            assert_eq!(difference.id, root);
+            assert!(difference.owned);
+
+            let expected: f64 = if larger_right { -16.0 } else { 16.0 };
+            assert_eq!(
+                evaluate(&arena.borrow(), root, &&[2.0, 3.0][..]).unwrap().to_bits(),
+                expected.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_subtraction_reuses_only_the_consumed_operand() {
+        for borrow_right in [false, true] {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let x = Expr::from_var(&arena, VarId(0));
+            let y = Expr::from_var(&arena, VarId(1));
+            let left = x.square();
+            let right = x.square() + y.square() + 2.0 * x + 3.0;
+
+            let (root, borrowed) =
+                if borrow_right { (left.id, right.id) } else { (right.id, left.id) };
+            arena.reset_access_count();
+            let difference = if borrow_right { left - &right } else { &left - right };
+            assert_eq!(arena.access_count(), 1);
+            assert_eq!(difference.id, root);
+            assert!(difference.owned);
+
+            let snapshot = arena.borrow();
+            assert_eq!(
+                evaluate(&snapshot, root, &&[2.0, 3.0][..]).unwrap().to_bits(),
+                (-16.0_f64).to_bits()
+            );
+
+            let expected: f64 = if borrow_right { 20.0 } else { 4.0 };
+            assert_eq!(
+                evaluate(&snapshot, borrowed, &&[2.0, 3.0][..]).unwrap().to_bits(),
+                expected.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn right_subtraction_respects_permanent_sealing_after_a_clone() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let y = Expr::from_var(&arena, VarId(1));
+        let right = x.square() + y.square();
+        let alias = right.clone();
+        let difference = x - right;
+        assert_ne!(difference.id, alias.id);
+
+        let snapshot = arena.borrow();
+        assert_eq!(
+            evaluate(&snapshot, alias.id, &&[2.0, 3.0][..]).unwrap().to_bits(),
+            13.0_f64.to_bits()
+        );
+        assert_eq!(
+            evaluate(&snapshot, difference.id, &&[2.0, 3.0][..]).unwrap().to_bits(),
+            (-11.0_f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn failed_right_accumulation_restores_coefficients_and_constant() {
+        for failure in 0..3 {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let x = Expr::from_var(&arena, VarId(0));
+            let mut builder = crate::QuadraticBuilder::new(&arena);
+            let coefficient = if failure == 0 { -0.75 * f64::MAX } else { 1.0 };
+            let constant = if failure == 1 { -0.75 * f64::MAX } else { 3.0 };
+            builder.add_monomial(coefficient, VarId(0), VarId(0)).unwrap();
+            builder.add_monomial(1.0, VarId(1), VarId(1)).unwrap();
+            builder.add_constant(constant).unwrap();
+
+            let right = builder.build();
+            let root = right.id;
+            let before = arena.with_ref(|arena| {
+                let ExprNode::Quadratic(q) = arena.get(root) else { panic!("quadratic") };
+                q.as_ref().clone()
+            });
+            let left = match failure {
+                0 => ((0.75 * f64::MAX) * x * x).into_dynamic(),
+                1 => (x.square() + 0.75 * f64::MAX).into_dynamic(),
+                _ => x.sin().into_dynamic(),
+            };
+            let difference = left - right;
+            assert_ne!(difference.id, root);
+
+            let snapshot = arena.borrow();
+            let ExprNode::Quadratic(after) = snapshot.get(root) else { panic!("quadratic") };
+            assert_eq!(after.linear(), before.linear());
+            assert_eq!(after.quadratic(), before.quadratic());
+            assert_eq!(after.constant().to_bits(), before.constant().to_bits());
+
+            let value = evaluate(&snapshot, difference.id, &&[0.5, 0.25][..]).unwrap();
+            match failure {
+                0 => assert!((value / (0.375 * f64::MAX) - 1.0).abs() < f64::EPSILON),
+                1 => assert_eq!(value.to_bits(), f64::INFINITY.to_bits()),
+                _ => assert_eq!(value.to_bits(), (0.5_f64.sin() - 3.3125).to_bits()),
+            }
+        }
+    }
+
+    #[test]
+    fn right_subtraction_preserves_narrowed_affine_ownership_and_coefficients() {
+        for scalar in [false, true] {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let x = Expr::from_var(&arena, VarId(0));
+            let right = (x.square() - x.square() + 2.0 * x + 3.0).into_affine().unwrap();
+            let root = right.id;
+            let difference = if scalar { 5.0 - right } else { Expr::constant(&arena, 5.0) - right };
+            assert_eq!(difference.id, root);
+            assert!(difference.owned);
+
+            let square = difference.square();
+            let snapshot = arena.borrow();
+            let linear = crate::extract_linear(&snapshot, root).unwrap();
+            assert_eq!(linear.coeffs.as_ref(), [(VarId(0), -2.0)]);
+            assert_eq!(linear.constant.to_bits(), 2.0_f64.to_bits());
+            assert_eq!(
+                evaluate(&snapshot, square.id, &&[2.0][..]).unwrap().to_bits(),
+                4.0_f64.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn right_subtraction_reuses_worker_roots_with_base_arena_inputs() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let y = Expr::from_var(&arena, VarId(1));
+        let mut batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let mut forks = vec![arena.__with_fork(snapshot.clone(), || {
+            let right = x.square() + y.square() + 2.0 * x + 3.0;
+            let root = right.id;
+            let difference = x - right;
+            assert_eq!(difference.id, root);
+            assert!(difference.owned);
+
+            difference.id
+        })];
+
+        drop(snapshot);
+        let remaps = batch.merge(&mut forks);
+        let root = remaps[0].apply(forks[0].value);
+        drop(batch);
+        assert_eq!(
+            evaluate(&arena.borrow(), root, &&[2.0, 3.0][..]).unwrap().to_bits(),
+            (-18.0_f64).to_bits()
+        );
+    }
 
     #[test]
     fn borrowed_binary_operators_use_one_guard_and_seal_both_roots() {
