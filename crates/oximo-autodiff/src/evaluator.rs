@@ -799,7 +799,7 @@ impl NlpEvaluator {
 
         // Constant quadratic contributions, scaled by sigma/lambda. The
         // scatter positions are cached (see `obj_hess_pos`/`con_hess_pos`), so
-        // this reads `h` live but does no per-call binary search.
+        // this reads polynomial coefficients live but does no per-call binary search.
         if let SlotKind::Quadratic(q) = &self.objective.kind {
             for (&pos, &(r, c, coefficient)) in self.obj_hess_pos.iter().zip(q.quadratic()) {
                 vals[pos] += if r == c {
@@ -985,14 +985,18 @@ fn mult_of(source: &NlSource, obj_factor: f64, lambda: &[f64]) -> f64 {
 /// non-quadratic slots.
 fn quad_scatter_positions(slot: &FunctionSlot, hess: &[(usize, usize)]) -> Vec<usize> {
     match &slot.kind {
-        SlotKind::Quadratic(q) => q
-            .quadratic()
-            .iter()
-            .map(|&(r, c, _)| {
-                hess.binary_search(&(r.index(), c.index()))
-                    .expect("quadratic entry is in the pattern by construction")
-            })
-            .collect(),
+        SlotKind::Quadratic(q) => {
+            debug_assert!(q.is_canonical(), "quadratic scatter requires canonical coefficients");
+
+            // Coefficients are column-major while the Hessian pattern is row-major.
+            q.quadratic()
+                .iter()
+                .map(|&(r, c, _)| {
+                    hess.binary_search(&(r.index(), c.index()))
+                        .expect("quadratic entry is in the pattern by construction")
+                })
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -1050,9 +1054,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => (x + 2.0 * y - z).as_dynamic(),
+                1 => (x + 2.0 * y - z).into_dynamic(),
                 2 => x.powi(2) + y * z,
-                _ => (x * y * z + x.sin()).as_dynamic(),
+                _ => (x * y * z + x.sin()).into_dynamic(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
