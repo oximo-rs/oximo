@@ -201,7 +201,8 @@ fn emit_quadratic<W: Write>(
     q: &oximo_expr::QuadraticTerms,
     include_affine: bool,
 ) -> Result<(), IoError> {
-    let n = q.quadratic().len() + usize::from(include_affine);
+    let has_affine = include_affine && (!q.linear().is_empty() || q.constant() != 0.0);
+    let n = q.quadratic().len() + usize::from(has_affine);
     match n {
         0 => return w.num(0.0),
         1 => {}
@@ -212,7 +213,7 @@ fn emit_quadratic<W: Write>(
             w.eor()?;
         }
     }
-    if include_affine {
+    if has_affine {
         emit_linear_inline(w, var_index, q.linear(), q.constant())?;
     }
     for (a, b, c) in q.quadratic().iter().copied() {
@@ -384,6 +385,43 @@ fn emit_term<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pure_quadratics_omit_empty_affine_children() {
+        let x = VarId(0);
+        let y = VarId(1);
+        let monomials = [(x, x, 1.0), (y, x, 1.0), (y, y, 1.0)];
+        let var_index = FxHashMap::from_iter([(x, 0), (y, 1)]);
+        let opts = super::super::options::WriteOptions::ascii_lean();
+        let expected = [
+            "n0\n",
+            "o2\nv0\nv0\n",
+            "o0\no2\nv0\nv0\no2\nv1\nv0\n",
+            "o54\n3\no2\nv0\nv0\no2\nv1\nv0\no2\nv1\nv1\n",
+        ];
+
+        for (count, expected) in expected.into_iter().enumerate() {
+            for constant in [0.0, -0.0] {
+                let terms = oximo_expr::QuadraticTerms::from_coefficients(
+                    monomials[..count].to_vec(),
+                    Vec::new(),
+                    constant,
+                )
+                .unwrap();
+                for include_affine in [false, true] {
+                    let mut bytes = Vec::new();
+                    emit_quadratic(
+                        &mut Writer::new(&mut bytes, &opts),
+                        &var_index,
+                        &terms,
+                        include_affine,
+                    )
+                    .unwrap();
+                    assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn nonfinite_extracted_terms_keep_tree_encoding() {
