@@ -255,3 +255,38 @@ fn compact_quadratics_preserve_affine_parts_and_objective_offsets_in_nl() {
         }
     }
 }
+
+#[test]
+fn compact_quadratic_residuals_roundtrip_in_additions_negations_and_functions() {
+    use oximo_expr::evaluate;
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+
+    let model = Model::new("nested compact NL roundtrip");
+    variable!(model, x);
+    variable!(model, y);
+    let mut builder = model.quadratic_builder();
+    builder.add_product(2.0, x, y).unwrap();
+    builder.add_term(3.0, y).unwrap();
+    builder.add_constant(4.0).unwrap();
+    let quadratic = builder.build();
+
+    for expression in [&quadratic + x.sin(), -(&quadratic + x.sin()), quadratic.sin()] {
+        let root = expression.id();
+        model.__minimize(expression);
+        for options in [WriteOptions::default(), WriteOptions::binary()] {
+            let mut bytes = Vec::new();
+            write_nl_with(&model, &mut bytes, &options).unwrap();
+            let imported = read_nl(bytes.as_slice()).unwrap();
+            for values in [[0.0, 0.0], [1.0, 2.0], [-2.0, 3.0]] {
+                let expected = evaluate(&model.arena(), root, &&values[..]).unwrap();
+                let actual = evaluate(
+                    &imported.arena(),
+                    imported.objective().as_ref().unwrap().expr,
+                    &&values[..],
+                )
+                .unwrap();
+                assert!((actual - expected).abs() < 1e-10);
+            }
+        }
+    }
+}
