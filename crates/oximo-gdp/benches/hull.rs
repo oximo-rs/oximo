@@ -57,9 +57,9 @@ fn shared(rows: usize) -> (Model, GdpReformulationOptions) {
     let model = Model::new("shared Hull DAG");
 
     variable!(model, 0.0 <= x <= 1.0);
-    let mut body = x.as_dynamic();
+    let mut body = x.into_dynamic();
     for _ in 0..20 {
-        body = (body.clone() * body + 0.1).as_dynamic();
+        body = (body.clone() * body + 0.1).into_dynamic();
     }
     let active = model.add_boolean("active");
     for i in 0..rows {

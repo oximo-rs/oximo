@@ -45,7 +45,7 @@ fn construct(kind: &str, n: u32, fixture: Option<&(ExprArena, ExprId)>) -> (u128
         let expression = (0..n)
             .map(|i| {
                 let x = Expr::from_var(&cell, VarId(i));
-                if kind == "symbolic_sum" { (p * x).into_dynamic() } else { x.as_dynamic() }
+                if kind == "symbolic_sum" { (p * x).into_dynamic() } else { x.into_dynamic() }
             })
             .reduce(|a, b| a + b)
             .unwrap();
@@ -55,7 +55,7 @@ fn construct(kind: &str, n: u32, fixture: Option<&(ExprArena, ExprId)>) -> (u128
         return (start.elapsed().as_nanos(), nodes);
     }
     let x = Expr::from_var(&cell, VarId(0));
-    let mut expression = x.as_dynamic();
+    let mut expression = x.into_dynamic();
     for _ in 1..n {
         expression = match kind {
             "powers" => expression.powi(2),

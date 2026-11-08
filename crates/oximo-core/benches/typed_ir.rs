@@ -44,7 +44,7 @@ fn unique_rows(dynamic: bool) -> u128 {
     let start = Instant::now();
     for expr in expressions {
         if dynamic {
-            black_box(model.__add_constraint_auto(expr.as_dynamic().le(10.0)));
+            black_box(model.__add_constraint_auto(expr.into_dynamic().le(10.0)));
         } else {
             black_box(model.__add_constraint_auto(expr.le(10.0)));
         }
