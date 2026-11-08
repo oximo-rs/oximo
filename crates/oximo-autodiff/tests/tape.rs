@@ -36,7 +36,7 @@ fn diagonal_values_agree_across_expression_tape_and_quadratic_slot() {
             assert_eq!(value.to_bits(), expected.to_bits());
             assert_eq!(taped.to_bits(), expected.to_bits());
 
-            if x == 2.0 {
+            if x.to_bits() == 2.0_f64.to_bits() {
                 assert_eq!(value.to_bits(), ((h * 2.0) * 2.0).to_bits());
             }
         }
