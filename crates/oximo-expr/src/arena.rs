@@ -1984,14 +1984,14 @@ mod tests {
         let snapshot = batch.snapshot();
         let mut forks = vec![
             cell.__with_fork(snapshot.clone(), || {
-                let root = (x.square() + x).erase();
+                let root = (x.square() + x).as_dynamic();
                 for _ in 0..2 {
                     assert_eq!(root.__class(), ExprClass::Quadratic);
                 }
                 root.id()
             }),
             cell.__with_fork(snapshot.clone(), || {
-                let root = x.sin().erase();
+                let root = x.sin().as_dynamic();
                 for _ in 0..2 {
                     assert_eq!(root.__class(), ExprClass::Nonlinear);
                 }

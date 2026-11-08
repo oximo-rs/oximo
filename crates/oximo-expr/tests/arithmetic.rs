@@ -4,7 +4,7 @@ use oximo_expr::{
 };
 
 fn make_var(arena: &ExprArenaCell, idx: u32) -> Expr<'_> {
-    Expr::from_var(arena, VarId(idx)).erase()
+    Expr::from_var(arena, VarId(idx)).as_dynamic()
 }
 
 #[test]

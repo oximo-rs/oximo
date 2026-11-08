@@ -1183,12 +1183,12 @@ mod tests {
         let x = m.__var("x").bounds(-3.0, 2.0).build();
         let y = m.__var("y").bounds(1.0, 4.0).build();
         let expressions = [
-            (x.square() + y).erase(),
-            (x / y).erase(),
-            x.atan2(y).erase(),
+            (x.square() + y).as_dynamic(),
+            (x / y).as_dynamic(),
+            x.atan2(y).as_dynamic(),
             x.pow(y),
-            x.min(y).erase(),
-            x.max(y).erase(),
+            x.min(y).as_dynamic(),
+            x.max(y).as_dynamic(),
         ];
         let arena = m.arena();
         let variables = m.resolved_variables();

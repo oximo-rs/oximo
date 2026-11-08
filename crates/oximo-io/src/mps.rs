@@ -1087,7 +1087,7 @@ fn expression<'a>(
     quadratic: impl IntoIterator<Item = ((usize, usize), f64)>,
     constant: f64,
 ) -> Expr<'a> {
-    let mut expr = model.__constant(constant).erase();
+    let mut expr = model.__constant(constant).as_dynamic();
     for (column, coefficient) in linear {
         if coefficient != 0.0 {
             expr = expr + coefficient * &variables[column];
@@ -1336,7 +1336,7 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
                 .bounds(model_lower, column.upper)
                 .domain(domain)
                 .build()
-                .erase(),
+                .as_dynamic(),
         );
     }
     let mut pending_indicators = Vec::new();
@@ -1698,7 +1698,7 @@ fn rebuild_quadratic<'a>(
     variables: &[Expr<'a>],
     terms: &QuadraticTerms,
 ) -> Expr<'a> {
-    let mut expr = model.__constant(terms.constant()).erase();
+    let mut expr = model.__constant(terms.constant()).as_dynamic();
     for &(var, coefficient) in terms.linear() {
         expr = expr + coefficient * &variables[var.index()];
     }
@@ -1722,7 +1722,7 @@ fn write_mps_with_indicators<W: Write>(
     let variables: Vec<_> = source_vars
         .iter()
         .map(|v| {
-            temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build().erase()
+            temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build().as_dynamic()
         })
         .collect();
     let mut raw_row_names = Vec::new();

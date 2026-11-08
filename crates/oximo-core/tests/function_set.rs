@@ -64,19 +64,36 @@ fn operators_and_families_carry_static_degree() {
     let _: Expr<'_, Affine> = sum!(m, p[i] * x[i] for i in 0..3);
     let _: Expr<'_, Quadratic> = sum!(m, x[i].square() for i in 0..3);
     let _: Expr<'_, Affine> = dot(&[(x[0]), (x[1])], &[1.0, 2.0]);
-    let mixed = [x[0].erase(), x[1].square().erase(), x[2].sin().erase()];
+    let mixed = [x[0].as_dynamic(), x[1].square().as_dynamic(), x[2].sin().as_dynamic()];
     assert!(matches!((mixed[0]).clone().into_function(), AnyScalarFunction::Affine(_)));
     assert!(matches!((mixed[1]).clone().into_function(), AnyScalarFunction::Quadratic(_)));
     assert!(matches!((mixed[2]).clone().into_function(), AnyScalarFunction::Nonlinear(_)));
-    assert_eq!(mixed[1].try_affine().unwrap_err(), ExprClass::Quadratic);
-    assert_eq!(mixed[2].try_quadratic().unwrap_err(), ExprClass::Nonlinear);
+    assert_eq!(mixed[1].as_affine().unwrap_err(), ExprClass::Quadratic);
+    assert_eq!(mixed[2].as_quadratic().unwrap_err(), ExprClass::Nonlinear);
+}
+
+#[test]
+fn scalar_function_narrowing_returns_recoverable_expressions() {
+    let m = Model::new("recoverable conversions");
+    variable!(m, x);
+
+    let original = ScalarAffineFunction::try_from(x.square().into_dynamic()).unwrap_err();
+    let quadratic = ScalarQuadraticFunction::try_from(original).unwrap();
+    let row = m.add_constraint("quadratic", Constraint::new(quadratic, LessThan(4.0)));
+    let root = m.constraints().algebraic()[row.index()].lhs;
+    assert_eq!(evaluate(&m.arena(), root, &&[2.0][..]).unwrap().to_bits(), 4.0_f64.to_bits());
+
+    let original = ScalarQuadraticFunction::try_from(x.sin().into_dynamic()).unwrap_err();
+    let original: Expr<'_, Dynamic> = ScalarAffineFunction::try_from(original).unwrap_err();
+    m.add_constraint("nonlinear", original.into_nonlinear().le(1.0));
+    assert_eq!(m.kind(), ModelKind::NLP);
 }
 
 #[test]
 fn dynamic_relations_retain_expressions_and_checked_classification() {
     let m = Model::new("dynamic relations");
     variable!(m, x);
-    let expressions = [x.erase(), x.square().erase(), x.sin().erase()];
+    let expressions = [x.as_dynamic(), x.square().as_dynamic(), x.sin().as_dynamic()];
     let before = m.arena().len();
     for expr in &expressions {
         let le: Constraint<ScalarDynamicFunction<'_>, LessThan> = expr.clone().le(3.0);
@@ -110,7 +127,7 @@ fn indexed_dynamic_relations_remap_local_roots_and_keep_parameters_live() {
     variable!(m, x[i in 0..2048]);
     param!(m, p = 2.0);
     let rows = constraint!(
-        m, rows[i in 0..2048], (x[i].square() + p * x[i]).erase() <= 10.0
+        m, rows[i in 0..2048], (x[i].square() + p * x[i]).as_dynamic() <= 10.0
     );
     assert_eq!(m.num_constraints(), 2048);
     assert_eq!(m.kind(), ModelKind::QCP);
@@ -198,8 +215,8 @@ fn constant_arithmetic_agrees_with_checked_degrees_and_extraction() {
         let quadratic: Expr<'_, Quadratic> = affine.clone() * x;
         assert_eq!(affine.__class(), ExprClass::Linear);
         assert_eq!(quadratic.__class(), ExprClass::Quadratic);
-        assert!(affine.erase().try_affine().is_ok());
-        assert!(quadratic.erase().try_quadratic().is_ok());
+        assert!(affine.as_dynamic().as_affine().is_ok());
+        assert!(quadratic.as_dynamic().as_quadratic().is_ok());
         let arena = m.arena();
         assert!(extract_linear(&arena, affine.id()).is_some());
         assert!(extract_quadratic(&arena, quadratic.id()).is_some());
@@ -215,9 +232,12 @@ fn intervals_keep_macro_split_policy_and_direct_ir_bounds() {
         constraint!(m, 0.0 <= x.square() <= 2.0),
         RangeConstraintHandles::Split { .. }
     ));
-    assert!(matches!(constraint!(m, 0.0 <= x.erase() <= 2.0), RangeConstraintHandles::Interval(_)));
     assert!(matches!(
-        constraint!(m, 0.0 <= x.square().erase() <= 2.0),
+        constraint!(m, 0.0 <= x.as_dynamic() <= 2.0),
+        RangeConstraintHandles::Interval(_)
+    ));
+    assert!(matches!(
+        constraint!(m, 0.0 <= x.square().as_dynamic() <= 2.0),
         RangeConstraintHandles::Split { .. }
     ));
     let c = m.add_constraint(
@@ -242,7 +262,7 @@ fn typed_and_macro_soc_share_the_registry() {
     let cones = m.soc_constraints();
     assert_eq!(cones[direct.index()].terms, cones[generated.index()].terms);
     assert_eq!(cones[direct.index()].bound, cones[generated.index()].bound);
-    let _ = x.powi(1).try_affine().unwrap().into_affine_function();
+    let _ = x.powi(1).as_affine().unwrap().into_affine_function();
 }
 
 #[test]
@@ -311,14 +331,18 @@ fn invalid_runtime_data_cannot_register_rows() {
         .is_err()
     );
     assert!(
-        catch_unwind(AssertUnwindSafe(|| m.add_constraint("foreign dynamic", y.erase().le(1.0))))
-            .is_err()
+        catch_unwind(AssertUnwindSafe(
+            || m.add_constraint("foreign dynamic", y.as_dynamic().le(1.0))
+        ))
+        .is_err()
     );
     assert!(
-        catch_unwind(AssertUnwindSafe(|| m.add_constraint("nan dynamic", x.erase().le(f64::NAN))))
-            .is_err()
+        catch_unwind(AssertUnwindSafe(
+            || m.add_constraint("nan dynamic", x.as_dynamic().le(f64::NAN))
+        ))
+        .is_err()
     );
-    assert!(x.square().erase().try_affine().is_err());
+    assert!(x.square().as_dynamic().as_affine().is_err());
     assert!(
         catch_unwind(AssertUnwindSafe(|| m.add_constraint(
             "dimension",

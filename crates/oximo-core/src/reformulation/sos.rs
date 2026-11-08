@@ -476,7 +476,7 @@ fn add_binary_activations<'a>(
             let name = unique_variable_name(model, &base);
             let expression = model.__var(name).binary().build();
             generated.push(expression.var_id().expect("new activation is a variable"));
-            expression.erase()
+            expression.as_dynamic()
         })
         .collect()
 }

@@ -170,7 +170,7 @@ pub fn model(rows: usize, degree: usize) -> Model {
         let lhs = match degree {
             1 => (x + 2.0 * y - z).into_dynamic(),
             2 => x.powi(2) + y,
-            _ => (x * y * z).erase(),
+            _ => (x * y * z).as_dynamic(),
         };
         model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
     }

@@ -253,7 +253,7 @@ fn owned_pairs_register_in_their_native_registries() {
     let model = Model::new("owned pairs");
     variable!(model, x);
     variable!(model, b, Binary);
-    let dynamic = x.erase().into_function().semantic_data();
+    let dynamic = x.as_dynamic().into_function().semantic_data();
     model.add_constraint("lt", Constraint::new(dynamic.clone(), LessThan(2.0)));
     model.add_constraint("gt", Constraint::new(dynamic.clone(), GreaterThan(0.0)));
     model.add_constraint("eq", Constraint::new(dynamic.clone(), EqualTo(1.0)));
@@ -1021,13 +1021,13 @@ fn range_registration_preserves_static_and_dynamic_function_identities() {
     let model = Model::new("range signatures");
     variable!(model, x);
     model.__add_range("static", x, 1.0, 2.0);
-    model.__add_range("dynamic", x.erase(), 1.0, 2.0);
+    model.__add_range("dynamic", x.as_dynamic(), 1.0, 2.0);
     assert!(
         model.typed_constraint_handle::<ScalarFunctionData<Affine>, Interval>("static").is_some()
     );
     let dynamic =
         model.typed_constraint_handle::<AnyScalarFunctionData, Interval>("dynamic").unwrap();
-    model.set_constraint_function(dynamic, x.square().erase().into_function()).unwrap();
+    model.set_constraint_function(dynamic, x.square().as_dynamic().into_function()).unwrap();
     let updated = model.semantic_constraint(dynamic).unwrap().unwrap();
     assert_eq!(
         updated.pair.function.downcast_ref::<AnyScalarFunctionData>().unwrap().class,
@@ -1089,13 +1089,13 @@ fn homogeneous_declarations_keep_identity_when_one_signature_or_origin_changes()
         .map(|i| {
             model.add_constraint(
                 format!("row{i}"),
-                Constraint::new(x.erase().into_function(), LessThan(f64::from(i))),
+                Constraint::new(x.as_dynamic().into_function(), LessThan(f64::from(i))),
             )
         })
         .collect();
     let fork = model.fork();
 
-    model.set_constraint_function(rows[31], x.square().erase().into_function()).unwrap();
+    model.set_constraint_function(rows[31], x.square().as_dynamic().into_function()).unwrap();
     let cone = model.add_soc_constraint("mixed registry", [x], x);
     model.set_constraint_origin(rows[63].id(), ConstraintOrigin::Range("edited origin".into()));
     assert_eq!(model.semantic_constraint(cone).unwrap().unwrap().id, cone.id());

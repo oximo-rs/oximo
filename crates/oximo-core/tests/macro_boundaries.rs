@@ -104,7 +104,7 @@ fn explicit_borrows_work_for_scalar_and_indexed_ranges_and_indicators() {
     variable!(m, x);
     variable!(m, b, Bin);
     let e = x + 1.0;
-    let trigger = b.erase();
+    let trigger = b.as_dynamic();
     constraint!(m, interval, 0.0 <= &e <= 5.0);
     constraint!(m, intervals[i in 0..512], 0.0 <= &e <= i as f64 + 5.0);
     indicator_constraint!(m, single, &trigger == 1 => &e <= 4.0);

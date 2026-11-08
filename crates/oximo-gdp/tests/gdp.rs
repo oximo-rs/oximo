@@ -1026,7 +1026,8 @@ fn nonnegative_sums_keep_safe_square_root_domains() {
         variable!(model, 0.0 <= x <= 1.0);
         variable!(model, 0.0 <= z <= 1.0);
         boolean_variable!(model, active);
-        let sum = if squared { (x.square() + z.square()).erase() } else { (x + z).erase() };
+        let sum =
+            if squared { (x.square() + z.square()).as_dynamic() } else { (x + z).as_dynamic() };
         disjunct_constraint!(model, active, sum.sqrt() <= 1.0);
         model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
         assert!(satisfied(&model, &[0.0, 0.0, 1.0]));
@@ -1253,7 +1254,7 @@ fn regression_big_m_precision_loss_is_rejected_atomically_on_both_sides() {
                 param!(model, offset = offset_value);
                 boolean_variable!(model, active);
                 disjunct_constraint!(model, active, valid, x <= 1e14);
-                let residual = if nonlinear { (x + x.sin()).erase() } else { x.erase() };
+                let residual = if nonlinear { (x + x.sin()).as_dynamic() } else { x.as_dynamic() };
                 let row = if upper {
                     disjunct_constraint!(
                         model,
@@ -1317,7 +1318,8 @@ fn big_m_indicator_coefficient_precision_loss_is_atomic() {
                     param!(model, scale = coefficient);
                     boolean_variable!(model, active);
                     disjunct_constraint!(model, active, valid, x <= 1e14);
-                    let residual = if nonlinear { (x + x.sin()).erase() } else { x.erase() };
+                    let residual =
+                        if nonlinear { (x + x.sin()).as_dynamic() } else { x.as_dynamic() };
                     let body = residual + scale * active.binary();
                     let row = if upper {
                         disjunct_constraint!(model, active, ill_scaled, body <= 0.0)
@@ -1397,9 +1399,9 @@ fn big_m_preserves_the_effective_active_bound_after_coefficient_merging() {
             let bound = if upper { 1e14_f64 } else { -1e14_f64 };
             let coefficient = if upper { bound.next_down() } else { bound.next_up() };
             let residual = if nonlinear {
-                if upper { x.exp().erase() } else { (-x.exp()).erase() }
+                if upper { x.exp().as_dynamic() } else { (-x.exp()).as_dynamic() }
             } else {
-                x.erase()
+                x.as_dynamic()
             };
             let body = residual + coefficient * active.binary();
             let row = if upper {

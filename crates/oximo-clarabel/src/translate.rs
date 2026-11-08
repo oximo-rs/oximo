@@ -1244,8 +1244,11 @@ pub mod benchmark_support {
         let t = model.__var("t").lb(0.0).build();
         model.__minimize(t);
         for i in 0..rows {
-            let lhs =
-                if soc { x.powi(2) + y.powi(2) - t.powi(2) } else { (x + 2.0 * y - t).erase() };
+            let lhs = if soc {
+                x.powi(2) + y.powi(2) - t.powi(2)
+            } else {
+                (x + 2.0 * y - t).as_dynamic()
+            };
             model.__add_constraint_auto(lhs.le(if soc { 0.0 } else { i as f64 + 10.0 }));
         }
         model

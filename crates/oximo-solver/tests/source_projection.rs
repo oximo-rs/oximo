@@ -703,8 +703,8 @@ fn builder_errors_convert_to_projection_errors_for_question_mark_chains() {
         ProjectionError::from(error),
         ProjectionError::ForeignExpression { expected: source.id(), actual: foreign.id() }
     );
-    assert!(project(&source, y.erase(), SolverResult::for_model(&source)).is_err());
-    assert!(project(&source, x.erase(), SolverResult::for_model(&source)).is_ok());
+    assert!(project(&source, y.as_dynamic(), SolverResult::for_model(&source)).is_err());
+    assert!(project(&source, x.as_dynamic(), SolverResult::for_model(&source)).is_ok());
 }
 
 #[test]

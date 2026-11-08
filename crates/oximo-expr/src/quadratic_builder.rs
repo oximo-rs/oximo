@@ -823,13 +823,16 @@ mod tests {
 
         // Constant, left-linear, right-linear, and quadratic contributions.
         for (left, right) in [
-            (Expr::constant(&arena, f64::MAX).erase(), Expr::constant(&arena, 2.0).erase()),
-            ((f64::MAX * x).erase(), Expr::constant(&arena, 2.0).erase()),
-            (Expr::constant(&arena, f64::MAX).erase(), (2.0 * y).erase()),
-            ((f64::MAX * x).erase(), (2.0 * y).erase()),
+            (
+                Expr::constant(&arena, f64::MAX).as_dynamic(),
+                Expr::constant(&arena, 2.0).as_dynamic(),
+            ),
+            ((f64::MAX * x).as_dynamic(), Expr::constant(&arena, 2.0).as_dynamic()),
+            (Expr::constant(&arena, f64::MAX).as_dynamic(), (2.0 * y).as_dynamic()),
+            ((f64::MAX * x).as_dynamic(), (2.0 * y).as_dynamic()),
         ] {
             builder
-                .add_product(0.5, left.try_affine().unwrap(), right.try_affine().unwrap())
+                .add_product(0.5, left.as_affine().unwrap(), right.as_affine().unwrap())
                 .unwrap();
             let q = builder.build();
             let terms = crate::extract_quadratic(&arena.borrow(), q.id()).unwrap();
@@ -930,7 +933,7 @@ mod tests {
         assert_eq!(q.quadratic()[1].2.to_bits(), 1);
 
         let doubled: Expr =
-            [Expr::new(raw, &arena), Expr::constant(&arena, 1.0).erase()].into_iter().sum();
+            [Expr::new(raw, &arena), Expr::constant(&arena, 1.0).as_dynamic()].into_iter().sum();
         assert_eq!(
             crate::extract_quadratic(&arena.borrow(), doubled.id()).unwrap().quadratic()[1]
                 .2

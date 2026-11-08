@@ -67,7 +67,7 @@ impl<'a> AffineBuilder<'a> {
     }
 
     /// Add a weighted constant or affine expression without writing arena nodes.
-    /// Dynamic handles must first be checked with [`Expr::try_affine`].
+    /// Dynamic handles must first be checked with [`Expr::as_affine`].
     ///
     /// # Panics
     /// Panics before changing the builder if the expression belongs to another arena.

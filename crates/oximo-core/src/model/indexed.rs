@@ -899,7 +899,7 @@ impl Model {
         let mut row_counts = Vec::with_capacity(keys.len());
         for key in &keys {
             let (trigger, value, mid, lo, hi) = rule(K::from_index_key(key));
-            let mid = mid.into_affine_function().expression().erase();
+            let mid = mid.into_affine_function().expression().as_dynamic();
             self.assert_expr_belongs(&mid);
             let trigger = self.indicator_trigger(trigger.into_expression().into_dynamic());
             let name = format_index_name_small(prefix, key);

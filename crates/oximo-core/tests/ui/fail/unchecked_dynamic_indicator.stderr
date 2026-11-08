@@ -1,8 +1,8 @@
 error[E0277]: the trait bound `ScalarDynamicFunction<'_>: IntoAffineFunction<'_>` is not satisfied
  --> tests/ui/fail/unchecked_dynamic_indicator.rs:9:5
   |
-9 |     indicator_constraint!(model, b == 1 => x.erase() <= 1.0);
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarDynamicFunction<'_>`
+9 |     indicator_constraint!(model, b == 1 => x.as_dynamic() <= 1.0);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoAffineFunction<'_>` is not implemented for `ScalarDynamicFunction<'_>`
   |
   = help: the following other types implement trait `IntoAffineFunction<'a>`:
             &T

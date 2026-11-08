@@ -92,13 +92,13 @@ fn soc_checks_dimensions_and_dynamic_degree_before_registering() {
         || m.add_constraint("cone", Constraint::new(vector, SecondOrderCone { dimension: 1 })),
         "at least two",
     );
-    assert!(x.square().erase().try_affine().is_err());
+    assert!(x.square().as_dynamic().as_affine().is_err());
     assert_panics_with(
         || m.add_soc_constraint("cone", std::iter::empty::<Expr<'_, Affine>>(), t),
         "at least two",
     );
     assert_eq!(m.num_soc_constraints(), 0);
-    let cone = soc_constraint!(m, cone, [x.powi(1).try_affine().unwrap()] <= t);
+    let cone = soc_constraint!(m, cone, [x.powi(1).as_affine().unwrap()] <= t);
     assert_eq!(cone.index(), 0);
     assert_panics_with(|| soc_constraint!(m, cone, [x] <= t), "already registered");
     assert_eq!(m.num_soc_constraints(), 1);
@@ -118,7 +118,7 @@ fn affine_powers_extract_and_rebind_without_freezing_parameters() {
             ((expressions[2]).clone(), parameter.powi(3), 0.0),
             ((expressions[3]).clone(), 0.0, 1.0),
         ] {
-            let affine = expr.try_affine().unwrap();
+            let affine = expr.as_affine().unwrap();
             let arena = m.arena();
             let terms = extract_linear(&arena, affine.id()).unwrap();
             assert_eq!(terms.coeffs.iter().map(|(_, value)| value).sum::<f64>(), coefficient);
@@ -126,9 +126,9 @@ fn affine_powers_extract_and_rebind_without_freezing_parameters() {
         }
     }
     for exponent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert_eq!(p.powf(exponent).try_affine().unwrap_err(), ExprClass::Nonlinear);
+        assert_eq!(p.powf(exponent).as_affine().unwrap_err(), ExprClass::Nonlinear);
     }
-    assert!(x.powi(2).try_affine().is_err());
+    assert!(x.powi(2).as_affine().is_err());
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn scalar_zero_division_is_rejected_before_emitting_nodes() {
     for divisor in [0.0, -0.0] {
         assert!(catch_unwind(AssertUnwindSafe(|| x / divisor)).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| quadratic.clone() / divisor)).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| x.erase() / divisor)).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| x.as_dynamic() / divisor)).is_err());
     }
     assert!(catch_unwind(AssertUnwindSafe(|| x / 0)).is_err());
     assert_eq!(m.arena().len(), before);
@@ -158,10 +158,10 @@ fn indicator_inputs_are_checked_before_registration() {
     assert_panics_with(|| indicator_constraint!(m, row, x == 1 => x <= 1.0), "binary");
     assert_panics_with(|| indicator_constraint!(m, row, b == 1 => y <= 1.0), "model");
     assert_panics_with(|| indicator_constraint!(m, row, y == 1 => x <= 1.0), "model");
-    assert!(x.square().erase().try_affine().is_err());
+    assert!(x.square().as_dynamic().as_affine().is_err());
     assert_panics_with(|| indicator_constraint!(m, row, b == 1 => x <= f64::NEG_INFINITY), "bound");
     assert_eq!(m.num_indicator_constraints(), 0);
-    let checked = x.nonlinear().try_affine().unwrap();
+    let checked = x.as_nonlinear().as_affine().unwrap();
     let row = indicator_constraint!(m, row, b == 1 => checked <= 1.0);
     assert_eq!(row.indicator_id().0, 0);
     assert_panics_with(|| indicator_constraint!(m, row, b == 1 => x <= 1.0), "already registered");

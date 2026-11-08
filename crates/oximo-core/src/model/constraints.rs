@@ -1550,7 +1550,7 @@ impl Model {
         let trigger: Expr = trigger.into();
         let lhs: Expr = lhs.into();
         self.assert_expr_belongs(&lhs);
-        let trigger = self.indicator_trigger(trigger.erase());
+        let trigger = self.indicator_trigger(trigger.as_dynamic());
         let id = self.register_indicator(
             name.into(),
             trigger,
@@ -1574,9 +1574,9 @@ impl Model {
         hi: B2,
     ) -> RangeIndicatorConstraintHandles {
         let trigger: Expr = trigger.into();
-        let mid = mid.into_affine_function().expression().erase();
+        let mid = mid.into_affine_function().expression().as_dynamic();
         self.assert_expr_belongs(&mid);
-        let trigger = self.indicator_trigger(trigger.erase());
+        let trigger = self.indicator_trigger(trigger.as_dynamic());
         if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
             && mid.__class() == ExprClass::Linear
         {

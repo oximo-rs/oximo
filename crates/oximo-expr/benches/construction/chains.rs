@@ -45,7 +45,7 @@ fn construct(kind: &str, n: u32, fixture: Option<&(ExprArena, ExprId)>) -> (u128
         let expression = (0..n)
             .map(|i| {
                 let x = Expr::from_var(&cell, VarId(i));
-                if kind == "symbolic_sum" { (p * x).into_dynamic() } else { x.erase() }
+                if kind == "symbolic_sum" { (p * x).into_dynamic() } else { x.as_dynamic() }
             })
             .reduce(|a, b| a + b)
             .unwrap();
@@ -55,7 +55,7 @@ fn construct(kind: &str, n: u32, fixture: Option<&(ExprArena, ExprId)>) -> (u128
         return (start.elapsed().as_nanos(), nodes);
     }
     let x = Expr::from_var(&cell, VarId(0));
-    let mut expression = x.erase();
+    let mut expression = x.as_dynamic();
     for _ in 1..n {
         expression = match kind {
             "powers" => expression.powi(2),
@@ -89,7 +89,7 @@ pub fn measure_cases(filter: Option<&str>) {
             if let Some((snapshot, input)) = &fixture {
                 let cell = ExprArenaCell::new(snapshot.clone());
                 let expression = Expr::new(*input, &cell) * Expr::from_var(&cell, VarId(0));
-                assert!(expression.try_affine().is_ok());
+                assert!(expression.as_affine().is_ok());
                 assert!(extract_linear(&cell.borrow(), expression.id()).is_some());
                 let values = vec![3.0; n as usize];
                 let expected = if kind == "cancel_add" { 6.0 } else { 0.0 };

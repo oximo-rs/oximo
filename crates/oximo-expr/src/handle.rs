@@ -95,7 +95,7 @@ impl<'a, D: Degree> Expr<'a, D> {
     }
 
     /// Record ownership while the construction guard is already held.
-    /// Immutable node kinds never need a later arena access when cloned or erased.
+    /// Immutable node kinds never need a later arena access when shared.
     pub(crate) fn build(
         arena: &'a ExprArenaCell,
         construct: impl FnOnce(&mut dyn crate::arena::ArenaAccess) -> ExprId,
@@ -127,19 +127,21 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// Check the runtime degree and consume the handle, retaining ownership.
     ///
     /// # Errors
-    /// Returns the actual class if it is not affine.
-    pub fn into_affine(self) -> Result<Expr<'a, Affine>, ExprClass> {
+    /// Returns the original expression, including its static degree and ownership,
+    /// if it is not affine.
+    pub fn into_affine(self) -> Result<Expr<'a, Affine>, Self> {
         let class = self.__class();
-        if class == ExprClass::Linear { Ok(self.into_degree()) } else { Err(class) }
+        if class == ExprClass::Linear { Ok(self.into_degree()) } else { Err(self) }
     }
 
     /// Check the runtime degree and consume the handle, retaining ownership.
     ///
     /// # Errors
-    /// Returns the actual class if its degree exceeds two.
-    pub fn into_quadratic(self) -> Result<Expr<'a, Quadratic>, ExprClass> {
+    /// Returns the original expression, including its static degree and ownership,
+    /// if its degree exceeds two.
+    pub fn into_quadratic(self) -> Result<Expr<'a, Quadratic>, Self> {
         let class = self.__class();
-        if class <= ExprClass::Quadratic { Ok(self.into_degree()) } else { Err(class) }
+        if class <= ExprClass::Quadratic { Ok(self.into_degree()) } else { Err(self) }
     }
 
     /// Classify and consume the handle, retaining unique ownership.
@@ -157,8 +159,10 @@ impl<'a, D: Degree> Expr<'a, D> {
         }
     }
 
-    /// Classify a dynamic expression without copying nodes or extracting coefficients.
-    pub fn classified(&self) -> ClassifiedExpr<'a> {
+    /// Borrow a classified view without copying nodes or extracting coefficients.
+    /// Sharing permanently seals an owned quadratic. Use [`Self::into_classified`]
+    /// when consuming a handle.
+    pub fn as_classified(&self) -> ClassifiedExpr<'a> {
         self.seal();
         match self.__class() {
             ExprClass::Linear => ClassifiedExpr::Affine(Expr::from_id(self.id, self.arena)),
@@ -170,19 +174,15 @@ impl<'a, D: Degree> Expr<'a, D> {
     #[inline]
     /// Borrowed dynamic view that seals unique roots.
     /// Use [`Self::into_dynamic`] when consuming a handle.
-    pub fn erase(&self) -> Expr<'a> {
+    pub fn as_dynamic(&self) -> Expr<'a> {
         self.seal();
         Expr::from_id(self.id, self.arena)
     }
 
-    /// Borrowed dynamic view. Sharing permanently seals an owned quadratic.
-    pub fn as_dynamic(&self) -> Expr<'a> {
-        self.erase()
-    }
-
     /// Borrowed nonlinear view. Use [`Self::into_nonlinear`] to consume a handle.
     pub fn as_nonlinear(&self) -> Expr<'a, Nonlinear> {
-        self.nonlinear()
+        self.seal();
+        Expr::from_id(self.id, self.arena)
     }
 
     pub fn id(&self) -> ExprId {
@@ -254,34 +254,34 @@ impl<'a, D: Degree> Expr<'a, D> {
         self.mul_factored(self)
     }
 
-    /// Check the arena expression before narrowing its static degree.
+    /// Borrow a checked affine view, sealing unique roots when successful.
+    /// Use [`Self::into_affine`] when consuming a handle.
     ///
     /// # Errors
     /// Returns the actual expression class if it is not affine.
-    pub fn try_affine(&self) -> Result<Expr<'a, Affine>, ExprClass> {
-        self.seal();
+    pub fn as_affine(&self) -> Result<Expr<'a, Affine>, ExprClass> {
         let class = self.__class();
-        if class == ExprClass::Linear { Ok(Expr::from_id(self.id, self.arena)) } else { Err(class) }
-    }
-
-    /// Check that the expression has polynomial degree at most two.
-    ///
-    /// # Errors
-    /// Returns the actual expression class for a nonlinear expression.
-    pub fn try_quadratic(&self) -> Result<Expr<'a, Quadratic>, ExprClass> {
-        self.seal();
-        let class = self.__class();
-        if class <= ExprClass::Quadratic {
+        if class == ExprClass::Linear {
+            self.seal();
             Ok(Expr::from_id(self.id, self.arena))
         } else {
             Err(class)
         }
     }
 
-    /// Borrowed nonlinear view. Use [`Self::into_nonlinear`] to retain ownership.
-    pub fn nonlinear(&self) -> Expr<'a, Nonlinear> {
-        self.seal();
-        Expr::from_id(self.id, self.arena)
+    /// Borrow a checked view of polynomial degree at most two, sealing unique
+    /// roots when successful. Use [`Self::into_quadratic`] when consuming a handle.
+    ///
+    /// # Errors
+    /// Returns the actual expression class for a nonlinear expression.
+    pub fn as_quadratic(&self) -> Result<Expr<'a, Quadratic>, ExprClass> {
+        let class = self.__class();
+        if class <= ExprClass::Quadratic {
+            self.seal();
+            Ok(Expr::from_id(self.id, self.arena))
+        } else {
+            Err(class)
+        }
     }
 
     /// Identity of the model/expression arena that created this handle.
@@ -576,8 +576,109 @@ impl<'a> From<Expr<'a, Constant>> for Expr<'a, Quadratic> {
 }
 #[cfg(test)]
 mod tests {
-    use super::Expr;
-    use crate::arena::{ExprArena, ExprArenaCell};
+    use super::{ClassifiedExpr, Expr};
+    use crate::arena::{ExprArena, ExprArenaCell, VarId};
+    use crate::{Dynamic, ExprClass, Nonlinear, Quadratic, evaluate};
+
+    #[test]
+    fn failed_consuming_affine_conversion_returns_the_owned_original() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = (x.square() + 2.0 * x + 3.0).into_dynamic();
+        let root = expression.id;
+        let model = expression.model_id();
+
+        let original: Expr<'_, Dynamic> = expression.into_affine().unwrap_err();
+        assert_eq!(original.id, root);
+        assert_eq!(original.model_id(), model);
+        assert!(std::ptr::eq(original.arena(), std::ptr::from_ref(&arena)));
+        assert!(original.owned);
+
+        let ClassifiedExpr::Quadratic(recovered) = original.into_classified() else {
+            panic!("expected a quadratic expression");
+        };
+        let result = recovered + x;
+        assert_eq!(result.id, root, "recovery must preserve in-place accumulation");
+        assert_eq!(
+            evaluate(&arena.borrow(), result.id, &&[2.0][..]).unwrap().to_bits(),
+            13.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn failed_narrowing_retains_the_static_degree_and_nonlinear_graph() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x.sin();
+        let root = expression.id;
+
+        let original: Expr<'_, Nonlinear> = expression.into_quadratic().unwrap_err();
+        let original: Expr<'_, Nonlinear> = original.into_affine().unwrap_err();
+        assert_eq!(original.id, root);
+        assert_eq!(original.model_id(), arena.model_id());
+        assert!(std::ptr::eq(original.arena(), std::ptr::from_ref(&arena)));
+        assert_eq!(
+            evaluate(&arena.borrow(), original.id, &&[0.5][..]).unwrap().to_bits(),
+            0.5_f64.sin().to_bits()
+        );
+    }
+
+    #[test]
+    fn consuming_conversions_retain_unique_ownership() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x.square() - x.square() + x;
+        let root = expression.id;
+        let expression = expression.into_dynamic().into_affine().unwrap();
+        let expression = expression.into_nonlinear().into_quadratic().unwrap();
+        let expression = expression + x.square();
+        assert_eq!(expression.id, root);
+        assert!(expression.owned);
+    }
+
+    #[test]
+    fn borrowed_conversions_seal_the_shared_root() {
+        for conversion in 0..5 {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let x = Expr::from_var(&arena, VarId(0));
+            let expression = x.square() - x.square() + x;
+            let root = expression.id;
+            let alias = match conversion {
+                0 => expression.as_dynamic(),
+                1 => expression.as_nonlinear().into_dynamic(),
+                2 => expression.as_affine().unwrap().into_dynamic(),
+                3 => expression.as_quadratic().unwrap().into_dynamic(),
+                _ => {
+                    let ClassifiedExpr::Affine(alias) = expression.as_classified() else {
+                        panic!("expected an affine expression");
+                    };
+                    alias.into_dynamic()
+                }
+            };
+
+            let result = expression + x;
+            assert_ne!(result.id, root, "conversion {conversion} must seal its shared root");
+            assert_eq!(alias.id, root);
+            assert_eq!(
+                evaluate(&arena.borrow(), alias.id, &&[2.0][..]).unwrap().to_bits(),
+                2.0_f64.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_borrowed_narrowing_keeps_unique_ownership() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x.square();
+        let root = expression.id;
+        assert_eq!(expression.as_affine().unwrap_err(), ExprClass::Quadratic);
+
+        let recovered: Expr<'_, Quadratic> = expression.into_affine().unwrap_err();
+        let result = recovered + x;
+        assert_eq!(result.id, root);
+        assert_eq!(x.sin().as_quadratic().unwrap_err(), ExprClass::Nonlinear);
+    }
 
     #[test]
     fn set_param_value_rebinds_through_handle() {
@@ -611,7 +712,7 @@ mod tests {
 // Reusable borrowed variable/parameter handles cross dynamic APIs.
 impl<'a, D: Degree> From<&Expr<'a, D>> for Expr<'a> {
     fn from(value: &Expr<'a, D>) -> Self {
-        value.erase()
+        value.as_dynamic()
     }
 }
 

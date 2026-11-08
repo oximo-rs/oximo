@@ -95,7 +95,7 @@ fn build_flat<'a>(terms: &[Expr<'a, Affine>]) -> Expr<'a, Affine> {
 
 fn run(n: usize, workload: &str, method: Method, phase: &str) -> u128 {
     let (arena, ids) = fixture(n, workload);
-    let terms: Vec<_> = ids.iter().map(|&id| Expr::new(id, &arena).try_affine().unwrap()).collect();
+    let terms: Vec<_> = ids.iter().map(|&id| Expr::new(id, &arena).as_affine().unwrap()).collect();
     let start = Instant::now();
     let expr = build(&arena, &terms, method);
     if phase == "linear" {
@@ -157,7 +157,7 @@ fn main() {
                         let (arena, ids) = fixture(n, workload);
                         let terms: Vec<_> = ids
                             .iter()
-                            .map(|&id| Expr::new(id, &arena).try_affine().unwrap())
+                            .map(|&id| Expr::new(id, &arena).as_affine().unwrap())
                             .collect();
                         let expr = build(&arena, &terms, method);
                         let snapshot = arena.borrow();
@@ -205,7 +205,7 @@ fn measure_reuse(n: usize) {
     let reuse = |track_structure: bool| {
         let (arena, ids) = fixture(n, "distinct");
         let terms: Vec<_> =
-            ids.iter().map(|&id| Expr::new(id, &arena).try_affine().unwrap()).collect();
+            ids.iter().map(|&id| Expr::new(id, &arena).as_affine().unwrap()).collect();
         let mut builder = AffineBuilder::with_capacity(&arena, n);
         for term in &terms {
             builder.add_term(1.0, term);

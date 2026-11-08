@@ -1751,9 +1751,9 @@ pub mod benchmark_support {
         let z = model.__var("z").lb(-5.0).ub(5.0).build();
         for i in 0..rows {
             let lhs = match degree {
-                1 => (x + 2.0 * y - z).erase(),
+                1 => (x + 2.0 * y - z).as_dynamic(),
                 2 => x.powi(2) + y,
-                _ => (x * y * z).erase(),
+                _ => (x * y * z).as_dynamic(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -1797,7 +1797,7 @@ mod refresh_tests {
         let arena = m.__sum_context();
         let x_id = x.var_id().unwrap();
         let root = arena.borrow_mut().linear(vec![(x_id, 1.0), (x_id, 2.0)], 0.0);
-        let expression = oximo_expr::Expr::new(root, arena).try_affine().unwrap();
+        let expression = oximo_expr::Expr::new(root, arena).as_affine().unwrap();
         m.set_constraint_function(row, expression.into_function()).unwrap();
         let prepared = LoweringContext::new(&m).unwrap();
         let change = PreparationChange::Selected(

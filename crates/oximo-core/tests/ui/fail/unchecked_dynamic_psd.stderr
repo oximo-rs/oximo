@@ -1,8 +1,8 @@
 error[E0277]: the trait bound `Expr<'_>: IntoAffineMatrixEntry<'_>` is not satisfied
  --> tests/ui/fail/unchecked_dynamic_psd.rs:8:28
   |
-8 |     psd_constraint!(model, SymmetricMatrix::from_upper_triangle(1, [x.erase()]));
-  |     -----------------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
+8 |     psd_constraint!(model, SymmetricMatrix::from_upper_triangle(1, [x.as_dynamic()]));
+  |     -----------------------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
   |     |                      |
   |     |                      the trait `IntoAffineMatrixEntry<'_>` is not implemented for `Expr<'_>`
   |     required by a bound introduced by this call

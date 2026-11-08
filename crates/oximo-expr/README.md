@@ -75,7 +75,7 @@ let expression = builder.build();
 
 `AffineBuilder::new(arena)` and `with_capacity(arena, capacity)` also work without
 a `Model`. Inputs must have static `Affine` or `Constant` degree. Use
-`try_affine()` to check a dynamic handle. Adding terms creates no arena nodes.
+`as_affine()` to check a dynamic handle. Adding terms creates no arena nodes.
 Numeric-only input emits one `Linear` node, or a constant after cancellation.
 Parameter-dependent input preserves symbolic terms and ordered numeric segments
 under a flat sum.

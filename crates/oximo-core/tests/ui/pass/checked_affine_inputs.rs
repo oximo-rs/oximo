@@ -6,7 +6,7 @@ fn main() {
     let model = Model::new("contract");
     variable!(model, x);
     variable!(model, b, Bin);
-    let affine = x.erase().try_affine().unwrap();
+    let affine = x.as_dynamic().as_affine().unwrap();
     soc_constraint!(model, cones[i in 0..2], [&affine + i as f64] <= x);
     psd_constraint!(model, cones_psd[i in 0..2], SymmetricMatrix::from_upper_triangle(1, [&affine + i as f64]));
     indicator_constraint!(model, rows[i in 0..2], b == 1 => &affine <= i as f64);

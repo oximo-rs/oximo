@@ -18,7 +18,7 @@ impl FunctionInSet<Interval> for Scalar<'_> {}
 // A scalar function needs no LowerConstraint implementation.
 impl<'a> ScalarFunction<'a> for Scalar<'a> {
     fn expression(self) -> Expr<'a> {
-        self.0.erase()
+        self.0.as_dynamic()
     }
     fn is_affine(&self) -> bool {
         true

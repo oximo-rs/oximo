@@ -29,8 +29,8 @@
 //! every scalar degree supports inequalities and equalities.
 //!
 //! Use `x.square()` or `x * x` for a statically quadratic expression. Runtime
-//! powers such as `x.powi(n)` return [`Dynamic`]. [`Expr::erase`] gives mixed
-//! degrees a common type; [`Expr::try_affine`] and [`Expr::try_quadratic`] check
+//! powers such as `x.powi(n)` return [`Dynamic`]. [`Expr::as_dynamic`] gives mixed
+//! degrees a common type; [`Expr::as_affine`] and [`Expr::as_quadratic`] check
 //! the expression before narrowing its degree.
 //!
 //! # Modeling and validation
@@ -227,13 +227,13 @@ impl<'a> From<Expr<'a, Constant>> for ScalarAffineFunction<'a> {
     }
 }
 impl<'a> TryFrom<Expr<'a>> for ScalarAffineFunction<'a> {
-    type Error = ExprClass;
+    type Error = Expr<'a>;
     fn try_from(expr: Expr<'a>) -> Result<Self, Self::Error> {
         expr.into_affine().map(Self)
     }
 }
 impl<'a> TryFrom<Expr<'a>> for ScalarQuadraticFunction<'a> {
-    type Error = ExprClass;
+    type Error = Expr<'a>;
     fn try_from(expr: Expr<'a>) -> Result<Self, Self::Error> {
         expr.into_quadratic().map(Self)
     }
@@ -270,7 +270,7 @@ impl<'a> From<Expr<'a, Dynamic>> for ScalarNonlinearFunction<'a> {
     }
 }
 
-/// Statically affine inputs. Narrow dynamic expressions explicitly with `try_affine`.
+/// Statically affine inputs. Narrow dynamic expressions explicitly with [`Expr::into_affine`] or [`Expr::as_affine`].
 pub trait IntoAffineFunction<'a> {
     fn into_affine_function(self) -> ScalarAffineFunction<'a>;
 }
@@ -538,7 +538,7 @@ impl<'a> AlgebraicConstraintIr<'a> {
     /// Panics for invalid bounds or a non-affine expression.
     pub fn into_affine(self) -> AffineConstraintIr<'a> {
         validate_bounds(self.lower, self.upper);
-        self.lhs.try_affine().expect("indicator consequent must be affine");
+        self.lhs.as_affine().expect("indicator consequent must be affine");
         AffineConstraintIr(self)
     }
 }
@@ -609,7 +609,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(f64::NEG_INFINITY, set.0);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: f64::NEG_INFINITY,
                     upper: set.0,
                     semantic,
@@ -634,7 +634,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(set.0, f64::INFINITY);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: set.0,
                     upper: f64::INFINITY,
                     semantic,
@@ -659,7 +659,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(set.0, set.0);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: set.0,
                     upper: set.0,
                     semantic,
@@ -683,7 +683,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(set.lower, set.upper);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: set.lower,
                     upper: set.upper,
                     semantic,

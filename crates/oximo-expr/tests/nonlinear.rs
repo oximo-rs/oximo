@@ -13,7 +13,7 @@ fn every_unary_method_uses_the_public_operation_enum() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let x = Expr::constant(&arena, 1.25);
     let expressions = [
-        (x.neg().nonlinear(), UnaryOp::Neg),
+        (x.neg().as_nonlinear(), UnaryOp::Neg),
         (x.abs(), UnaryOp::Abs),
         (x.sqrt(), UnaryOp::Sqrt),
         (x.cbrt(), UnaryOp::Cbrt),
@@ -162,13 +162,13 @@ fn extrema_builder_streams_in_order_flattens_and_handles_empty() {
     let child = Expr::new(child, &arena);
 
     let mut minimum = oximo_expr::ExtremaBuilder::min();
-    minimum.push(a.min(b).erase());
-    minimum.push(c.erase());
+    minimum.push(a.min(b).as_dynamic());
+    minimum.push(c.as_dynamic());
     let minimum = minimum.finish().unwrap();
 
     let mut maximum = oximo_expr::ExtremaBuilder::max();
-    maximum.push(a.max(b).erase());
-    maximum.push(c.erase());
+    maximum.push(a.max(b).as_dynamic());
+    maximum.push(c.as_dynamic());
     let maximum = maximum.finish().unwrap();
 
     let snapshot = arena.borrow();

@@ -1,8 +1,8 @@
 error[E0277]: the trait bound `Expr<'_>: IntoAffineFunction<'_>` is not satisfied
  --> tests/ui/fail/unchecked_dynamic_indicator_range.rs:9:51
   |
-9 |     indicator_constraint!(model, b == 1 => 0.0 <= x.erase() <= 1.0);
-  |     ----------------------------------------------^^^^^^^^^--------
+9 |     indicator_constraint!(model, b == 1 => 0.0 <= x.as_dynamic() <= 1.0);
+  |     ----------------------------------------------^^^^^^^^^^^^^^--------
   |     |                                             |
   |     |                                             the trait `IntoAffineFunction<'_>` is not implemented for `Expr<'_>`
   |     required by a bound introduced by this call
@@ -37,6 +37,6 @@ note: required by a bound in `model::constraints::<impl oximo_core::Model>::__ad
   = note: this error originates in the macro `leaf_functions` (in Nightly builds, run with -Z macro-backtrace for more info)
 help: consider removing this method call, as the receiver has type `Expr<'_, oximo_expr::degree::VariableDegree>` and `Expr<'_, oximo_expr::degree::VariableDegree>: IntoAffineFunction<'_>` trivially holds
   |
-9 -     indicator_constraint!(model, b == 1 => 0.0 <= x.erase() <= 1.0);
+9 -     indicator_constraint!(model, b == 1 => 0.0 <= x.as_dynamic() <= 1.0);
 9 +     indicator_constraint!(model, b == 1 => 0.0 <= x <= 1.0);
   |

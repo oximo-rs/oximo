@@ -387,7 +387,7 @@ fn degree(a: &Ast) -> u32 {
 
 fn lower<'a>(m: &'a Model, vars: &HashMap<String, Expr<'a>>, a: Ast) -> Result<Expr<'a>, IoError> {
     match a {
-        Ast::Const(x) => Ok(m.__constant(x).erase()),
+        Ast::Const(x) => Ok(m.__constant(x).as_dynamic()),
         Ast::Var(v) => {
             vars.get(&v).cloned().ok_or_else(|| invalid_lp(1, 1, format!("unknown variable {v}")))
         }
@@ -805,7 +805,7 @@ fn build_model(
         };
         vars.insert(
             var_name.clone(),
-            m.__var(var_name.clone()).bounds(lb, ub).domain(domain).build().erase(),
+            m.__var(var_name.clone()).bounds(lb, ub).domain(domain).build().as_dynamic(),
         );
     }
     let mut used_names = HashSet::new();
@@ -903,7 +903,7 @@ fn build_model(
         validate_lp_rhs(indicator.sense, indicator.rhs)?;
         let e = lower(&m, &vars, indicator.expr)?;
         let affine =
-            e.try_affine().map_err(|_| invalid_lp(1, 1, "indicator consequent must be affine"))?;
+            e.as_affine().map_err(|_| invalid_lp(1, 1, "indicator consequent must be affine"))?;
         let consequent = match indicator.sense {
             Sense::Le => affine.le(indicator.rhs).into_ir(),
             Sense::Ge => affine.ge(indicator.rhs).into_ir(),

@@ -1018,9 +1018,9 @@ mod cache_tests {
         param!(model, p = 2.0);
         for i in 0..20 {
             model.add_constraint(format!("affine_{i}"), (p * x + y).le(f64::from(i)));
-            model.add_constraint(format!("dynamic_{i}"), x.erase().le(f64::from(i)));
+            model.add_constraint(format!("dynamic_{i}"), x.as_dynamic().le(f64::from(i)));
         }
-        constraint!(model, nonlinear, x.sin().erase() <= 2.0);
+        constraint!(model, nonlinear, x.sin().as_dynamic() <= 2.0);
         constraint!(model, quadratic, x.square() <= 4.0);
         constraint!(model, other_set, x == y);
         objective!(model, Min, x);
@@ -1050,9 +1050,9 @@ mod cache_tests {
         p.set_param_value(2.0).unwrap();
         assert!(Rc::ptr_eq(&first, &for_validation(&model)));
 
-        let mut unused = x.erase();
+        let mut unused = x.as_dynamic();
         for _ in 0..20_000 {
-            unused = unused.sin().erase();
+            unused = unused.sin().as_dynamic();
         }
         assert!(Rc::ptr_eq(&first, &for_validation(&model)));
         assert_eq!(first.entries, ModelRequirements::infer(&model).entries);
@@ -1194,9 +1194,9 @@ mod cache_tests {
         let model = Model::new("shared operators");
 
         variable!(model, x);
-        let mut shared = x.erase();
+        let mut shared = x.as_dynamic();
         for _ in 0..1000 {
-            shared = shared.sin().erase();
+            shared = shared.sin().as_dynamic();
         }
         for i in 0..100 {
             model.add_constraint(format!("row {i}"), shared.clone().le(2.0));

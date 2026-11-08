@@ -78,7 +78,7 @@ fn sparse_affine_batches_keep_duplicates_constants_ranges_and_source_slots() {
     let y_id = y.var_id().unwrap();
     let root =
         arena.borrow_mut().linear(vec![(x_id, 3.0), (x_id, -2.0), (y_id, 5.0), (y_id, -5.0)], 4.0);
-    let expression = oximo_expr::Expr::new(root, arena).try_affine().unwrap();
+    let expression = oximo_expr::Expr::new(root, arena).as_affine().unwrap();
     let upper = constraint!(model, upper, &expression <= 5.0);
     let lower = constraint!(model, lower, &expression >= 3.0);
     let equality = constraint!(model, equality, &expression == 4.0);
@@ -244,7 +244,7 @@ fn indicator_divisions_are_validated_before_native_rows() {
     variable!(model, b, Binary);
     variable!(model, x);
     param!(model, p = 1.0);
-    let lhs = (x + (x / p).powi(0)).try_affine().unwrap();
+    let lhs = (x + (x / p).powi(0)).as_affine().unwrap();
     let row = indicator_constraint!(model, row, b == 1 => lhs <= 1.0);
     objective!(model, Min, x);
 

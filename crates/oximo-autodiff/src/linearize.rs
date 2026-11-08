@@ -54,7 +54,7 @@ mod tests {
         variable!(m, y);
         param!(m, p = 2.0);
         let affine = p * x + 3.0 * y + 7.0;
-        assert_eq!(gradient_at(&m, affine.erase(), &[1.0, 2.0]).unwrap(), [2.0, 3.0]);
+        assert_eq!(gradient_at(&m, affine.as_dynamic(), &[1.0, 2.0]).unwrap(), [2.0, 3.0]);
 
         m.set_param(p, -4.0).unwrap();
         assert_eq!(gradient_at(&m, affine.into_dynamic(), &[1.0, 2.0]).unwrap(), [-4.0, 3.0]);
@@ -85,7 +85,7 @@ mod tests {
         variable!(m, y);
         param!(m, p = 2.0);
         let quadratic = p * x * x + x * y + 3.0 * y;
-        assert_eq!(gradient_at(&m, quadratic.erase(), &[0.5, 2.0]).unwrap(), [4.0, 3.5]);
+        assert_eq!(gradient_at(&m, quadratic.as_dynamic(), &[0.5, 2.0]).unwrap(), [4.0, 3.5]);
 
         m.set_param(p, -4.0).unwrap();
         assert_eq!(gradient_at(&m, quadratic.into_dynamic(), &[0.5, 2.0]).unwrap(), [-2.0, 3.5]);

@@ -494,7 +494,7 @@ fn indexed_constraint_handles_match_in_serial_and_parallel() {
         let ranges = model.add_range_constraints_over_with(
             "r",
             keys,
-            &|i| (if i % 2 == 0 { (*x + 1.0).erase() } else { x.powi(2) }, 0.0, 10.0),
+            &|i| (if i % 2 == 0 { (*x + 1.0).as_dynamic() } else { x.powi(2) }, 0.0, 10.0),
             Some(parallel),
         );
         for (key, id) in ordinary.iter() {
@@ -674,7 +674,7 @@ fn parallel_range_failure_does_not_mutate_model_or_arena() {
         let arena_len = model.arena().len();
         let keys = Set::range(0..128usize);
         let rule = |i: usize| {
-            let body = if i.is_multiple_of(2) { (x + 1.0).erase() } else { x.powi(2) };
+            let body = if i.is_multiple_of(2) { (x + 1.0).as_dynamic() } else { x.powi(2) };
             assert!(duplicate_name || i != 17, "deliberate range callback panic");
             (body, 0.0, 10.0)
         };

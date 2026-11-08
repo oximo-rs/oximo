@@ -388,9 +388,9 @@ fn deep_expression_walk_is_iterative() {
     let model = Model::new("deep");
 
     variable!(model, x);
-    let mut expression = x.erase();
+    let mut expression = x.as_dynamic();
     for _ in 0..8_000 {
-        expression = expression.sin().erase();
+        expression = expression.sin().as_dynamic();
     }
     objective!(model, Min, expression);
 

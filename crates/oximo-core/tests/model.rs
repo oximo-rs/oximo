@@ -236,8 +236,8 @@ fn dynamic_quadratic_soc_term_requires_successful_narrowing() {
     let m = Model::new("bad_soc");
     variable!(m, x);
     variable!(m, t >= 0.0);
-    assert!((x * x).erase().try_affine().is_err());
-    assert!(t.erase().try_affine().is_ok());
+    assert!((x * x).as_dynamic().as_affine().is_err());
+    assert!(t.as_dynamic().as_affine().is_ok());
 }
 
 #[test]

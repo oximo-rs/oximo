@@ -854,7 +854,7 @@ fn soc_macro_accepts_explicitly_narrowed_dynamic_terms() {
     let m = Model::new("soc_bad");
     variable!(m, x);
     variable!(m, t >= 0.0);
-    soc_constraint!(m, cone, [x.erase().try_affine().unwrap()] <= t);
+    soc_constraint!(m, cone, [x.as_dynamic().as_affine().unwrap()] <= t);
     assert_eq!(m.num_soc_constraints(), 1);
 }
 

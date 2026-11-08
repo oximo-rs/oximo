@@ -157,7 +157,7 @@ fn builders_ingest_hessians_and_check_dynamic_affine_inputs_without_nodes() {
     let seed =
         oximo_expr::QuadraticTerms::from_coefficients(vec![(v, v, tiny)], vec![(v, 2.0)], 3.0)
             .unwrap();
-    let dynamic = (2.0 * x + 1.0).erase();
+    let dynamic = (2.0 * x + 1.0).as_dynamic();
     let before = m.arena().len();
     let mut builder = m.quadratic_builder();
     builder.add_quadratic(1.0, &seed).unwrap().add_expr(2.0, &dynamic).unwrap();
@@ -167,11 +167,11 @@ fn builders_ingest_hessians_and_check_dynamic_affine_inputs_without_nodes() {
     assert_eq!(terms.linear(), [(v, 6.0)]);
     assert_eq!(terms.constant(), 5.0);
     assert!(builder.build_terms().quadratic().is_empty());
-    let compound = x.square().erase();
+    let compound = x.square().as_dynamic();
     assert_eq!(builder.add_expr(1.0, &compound).unwrap_err(), QuadraticBuildError::NotAffine);
     param!(m, p = 2.0);
     assert_eq!(
-        builder.add_expr(0.0, (p * x).erase()).unwrap_err(),
+        builder.add_expr(0.0, (p * x).as_dynamic()).unwrap_err(),
         QuadraticBuildError::ParameterizedInput
     );
     builder.add_quadratic(1.0, &terms).unwrap();

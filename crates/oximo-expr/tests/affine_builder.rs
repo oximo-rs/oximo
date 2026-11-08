@@ -117,7 +117,7 @@ fn operator_thresholds_and_saved_prefixes() {
             id = writer.push(ExprNode::Unary(oximo_expr::UnaryOp::Neg, id));
         }
     }
-    let deep = Expr::new(id, &arena).try_affine().unwrap() + (vars[1]).clone();
+    let deep = Expr::new(id, &arena).as_affine().unwrap() + (vars[1]).clone();
     assert!(matches!(arena.borrow().get(deep.id()), ExprNode::Add(_)));
     assert_eq!(
         extract_linear(&arena.borrow(), deep.id()).unwrap().coeffs.as_ref(),
@@ -251,13 +251,13 @@ fn numeric_cancellation_does_not_raise_product_or_power_degree() {
     let right = vars.iter().rev().cloned().reduce(|a, b| a + b).unwrap();
     for cancelled in [left.clone() - left.clone(), left.clone() - right] {
         for expr in [
-            (cancelled.clone() * (vars[0]).clone()).erase(),
-            ((vars[0]).clone() * cancelled.clone()).erase(),
+            (cancelled.clone() * (vars[0]).clone()).as_dynamic(),
+            ((vars[0]).clone() * cancelled.clone()).as_dynamic(),
             cancelled.powi(3),
             cancelled.powf(2.0),
-            cancelled.square().erase(),
+            cancelled.square().as_dynamic(),
         ] {
-            assert!(expr.try_affine().is_ok());
+            assert!(expr.as_affine().is_ok());
             let snapshot = arena.borrow();
             let linear = extract_linear(&snapshot, expr.id()).unwrap();
             assert!(linear.coeffs.is_empty());
@@ -266,13 +266,13 @@ fn numeric_cancellation_does_not_raise_product_or_power_degree() {
         }
         let constant = cancelled.clone() + 3.0;
         let affine = constant * (vars[0]).clone();
-        assert!(affine.try_affine().is_ok());
+        assert!(affine.as_affine().is_ok());
         assert_eq!(
             extract_linear(&arena.borrow(), affine.id()).unwrap().coeffs.as_ref(),
             &[(VarId(0), 3.0)]
         );
         let large_product = cancelled * left.clone();
-        assert!(large_product.try_affine().is_ok());
+        assert!(large_product.as_affine().is_ok());
         assert!(extract_linear(&arena.borrow(), large_product.id()).unwrap().coeffs.is_empty());
         assert_eq!(evaluate(&arena.borrow(), large_product.id(), &&[][..]).unwrap(), 0.0);
     }
@@ -309,10 +309,10 @@ fn numeric_cancellation_under_symbolic_parents_stays_affine_after_rebinding() {
     let symbolic = cancelled.clone() + p;
     let snapshot = arena.borrow();
     let expressions = [
-        (((cancelled * p) * (vars[0]).clone()).erase(), false),
-        ((symbolic.clone() * (vars[0]).clone()).erase(), true),
-        ((-symbolic.clone() * (vars[0]).clone()).erase(), true),
-        ((symbolic.powi(3) * (vars[0]).clone()).erase(), true),
+        (((cancelled * p) * (vars[0]).clone()).as_dynamic(), false),
+        ((symbolic.clone() * (vars[0]).clone()).as_dynamic(), true),
+        ((-symbolic.clone() * (vars[0]).clone()).as_dynamic(), true),
+        ((symbolic.powi(3) * (vars[0]).clone()).as_dynamic(), true),
     ];
     // Rewriting never changes the original handles or the saved snapshot.
     assert!(matches!(snapshot.get(symbolic.id()), ExprNode::Add(_)));
@@ -320,7 +320,7 @@ fn numeric_cancellation_under_symbolic_parents_stays_affine_after_rebinding() {
         p.set_param_value(value).unwrap();
         let current = arena.borrow();
         for (index, (expression, has_parameter)) in expressions.iter().enumerate() {
-            assert!(expression.try_affine().is_ok(), "case {index}");
+            assert!(expression.as_affine().is_ok(), "case {index}");
             let terms = extract_linear(&current, expression.id()).unwrap();
             let coefficient = match index {
                 2 => -value,
@@ -548,7 +548,7 @@ fn cancellation_under_a_deep_symbolic_spine_stays_affine_after_rebinding() {
                 }
             }
             let expression = Expr::new(root, &arena) * (vars[0]).clone();
-            assert!(expression.try_affine().is_ok());
+            assert!(expression.as_affine().is_ok());
             for value in [2.0, -1.0, 0.0] {
                 p.set_param_value(value).unwrap();
                 let snapshot = arena.borrow();
