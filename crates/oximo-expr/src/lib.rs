@@ -2,10 +2,12 @@
 #![forbid(unsafe_code)]
 
 mod affine_builder;
+mod affine_split;
 mod analysis;
 mod arena;
 mod captured;
 mod classify;
+mod compensated_sum;
 pub mod degree;
 mod eval;
 mod fold;
@@ -21,6 +23,7 @@ mod simplify;
 mod visit;
 
 pub use affine_builder::AffineBuilder;
+pub use affine_split::{AffineResidual, split_affine};
 pub use analysis::ExpressionOperator;
 #[doc(hidden)]
 pub use analysis::{ExpressionAnalysis, ExpressionSummary};

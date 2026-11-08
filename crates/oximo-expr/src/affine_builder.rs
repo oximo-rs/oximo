@@ -4,6 +4,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::smallvec;
 
 use crate::arena::{ArenaAccess, ExprId, ExprNode, VarId};
+use crate::compensated_sum::CompensatedSum;
 use crate::degree::AddDegree;
 use crate::linear::{CoeffAccum, LinearTerms, add_n, as_linear, push_linear};
 use crate::{Affine, Expr, ExprArenaCell};
@@ -182,33 +183,6 @@ fn flush_segment(
         children.push(push_linear(arena, LinearTerms::owned(acc.coeffs.clone(), *constant)));
         acc.clear();
         *constant = 0.0;
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct CompensatedSum {
-    sum: f64,
-    correction: f64,
-}
-
-impl CompensatedSum {
-    fn add(&mut self, value: f64) {
-        let next = self.sum + value;
-        if self.sum.is_finite() && value.is_finite() && next.is_finite() {
-            self.correction += if self.sum.abs() >= value.abs() {
-                (self.sum - next) + value
-            } else {
-                (value - next) + self.sum
-            };
-        } else {
-            // Avoid introducing NaN solely from inf-inf in the correction.
-            self.correction = 0.0;
-        }
-        self.sum = next;
-    }
-
-    fn value(self) -> f64 {
-        self.sum + self.correction
     }
 }
 

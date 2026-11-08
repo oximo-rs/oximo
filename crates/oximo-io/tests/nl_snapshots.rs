@@ -290,3 +290,50 @@ fn compact_quadratic_residuals_roundtrip_in_additions_negations_and_functions() 
         }
     }
 }
+
+#[test]
+fn polynomial_affine_cancellation_preserves_nl_objective_offsets_and_row_bounds() {
+    use oximo_expr::{Dynamic, Expr, ExprNode, QuadraticTerms, evaluate};
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+    use std::sync::Arc;
+
+    let model = Model::new("compensated polynomial NL split");
+    variable!(model, x);
+    let variable = x.var_id().unwrap();
+    let root = {
+        let mut arena = x.arena().borrow_mut();
+        let children = [1e16, 1.0, -1e16]
+            .into_iter()
+            .map(|value| {
+                arena.push(ExprNode::Quadratic(Arc::new(
+                    QuadraticTerms::from_coefficients(
+                        vec![(variable, variable, 1.0)],
+                        vec![(variable, value)],
+                        value,
+                    )
+                    .unwrap(),
+                )))
+            })
+            .collect();
+        arena.push(ExprNode::Add(children))
+    };
+    let expression = Expr::<Dynamic>::new(root, x.arena());
+    objective!(model, Min, &expression);
+    constraint!(model, row, expression <= 5.0);
+
+    for options in [WriteOptions::default(), WriteOptions::binary()] {
+        let mut bytes = Vec::new();
+        write_nl_with(&model, &mut bytes, &options).unwrap();
+        let imported = read_nl(bytes.as_slice()).unwrap();
+        assert_eq!(imported.constraints().algebraic()[0].upper, 4.0);
+        for value in [0.0, 1.0, -1.0] {
+            let actual = evaluate(
+                &imported.arena(),
+                imported.objective().as_ref().unwrap().expr,
+                &&[value][..],
+            )
+            .unwrap();
+            assert_eq!(actual, 3.0 * value * value + value + 1.0);
+        }
+    }
+}

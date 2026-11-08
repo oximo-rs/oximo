@@ -20,10 +20,11 @@
 
 use std::io::Write;
 
-use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp, VarId, extract_linear};
+use oximo_expr::{
+    AffineResidual, ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp, VarId, extract_linear,
+};
 use rustc_hash::FxHashMap;
 
-use super::analyze::Residual;
 use super::writer::Writer;
 use crate::error::IoError;
 
@@ -55,7 +56,7 @@ pub(crate) fn emit_residual<'a, W: Write>(
     w: &mut Writer<'_, W>,
     arena: &'a ExprArena,
     var_index: &FxHashMap<VarId, u32>,
-    residual: &[Residual],
+    residual: &[AffineResidual],
     cache: &mut EmitCache<'a>,
 ) -> Result<(), IoError> {
     match residual.len() {
@@ -82,7 +83,7 @@ fn emit_signed<'a, W: Write>(
     w: &mut Writer<'_, W>,
     arena: &'a ExprArena,
     var_index: &FxHashMap<VarId, u32>,
-    residual: Residual,
+    residual: AffineResidual,
     cache: &mut EmitCache<'a>,
 ) -> Result<(), IoError> {
     let source = residual.source();
@@ -90,8 +91,8 @@ fn emit_signed<'a, W: Write>(
         w.op(16)?;
     }
     match residual {
-        Residual::Full(_) => emit_expr(w, arena, var_index, source.id, cache),
-        Residual::QuadraticPart(_) => {
+        AffineResidual::Full(_) => emit_expr(w, arena, var_index, source.id, cache),
+        AffineResidual::QuadraticPart(_) => {
             let ExprNode::Quadratic(q) = arena.get(source.id) else {
                 unreachable!("quadratic residual must reference a Quadratic node")
             };

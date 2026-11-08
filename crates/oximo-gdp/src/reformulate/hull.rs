@@ -26,7 +26,8 @@ use oximo_core::{
     Domain, ExprArena, ExprId, ExprNode, GeneratedConstraintId, GeneratedVarId, Model, VarId,
 };
 use oximo_expr::{
-    EvalContext, LinearTerms, ParamId, SignedExpr, evaluate, extract_linear, split_linear,
+    AffineResidual, EvalContext, LinearTerms, ParamId, SignedExpr, evaluate, extract_linear,
+    split_affine, split_linear,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
@@ -99,35 +100,33 @@ impl PlanningArena {
         &mut self,
         root: ExprId,
     ) -> Result<(LinearTerms<'static>, Vec<SignedExpr>), GdpError> {
-        let (affine, residual) = split_linear(self, root);
-        let mut affine = affine.into_owned();
-        let mut constant = RecoverySum::default();
-        constant.add(affine.constant)?;
+        let (affine, residual) = split_affine(self, root);
+        let affine = affine.into_owned();
+        if !affine.constant.is_finite() || affine.coeffs.iter().any(|&(_, c)| !c.is_finite()) {
+            return Err(GdpError::NumericOverflow);
+        }
 
         let mut parts = Vec::with_capacity(residual.len());
-        for mut term in residual {
-            let ExprNode::Quadratic(q) = self.get(term.id).clone() else {
+        for residual in residual {
+            let mut term = residual.source();
+            if let AffineResidual::Full(_) = residual {
                 parts.push(term);
                 continue;
-            };
-            let sign = if term.neg { -1.0 } else { 1.0 };
-            affine.coeffs.to_mut().extend(q.linear().iter().map(|&(v, c)| (v, sign * c)));
-            constant.add(sign * q.constant())?;
-            if !q.quadratic().is_empty() {
-                if !q.linear().is_empty() || q.constant() != 0.0 {
-                    term.id = self.push(ExprNode::Quadratic(Arc::new(
-                        oximo_expr::QuadraticTerms::from_coefficients(
-                            q.quadratic().to_vec(),
-                            Vec::new(),
-                            0.0,
-                        )
-                        .expect("validated Hessian subset"),
-                    )))?;
-                }
-                parts.push(term);
             }
+            let ExprNode::Quadratic(q) = self.get(term.id) else {
+                unreachable!("quadratic residual must reference a Quadratic node")
+            };
+            if !q.linear().is_empty() || q.constant() != 0.0 {
+                let stripped = oximo_expr::QuadraticTerms::from_coefficients(
+                    q.quadratic().to_vec(),
+                    Vec::new(),
+                    0.0,
+                )
+                .expect("validated polynomial subset");
+                term.id = self.push(ExprNode::Quadratic(Arc::new(stripped)))?;
+            }
+            parts.push(term);
         }
-        affine.constant = constant.value()?;
 
         Ok((affine, parts))
     }
@@ -2220,4 +2219,57 @@ fn substitute_quadratic(
     }
 
     arena.push(ExprNode::Add(terms.into_iter().collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_splitting_preserves_small_affine_terms_and_materializes_only_monomials() {
+        let mut source = ExprArena::new();
+        let variable = VarId(0);
+        let children = [1e16, 1.0, -1e16]
+            .into_iter()
+            .map(|value| {
+                source.push(ExprNode::Quadratic(Arc::new(
+                    oximo_expr::QuadraticTerms::from_coefficients(
+                        vec![(variable, variable, 1.0)],
+                        vec![(variable, value)],
+                        value,
+                    )
+                    .unwrap(),
+                )))
+            })
+            .collect();
+        let root = source.push(ExprNode::Add(children));
+        let mut arena = PlanningArena::new(&source, None).unwrap();
+        let (affine, residual) = arena.split_source(root).unwrap();
+        assert_eq!(affine.constant, 1.0);
+        assert_eq!(affine.coeffs.as_ref(), &[(variable, 1.0)]);
+        assert_eq!(residual.len(), 3);
+
+        for term in residual {
+            let ExprNode::Quadratic(terms) = arena.get(term.id) else {
+                panic!("materialized quadratic")
+            };
+            assert_eq!(terms.constant(), 0.0);
+            assert_eq!(terms.linear(), []);
+            assert_eq!(terms.quadratic(), &[(variable, variable, 1.0)]);
+        }
+
+        let mut limited = PlanningArena::new(&source, Some(source.len())).unwrap();
+        assert!(matches!(limited.split_source(root), Err(GdpError::PlanningLimit { .. })));
+    }
+
+    #[test]
+    fn source_splitting_rejects_nonfinite_affine_results() {
+        let mut source = ExprArena::new();
+        for value in [f64::INFINITY, f64::NAN, f64::MAX] {
+            let constant = source.constant(value);
+            let root = source.push(ExprNode::Add([constant, constant].into_iter().collect()));
+            let mut arena = PlanningArena::new(&source, None).unwrap();
+            assert!(matches!(arena.split_source(root), Err(GdpError::NumericOverflow)));
+        }
+    }
 }

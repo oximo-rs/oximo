@@ -1,8 +1,8 @@
 mod support;
 
 use oximo_expr::{
-    Expr, ExprArena, ExprArenaCell, ExprNode, VarId, classify, extract_linear, extract_quadratic,
-    render_expr, split_linear,
+    Expr, ExprArena, ExprArenaCell, ExprNode, QuadraticTerms, VarId, classify, extract_linear,
+    extract_quadratic, render_expr, split_affine, split_linear,
 };
 use smallvec::smallvec;
 
@@ -11,6 +11,7 @@ static ALLOC: support::CountingAllocator = support::CountingAllocator;
 
 fn main() {
     println!("case,nanoseconds,allocations,requested_bytes,peak_live_bytes");
+    split_affine_cases();
     let mut arena = ExprArena::new();
     let vars: Vec<_> = (0..2048).map(|i| arena.var(VarId(i))).collect();
     let p = arena.new_param(1.5);
@@ -95,4 +96,74 @@ fn main() {
     support::measure("quadratic_hidden_overflow/64", || {
         extract_quadratic(&snapshot, overflow.id()).unwrap()
     });
+}
+
+fn measure_split(name: &str, arena: &ExprArena, root: oximo_expr::ExprId) {
+    support::measure(name, || {
+        let (linear, residual) = split_affine(arena, root);
+        (linear.into_owned(), residual)
+    });
+}
+
+fn split_affine_cases() {
+    let mut arena = ExprArena::new();
+    let variables: Vec<_> = (0..2048).map(|i| arena.var(VarId(i))).collect();
+    for count in [32, 2048] {
+        let wide = arena.push(ExprNode::Add(variables[..count].iter().copied().collect()));
+        measure_split(&format!("split_affine_wide/{count}"), &arena, wide);
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let sum = (0..count)
+            .map(|i| Expr::from_var(&cell, VarId(u32::try_from(i).unwrap())))
+            .map(Expr::<oximo_expr::Affine>::from)
+            .reduce(|left, right| left + right)
+            .unwrap();
+        measure_split(&format!("split_affine_built/{count}"), &cell.borrow(), sum.id());
+    }
+
+    for count in [8, 128] {
+        let terms = (0..count)
+            .map(|i| {
+                let variable = VarId(i);
+                let terms = QuadraticTerms::from_coefficients(
+                    vec![(variable, variable, 1.0)],
+                    vec![(variable, 2.0)],
+                    3.0,
+                )
+                .unwrap();
+                arena.push(ExprNode::Quadratic(std::sync::Arc::new(terms)))
+            })
+            .collect();
+        let root = arena.push(ExprNode::Add(terms));
+        measure_split(&format!("split_affine_quadratic_sum/{count}"), &arena, root);
+    }
+
+    let shuffled =
+        arena.push(ExprNode::Add((0..2048).map(|i| variables[(i * 1151) % 2048]).collect()));
+    measure_split("split_affine_shuffled/2048", &arena, shuffled);
+
+    let duplicates =
+        arena.push(ExprNode::Add((0..2048).map(|i| variables[(i * 19) % 32]).collect()));
+    measure_split("split_affine_duplicates/2048", &arena, duplicates);
+
+    let parameter_id = arena.new_param(1.5);
+    let parameter = arena.param(parameter_id);
+    let affine = arena.linear((0..32).map(|i| (VarId(i), 1.0)).collect(), 1.0);
+    let scaled = arena.push(ExprNode::Mul(smallvec![parameter, affine]));
+    let scaled_sum = arena.push(ExprNode::Add((0..2048).map(|_| scaled).collect()));
+    measure_split("split_affine_scaled_shared/2048", &arena, scaled_sum);
+
+    let mut level = variables;
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|pair| arena.push(ExprNode::Add(pair.iter().copied().collect())))
+            .collect();
+    }
+    measure_split("split_affine_balanced/2048", &arena, level[0]);
+
+    let mut shared = arena.linear((0..32).map(|i| (VarId(i), 1.0)).collect(), 1.0);
+    for _ in 0..40 {
+        shared = arena.push(ExprNode::Add(smallvec![shared, shared]));
+    }
+    measure_split("split_affine_shared/40", &arena, shared);
 }
