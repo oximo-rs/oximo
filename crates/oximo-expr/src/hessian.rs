@@ -14,11 +14,13 @@ pub enum HessianConversionErrorKind {
     AccumulationOverflow,
     #[error("the diagonal has no exactly representable polynomial coefficient")]
     InexactDiagonal,
+    #[error("doubling the polynomial diagonal exceeds the finite f64 range")]
+    DiagonalOverflow,
 }
 
 /// A failed conversion, including the variable pair and offending input value.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("Hessian entry ({row:?}, {column:?}) = {value:e}: {kind}")]
+#[error("Hessian conversion at ({row:?}, {column:?}) for input {value:e}: {kind}")]
 pub struct HessianConversionError {
     pub row: VarId,
     pub column: VarId,
@@ -53,6 +55,48 @@ pub enum QuadraticImportError {
 #[derive(Clone, Debug)]
 pub struct LowerTriangularHessian {
     entries: Vec<(VarId, VarId, f64)>,
+}
+
+impl QuadraticTerms {
+    /// Convert polynomial coefficients to finite lower-triangle second derivatives.
+    /// Diagonal coefficients are doubled, while off-diagonal coefficients are unchanged.
+    /// Entries retain canonical column-then-row order.
+    ///
+    /// ```
+    /// use oximo_expr::{QuadraticTerms, VarId};
+    /// # fn main() -> Result<(), oximo_expr::HessianConversionError> {
+    /// let terms = QuadraticTerms::from_coefficients(
+    ///     vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
+    ///     Vec::new(), 0.0,
+    /// ).unwrap();
+    ///
+    /// let hessian = terms.checked_hessian_entries().collect::<Result<Vec<_>, _>>()?;
+    /// assert_eq!(hessian, [(VarId(0), VarId(0), 6.0), (VarId(1), VarId(0), 5.0)]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// An entry returns its variable pair and original polynomial coefficient if
+    /// the input is nonfinite or doubling a diagonal overflows.
+    pub fn checked_hessian_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Result<(VarId, VarId, f64), HessianConversionError>> + '_
+    {
+        self.quadratic().iter().map(|&(row, column, coefficient)| {
+            let error = |kind| HessianConversionError { row, column, value: coefficient, kind };
+            let value = if row == column { 2.0 * coefficient } else { coefficient };
+            if !value.is_finite() {
+                let kind = if coefficient.is_finite() {
+                    HessianConversionErrorKind::DiagonalOverflow
+                } else {
+                    HessianConversionErrorKind::NonFiniteInput
+                };
+                return Err(error(kind));
+            }
+            Ok((row, column, value))
+        })
+    }
 }
 
 impl LowerTriangularHessian {
@@ -121,6 +165,92 @@ impl TryFrom<LowerTriangularHessian> for QuadraticTerms {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_polynomial_export_preserves_order_and_exact_subnormal_diagonals() {
+        let tiny = f64::from_bits(1);
+        let terms = QuadraticTerms::from_coefficients(
+            vec![
+                (VarId(3), VarId(3), -tiny),
+                (VarId(0), VarId(2), f64::MAX),
+                (VarId(1), VarId(1), -0.5 * f64::MAX),
+                (VarId(0), VarId(0), tiny),
+            ],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(terms.checked_hessian_entries().len(), 4);
+
+        let entries = terms.checked_hessian_entries().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(
+            entries,
+            [
+                (VarId(0), VarId(0), 2.0 * tiny),
+                (VarId(2), VarId(0), f64::MAX),
+                (VarId(1), VarId(1), -f64::MAX),
+                (VarId(3), VarId(3), -2.0 * tiny),
+            ]
+        );
+
+        let imported =
+            QuadraticTerms::try_from(LowerTriangularHessian::new(entries).unwrap()).unwrap();
+        assert_eq!(imported.quadratic(), terms.quadratic());
+    }
+
+    #[test]
+    fn checked_polynomial_export_reports_diagonal_overflow_with_original_coefficient() {
+        let first_overflow = f64::from_bits((0.5 * f64::MAX).to_bits() + 1);
+        for coefficient in [first_overflow, 1e308, f64::MAX] {
+            for negate in [false, true] {
+                let mut terms = QuadraticTerms::from_coefficients(
+                    vec![(VarId(1), VarId(0), 2.0), (VarId(7), VarId(7), coefficient)],
+                    Vec::new(),
+                    0.0,
+                )
+                .unwrap();
+                if negate {
+                    terms.negate();
+                }
+
+                let error =
+                    terms.checked_hessian_entries().collect::<Result<Vec<_>, _>>().unwrap_err();
+                let expected = if negate { -coefficient } else { coefficient };
+                assert_eq!(
+                    error,
+                    HessianConversionError {
+                        row: VarId(7),
+                        column: VarId(7),
+                        value: expected,
+                        kind: HessianConversionErrorKind::DiagonalOverflow,
+                    }
+                );
+                assert!(error.to_string().contains("finite f64 range"));
+            }
+        }
+    }
+
+    #[test]
+    fn checked_polynomial_export_rejects_nonfinite_diagonal_and_cross_entries() {
+        for coefficient in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for column in [VarId(0), VarId(3)] {
+                let terms = QuadraticTerms::from_canonical_parts(
+                    vec![(VarId(3), column, coefficient)],
+                    Vec::new(),
+                    0.0,
+                );
+                assert_eq!(
+                    terms.checked_hessian_entries().next().unwrap().unwrap_err(),
+                    HessianConversionError {
+                        row: VarId(3),
+                        column,
+                        value: coefficient,
+                        kind: HessianConversionErrorKind::NonFiniteInput,
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn typed_hessian_conversion_canonicalizes_and_reports_the_offending_entry() {

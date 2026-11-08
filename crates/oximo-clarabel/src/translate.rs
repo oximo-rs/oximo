@@ -667,15 +667,8 @@ fn objective_data(
         q[var.index()] += sign * coef;
     }
     let p_trip = quad
-        .hessian_entries()
-        .map(|(row, col, h)| {
-            if !h.is_finite() {
-                return Err(SolverError::Backend(
-                    "quadratic objective Hessian exceeds finite f64 range".into(),
-                ));
-            }
-            Ok((col.index(), row.index(), sign * h))
-        })
+        .checked_hessian_entries()
+        .map(|entry| entry.map(|(row, col, h)| (col.index(), row.index(), sign * h)))
         .collect::<Result<_, _>>()?;
     Ok((sign, p_trip, q, quad.constant()))
 }
@@ -1300,6 +1293,27 @@ mod tests {
     use oximo_solver::UniversalOptionsExt;
 
     use super::*;
+
+    #[test]
+    fn objective_hessian_conversion_transposes_pairs_and_checks_overflow() {
+        let model = Model::new("checked Hessian");
+        variable!(model, x);
+        variable!(model, y);
+        objective!(model, Max, -3.0 * x.square() - 5.0 * x * y);
+
+        let prepared = LoweringContext::new(&model).unwrap();
+        let (_, hessian, _, _) = objective_data(&prepared, 2).unwrap();
+        assert_eq!(hessian, [(0, 0, 6.0), (0, 1, 5.0)]);
+
+        drop(prepared);
+        objective!(model, Min, 1e308 * x.square());
+        let prepared = LoweringContext::new(&model).unwrap();
+        assert!(matches!(
+            objective_data(&prepared, 2).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
 
     #[test]
     fn concurrent_rebinding_keeps_native_bound_rows_and_coefficients_in_one_snapshot() {

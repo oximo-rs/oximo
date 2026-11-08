@@ -1316,8 +1316,7 @@ fn add_comparison_rows(
         .collect()
 }
 
-/// Convert the canonical triangular Hessian convention, f = x'Hx/2 + a'x + c.
-/// Cross entries already include both symmetric positions.
+/// Convert canonical polynomial coefficients to a native quadratic expression.
 #[cfg(test)]
 fn quadratic_expression(terms: &QuadraticTerms, variables: &[gurobi_rs::Var]) -> QuadExpr {
     let mut expression = QuadExpr::new();

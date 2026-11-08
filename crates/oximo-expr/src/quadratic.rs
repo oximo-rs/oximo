@@ -197,7 +197,7 @@ impl QuadraticTerms {
     /// Full lower-triangle second derivatives.
     ///
     /// The mathematical Hessian can overflow even when the polynomial coefficients are finite.
-    /// Consumers requiring a finite solver matrix must validate the resulting values.
+    /// Use [`Self::checked_hessian_entries`] when a finite solver matrix is required.
     pub fn hessian_entries(&self) -> impl ExactSizeIterator<Item = (VarId, VarId, f64)> + '_ {
         self.quadratic().iter().map(|&(a, b, c)| (a, b, if a == b { 2.0 * c } else { c }))
     }

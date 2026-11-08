@@ -297,7 +297,8 @@ pub enum ExprNode {
         coeffs: Vec<(VarId, f64)>,
         constant: f64,
     },
-    /// Immutable numeric quadratic coefficients in Hessian convention.
+    /// Immutable numeric polynomial coefficients.
+    /// A diagonal coefficient `c` represents `c * x * x`.
     Quadratic(Arc<crate::QuadraticTerms>),
 }
 

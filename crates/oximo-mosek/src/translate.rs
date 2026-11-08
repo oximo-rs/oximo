@@ -644,14 +644,11 @@ fn fill_q_triplets(terms: &QuadraticTerms, scratch: &mut TaskScratch) -> Result<
     scratch.indices.reserve(len.saturating_sub(scratch.indices.capacity()));
     scratch.columns.reserve(len.saturating_sub(scratch.columns.capacity()));
     scratch.values.reserve(len.saturating_sub(scratch.values.capacity()));
-    for &(row, column, value) in terms.quadratic() {
+    for entry in terms.checked_hessian_entries() {
+        let (row, column, value) = entry?;
         scratch.indices.push(index_i32(row.index(), "variable")?);
         scratch.columns.push(index_i32(column.index(), "variable")?);
-        let h = if row == column { 2.0 * value } else { value };
-        if !h.is_finite() {
-            return Err(SolverError::Backend("quadratic Hessian exceeds finite f64 range".into()));
-        }
-        scratch.values.push(h);
+        scratch.values.push(value);
     }
     Ok(())
 }
@@ -980,6 +977,30 @@ pub mod benchmark_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_hessian_upload_uses_checked_polynomial_conversion() {
+        let terms = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        let mut scratch = TaskScratch::default();
+        fill_q_triplets(&terms, &mut scratch).unwrap();
+        assert_eq!(scratch.indices, [0, 1]);
+        assert_eq!(scratch.columns, [0, 0]);
+        assert_eq!(scratch.values, [6.0, 5.0]);
+
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1e308)], Vec::new(), 0.0)
+                .unwrap();
+        assert!(matches!(
+            fill_q_triplets(&terms, &mut scratch).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
 
     #[test]
     fn separates_primal_and_dual_solution_statuses() {

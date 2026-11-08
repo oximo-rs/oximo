@@ -338,13 +338,8 @@ pub(crate) fn objective_terms(
 /// Row indices within each column are sorted ascending.
 fn hessian_columns(quad: &QuadraticTerms, num_vars: usize) -> Result<HessianCols, SolverError> {
     let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); num_vars];
-    for (row, col, value) in quad.quadratic() {
-        let h = if row == col { 2.0 * value } else { *value };
-        if !h.is_finite() {
-            return Err(SolverError::Backend(
-                "quadratic objective Hessian exceeds finite f64 range".into(),
-            ));
-        }
+    for entry in quad.checked_hessian_entries() {
+        let (row, col, h) = entry?;
         cols[col.index()].push((row.index(), h));
     }
     // QuadraticTerms already orders pairs by column then row.
@@ -497,6 +492,26 @@ mod tests {
 
     use super::*;
     use crate::HighsOptions;
+
+    #[test]
+    fn hessian_columns_preserve_cross_terms_and_reject_overflowing_diagonals() {
+        let terms = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(hessian_columns(&terms, 2).unwrap(), [vec![(0, 6.0), (1, 5.0)], vec![]]);
+
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1e308)], Vec::new(), 0.0)
+                .unwrap();
+        assert!(matches!(
+            hessian_columns(&terms, 1).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
 
     #[test]
     fn qp_min_sum_of_squares() {
