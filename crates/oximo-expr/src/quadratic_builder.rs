@@ -1121,8 +1121,9 @@ mod tests {
         }
         assert_eq!(q.id, original, "unique accumulation must not copy the prefix");
 
-        let alias = q.clone();
-        drop(alias);
+        {
+            let _alias = q.clone();
+        }
         q = q + x * y;
         assert_ne!(q.id, original, "dropping an alias must not recover uniqueness");
 
@@ -1193,7 +1194,7 @@ mod tests {
         let ExprNode::Quadratic(before) = snapshot.get(original) else {
             panic!("compact quadratic")
         };
-        assert!(before.linear.is_empty());
+        assert_eq!(before.linear.as_slice(), []);
         assert_eq!(before.quadratic[0].2, 1.0);
     }
 }

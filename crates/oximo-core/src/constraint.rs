@@ -459,17 +459,6 @@ impl<'a, D: FunctionDegree> Relate<'a, D> for Expr<'a, D> {
         Constraint::new(R::Degree::relation_function(lhs), EqualTo(rhs))
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::Sense;
-
-    #[test]
-    fn display_uses_ascii_relations() {
-        let labels = [Sense::Le.to_string(), Sense::Ge.to_string(), Sense::Eq.to_string()];
-        assert_eq!(labels, ["<=", ">=", "="]);
-        assert!(labels.iter().all(|label| label.is_ascii()));
-    }
-}
 
 impl<'a, D: FunctionDegree> Relate<'a, D> for &Expr<'a, D> {
     fn le<R: IntoRhs<'a, D>>(
@@ -500,5 +489,17 @@ where
     type Degree = <D as oximo_expr::degree::AddDegree<R>>::Output;
     fn fold_rhs(self, lhs: Expr<'a, D>) -> (Expr<'a, Self::Degree>, f64) {
         (lhs - self, 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sense;
+
+    #[test]
+    fn display_uses_ascii_relations() {
+        let labels = [Sense::Le.to_string(), Sense::Ge.to_string(), Sense::Eq.to_string()];
+        assert_eq!(labels, ["<=", ">=", "="]);
+        assert!(labels.iter().all(|label| label.is_ascii()));
     }
 }

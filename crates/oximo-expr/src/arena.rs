@@ -1788,7 +1788,7 @@ mod tests {
             }
             assert!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0).is_none());
             let ExprNode::Quadratic(q) = arena.node(root) else { panic!("quadratic root") };
-            assert!(q.linear.is_empty());
+            assert_eq!(q.linear.as_slice(), []);
         }
     }
 

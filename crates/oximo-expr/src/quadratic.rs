@@ -1020,7 +1020,7 @@ mod tests {
 
         builder.add_monomial(1e308, VarId(0), VarId(0)).unwrap();
         builder.add_monomial(-1e308, VarId(0), VarId(0)).unwrap();
-        assert!(builder.build_terms().quadratic().is_empty());
+        assert_eq!(builder.build_terms().quadratic(), []);
 
         builder.add_monomial(f64::MAX, VarId(0), VarId(0)).unwrap();
         assert_eq!(
@@ -1292,7 +1292,7 @@ mod tests {
 
         scale_unique(&mut q, &mut slots, 0.0).unwrap();
         assert_eq!(q.diagonal_coefficient_magnitude_bounds(), None);
-        assert!(q.quadratic().is_empty());
+        assert_eq!(q.quadratic(), []);
     }
 
     #[test]

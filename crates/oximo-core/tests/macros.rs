@@ -7,9 +7,9 @@ use oximo_core::prelude::*;
 fn sum_preserves_indexed_mutating_receivers_and_assignment_places() {
     let model = Model::new("ordinary Rust inside macros");
     variable!(model, x);
-    let mut weights = vec![vec![1.0, 2.0, 3.0]];
+    let mut weights = [vec![1.0, 2.0, 3.0]];
     let expression = sum!(model,weights[0].pop().unwrap()*x for _i in 0..3);
-    assert!(weights[0].is_empty());
+    assert_eq!(weights[0].as_slice(), []);
     assert_eq!(
         oximo_expr::extract_linear(&model.arena(), expression.id()).unwrap().coeffs.as_ref(),
         [(x.var_id().unwrap(), 6.0)]
@@ -17,7 +17,7 @@ fn sum_preserves_indexed_mutating_receivers_and_assignment_places() {
 
     let mut cells = vec![vec![0.0; 2]];
     let expression = sum!(model,{
-        cells[0][i]=i as f64;
+        cells[0][i]=f64::from(u32::try_from(i).unwrap());
         cells[0][i]+=1.0;
         cells[0][i]*x
     } for i in 0..2);
@@ -31,7 +31,7 @@ fn sum_preserves_indexed_mutating_receivers_and_assignment_places() {
         cells[0][0] = 4.0;
         cells[0][0] * x
     });
-    constraint!(model, receiver, weights[0].len() as f64 * x <= 1.0);
+    constraint!(model, receiver, f64::from(u32::try_from(weights[0].len()).unwrap()) * x <= 1.0);
     assert_eq!(cells[0][0], 4.0);
 }
 

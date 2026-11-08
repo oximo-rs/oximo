@@ -52,7 +52,7 @@ fn ordinary_rust_arithmetic_preserves_consumption_and_side_effects() {
             visits += 1;
             left + right
         };
-        (name.len() as f64 + total.0) * x
+        (f64::from(u32::try_from(name.len()).unwrap()) + total.0) * x
     });
     assert_eq!(visits, 1);
 
@@ -78,18 +78,18 @@ fn computed_expressions_follow_normal_ownership_inside_blocks() {
     variable!(m, x);
     variable!(m, y);
     objective!(m, Min, {
-        let e = x + y;
-        let a = &e + x;
-        let b = e + y;
-        a + b
+        let shared = x + y;
+        let left = &shared + x;
+        let right = shared + y;
+        left + right
     });
     let root = m.objective().as_ref().unwrap().expr;
     assert_eq!(evaluate(&m.arena(), root, &&[2.0, 3.0][..]).unwrap(), 15.0);
 
     let before = m.__sum_context().__node_count();
     objective!(m, Min, {
-        let e = x.square();
-        e + y
+        let quadratic = x.square();
+        quadratic + y
     });
     assert_eq!(
         m.__sum_context().__node_count(),
@@ -106,10 +106,10 @@ fn explicit_borrows_work_for_scalar_and_indexed_ranges_and_indicators() {
     let e = x + 1.0;
     let trigger = b.as_dynamic();
     constraint!(m, interval, 0.0 <= &e <= 5.0);
-    constraint!(m, intervals[i in 0..512], 0.0 <= &e <= i as f64 + 5.0);
+    constraint!(m, intervals[i in 0..512], 0.0 <= &e <= f64::from(u32::try_from(i).unwrap()) + 5.0);
     indicator_constraint!(m, single, &trigger == 1 => &e <= 4.0);
-    indicator_constraint!(m, rows[i in 0..2], &trigger == 1 => &e <= i as f64 + 4.0);
-    indicator_constraint!(m, ranges[i in 0..2], &trigger == 1 => 0.0 <= &e <= i as f64 + 4.0);
+    indicator_constraint!(m, rows[i in 0..2], &trigger == 1 => &e <= f64::from(u32::try_from(i).unwrap()) + 4.0);
+    indicator_constraint!(m, ranges[i in 0..2], &trigger == 1 => 0.0 <= &e <= f64::from(u32::try_from(i).unwrap()) + 4.0);
     objective!(m, Min, e);
     assert_eq!(m.num_constraints(), 518);
 }

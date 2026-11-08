@@ -516,7 +516,7 @@ mod tests {
             let Storage::Dense { data, keys, .. } = storage else {
                 panic!("expected dense storage")
             };
-            assert_eq!(data.iter().map(|expr| expr.id()).collect::<Vec<_>>(), [x.id(), y.id()]);
+            assert_eq!(data.iter().map(Expr::id).collect::<Vec<_>>(), [x.id(), y.id()]);
             assert_eq!(keys, [IndexKey::Int(-1), IndexKey::Int(0)]);
         }
     }

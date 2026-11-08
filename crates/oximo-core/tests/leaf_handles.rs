@@ -11,7 +11,7 @@ fn scalar_and_indexed_leaves_copy_without_allocating_nodes() {
     variable!(m, x);
     param!(m, p = 2.0);
     variable!(m, z[i in 0..3, j in 0..2]);
-    param!(m, cost[i in 0..3] = i as f64 + 1.0);
+    param!(m, cost[i in 0..3] = f64::from(u32::try_from(i).unwrap()) + 1.0);
 
     let before = m.__sum_context().__node_count();
     let (first, second): (VariableHandle<'_>, _) = copies(x);
@@ -30,9 +30,9 @@ fn scalar_and_indexed_leaves_copy_without_allocating_nodes() {
     assert_eq!(evaluate(&m.arena(), cost[1].id(), &&[][..]).unwrap(), 7.0);
 
     let expression = unit * entry * entry + first + second;
-    let q = extract_quadratic(&m.arena(), expression.id()).unwrap();
-    assert_eq!(q.quadratic(), [(entry.var_id().unwrap(), entry.var_id().unwrap(), 7.0)]);
-    assert_eq!(q.linear(), [(x.var_id().unwrap(), 2.0)]);
+    let terms = extract_quadratic(&m.arena(), expression.id()).unwrap();
+    assert_eq!(terms.quadratic(), [(entry.var_id().unwrap(), entry.var_id().unwrap(), 7.0)]);
+    assert_eq!(terms.linear(), [(x.var_id().unwrap(), 2.0)]);
 }
 
 #[test]

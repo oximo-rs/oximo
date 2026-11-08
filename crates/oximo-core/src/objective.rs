@@ -77,6 +77,16 @@ impl<'a> IntoObjectiveExpression<'a> for i32 {
     }
 }
 
+impl<'a, T: Clone + IntoObjectiveExpression<'a>> IntoObjectiveExpression<'a> for &T {
+    type Degree = T::Degree;
+    fn into_objective_expression(
+        self,
+        arena: &'a oximo_expr::ExprArenaCell,
+    ) -> oximo_expr::Expr<'a, Self::Degree> {
+        self.clone().into_objective_expression(arena)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ObjectiveSense;
@@ -86,15 +96,5 @@ mod tests {
         let labels = [ObjectiveSense::Minimize.to_string(), ObjectiveSense::Maximize.to_string()];
         assert_eq!(labels, ["minimize", "maximize"]);
         assert!(labels.iter().all(|label| label.is_ascii()));
-    }
-}
-
-impl<'a, T: Clone + IntoObjectiveExpression<'a>> IntoObjectiveExpression<'a> for &T {
-    type Degree = T::Degree;
-    fn into_objective_expression(
-        self,
-        arena: &'a oximo_expr::ExprArenaCell,
-    ) -> oximo_expr::Expr<'a, Self::Degree> {
-        self.clone().into_objective_expression(arena)
     }
 }

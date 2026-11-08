@@ -64,9 +64,9 @@ fn validation_is_atomic_and_parameters_are_never_snapshotted() {
         QuadraticBuildError::ProductOverflow
     );
     let expression = builder.build();
-    let q = extract_quadratic(&m.arena(), expression.id()).unwrap();
+    let terms = extract_quadratic(&m.arena(), expression.id()).unwrap();
     assert_eq!(
-        q.hessian_entries().collect::<Vec<_>>(),
+        terms.hessian_entries().collect::<Vec<_>>(),
         [(x.var_id().unwrap(), x.var_id().unwrap(), 4.0)]
     );
     builder.add_constant(f64::MAX).unwrap();
@@ -93,8 +93,8 @@ fn macro_arithmetic_reuses_handles_without_caller_clones() {
     constraint!(m, again, reusable <= 4.0);
     p.set_param_value(3.0).unwrap();
     let arena = m.arena();
-    let q = extract_quadratic(&arena, m.constraints().algebraic()[0].lhs).unwrap();
-    assert_eq!(q.hessian_entries().collect::<Vec<_>>()[0].2, 6.0);
+    let terms = extract_quadratic(&arena, m.constraints().algebraic()[0].lhs).unwrap();
+    assert_eq!(terms.hessian_entries().collect::<Vec<_>>()[0].2, 6.0);
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn builders_ingest_hessians_and_check_dynamic_affine_inputs_without_nodes() {
     assert_eq!(terms.quadratic()[0].2.to_bits(), 1);
     assert_eq!(terms.linear(), [(v, 6.0)]);
     assert_eq!(terms.constant(), 5.0);
-    assert!(builder.build_terms().quadratic().is_empty());
+    assert_eq!(builder.build_terms().quadratic(), []);
     let compound = x.square().as_dynamic();
     assert_eq!(builder.add_expr(1.0, &compound).unwrap_err(), QuadraticBuildError::NotAffine);
     param!(m, p = 2.0);
