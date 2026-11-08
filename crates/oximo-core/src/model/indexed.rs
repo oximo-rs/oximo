@@ -524,7 +524,10 @@ impl Model {
                         for entry in function.matrix().upper_triangle() {
                             assert_expr_arena(entry, expected_arena);
                         }
-                        (format_index_name_small(prefix, key), function.matrix().map(Expr::id))
+                        (
+                            format_index_name_small(prefix, key),
+                            function.matrix().map(Expr::publish_id),
+                        )
                     })
                     .collect::<Vec<_>>()
             })
@@ -911,7 +914,7 @@ impl Model {
                     name,
                     trigger,
                     value,
-                    mid.id(),
+                    mid.publish_id(),
                     lower,
                     upper,
                 ));

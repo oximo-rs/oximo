@@ -463,7 +463,7 @@ impl Model {
     ) {
         let expr = expr.into_objective_expression(&self.arena);
         self.assert_expr_belongs(&expr);
-        let expr_id = expr.id();
+        let expr_id = expr.publish_id();
         let semantic_function =
             <E::Degree as crate::function_set::FunctionDegree>::relation_function(expr);
         let function =

@@ -60,7 +60,7 @@ impl Function for SymmetricAffineFunction<'_> {
     type Owned = crate::semantic::SymmetricAffineData;
 
     fn semantic_data(&self) -> Self::Owned {
-        Self::Owned { model_id: self.0[(0, 0)].model_id(), matrix: self.0.map(Expr::id) }
+        Self::Owned { model_id: self.0[(0, 0)].model_id(), matrix: self.0.map(Expr::publish_id) }
     }
 }
 

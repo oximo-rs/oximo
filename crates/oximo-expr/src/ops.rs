@@ -8,22 +8,36 @@ use crate::linear::{
 };
 
 /// Construction-local ownership view.
-struct Operand<'a> {
+struct Operand<'a, 'handle> {
     id: ExprId,
     arena: &'a ExprArenaCell,
     owned: bool,
-    seal: bool,
+    publication: Option<&'handle std::sync::atomic::AtomicBool>,
 }
 
-impl<'a> Operand<'a> {
+impl<'a, 'handle> Operand<'a, 'handle> {
     #[inline]
     fn owned<D: Degree>(expression: Expr<'a, D>) -> Self {
-        Self { id: expression.id, arena: expression.arena, owned: expression.owned, seal: false }
+        Self {
+            id: expression.id,
+            arena: expression.arena,
+            owned: expression.owned,
+            publication: None,
+        }
     }
 
     #[inline]
-    fn borrowed<D: Degree>(expression: &Expr<'a, D>) -> Self {
-        Self { id: expression.id, arena: expression.arena, owned: false, seal: expression.owned }
+    fn borrowed<D: Degree>(expression: &'handle Expr<'a, D>) -> Self {
+        Self {
+            id: expression.id,
+            arena: expression.arena,
+            owned: false,
+            publication: if expression.needs_sealing() {
+                expression.publication_flag()
+            } else {
+                None
+            },
+        }
     }
 
     fn assert_same_arena(&self, other: &Self) {
@@ -31,17 +45,24 @@ impl<'a> Operand<'a> {
     }
 
     fn seal_in(&self, arena: &dyn crate::arena::ArenaAccess) {
-        if self.seal {
+        if let Some(flag) = self.publication
+            && !flag.load(std::sync::atomic::Ordering::Acquire)
+        {
             arena.seal(self.id);
+            flag.store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
 
 #[inline]
 fn build_binary<'a, D: Degree>(
-    lhs: Operand<'a>,
-    rhs: Operand<'a>,
-    construct: impl FnOnce(&mut dyn crate::arena::ArenaAccess, &Operand<'a>, &Operand<'a>) -> ExprId,
+    lhs: Operand<'a, '_>,
+    rhs: Operand<'a, '_>,
+    construct: impl FnOnce(
+        &mut dyn crate::arena::ArenaAccess,
+        &Operand<'a, '_>,
+        &Operand<'a, '_>,
+    ) -> ExprId,
 ) -> Expr<'a, D> {
     lhs.assert_same_arena(&rhs);
     Expr::build(lhs.arena, |arena| {
@@ -53,8 +74,8 @@ fn build_binary<'a, D: Degree>(
 
 #[inline]
 fn build_unary<'a, D: Degree>(
-    input: Operand<'a>,
-    construct: impl FnOnce(&mut dyn crate::arena::ArenaAccess, &Operand<'a>) -> ExprId,
+    input: Operand<'a, '_>,
+    construct: impl FnOnce(&mut dyn crate::arena::ArenaAccess, &Operand<'a, '_>) -> ExprId,
 ) -> Expr<'a, D> {
     Expr::build(input.arena, |arena| {
         input.seal_in(arena);
@@ -65,8 +86,8 @@ fn build_unary<'a, D: Degree>(
 #[inline]
 fn prefer_right_destination(
     arena: &dyn crate::arena::ArenaAccess,
-    lhs: &Operand<'_>,
-    rhs: &Operand<'_>,
+    lhs: &Operand<'_, '_>,
+    rhs: &Operand<'_, '_>,
 ) -> bool {
     rhs.owned
         && (!lhs.owned
@@ -77,7 +98,7 @@ fn prefer_right_destination(
 }
 
 #[inline]
-fn add_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
+fn add_expr<'a, D: Degree>(lhs: Operand<'a, '_>, rhs: Operand<'a, '_>) -> Expr<'a, D> {
     lhs.assert_same_arena(&rhs);
 
     // Addition can retain an already-owned root even after a checked narrowing
@@ -107,7 +128,7 @@ fn add_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
 }
 
 #[inline]
-fn sub_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
+fn sub_expr<'a, D: Degree>(lhs: Operand<'a, '_>, rhs: Operand<'a, '_>) -> Expr<'a, D> {
     lhs.assert_same_arena(&rhs);
     let (id, owned) = lhs.arena.with_mut(|arena| {
         lhs.seal_in(arena);
@@ -149,7 +170,7 @@ fn subtract_into_right(
 }
 
 #[inline]
-fn mul_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
+fn mul_expr<'a, D: Degree>(lhs: Operand<'a, '_>, rhs: Operand<'a, '_>) -> Expr<'a, D> {
     build_binary(lhs, rhs, |arena, lhs, rhs| {
         if crate::degree::may_be_quadratic::<D>() {
             if lhs.owned
@@ -172,12 +193,12 @@ fn mul_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
 }
 
 #[inline]
-fn div_expr<'a, D: Degree>(lhs: Operand<'a>, rhs: Operand<'a>) -> Expr<'a, D> {
+fn div_expr<'a, D: Degree>(lhs: Operand<'a, '_>, rhs: Operand<'a, '_>) -> Expr<'a, D> {
     build_binary(lhs, rhs, |arena, lhs, rhs| div_into(arena, lhs.id, rhs.id))
 }
 
 #[inline]
-fn neg_expr<'a, D: Degree>(input: Operand<'a>) -> Expr<'a, D> {
+fn neg_expr<'a, D: Degree>(input: Operand<'a, '_>) -> Expr<'a, D> {
     build_unary(input, |arena, input| {
         if input.owned
             && let Some(id) = arena.scale_quadratic(input.id, -1.0)

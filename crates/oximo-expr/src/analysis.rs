@@ -251,7 +251,7 @@ impl ExpressionAnalysis {
 
     /// Look up a fact for this analysis's immutable arena snapshot.
     pub fn known(&self, arena: &ExprArena, id: ExprId) -> Option<ExpressionSummary> {
-        arena.get(id);
+        let _ = arena.get(id);
         self.known_node(arena, id)
     }
 
@@ -261,12 +261,13 @@ impl ExpressionAnalysis {
 
     /// Compute all structural facts together, retaining shared descendants.
     /// Use an analysis with one immutable arena, or append-only versions of it.
+    /// The root is published so retained facts survive later owned arithmetic.
     ///
     /// # Panics
     ///
     /// Panics for an invalid expression ID or a graph containing invalid children.
     pub fn summarize(&mut self, arena: &ExprArena, root: ExprId) -> ExpressionSummary {
-        arena.get(root);
+        arena.seal(root);
         if let Some(summary) = self.known_node(arena, root) {
             return summary;
         }

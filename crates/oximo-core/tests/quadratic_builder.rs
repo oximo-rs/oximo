@@ -2,6 +2,112 @@ use oximo_core::prelude::*;
 use oximo_expr::{ExprClass, ExprNode, QuadraticBuildError, evaluate, extract_quadratic};
 
 #[test]
+fn registered_soc_sources_survive_consuming_arithmetic() {
+    let model = Model::new("SOC publication");
+    variable!(model, x);
+    let term = 2.0 * x + 1.0;
+    let bound = 3.0 * x + 2.0;
+    let cone = model.add_soc_constraint("cone", [&term], &bound);
+    let registered = &model.soc_constraints()[cone.index()];
+    let term_id = registered.terms[0];
+    let bound_id = registered.bound;
+    assert_eq!(term_id, term.id());
+    assert_eq!(bound_id, bound.id());
+
+    let grown_term = term + x;
+    let grown_bound = bound + x;
+    let arena = model.arena();
+    for (id, expected) in
+        [(term_id, 7.0_f64), (bound_id, 11.0), (grown_term.id(), 10.0), (grown_bound.id(), 14.0)]
+    {
+        assert_eq!(evaluate(&arena, id, &&[3.0][..]).unwrap().to_bits(), expected.to_bits());
+    }
+}
+
+#[test]
+fn registered_psd_sources_survive_consuming_the_matrix() {
+    let model = Model::new("PSD publication");
+    variable!(model, x);
+    let matrix = SymmetricMatrix::from_upper_triangle(2, [x + 1.0, 2.0 * x, x + 4.0]);
+    let cone = model.add_psd_constraint("cone", &matrix);
+    let registered = model.psd_constraints()[cone.index()].matrix.clone();
+    for (id, source) in registered.upper_triangle().iter().zip(matrix.upper_triangle()) {
+        assert_eq!(*id, source.id());
+    }
+
+    let grown = matrix.map_owned(|entry| entry + x);
+    let arena = model.arena();
+    for ((&id, source), expected) in
+        registered.upper_triangle().iter().zip(grown.upper_triangle()).zip([4.0_f64, 6.0, 7.0])
+    {
+        assert_eq!(evaluate(&arena, id, &&[3.0][..]).unwrap().to_bits(), expected.to_bits());
+        assert_eq!(
+            evaluate(&arena, source.id(), &&[3.0][..]).unwrap().to_bits(),
+            (expected + 3.0).to_bits()
+        );
+    }
+}
+
+#[test]
+fn registered_indicator_source_survives_consuming_arithmetic() {
+    let model = Model::new("indicator publication");
+    variable!(model, x);
+    variable!(model, enabled, Binary);
+    let source = 2.0 * x + 1.0;
+    let row = model.add_indicator_constraint("row", enabled, true, (&source).le(10.0));
+    let registered = model.indicator_constraints()[row.index()].lhs;
+    assert_eq!(registered, source.id());
+
+    let grown = source + x;
+    let arena = model.arena();
+    assert_eq!(
+        evaluate(&arena, registered, &&[3.0, 1.0][..]).unwrap().to_bits(),
+        7.0_f64.to_bits()
+    );
+    assert_eq!(
+        evaluate(&arena, grown.id(), &&[3.0, 1.0][..]).unwrap().to_bits(),
+        10.0_f64.to_bits()
+    );
+}
+
+#[test]
+fn registered_objective_source_cannot_be_reused_in_place() {
+    let model = Model::new("objective publication");
+    variable!(model, x);
+    let source = x * x;
+    objective!(model, Min, &source);
+
+    let registered = model.objective().as_ref().unwrap().expr;
+    assert_eq!(registered, source.id());
+
+    let grown = source + x;
+    assert_ne!(grown.id(), registered);
+
+    let arena = model.arena();
+    assert_eq!(evaluate(&arena, registered, &&[3.0][..]).unwrap().to_bits(), 9.0_f64.to_bits());
+    assert_eq!(evaluate(&arena, grown.id(), &&[3.0][..]).unwrap().to_bits(), 12.0_f64.to_bits());
+}
+
+#[test]
+fn semantic_publication_protects_ids_before_model_registration() {
+    let model = Model::new("published function metadata");
+    variable!(model, x);
+    let function = (x * x).into_function();
+    let metadata = function.semantic_data();
+    let original = metadata.expression();
+    let grown = function.expression() + x;
+    assert_ne!(grown.id(), original);
+    assert_eq!(evaluate(&model.arena(), original, &&[3.0][..]).unwrap(), 9.0);
+
+    let expression = x * x;
+    let metadata = ScalarFunctionData::from_expression(&expression);
+    let original = metadata.expression();
+    let grown = expression + x;
+    assert_ne!(grown.id(), original);
+    assert_eq!(evaluate(&model.arena(), original, &&[3.0][..]).unwrap(), 9.0);
+}
+
+#[test]
 fn coefficients_expand_affine_products_and_reuse_builder() {
     let m = Model::new("numeric quadratic");
     variable!(m, x);

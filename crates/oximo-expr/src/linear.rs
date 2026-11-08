@@ -1217,6 +1217,7 @@ fn additive_affinity(arena: &ExprArena, root: ExprId) -> FxHashMap<ExprId, bool>
 ///
 /// As with [`extract_linear`], call [`LinearTerms::into_owned`] before retaining
 /// the linear terms independently of `arena`.
+/// Residual IDs are published to protect them from later in-place updates.
 ///
 /// # Panics
 /// Panics if `id` or a reachable child is not a valid ID in `arena`.
@@ -1226,6 +1227,7 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
     }
     // Non-additive nonlinear roots are already a single residual.
     if !matches!(arena.get(id), ExprNode::Add(_) | ExprNode::Unary(UnaryOp::Neg, _)) {
+        arena.seal(id);
         return (LinearTerms::borrowed(&[], 0.0), vec![SignedExpr { id, neg: false }]);
     }
     let mut lin = CoeffAccum::with_capacity(0);
@@ -1254,7 +1256,10 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
                 }
             }
             ExprNode::Unary(UnaryOp::Neg, inner) => sign_stack.push((*inner, -sign)),
-            _ => residual.push(SignedExpr { id: cur, neg: sign < 0.0 }),
+            _ => {
+                arena.seal(cur);
+                residual.push(SignedExpr { id: cur, neg: sign < 0.0 });
+            }
         }
     }
     let mut coeffs = lin.into_coeffs();
@@ -1265,6 +1270,8 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
 /// Render the first nonlinear summand of `id` as a short infix string, resolving
 /// each [`VarId`] to a display name via `resolve`. Returns `None` when `id` is
 /// fully affine (no nonlinear residual).
+/// Like [`split_linear`], this publishes residual IDs, permanently disabling their
+/// in-place quadratic accumulation when called on a live arena or write guard.
 pub fn describe_nonlinear_term(
     arena: &ExprArena,
     id: ExprId,

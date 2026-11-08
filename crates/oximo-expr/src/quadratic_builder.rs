@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_ids_snapshots_and_parent_insertion_protect_coefficients() {
+    fn published_ids_snapshots_and_parent_insertion_protect_coefficients() {
         for mode in 0..4 {
             let arena = ExprArenaCell::new(ExprArena::new());
             let x = Expr::from_var(&arena, VarId(0));
@@ -1141,7 +1141,7 @@ mod tests {
             let original = q.id;
             match mode {
                 0 => {
-                    let _ = q.id();
+                    let _ = q.publish_id();
                 }
                 1 => {
                     let _ = arena.borrow();

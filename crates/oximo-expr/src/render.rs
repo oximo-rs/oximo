@@ -20,6 +20,8 @@ type Part = (bool, String);
 /// is rendered as `0`.
 ///
 /// Parameters render as their current arena value.
+/// Like [`split_linear`], rendering publishes residual IDs, permanently disabling
+/// their in-place quadratic accumulation on a live arena or write guard.
 pub fn render_expr(arena: &ExprArena, id: ExprId, resolve: &impl Fn(VarId) -> String) -> String {
     let (lin, residual) = split_linear(arena, id);
     let mut parts = linear_parts(&lin, resolve);

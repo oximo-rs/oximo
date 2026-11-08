@@ -808,12 +808,14 @@ pub fn extract_quadratic(arena: &ExprArena, id: ExprId) -> Option<QuadraticTerms
         .filter(QuadraticTerms::is_canonical)
 }
 
-/// Share compact coefficients without copying their vectors.
+/// Share compact coefficients without copying their vectors, permanently
+/// publishing the source root before returning a shared view.
 pub fn extract_quadratic_shared(
     arena: &ExprArena,
     id: ExprId,
 ) -> Option<std::sync::Arc<QuadraticTerms>> {
     if let ExprNode::Quadratic(terms) = arena.get(id) {
+        arena.seal(id);
         return Some(std::sync::Arc::clone(terms));
     }
     extract_quadratic(arena, id).map(std::sync::Arc::new)

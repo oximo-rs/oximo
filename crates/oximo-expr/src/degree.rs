@@ -2,8 +2,48 @@
 mod sealed {
     pub trait Sealed {
         const MAY_BE_QUADRATIC: bool = true;
+        type Publication: PublicationState;
+    }
+
+    pub trait PublicationState: Send + Sync {
+        fn new(published: bool) -> Self;
+        fn is_published(&self) -> bool;
+        fn flag(&self) -> Option<&std::sync::atomic::AtomicBool>;
+    }
+
+    impl PublicationState for () {
+        #[inline]
+        fn new(_published: bool) -> Self {}
+        #[inline]
+        fn is_published(&self) -> bool {
+            true
+        }
+        #[inline]
+        fn flag(&self) -> Option<&std::sync::atomic::AtomicBool> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct ComputedPublication(std::sync::atomic::AtomicBool);
+
+    impl PublicationState for ComputedPublication {
+        #[inline]
+        fn new(published: bool) -> Self {
+            Self(std::sync::atomic::AtomicBool::new(published))
+        }
+        #[inline]
+        fn is_published(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::Acquire)
+        }
+        #[inline]
+        fn flag(&self) -> Option<&std::sync::atomic::AtomicBool> {
+            Some(&self.0)
+        }
     }
 }
+
+pub(crate) use sealed::PublicationState;
 
 pub(crate) fn may_be_quadratic<D: Degree>() -> bool {
     D::MAY_BE_QUADRATIC
@@ -21,7 +61,7 @@ pub trait ExpressionDegree: Degree {}
 
 /// Degree markers reserved for immutable variable and parameter identities.
 #[doc(hidden)]
-pub trait LeafDegree: Degree {}
+pub trait LeafDegree: Degree + sealed::Sealed<Publication = ()> {}
 
 /// Result degree of addition and subtraction.
 pub trait AddDegree<R: Degree>: Degree {
@@ -43,6 +83,7 @@ pub trait DivDegree<R: Degree>: Degree {
 pub struct Constant;
 impl sealed::Sealed for Constant {
     const MAY_BE_QUADRATIC: bool = false;
+    type Publication = sealed::ComputedPublication;
 }
 impl Degree for Constant {
     type Computed = Self;
@@ -54,6 +95,7 @@ impl ExpressionDegree for Constant {}
 pub struct Affine;
 impl sealed::Sealed for Affine {
     const MAY_BE_QUADRATIC: bool = false;
+    type Publication = sealed::ComputedPublication;
 }
 impl Degree for Affine {
     type Computed = Self;
@@ -63,7 +105,9 @@ impl ExpressionDegree for Affine {}
 /// Quadratic expression degree.
 #[derive(Copy, Clone, Debug)]
 pub struct Quadratic;
-impl sealed::Sealed for Quadratic {}
+impl sealed::Sealed for Quadratic {
+    type Publication = sealed::ComputedPublication;
+}
 impl Degree for Quadratic {
     type Computed = Self;
 }
@@ -72,7 +116,9 @@ impl ExpressionDegree for Quadratic {}
 /// Nonlinear expression degree.
 #[derive(Copy, Clone, Debug)]
 pub struct Nonlinear;
-impl sealed::Sealed for Nonlinear {}
+impl sealed::Sealed for Nonlinear {
+    type Publication = sealed::ComputedPublication;
+}
 impl Degree for Nonlinear {
     type Computed = Self;
 }
@@ -81,7 +127,9 @@ impl ExpressionDegree for Nonlinear {}
 /// Dynamic expression degree.
 #[derive(Copy, Clone, Debug)]
 pub struct Dynamic;
-impl sealed::Sealed for Dynamic {}
+impl sealed::Sealed for Dynamic {
+    type Publication = sealed::ComputedPublication;
+}
 impl Degree for Dynamic {
     type Computed = Self;
 }
@@ -134,6 +182,7 @@ pair!(Dynamic, Dynamic => Dynamic, Dynamic, Dynamic);
 pub struct VariableDegree;
 impl sealed::Sealed for VariableDegree {
     const MAY_BE_QUADRATIC: bool = false;
+    type Publication = ();
 }
 impl Degree for VariableDegree {
     type Computed = Affine;
@@ -146,6 +195,7 @@ impl LeafDegree for VariableDegree {}
 pub struct ParameterDegree;
 impl sealed::Sealed for ParameterDegree {
     const MAY_BE_QUADRATIC: bool = false;
+    type Publication = ();
 }
 impl Degree for ParameterDegree {
     type Computed = Constant;

@@ -141,7 +141,7 @@ impl<D: Degree> ScalarFunctionData<D> {
         expression: E,
     ) -> ScalarFunctionData<D::Computed> {
         let expression = expression.as_expression();
-        ScalarFunctionData::new(expression.model_id(), expression.id())
+        ScalarFunctionData::new(expression.model_id(), expression.publish_id())
     }
 
     pub fn expression(&self) -> ExprId {
@@ -750,35 +750,6 @@ impl From<SocConstraintId> for SemanticConstraintId {
 impl From<PsdConstraintId> for SemanticConstraintId {
     fn from(id: PsdConstraintId) -> Self {
         Self::PositiveSemidefinite(id)
-    }
-}
-
-impl ScalarFunctionData<oximo_expr::Affine> {
-    /// Checked narrowing for a runtime root owned by this model.
-    pub fn try_from_root(model: &crate::Model, root: ExprId) -> Option<Self> {
-        let arena = model.arena();
-
-        if root.index() >= arena.len()
-            || oximo_expr::classify(&arena, root) != oximo_expr::ExprClass::Linear
-        {
-            return None;
-        }
-
-        Some(Self::new(model.id(), root))
-    }
-}
-
-impl ScalarFunctionData<oximo_expr::Quadratic> {
-    pub fn try_from_root(model: &crate::Model, root: ExprId) -> Option<Self> {
-        let arena = model.arena();
-
-        if root.index() >= arena.len()
-            || oximo_expr::classify(&arena, root) == oximo_expr::ExprClass::Nonlinear
-        {
-            return None;
-        }
-
-        Some(Self::new(model.id(), root))
     }
 }
 

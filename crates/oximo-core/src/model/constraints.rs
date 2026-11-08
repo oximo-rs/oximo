@@ -239,7 +239,7 @@ impl PendingSoc {
     ) -> Self {
         let bound = bound.into_affine_function().expression();
         super::assert_expr_arena(&bound, expected_arena);
-        let components: crate::SharedSlice<_> = std::iter::once(bound.id())
+        let components: crate::SharedSlice<_> = std::iter::once(bound.into_id())
             .chain(terms.into_iter().map(|term| {
                 let term = term.into_affine_function().expression();
                 assert_eq!(
@@ -247,7 +247,7 @@ impl PendingSoc {
                     expected_arena,
                     "SOC components must belong to the same model"
                 );
-                term.id()
+                term.into_id()
             }))
             .collect();
         assert!(components.len() >= 2, "SOC needs at least two components");
@@ -640,7 +640,7 @@ impl Model {
         let mid = mid.into_expression();
         let handles = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
             validate_bounds(lower, upper);
-            let mid_id = mid.id();
+            let mid_id = mid.publish_id();
             let function = mid.into_function();
 
             if function.is_affine() {
@@ -844,7 +844,11 @@ impl Model {
         let mut rows = self.psd_constraints.borrow_mut();
         let id = PsdConstraintId(u32::try_from(rows.len()).expect("PSD count overflow"));
         names.insert_unique(name.clone(), id);
-        rows.push(PsdConstraint { name, matrix: ir.0.matrix().map(Expr::id), active: true });
+        rows.push(PsdConstraint {
+            name,
+            matrix: ir.0.matrix().map(Expr::publish_id),
+            active: true,
+        });
         self.record_declared_native(id.into(), super::semantic::Representation::Psd);
         self.invalidate_kind();
         PsdConstraintHandle::new(id, self.id())
@@ -1350,7 +1354,7 @@ impl Model {
             name,
             trigger,
             active_value,
-            consequent.lhs.id(),
+            consequent.lhs.publish_id(),
             lower,
             upper,
         );
@@ -1486,7 +1490,7 @@ impl Model {
             name.into(),
             trigger,
             active_value,
-            consequent.lhs.id(),
+            consequent.lhs.publish_id(),
             (consequent.lower, consequent.upper),
             Some(consequent.semantic.into_pair()),
         );
@@ -1555,7 +1559,7 @@ impl Model {
             name.into(),
             trigger,
             active_value,
-            lhs.id(),
+            lhs.publish_id(),
             (lower, upper),
             None,
         );
@@ -1584,7 +1588,7 @@ impl Model {
                 name.into(),
                 trigger,
                 active_value,
-                mid.id(),
+                mid.publish_id(),
                 lower,
                 upper,
             );

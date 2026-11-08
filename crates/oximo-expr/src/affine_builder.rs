@@ -82,7 +82,7 @@ impl<'a> AffineBuilder<'a> {
             std::ptr::eq(self.arena, expression.arena()),
             "expressions belong to different arenas"
         );
-        self.terms.push((expression.id(), coefficient));
+        self.terms.push((expression.publish_id(), coefficient));
         self
     }
 

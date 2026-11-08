@@ -1,5 +1,6 @@
 use crate::arena::{Children, ExprArenaCell, ExprId, ExprNode, ModelId, ParamId, UnaryOp, VarId};
 use crate::classify::{ExprClass, classify_access};
+use crate::degree::PublicationState;
 use crate::degree::{
     Affine, Constant, Degree, Dynamic, MulDegree, Nonlinear, ParameterDegree, Quadratic,
     VariableDegree,
@@ -11,6 +12,7 @@ pub struct Expr<'a, D: Degree = Dynamic> {
     pub(crate) arena: &'a ExprArenaCell,
     model_id: ModelId,
     pub(crate) owned: bool,
+    publication: D::Publication,
     degree: std::marker::PhantomData<D>,
 }
 
@@ -35,6 +37,7 @@ impl<D: Degree> Clone for Expr<'_, D> {
             arena: self.arena,
             model_id: self.model_id,
             owned: false,
+            publication: D::Publication::new(true),
             degree: std::marker::PhantomData,
         }
     }
@@ -80,7 +83,8 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// Parameter values are supplied separately when evaluating the capture.
     #[must_use]
     pub fn capture(&self) -> crate::CapturedExpr {
-        crate::CapturedExpr::new(self.model_id(), &self.arena().borrow(), self.id())
+        let root = self.publish_id();
+        crate::CapturedExpr::new(self.model_id(), &self.arena().borrow(), root)
     }
 
     #[inline]
@@ -90,6 +94,7 @@ impl<'a, D: Degree> Expr<'a, D> {
             arena,
             model_id: arena.model_id(),
             owned: false,
+            publication: D::Publication::new(true),
             degree: std::marker::PhantomData,
         }
     }
@@ -107,11 +112,14 @@ impl<'a, D: Degree> Expr<'a, D> {
     pub(crate) fn from_construction(id: ExprId, owned: bool, arena: &'a ExprArenaCell) -> Self {
         let mut result = Self::from_id(id, arena);
         result.owned = owned;
+        result.publication = D::Publication::new(!owned);
         result
     }
 
     pub(crate) fn into_degree<E: Degree>(self) -> Expr<'a, E> {
-        Expr::from_construction(self.id, self.owned, self.arena)
+        let mut result = Expr::from_construction(self.id, self.owned, self.arena);
+        result.publication = E::Publication::new(self.publication.is_published());
+        result
     }
 
     /// Consume the handle without publishing an alias or losing unique ownership.
@@ -154,8 +162,28 @@ impl<'a, D: Degree> Expr<'a, D> {
     }
 
     pub(crate) fn seal(&self) {
-        if self.owned {
-            self.arena.with_ref(|a| a.seal(self.id));
+        if self.needs_sealing() {
+            self.arena.with_ref(|arena| arena.seal(self.id));
+            if let Some(flag) = self.publication.flag() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+
+    pub(crate) fn needs_sealing(&self) -> bool {
+        self.owned && !self.publication.is_published()
+    }
+
+    pub(crate) fn publication_flag(&self) -> Option<&std::sync::atomic::AtomicBool> {
+        self.publication.flag()
+    }
+
+    pub(crate) fn seal_in(&self, arena: &dyn crate::arena::ArenaAccess) {
+        if self.needs_sealing() {
+            arena.seal(self.id);
+            if let Some(flag) = self.publication.flag() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
         }
     }
 
@@ -185,8 +213,31 @@ impl<'a, D: Degree> Expr<'a, D> {
         Expr::from_id(self.id, self.arena)
     }
 
+    /// Read the current node identity without publishing or sealing it.
+    /// The node can change during later consuming arithmetic on an owned handle.
+    /// Use [`Self::publish_id`] or [`Self::into_id`] before retaining an identity
+    /// independently of the handle.
+    #[inline]
     pub fn id(&self) -> ExprId {
+        self.id
+    }
+
+    /// Publish a stable node identity, permanently disabling in-place reuse.
+    ///
+    /// After the first publication completes, repeated publication through this
+    /// handle does not reacquire the arena lock.
+    #[inline]
+    pub fn publish_id(&self) -> ExprId {
         self.seal();
+        self.id
+    }
+
+    /// Consume this handle and publish its stable node identity.
+    #[inline]
+    pub fn into_id(self) -> ExprId {
+        if self.needs_sealing() {
+            self.arena.with_ref(|arena| arena.seal(self.id));
+        }
         self.id
     }
 
@@ -241,8 +292,11 @@ impl<'a, D: Degree> Expr<'a, D> {
     {
         let rhs = rhs.as_expression();
         self.assert_same_arena(rhs);
-        let id =
-            self.arena.with_mut(|a| a.push(ExprNode::Mul([self.id, rhs.id].into_iter().collect())));
+        let id = self.arena.with_mut(|arena| {
+            self.seal_in(arena);
+            rhs.seal_in(arena);
+            arena.push(ExprNode::Mul([self.id, rhs.id].into_iter().collect()))
+        });
         Expr::from_id(id, self.arena)
     }
 
@@ -357,9 +411,7 @@ impl<'a, D: Degree> Expr<'a, D> {
 
     fn unary(&self, op: UnaryOp) -> Expr<'a, Nonlinear> {
         let id = self.arena.with_mut(|arena| {
-            if self.owned {
-                arena.seal(self.id);
-            }
+            self.seal_in(arena);
             arena.push_immutable(ExprNode::Unary(op, self.id))
         });
         Expr::from_id(id, self.arena)
@@ -369,7 +421,10 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// The `-expr` operator keeps its affine fast path.
     /// Use this method when the public [`UnaryOp`] node is required.
     pub fn neg(&self) -> Expr<'a, D::Computed> {
-        let id = self.arena.with_mut(|a| a.push(ExprNode::Unary(UnaryOp::Neg, self.id)));
+        let id = self.arena.with_mut(|arena| {
+            self.seal_in(arena);
+            arena.push(ExprNode::Unary(UnaryOp::Neg, self.id))
+        });
         Expr::from_id(id, self.arena)
     }
 
@@ -579,6 +634,144 @@ mod tests {
     use super::{ClassifiedExpr, Expr};
     use crate::arena::{ExprArena, ExprArenaCell, VarId};
     use crate::{Dynamic, ExprClass, Nonlinear, Quadratic, evaluate};
+
+    #[test]
+    fn identity_reads_do_not_lock_or_disable_in_place_accumulation() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x * x;
+        let root = expression.id();
+        arena.reset_access_count();
+        for _ in 0..100 {
+            assert_eq!(expression.id(), root);
+        }
+        assert_eq!(arena.access_count(), 0);
+
+        arena.with_ref(|arena| {
+            let _ = arena.get(root);
+        });
+        let result = expression + x;
+        assert_eq!(result.id(), root);
+        assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn owned_coefficient_copies_do_not_publish_the_source() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x * x;
+        let root = expression.id();
+        let terms = {
+            let guard = arena.borrow_mut();
+            crate::extract_quadratic(&guard, root).unwrap()
+        };
+        let result = expression + x;
+        assert_eq!(result.id(), root);
+        assert_eq!(terms.linear(), []);
+        assert_eq!(terms.quadratic(), [(VarId(0), VarId(0), 1.0)]);
+        assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn publication_is_cached_across_queries_clones_and_degree_conversions() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x * x;
+        arena.reset_access_count();
+        let published = expression.publish_id();
+        assert_eq!(arena.access_count(), 1);
+
+        for _ in 0..100 {
+            assert_eq!(expression.publish_id(), published);
+            let _ = expression.clone();
+        }
+        let expression = expression.into_dynamic().into_nonlinear();
+        assert_eq!(expression.publish_id(), published);
+        assert_eq!(arena.access_count(), 1);
+
+        let result = expression + x;
+        assert_ne!(result.id(), published);
+        assert_eq!(evaluate(&arena.borrow(), published, &&[3.0][..]).unwrap(), 9.0);
+
+        let stable = result.into_id();
+        assert_eq!(evaluate(&arena.borrow(), stable, &&[3.0][..]).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn borrowed_arithmetic_caches_publication_under_the_construction_lock() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x * x;
+        let _ = &expression + x;
+        arena.reset_access_count();
+        let root = expression.publish_id();
+        let _ = expression.clone();
+        assert_eq!(arena.access_count(), 0);
+
+        let result = expression + x;
+        assert_ne!(result.id(), root);
+    }
+
+    #[test]
+    fn borrowed_node_constructors_cache_publication() {
+        for constructor in 0..3 {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let x = Expr::from_var(&arena, VarId(0));
+            let expression = x * x;
+            match constructor {
+                0 => {
+                    let _ = expression.mul_factored(x);
+                }
+                1 => {
+                    let _ = expression.neg();
+                }
+                _ => {
+                    let _ = expression.sin();
+                }
+            }
+            arena.reset_access_count();
+            expression.publish_id();
+            assert_eq!(arena.access_count(), 0);
+        }
+    }
+
+    #[test]
+    fn publication_cache_keeps_handle_sizes_and_thread_traits() {
+        type PreviousFields<'a> = (&'a ExprArenaCell, crate::ExprId, crate::ModelId, bool);
+        assert_eq!(std::mem::size_of::<Expr<'_>>(), std::mem::size_of::<PreviousFields<'_>>());
+        assert_eq!(
+            std::mem::size_of::<crate::VariableHandle<'_>>(),
+            std::mem::size_of::<PreviousFields<'_>>()
+        );
+
+        fn thread_safe<T: Send + Sync>() {}
+        thread_safe::<Expr<'_, Dynamic>>();
+        thread_safe::<crate::VariableHandle<'_>>();
+    }
+
+    #[test]
+    fn publication_can_be_shared_across_threads_without_changing_the_expression() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let expression = x * x;
+        let root = expression.id();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..128 {
+                        assert_eq!(expression.publish_id(), root);
+                    }
+                });
+            }
+        });
+        arena.reset_access_count();
+        expression.publish_id();
+        assert_eq!(arena.access_count(), 0);
+
+        let result = expression + x;
+        assert_ne!(result.id(), root);
+        assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 9.0);
+    }
 
     #[test]
     fn failed_consuming_affine_conversion_returns_the_owned_original() {

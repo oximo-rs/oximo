@@ -441,7 +441,9 @@ impl ExprArena {
         }
     }
 
-    fn seal_all(&self) {
+    /// Permanently publish every node currently in the arena.
+    /// Raw appends through [`Self::push`] publish quadratic roots immediately.
+    pub fn seal_all(&self) {
         if let Some(ownership) = self.ownership.get() {
             ownership.lock().seal_all(self.len());
         }
@@ -546,6 +548,10 @@ impl ExprArena {
         self.nodes.is_empty()
     }
 
+    /// Append a raw node, publishing a quadratic root immediately.
+    /// Internal builders use `ArenaAccess::push` instead to retain ownership
+    /// of fresh quadratic roots for consuming arithmetic.
+    ///
     /// # Panics
     ///
     /// Panics if the number of expressions exceeds `u32::MAX` (expression arena overflow).
@@ -579,12 +585,19 @@ impl ExprArena {
     }
 
     #[inline]
+    /// Inspect a node without publishing it or changing ownership.
+    /// Use [`Self::seal`] before retaining its identity across in-place updates.
     pub fn get(&self, id: ExprId) -> &ExprNode {
-        let node = self.node(id);
-        if matches!(node, ExprNode::Quadratic(_)) {
-            ArenaAccess::seal(self, id);
-        }
-        node
+        self.node(id)
+    }
+
+    /// Permanently protect a node identity from in-place quadratic updates.
+    ///
+    /// # Panics
+    /// Panics if `id` is not a valid node in this arena.
+    pub fn seal(&self, id: ExprId) {
+        let _ = self.node(id);
+        ArenaAccess::seal(self, id);
     }
 
     #[inline]
@@ -602,8 +615,9 @@ impl ExprArena {
         &mut Arc::make_mut(&mut self.nodes)[id.index()]
     }
 
+    /// Inspect all nodes without changing ownership.
+    /// Use [`Self::seal_all`] before retaining all current node identities across consuming updates.
     pub fn nodes(&self) -> &[ExprNode] {
-        self.seal_all();
         &self.nodes
     }
 
@@ -1192,6 +1206,8 @@ impl ExprArenaCell {
     /// The returned value is not a live read lock.
     /// Later writes are isolated by copy-on-write and are not
     /// visible through this snapshot.
+    /// Taking the snapshot publishes every current canonical node, permanently
+    /// disabling in-place quadratic reuse for those nodes.
     ///
     /// # Panics
     ///
@@ -1757,7 +1773,7 @@ mod tests {
     use crate::{Expr, evaluate, extract_linear};
 
     #[test]
-    fn coefficient_queries_seal_direct_quadratic_roots() {
+    fn read_queries_preserve_unique_quadratic_roots() {
         for query in 0..4 {
             let mut arena = ExprArena::new();
             let x = arena.var(VarId(0));
@@ -1777,18 +1793,55 @@ mod tests {
                     let _ = arena.get(root);
                 }
                 1 => {
-                    let _ = crate::ExpressionAnalysis::default().known(&arena, root);
+                    let _ = arena.nodes();
                 }
                 2 => {
-                    let _ = crate::ExpressionAnalysis::default().summarize(&arena, root);
+                    let _ = crate::ExpressionAnalysis::default().known(&arena, root);
                 }
                 _ => {
                     let _ = crate::extract_quadratic(&arena, root);
                 }
             }
-            assert!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0).is_none());
+            assert_eq!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0), Some(root));
             let ExprNode::Quadratic(q) = arena.node(root) else { panic!("quadratic root") };
-            assert_eq!(q.linear.as_slice(), []);
+            assert_eq!(q.linear(), [(VarId(0), 1.0)]);
+        }
+    }
+
+    #[test]
+    fn published_residuals_coefficients_and_analysis_protect_quadratic_roots() {
+        for publication in 0..5 {
+            let mut arena = ExprArena::new();
+            let x = arena.var(VarId(0));
+            let root = ArenaAccess::push(
+                &mut arena,
+                ExprNode::Quadratic(Arc::new(
+                    crate::QuadraticTerms::from_coefficients(
+                        vec![(VarId(0), VarId(0), 1.0)],
+                        Vec::new(),
+                        0.0,
+                    )
+                    .unwrap(),
+                )),
+            );
+
+            match publication {
+                0 => arena.seal(root),
+                1 => {
+                    let _ = crate::ExpressionAnalysis::default().summarize(&arena, root);
+                }
+                2 => {
+                    let _ = crate::extract_quadratic_shared(&arena, root);
+                }
+                3 => {
+                    let _ = crate::split_linear(&arena, root);
+                }
+                _ => {
+                    let _ = crate::split_affine(&arena, root);
+                }
+            }
+
+            assert!(ArenaAccess::accumulate_quadratic(&mut arena, root, x, 1.0).is_none());
         }
     }
 

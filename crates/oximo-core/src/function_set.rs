@@ -181,7 +181,7 @@ macro_rules! scalar_function {
             type Owned = crate::semantic::ScalarFunctionData<$degree>;
 
             fn semantic_data(&self) -> Self::Owned {
-                crate::semantic::ScalarFunctionData::new(self.0.model_id(), self.0.id())
+                crate::semantic::ScalarFunctionData::new(self.0.model_id(), self.0.publish_id())
             }
         }
 
@@ -306,9 +306,9 @@ impl Function for AnyScalarFunction<'_> {
 
     fn semantic_data(&self) -> Self::Owned {
         let (model_id, id, class) = match self {
-            Self::Affine(f) => (f.0.model_id(), f.0.id(), ExprClass::Linear),
-            Self::Quadratic(f) => (f.0.model_id(), f.0.id(), ExprClass::Quadratic),
-            Self::Nonlinear(f) => (f.0.model_id(), f.0.id(), ExprClass::Nonlinear),
+            Self::Affine(f) => (f.0.model_id(), f.0.publish_id(), ExprClass::Linear),
+            Self::Quadratic(f) => (f.0.model_id(), f.0.publish_id(), ExprClass::Quadratic),
+            Self::Nonlinear(f) => (f.0.model_id(), f.0.publish_id(), ExprClass::Nonlinear),
         };
         AnyScalarFunctionData {
             expression: crate::semantic::ScalarFunctionData::new(model_id, id),
@@ -773,15 +773,18 @@ impl Function for VectorAffineFunction<'_> {
     fn semantic_data(&self) -> Self::Owned {
         Self::Owned {
             model_id: self.first.model_id(),
-            components: std::iter::once(self.first.id()).chain(self.rest.iter().copied()).collect(),
+            components: std::iter::once(self.first.publish_id())
+                .chain(self.rest.iter().copied())
+                .collect(),
         }
     }
 }
 
 impl<'a> VectorAffineFunction<'a> {
     pub(crate) fn into_data(mut self) -> crate::VectorAffineData {
-        self.rest.insert(0, self.first.id());
-        crate::VectorAffineData { model_id: self.first.model_id(), components: self.rest.into() }
+        let model_id = self.first.model_id();
+        self.rest.insert(0, self.first.into_id());
+        crate::VectorAffineData { model_id, components: self.rest.into() }
     }
 
     /// Construct a nonempty vector, checking that every component has one owner.
@@ -799,7 +802,7 @@ impl<'a> VectorAffineFunction<'a> {
                 std::ptr::eq(first.arena(), f.0.arena()),
                 "affine vector components must belong to the same model"
             );
-            f.0.id()
+            f.0.into_id()
         }));
         Self { first, rest }
     }
@@ -917,7 +920,7 @@ impl<'a> ScalarConstraintInput for AlgebraicConstraintIr<'a> {
         );
         PreparedScalarConstraint {
             view: crate::semantic::ScalarConstraintView {
-                lhs: self.lhs.id(),
+                lhs: self.lhs.into_id(),
                 lower: self.lower,
                 upper: self.upper,
             },

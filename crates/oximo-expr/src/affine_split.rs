@@ -31,6 +31,7 @@ impl AffineResidual {
 
 /// Split an expression into affine terms and signed nonlinear summands.
 ///
+/// Returned residual IDs are published to protect them from in-place updates.
 /// Constants and repeated coefficients across additive summands use Neumaier
 /// compensated summation. Parameters are resolved at their current arena values.
 /// Nonfinite results use ordinary IEEE arithmetic.
@@ -42,6 +43,7 @@ pub fn split_affine(arena: &ExprArena, root: ExprId) -> (LinearTerms<'_>, Vec<Af
         let residual = if terms.quadratic().is_empty() {
             Vec::new()
         } else {
+            arena.seal(root);
             vec![AffineResidual::QuadraticPart(SignedExpr { id: root, neg: false })]
         };
         return (LinearTerms::borrowed(terms.linear(), terms.constant()), residual);
@@ -83,6 +85,7 @@ pub fn split_affine(arena: &ExprArena, root: ExprId) -> (LinearTerms<'_>, Vec<Af
             }
             ExprNode::Unary(UnaryOp::Neg, child) => pending.push((*child, !neg)),
             ExprNode::Quadratic(_) => {
+                arena.seal(id);
                 residual.push(AffineResidual::QuadraticPart(SignedExpr { id, neg }));
             }
             _ => residual.push(AffineResidual::Full(SignedExpr { id, neg })),
@@ -180,6 +183,7 @@ fn stream_additive(
             ExprNode::Linear { coeffs, constant } => LinearTerms::borrowed(coeffs, *constant),
             ExprNode::Quadratic(terms) => {
                 if !terms.quadratic().is_empty() {
+                    arena.seal(id);
                     residual.push(AffineResidual::QuadraticPart(SignedExpr { id, neg }));
                 }
                 LinearTerms::borrowed(terms.linear(), terms.constant())
