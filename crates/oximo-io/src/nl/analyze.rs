@@ -1,13 +1,12 @@
 //! Per-row classification.
 //!
-//! For each constraint and the objective we run `split_linear` on the body.
+//! For each constraint and the objective we run `split_affine` on the body.
 //! The result is a `Row { linear, residual }` where:
 //!
 //! - `linear` carries the linear coefficients (goes into `J`/`G` segments
 //!   and into the RHS constant shift).
-//! - `residual` is `Some(ExprId)` when nonlinear summands remain (emitted in
-//!   the corresponding `C`/`O` segment), `None` when the whole body is
-//!   purely linear.
+//! - `residual` holds nonlinear summands (emitted in the corresponding `C`/`O`
+//!   segment), and is empty when the whole body is purely linear.
 //!
 //! Each row also caches the union of variables appearing anywhere in the body
 //! (linear OR nonlinear), used to size the Jacobian/gradient sparsity. The
@@ -16,7 +15,8 @@
 
 use oximo_core::{AlgebraicConstraint, Domain, Objective, ResolvedVariable};
 use oximo_expr::{
-    ExprArena, ExprId, ExprNode, LinearTerms, SignedExpr, VarId, Visitor, split_linear, walk_shared,
+    AffineResidual, ExprArena, ExprId, ExprNode, LinearTerms, VarId, Visitor, split_affine,
+    walk_shared,
 };
 use rustc_hash::FxHashSet;
 
@@ -26,30 +26,30 @@ use crate::error::IoError;
 pub(crate) struct Row {
     pub(crate) linear: LinearTerms<'static>,
     /// Nonlinear summands of the body, empty when the row is purely linear.
-    pub(crate) residual: Vec<SignedExpr>,
+    pub(crate) residual: Vec<AffineResidual>,
 }
 
 #[derive(Default)]
 struct ResidualCache {
-    entries: Vec<(ExprId, FxHashSet<VarId>)>,
+    entries: Vec<(AffineResidual, FxHashSet<VarId>)>,
 }
 
 impl ResidualCache {
     fn variables(
         &mut self,
         arena: &ExprArena,
-        id: ExprId,
+        residual: AffineResidual,
         nonfinite_strings: bool,
     ) -> Result<&FxHashSet<VarId>, IoError> {
-        if let Some(index) = self.entries.iter().position(|(root, _)| *root == id) {
+        if let Some(index) = self.entries.iter().position(|(root, _)| *root == residual) {
             return Ok(&self.entries[index].1);
         }
         let mut vars = FxHashSet::default();
-        analyze_residual(arena, id, nonfinite_strings, &mut vars)?;
+        analyze_residual(arena, residual, nonfinite_strings, &mut vars)?;
         if self.entries.len() == 8 {
             self.entries.remove(0);
         }
-        self.entries.push((id, vars));
+        self.entries.push((residual, vars));
         Ok(&self.entries.last().expect("inserted residual").1)
     }
 }
@@ -116,7 +116,7 @@ impl Analysis {
         cons_var_offsets.push(0);
 
         for c in constraints {
-            let (linear, residual) = split_linear(arena, c.lhs);
+            let (linear, residual) = split_affine(arena, c.lhs);
 
             if residual.is_empty()
                 && linear.coeffs.windows(2).all(|pair| pair[0].0.index() < pair[1].0.index())
@@ -126,7 +126,7 @@ impl Analysis {
                 let mut all: FxHashSet<_> = linear.coeffs.iter().map(|(var, _)| *var).collect();
 
                 for r in &residual {
-                    for v in residual_cache.variables(arena, r.id, nonfinite_strings)? {
+                    for v in residual_cache.variables(arena, *r, nonfinite_strings)? {
                         nl_vars_c.insert(*v);
                         all.insert(*v);
                     }
@@ -144,13 +144,13 @@ impl Analysis {
         let mut obj_all = FxHashSet::default();
         let obj = match objective {
             Some(objective) => {
-                let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
+                let (obj_linear, obj_residual) = split_affine(arena, objective.expr);
                 for (v, _) in obj_linear.coeffs.iter() {
                     obj_all.insert(*v);
                 }
                 if !obj_residual.is_empty() {
                     for r in &obj_residual {
-                        for v in residual_cache.variables(arena, r.id, nonfinite_strings)? {
+                        for v in residual_cache.variables(arena, *r, nonfinite_strings)? {
                             nl_vars_o.insert(*v);
                             obj_all.insert(*v);
                         }
@@ -185,7 +185,7 @@ fn sorted(set: FxHashSet<VarId>) -> Vec<VarId> {
 /// to keep `WriteOptions::nonfinite_strings` effective for expression constants.
 fn analyze_residual(
     arena: &ExprArena,
-    id: ExprId,
+    residual: AffineResidual,
     nonfinite_strings: bool,
     vars: &mut FxHashSet<VarId>,
 ) -> Result<(), IoError> {
@@ -210,6 +210,21 @@ fn analyze_residual(
                     self.vars.extend(coeffs.iter().map(|&(v, _)| v));
                     Some((*constant, "a linear expression constant"))
                 }
+                ExprNode::Quadratic(q) => {
+                    self.vars.extend(q.variables());
+                    if !self.nonfinite_strings
+                        && let Some(value) = std::iter::once(q.constant())
+                            .chain(q.linear().iter().map(|&(_, c)| c))
+                            .chain(q.quadratic().iter().map(|&(_, _, c)| c))
+                            .find(|v| !v.is_finite())
+                    {
+                        self.error = Some(IoError::InvalidNumber {
+                            value,
+                            location: "a quadratic coefficient".into(),
+                        });
+                    }
+                    None
+                }
                 _ => None,
             };
             if let Some((value, location)) = number
@@ -220,8 +235,23 @@ fn analyze_residual(
             }
         }
     }
+    if let AffineResidual::QuadraticPart(source) = residual {
+        let ExprNode::Quadratic(q) = arena.get(source.id) else {
+            unreachable!("quadratic residual must reference a Quadratic node")
+        };
+        vars.extend(q.quadratic().iter().flat_map(|&(a, b, _)| [a, b]));
+        if !nonfinite_strings
+            && let Some(value) = q.quadratic().iter().map(|&(_, _, c)| c).find(|v| !v.is_finite())
+        {
+            return Err(IoError::InvalidNumber {
+                value,
+                location: "a quadratic coefficient".into(),
+            });
+        }
+        return Ok(());
+    }
     let mut visitor = ResidualVisitor { vars, nonfinite_strings, error: None };
-    walk_shared(arena, id, &mut visitor);
+    walk_shared(arena, residual.source().id, &mut visitor);
     visitor.error.map_or(Ok(()), Err)
 }
 
@@ -245,8 +275,8 @@ mod tests {
             vec![(vz, 3.0), (vx, 1.0), (vx, -1.0)],
             Vec::new(),
         ] {
-            let id = x.arena.borrow_mut().linear(coefficients, 1.0);
-            model.__add_constraint_auto(Expr::new(id, x.arena).le(5.0));
+            let id = x.arena().borrow_mut().linear(coefficients, 1.0);
+            model.__add_constraint_auto(Expr::new(id, x.arena()).le(5.0));
         }
         model.__add_constraint_auto((x + y * z).le(5.0));
 
@@ -287,9 +317,9 @@ pub mod benchmark_support {
         model.__minimize(x + y + z);
         for i in 0..rows {
             let lhs = match degree {
-                1 => (x + 2.0 * y - z).erase(),
+                1 => (x + 2.0 * y - z).into_dynamic(),
                 2 => x.powi(2) + y * z,
-                _ => (x * y * z + x.sin()).erase(),
+                _ => (x * y * z + x.sin()).into_dynamic(),
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -315,11 +345,11 @@ pub mod benchmark_support {
         arena: &ExprArena,
         c: &AlgebraicConstraint,
     ) -> Result<(Row, Vec<VarId>, FxHashSet<VarId>), IoError> {
-        let (linear, residual) = split_linear(arena, c.lhs);
+        let (linear, residual) = split_affine(arena, c.lhs);
         let mut all: FxHashSet<VarId> = linear.coeffs.iter().map(|(v, _)| *v).collect();
         let mut nonlinear = FxHashSet::default();
         for r in &residual {
-            analyze_residual(arena, r.id, false, &mut nonlinear)?;
+            analyze_residual(arena, *r, false, &mut nonlinear)?;
         }
         all.extend(nonlinear.iter().copied());
         Ok((Row { linear: linear.into_owned(), residual }, sorted(all), nonlinear))
@@ -356,11 +386,11 @@ pub mod benchmark_support {
             cons_var_offsets.push(cons_vars.len());
             nl_vars_c.extend(used);
         }
-        let (obj_linear, obj_residual) = split_linear(arena, objective.expr);
+        let (obj_linear, obj_residual) = split_affine(arena, objective.expr);
         let mut obj_all: FxHashSet<VarId> = obj_linear.coeffs.iter().map(|(v, _)| *v).collect();
         let mut nl_vars_o = FxHashSet::default();
         for residual in &obj_residual {
-            analyze_residual(arena, residual.id, false, &mut nl_vars_o)?;
+            analyze_residual(arena, *residual, false, &mut nl_vars_o)?;
         }
         obj_all.extend(nl_vars_o.iter().copied());
         let obj = Some(Row { linear: obj_linear.into_owned(), residual: obj_residual });

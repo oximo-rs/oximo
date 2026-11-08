@@ -529,6 +529,10 @@ fn for_each_child(node: &ExprNode, mut visitor: impl FnMut(ExprId)) {
             visitor(*left);
             visitor(*right);
         }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Var(_)
+        | ExprNode::Param(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }

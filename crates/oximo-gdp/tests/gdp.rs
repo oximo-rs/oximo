@@ -21,6 +21,28 @@ fn auxiliary_feasible(model: &Model, a: bool, b: bool) -> bool {
 }
 
 #[test]
+fn logical_negation_consumes_a_stored_formula() {
+    for named in [false, true] {
+        let model = Model::new("stored negation");
+        boolean_variable!(model, a);
+        boolean_variable!(model, b);
+        let formula = a & b;
+        if named {
+            logical_constraint!(model, negated, !formula);
+        } else {
+            logical_constraint!(model, !formula);
+        }
+
+        let lowered = model.to_reformulated_gdp_model(BigM::default()).unwrap();
+        for a in [false, true] {
+            for b in [false, true] {
+                assert_eq!(auxiliary_feasible(&lowered, a, b), !(a && b));
+            }
+        }
+    }
+}
+
+#[test]
 fn named_blocks_preserve_sources_ids_and_history() {
     let m = Model::new("blocks");
     variable!(m,0.0<=x<=10.0);
@@ -1004,12 +1026,52 @@ fn nonnegative_sums_keep_safe_square_root_domains() {
         variable!(model, 0.0 <= x <= 1.0);
         variable!(model, 0.0 <= z <= 1.0);
         boolean_variable!(model, active);
-        let sum = if squared { (x.square() + z.square()).erase() } else { (x + z).erase() };
+        let sum =
+            if squared { (x.square() + z.square()).as_dynamic() } else { (x + z).as_dynamic() };
         disjunct_constraint!(model, active, sum.sqrt() <= 1.0);
         model.reformulate_gdp(GdpReformulationOptions::default()).unwrap();
         assert!(satisfied(&model, &[0.0, 0.0, 1.0]));
         assert!(!satisfied(&model, &[1.0, 1.0, 1.0]));
         assert!(satisfied(&model, &[1.0, 1.0, 0.0]));
+    }
+}
+
+#[test]
+fn compound_affine_squares_keep_safe_square_root_domains() {
+    for multiple_variables in [false, true] {
+        for construction in 0..7 {
+            let model = Model::new("factored affine square domain");
+            variable!(model, 0.0 <= x <= 2.0);
+            variable!(model, 0.0 <= y <= 2.0);
+            boolean_variable!(model, active);
+
+            let factor = if multiple_variables { x - y } else { x - 1.0 };
+            let square = match construction {
+                0 => factor.square().into_dynamic(),
+                1 => factor.powi(2),
+                2 => factor.powf(2.0),
+                3 => factor.pow(Expr::constant(model.__sum_context(), 2.0)),
+                4 => (&factor * &factor).into_dynamic(),
+                5 => (factor.clone() * factor).into_dynamic(),
+                _ => {
+                    if multiple_variables {
+                        ((x - y) * (x - y)).into_dynamic()
+                    } else {
+                        ((x - 1.0) * (x - 1.0)).into_dynamic()
+                    }
+                }
+            };
+
+            disjunct_constraint!(model, active, square.sqrt() <= 0.5);
+            model.reformulate_gdp(BigM::default()).unwrap();
+            for xv in [0.0_f64, 0.5, 1.0, 1.5, 2.0] {
+                for yv in [0.0, 0.5, 1.0, 1.5, 2.0] {
+                    let expected = (xv - if multiple_variables { yv } else { 1.0 }).abs() <= 0.5;
+                    assert_eq!(satisfied(&model, &[xv, yv, 1.0]), expected);
+                    assert!(satisfied(&model, &[xv, yv, 0.0]));
+                }
+            }
+        }
     }
 }
 
@@ -1067,6 +1129,61 @@ fn affine_constant_normalization_avoids_big_m_overflow() {
         assert!(satisfied(&model, &[0.0, 1.0]));
         assert!(!satisfied(&model, &[-1e308, 1.0]));
         assert!(satisfied(&model, &[-1e308, 0.0]));
+    }
+}
+
+#[test]
+fn scaled_quadratic_bounds_preserve_active_and_inactive_big_m_rows() {
+    for coefficient in [-1e-200_f64, 1e-200] {
+        for diagonal in [false, true] {
+            for negative_variables in [false, true] {
+                for lower_side in [false, true] {
+                    let model = Model::new("scaled quadratic bounds");
+                    let (lower, upper) =
+                        if negative_variables { (-1e200, -1e199) } else { (1e199, 1e200) };
+                    variable!(model, lower <= x <= upper);
+                    variable!(model, lower <= y <= upper);
+                    boolean_variable!(model, active);
+                    let body = if diagonal { coefficient * x * x } else { coefficient * x * y };
+                    let bound = coefficient.signum() * 2e200;
+
+                    if lower_side {
+                        disjunct_constraint!(model, active, body >= bound);
+                    } else {
+                        disjunct_constraint!(model, active, body <= bound);
+                    }
+
+                    let report = model.reformulate_gdp(BigM::default()).unwrap();
+                    let amount = if lower_side {
+                        report.rows[0].lower_m.unwrap()
+                    } else {
+                        report.rows[0].upper_m.unwrap()
+                    };
+                    assert!(amount.value.is_finite());
+
+                    if lower_side == (coefficient > 0.0) {
+                        assert!((amount.value / 1.99e200 - 1.0).abs() < 1e-12);
+                    } else {
+                        assert!(amount.value.abs() < f64::EPSILON);
+                    }
+
+                    for xv in [lower, f64::midpoint(lower, upper), upper] {
+                        for yv in [lower, f64::midpoint(lower, upper), upper] {
+                            let value = (coefficient * xv) * if diagonal { xv } else { yv };
+                            let source_satisfied =
+                                if lower_side { value >= bound } else { value <= bound };
+                            for selected in [false, true] {
+                                assert_eq!(
+                                    satisfied(&model, &[xv, yv, f64::from(selected)]),
+                                    !selected || source_satisfied,
+                                    "coefficient={coefficient}, diagonal={diagonal}, lower_side={lower_side}, x={xv}, y={yv}, selected={selected}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1137,7 +1254,7 @@ fn regression_big_m_precision_loss_is_rejected_atomically_on_both_sides() {
                 param!(model, offset = offset_value);
                 boolean_variable!(model, active);
                 disjunct_constraint!(model, active, valid, x <= 1e14);
-                let residual = if nonlinear { (x + x.sin()).erase() } else { x.erase() };
+                let residual = if nonlinear { (x + x.sin()).as_dynamic() } else { x.as_dynamic() };
                 let row = if upper {
                     disjunct_constraint!(
                         model,
@@ -1201,7 +1318,8 @@ fn big_m_indicator_coefficient_precision_loss_is_atomic() {
                     param!(model, scale = coefficient);
                     boolean_variable!(model, active);
                     disjunct_constraint!(model, active, valid, x <= 1e14);
-                    let residual = if nonlinear { (x + x.sin()).erase() } else { x.erase() };
+                    let residual =
+                        if nonlinear { (x + x.sin()).as_dynamic() } else { x.as_dynamic() };
                     let body = residual + scale * active.binary();
                     let row = if upper {
                         disjunct_constraint!(model, active, ill_scaled, body <= 0.0)
@@ -1281,9 +1399,9 @@ fn big_m_preserves_the_effective_active_bound_after_coefficient_merging() {
             let bound = if upper { 1e14_f64 } else { -1e14_f64 };
             let coefficient = if upper { bound.next_down() } else { bound.next_up() };
             let residual = if nonlinear {
-                if upper { x.exp().erase() } else { (-x.exp()).erase() }
+                if upper { x.exp().as_dynamic() } else { (-x.exp()).as_dynamic() }
             } else {
-                x.erase()
+                x.as_dynamic()
             };
             let body = residual + coefficient * active.binary();
             let row = if upper {
@@ -1325,7 +1443,7 @@ fn mixed_nonlinear_rows_preserve_affine_terms_constants_and_residual_signs() {
     param!(model, offset = 0.125);
     boolean_variable!(model, active);
     let body = x.square() - ((rate * x).exp() + coefficient * active.binary() + offset + z);
-    disjunct_constraint!(model, active, interval, -2.0 <= body <= 3.0);
+    disjunct_constraint!(model, active, interval, -2.0 <= body.clone() <= 3.0);
     let report = model.reformulate_gdp(BigM::default()).unwrap();
     assert_eq!(report.rows.len(), 1);
     assert_eq!(report.rows[0].constraints.len(), 2);

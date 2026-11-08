@@ -5,7 +5,7 @@ use oximo_expr::{
 
 fn value<D: oximo_expr::Degree>(expr: Expr<'_, D>) -> f64 {
     let values: &[f64] = &[];
-    evaluate(&expr.arena.borrow(), expr.id, &values).unwrap()
+    evaluate(&expr.arena().borrow(), expr.id(), &values).unwrap()
 }
 
 #[test]
@@ -13,7 +13,7 @@ fn every_unary_method_uses_the_public_operation_enum() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let x = Expr::constant(&arena, 1.25);
     let expressions = [
-        (x.neg().nonlinear(), UnaryOp::Neg),
+        (x.neg().as_nonlinear(), UnaryOp::Neg),
         (x.abs(), UnaryOp::Abs),
         (x.sqrt(), UnaryOp::Sqrt),
         (x.cbrt(), UnaryOp::Cbrt),
@@ -27,22 +27,22 @@ fn every_unary_method_uses_the_public_operation_enum() {
         (x.sin(), UnaryOp::Sin),
         (x.cos(), UnaryOp::Cos),
         (x.tan(), UnaryOp::Tan),
-        ((x / 2.0).asin(), UnaryOp::Asin),
-        ((x / 2.0).acos(), UnaryOp::Acos),
+        ((x.clone() / 2.0).asin(), UnaryOp::Asin),
+        ((x.clone() / 2.0).acos(), UnaryOp::Acos),
         (x.atan(), UnaryOp::Atan),
         (x.sinh(), UnaryOp::Sinh),
         (x.cosh(), UnaryOp::Cosh),
         (x.tanh(), UnaryOp::Tanh),
         (x.asinh(), UnaryOp::Asinh),
-        ((x + 1.0).acosh(), UnaryOp::Acosh),
+        ((x.clone() + 1.0).acosh(), UnaryOp::Acosh),
         ((x / 2.0).atanh(), UnaryOp::Atanh),
     ];
     let snapshot = arena.borrow();
     for (expr, expected) in expressions {
-        assert!(matches!(snapshot.get(expr.id), ExprNode::Unary(op, _) if *op == expected));
+        assert!(matches!(snapshot.get(expr.id()), ExprNode::Unary(op, _) if *op == expected));
         let expected_class =
             if expected == UnaryOp::Neg { ExprClass::Linear } else { ExprClass::Nonlinear };
-        assert_eq!(classify(&snapshot, expr.id), expected_class);
+        assert_eq!(classify(&snapshot, expr.id()), expected_class);
     }
 }
 
@@ -56,8 +56,8 @@ fn rust_spelling_aliases_produce_the_same_operations() {
         (x.expm1(), x.exp_m1(), UnaryOp::Expm1),
     ] {
         let snapshot = arena.borrow();
-        assert!(matches!(snapshot.get(modeling.id), ExprNode::Unary(op, _) if *op == expected));
-        assert!(matches!(snapshot.get(rust.id), ExprNode::Unary(op, _) if *op == expected));
+        assert!(matches!(snapshot.get(modeling.id()), ExprNode::Unary(op, _) if *op == expected));
+        assert!(matches!(snapshot.get(rust.id()), ExprNode::Unary(op, _) if *op == expected));
     }
 }
 
@@ -128,13 +128,19 @@ fn pairwise_min_and_max_flatten_both_sides_in_stable_order() {
     let maximum = a.max(b).max(c.max(d));
     let snapshot = arena.borrow();
     assert!(
-        matches!(snapshot.get(minimum.id), ExprNode::Min(children) if children.as_slice() == [a.id, b.id, c.id, d.id])
+        matches!(snapshot.get(minimum.id()), ExprNode::Min(children) if children.as_slice() == [a.id(), b.id(), c.id(), d.id()])
     );
     assert!(
-        matches!(snapshot.get(maximum.id), ExprNode::Max(children) if children.as_slice() == [a.id, b.id, c.id, d.id])
+        matches!(snapshot.get(maximum.id()), ExprNode::Max(children) if children.as_slice() == [a.id(), b.id(), c.id(), d.id()])
     );
-    assert_eq!(render_expr(&snapshot, minimum.id, &|v| format!("x{}", v.0)), "min(x0, x1, x2, x3)");
-    assert_eq!(render_expr(&snapshot, maximum.id, &|v| format!("x{}", v.0)), "max(x0, x1, x2, x3)");
+    assert_eq!(
+        render_expr(&snapshot, minimum.id(), &|v| format!("x{}", v.0)),
+        "min(x0, x1, x2, x3)"
+    );
+    assert_eq!(
+        render_expr(&snapshot, maximum.id(), &|v| format!("x{}", v.0)),
+        "max(x0, x1, x2, x3)"
+    );
 }
 
 #[test]
@@ -156,35 +162,35 @@ fn extrema_builder_streams_in_order_flattens_and_handles_empty() {
     let child = Expr::new(child, &arena);
 
     let mut minimum = oximo_expr::ExtremaBuilder::min();
-    minimum.push(a.min(b).erase());
-    minimum.push(c.erase());
+    minimum.push(a.min(b).as_dynamic());
+    minimum.push(c.as_dynamic());
     let minimum = minimum.finish().unwrap();
 
     let mut maximum = oximo_expr::ExtremaBuilder::max();
-    maximum.push(a.max(b).erase());
-    maximum.push(c.erase());
+    maximum.push(a.max(b).as_dynamic());
+    maximum.push(c.as_dynamic());
     let maximum = maximum.finish().unwrap();
 
     let snapshot = arena.borrow();
     assert!(
-        matches!(snapshot.get(minimum.id), ExprNode::Min(children) if children.as_slice() == [a.id, b.id, c.id])
+        matches!(snapshot.get(minimum.id()), ExprNode::Min(children) if children.as_slice() == [a.id(), b.id(), c.id()])
     );
     assert!(
-        matches!(snapshot.get(maximum.id), ExprNode::Max(children) if children.as_slice() == [a.id, b.id, c.id])
+        matches!(snapshot.get(maximum.id()), ExprNode::Max(children) if children.as_slice() == [a.id(), b.id(), c.id()])
     );
     drop(snapshot);
 
     let mut minimum = oximo_expr::ExtremaBuilder::min();
     minimum.push(empty_min);
-    minimum.push(child);
+    minimum.push(&child);
     let minimum = minimum.finish().unwrap();
     let mut maximum = oximo_expr::ExtremaBuilder::max();
     maximum.push(empty_max);
-    maximum.push(child);
+    maximum.push(&child);
     let maximum = maximum.finish().unwrap();
 
-    assert_eq!(minimum.id, child.id);
-    assert_eq!(maximum.id, child.id);
+    assert_eq!(minimum.id(), child.id());
+    assert_eq!(maximum.id(), child.id());
     assert_eq!(value(minimum), 7.0);
     assert_eq!(value(maximum), 7.0);
     assert!(oximo_expr::ExtremaBuilder::<oximo_expr::Affine>::min().finish().is_none());

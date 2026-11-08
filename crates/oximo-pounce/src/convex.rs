@@ -181,13 +181,13 @@ fn classify(model: &LoweringContext<'_>) -> Class {
                 .objective()
                 .as_ref()
                 .and_then(|obj| model.quadratic(obj.expr))
-                .is_some_and(|q| hessian_is_psd(&q.hessian, sign));
+                .is_some_and(|q| hessian_is_psd(&q, sign));
             if psd { Class::ConvexQp } else { Class::General }
         }
         ModelKind::SOCP => {
             let sign = objective_sign(model);
             let convex = model.objective().as_ref().is_none_or(|obj| {
-                model.quadratic(obj.expr).is_some_and(|q| hessian_is_psd(&q.hessian, sign))
+                model.quadratic(obj.expr).is_some_and(|q| hessian_is_psd(&q, sign))
             });
             if convex { Class::Socp } else { Class::General }
         }
@@ -203,19 +203,35 @@ fn objective_sign(model: &LoweringContext<'_>) -> f64 {
     }
 }
 
+/// Convert polynomial coefficients to the finite Hessian required by the QP solver.
+fn append_hessian(
+    terms: &oximo_expr::QuadraticTerms,
+    sign: f64,
+    output: &mut Vec<Triplet>,
+) -> Result<(), SolverError> {
+    output.reserve(terms.quadratic().len());
+    for entry in terms.checked_hessian_entries() {
+        let (row, col, h) = entry?;
+        output.push(Triplet::new(row.index(), col.index(), sign * h));
+    }
+
+    Ok(())
+}
+
 /// POUNCE's safe classifier using the reusable PSD certificate.
-fn hessian_is_psd(hessian: &[(oximo_expr::VarId, oximo_expr::VarId, f64)], sign: f64) -> bool {
-    let n = hessian
+fn hessian_is_psd(terms: &oximo_expr::QuadraticTerms, sign: f64) -> bool {
+    let n = terms
+        .quadratic()
         .iter()
         .flat_map(|(row, col, _)| [row.index(), col.index()])
         .max()
         .map_or(0, |index| index + 1);
-    let triplets = hessian
-        .iter()
-        .map(|&(row, col, value)| {
-            Triplet::new(row.index().max(col.index()), row.index().min(col.index()), sign * value)
-        })
-        .collect::<Vec<_>>();
+
+    let mut triplets = Vec::with_capacity(terms.quadratic().len());
+    for entry in terms.checked_hessian_entries() {
+        let Ok((row, column, value)) = entry else { return false };
+        triplets.push(Triplet::new(row.index(), column.index(), sign * value));
+    }
     pounce_rs::convex::certify_psd_lower_triangle(n, &triplets, PSD_TOL, backend).unwrap_or(false)
 }
 
@@ -269,13 +285,11 @@ impl Problem {
                         if let Some(o) = prepared.objective() {
                             let q =
                                 prepared.require_quadratic(o.expr, || "the objective".into())?;
-                            for &(id, c) in &q.linear {
+                            for &(id, c) in q.linear() {
                                 fresh.qp.c[id.index()] = fresh.sign * c;
                             }
-                            fresh.qp.p_lower.extend(q.hessian.iter().map(|&(a, b, c)| {
-                                Triplet::new(a.index(), b.index(), fresh.sign * c)
-                            }));
-                            fresh.objective_constant = fresh.sign * q.constant;
+                            append_hessian(&q, fresh.sign, &mut fresh.qp.p_lower)?;
+                            fresh.objective_constant = fresh.sign * q.constant();
                         }
                     }
                     ParameterTarget::VariableBound(id) => {
@@ -432,15 +446,11 @@ pub(crate) fn build_problem(
         let q = prepared.quadratic(obj.expr).ok_or_else(|| {
             SolverError::Backend("pounce convex route requires a quadratic objective".into())
         })?;
-        p_lower.extend(
-            q.hessian
-                .iter()
-                .map(|&(row, col, value)| Triplet::new(row.index(), col.index(), sign * value)),
-        );
-        for &(var, value) in &q.linear {
+        append_hessian(&q, sign, &mut p_lower)?;
+        for &(var, value) in q.linear() {
             c[var.index()] += sign * value;
         }
-        objective_constant = sign * q.constant;
+        objective_constant = sign * q.constant();
     }
 
     let model_constraints = prepared.constraints();
@@ -1081,6 +1091,33 @@ impl ActivePersistent {
 mod tests {
     use super::*;
     use oximo_core::{Model, constraint, objective, variable};
+
+    #[test]
+    fn objective_hessian_checks_conversion_before_using_a_solver_matrix() {
+        use oximo_expr::{QuadraticTerms, VarId};
+        let terms = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        let mut matrix = Vec::new();
+        append_hessian(&terms, -1.0, &mut matrix).unwrap();
+        assert_eq!(
+            matrix.iter().map(|entry| (entry.row, entry.col, entry.val)).collect::<Vec<_>>(),
+            [(0, 0, -6.0), (1, 0, -5.0)]
+        );
+
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1e308)], Vec::new(), 0.0)
+                .unwrap();
+        assert!(!hessian_is_psd(&terms, 1.0));
+        assert!(matches!(
+            append_hessian(&terms, 1.0, &mut Vec::new()).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
 
     #[test]
     fn row_replacement_updates_only_the_requested_row() {

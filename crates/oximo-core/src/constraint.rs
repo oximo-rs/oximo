@@ -459,6 +459,39 @@ impl<'a, D: FunctionDegree> Relate<'a, D> for Expr<'a, D> {
         Constraint::new(R::Degree::relation_function(lhs), EqualTo(rhs))
     }
 }
+
+impl<'a, D: FunctionDegree> Relate<'a, D> for &Expr<'a, D> {
+    fn le<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, LessThan> {
+        self.clone().le(rhs)
+    }
+    fn ge<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, GreaterThan> {
+        self.clone().ge(rhs)
+    }
+    fn eq<R: IntoRhs<'a, D>>(
+        self,
+        rhs: R,
+    ) -> Constraint<<R::Degree as FunctionDegree>::RelationFunction<'a>, EqualTo> {
+        self.clone().eq(rhs)
+    }
+}
+impl<'a, D, R> IntoRhs<'a, D> for &Expr<'a, R>
+where
+    D: FunctionDegree + oximo_expr::degree::AddDegree<R>,
+    R: oximo_expr::Degree,
+    <D as oximo_expr::degree::AddDegree<R>>::Output: FunctionDegree,
+{
+    type Degree = <D as oximo_expr::degree::AddDegree<R>>::Output;
+    fn fold_rhs(self, lhs: Expr<'a, D>) -> (Expr<'a, Self::Degree>, f64) {
+        (lhs - self, 0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Sense;

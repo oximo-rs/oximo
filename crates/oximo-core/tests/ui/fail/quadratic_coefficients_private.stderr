@@ -1,0 +1,10 @@
+error[E0616]: field `quadratic` of struct `QuadraticTerms` is private
+ --> tests/ui/fail/quadratic_coefficients_private.rs:6:18
+  |
+6 |     coefficients.quadratic.push((VarId(0), VarId(0), f64::NAN));
+  |                  ^^^^^^^^^ private field
+  |
+help: a method `quadratic` also exists, call it with parentheses
+  |
+6 |     coefficients.quadratic().push((VarId(0), VarId(0), f64::NAN));
+  |                           ++

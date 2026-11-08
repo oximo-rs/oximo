@@ -61,17 +61,17 @@ fn soc_quadratic_candidate(c: &AlgebraicConstraint, q: &QuadraticTerms) -> Optio
     if sense != Sense::Le {
         return None;
     }
-    if !q.linear.is_empty() || q.constant - rhs != 0.0 {
+    if !q.linear().is_empty() || q.constant() - rhs != 0.0 {
         return None;
     }
 
     let mut positives = 0;
     let mut negative: Option<(VarId, f64)> = None;
-    for &(row, col, h) in &q.hessian {
+    for &(row, col, h) in q.quadratic() {
         if row != col {
             return None;
         }
-        let coef = h / 2.0;
+        let coef = h;
         if coef > 0.0 {
             positives += 1;
         } else if coef < 0.0 {
@@ -128,7 +128,7 @@ pub fn __soc_bound_variable(row: &AlgebraicConstraint, terms: &QuadraticTerms) -
 ///
 /// - it is single-sided `lhs <= rhs` (no ranges, `>=`, or equalities),
 /// - `lhs - rhs` is a pure quadratic form: no linear terms, no constant,
-/// - the Hessian is diagonal with exactly one negative entry `-n` (on the
+/// - the quadratic form is diagonal with exactly one negative entry `-n` (on the
 ///   bound variable `t`) and at least one positive entry `p_i`,
 /// - `t` has lower bound `>= 0`.
 ///
@@ -146,10 +146,10 @@ pub fn __detect_soc_from_quadratic(
 ) -> Option<SocForm> {
     let (t, n) = soc_quadratic(vars, c, q)?;
     let terms = q
-        .hessian
+        .quadratic()
         .iter()
         .filter_map(|&(row, _, h)| {
-            let coef = h / 2.0;
+            let coef = h;
             (coef > 0.0).then(|| LinearTerms {
                 coeffs: vec![(row, (coef / n).sqrt())].into(),
                 constant: 0.0,

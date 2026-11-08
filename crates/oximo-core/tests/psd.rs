@@ -79,7 +79,7 @@ fn invalid_registrations_preserve_existing_registries() {
     symmetric_variable!(other, foreign[2]);
     assert!(catch_unwind(AssertUnwindSafe(|| m.add_psd_constraint("foreign", &foreign))).is_err());
     assert_eq!(m.num_psd_constraints(), 0);
-    assert!(x.square().erase().try_affine().is_err());
+    assert!(x.square().as_dynamic().as_affine().is_err());
     // Collision at the last entry must not register earlier entries.
     m.__var("taken[1,1]").build();
     let before = m.num_variables();
@@ -124,7 +124,7 @@ fn indexed_psd_forks_remap_in_deterministic_order_and_roll_back_errors() {
     );
     let nodes = m.arena().len();
     assert!(catch_unwind(AssertUnwindSafe(|| {
-        psd_constraint!(m, bad[i in 0..3], SymmetricMatrix::from_upper_triangle(1, [if i == 2 { x.square().erase() } else { (x + 20.0).erase() }.try_affine().expect("matrix entry must be affine")]));
+        psd_constraint!(m, bad[i in 0..3], SymmetricMatrix::from_upper_triangle(1, [if i == 2 { x.square().as_dynamic() } else { (x + 20.0).as_dynamic() }.as_affine().expect("matrix entry must be affine")]));
     })).is_err());
     assert_eq!(m.num_psd_constraints(), 300);
     assert_eq!(m.arena().len(), nodes);

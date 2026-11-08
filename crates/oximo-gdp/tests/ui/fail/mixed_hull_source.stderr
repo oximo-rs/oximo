@@ -9,5 +9,5 @@ error[E0308]: mismatched types
 note: method defined here
  --> $WORKSPACE/crates/oximo-core/src/model/variables.rs
   |
-  |     pub fn variable_handle(&self, id: VarId) -> Expr<'_, Affine> {
+  |     pub fn variable_handle(&self, id: VarId) -> VariableHandle<'_> {
   |            ^^^^^^^^^^^^^^^

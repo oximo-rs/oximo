@@ -318,11 +318,11 @@ pub(crate) fn objective_terms(
     let mut coeffs = vec![0.0; num_vars];
     if matches!(kind, ModelKind::QP) {
         let quad = prepared.require_quadratic(obj_expr, || "the objective".into())?;
-        for (v, c) in &quad.linear {
+        for (v, c) in quad.linear() {
             coeffs[v.index()] = *c;
         }
-        let cols = hessian_columns(&quad, num_vars);
-        Ok((coeffs, quad.constant, cols))
+        let cols = hessian_columns(&quad, num_vars)?;
+        Ok((coeffs, quad.constant(), cols))
     } else {
         let lin = prepared.require_linear(obj_expr, || "the objective".into())?;
         for &(v, c) in lin.coeffs.iter() {
@@ -336,15 +336,14 @@ pub(crate) fn objective_terms(
 /// compressed-sparse-column upload. Each variable yields one (possibly empty)
 /// column, so the Hessian dimension always matches the model's column count.
 /// Row indices within each column are sorted ascending.
-fn hessian_columns(quad: &QuadraticTerms, num_vars: usize) -> HessianCols {
+fn hessian_columns(quad: &QuadraticTerms, num_vars: usize) -> Result<HessianCols, SolverError> {
     let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); num_vars];
-    for (row, col, value) in &quad.hessian {
-        cols[col.index()].push((row.index(), *value));
+    for entry in quad.checked_hessian_entries() {
+        let (row, col, h) = entry?;
+        cols[col.index()].push((row.index(), h));
     }
-    for col in &mut cols {
-        col.sort_unstable_by_key(|(row, _)| *row);
-    }
-    cols
+    // QuadraticTerms already orders pairs by column then row.
+    Ok(cols)
 }
 
 fn collect_solution(
@@ -495,6 +494,26 @@ mod tests {
     use crate::HighsOptions;
 
     #[test]
+    fn hessian_columns_preserve_cross_terms_and_reject_overflowing_diagonals() {
+        let terms = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(hessian_columns(&terms, 2).unwrap(), [vec![(0, 6.0), (1, 5.0)], vec![]]);
+
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1e308)], Vec::new(), 0.0)
+                .unwrap();
+        assert!(matches!(
+            hessian_columns(&terms, 1).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
+
+    #[test]
     fn qp_min_sum_of_squares() {
         // min x^2 + y^2  s.t.  x + y = 1  ->  (0.5, 0.5), objective 0.5.
         let m = Model::new("sq");
@@ -564,17 +583,17 @@ mod tests {
         let weight = items
             .iter()
             .enumerate()
-            .map(|(i, &x)| f64::from(u32::try_from((i * 7) % 17 + 3).unwrap()) * x)
+            .map(|(i, x)| f64::from(u32::try_from((i * 7) % 17 + 3).unwrap()) * x)
             .sum::<oximo_core::Expr<'_, oximo_core::Affine>>();
         let value = items
             .iter()
             .enumerate()
-            .map(|(i, &x)| f64::from(u32::try_from((i * 11) % 23 + 5).unwrap()) * x)
+            .map(|(i, x)| f64::from(u32::try_from((i * 11) % 23 + 5).unwrap()) * x)
             .sum::<oximo_core::Expr<'_, oximo_core::Affine>>();
         let volume = items
             .iter()
             .enumerate()
-            .map(|(i, &x)| f64::from(u32::try_from((i * 13) % 31 + 2).unwrap()) * x)
+            .map(|(i, x)| f64::from(u32::try_from((i * 13) % 31 + 2).unwrap()) * x)
             .sum::<oximo_core::Expr<'_, oximo_core::Affine>>();
         constraint!(model, capacity, weight <= 350.0);
         constraint!(model, volume_capacity, volume <= 550.0);

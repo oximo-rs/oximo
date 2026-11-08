@@ -2,23 +2,28 @@
 #![forbid(unsafe_code)]
 
 mod affine_builder;
+mod affine_split;
 mod analysis;
 mod arena;
 mod captured;
 mod classify;
+mod compensated_sum;
 pub mod degree;
 mod eval;
 mod fold;
 mod handle;
+mod hessian;
 mod linear;
 mod model_error;
 mod ops;
 mod quadratic;
+mod quadratic_builder;
 mod render;
 mod simplify;
 mod visit;
 
 pub use affine_builder::AffineBuilder;
+pub use affine_split::{AffineResidual, split_affine};
 pub use analysis::ExpressionOperator;
 #[doc(hidden)]
 pub use analysis::{ExpressionAnalysis, ExpressionSummary};
@@ -31,15 +36,23 @@ pub use captured::CapturedExpr;
 #[cfg(test)]
 pub use classify::ClassificationStats;
 pub use classify::{ExprClass, classify};
-pub use degree::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
+pub use degree::{
+    Affine, Constant, Degree, Dynamic, ExpressionDegree, LeafDegree, Nonlinear, ParameterDegree,
+    Quadratic, VariableDegree,
+};
 pub use eval::{EvalContext, EvalError, WithParameters, evaluate};
-pub use handle::{ClassifiedExpr, Expr, ExprData};
+pub use handle::{ClassifiedExpr, Expr, ExprInput, ParameterHandle, VariableHandle};
+pub use hessian::{
+    HessianConversionError, HessianConversionErrorKind, LowerTriangularHessian,
+    QuadraticImportError,
+};
 pub use linear::{LinearTerms, SignedExpr, describe_nonlinear_term, extract_linear, split_linear};
 pub use model_error::{Bound, ModelError};
 #[doc(hidden)]
 pub use ops::ExtremaBuilder;
 pub use ops::dot;
-pub use quadratic::{QuadraticTerms, extract_quadratic};
+pub use quadratic::{QuadraticTerms, extract_quadratic, extract_quadratic_shared};
+pub use quadratic_builder::{QuadraticBuildError, QuadraticBuilder};
 pub use render::{render_expr, render_linear_terms};
 pub use simplify::simplify;
 pub use visit::{Visitor, walk, walk_shared};

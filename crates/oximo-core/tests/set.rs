@@ -215,7 +215,7 @@ fn indexed_var_tuple_indexing() {
     let by_ref = x[&key];
 
     // IDs must differ, the two scalars are not the same variable.
-    assert_ne!(by_tuple.id, by_ref.id);
+    assert_ne!(by_tuple.id(), by_ref.id());
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn add_constraints_over_scalar_typed_closure() {
     let m = Model::new("rule");
     let set = Set::range(0..3);
     let x = m.__indexed_var("x", &set).lb(0.0).build();
-    m.__add_constraints_over("c", &set, |i: usize| x[i].le(10.0));
+    m.__add_constraints_over("c", &set, |i: usize| (x[i]).le(10.0));
     assert_eq!(m.num_constraints(), 3);
     assert!(m.constraint_id("c[0]").is_some());
     assert!(m.constraint_id("c[2]").is_some());
@@ -236,7 +236,7 @@ fn add_constraints_over_tuple_set_typed_closure() {
     let cols = Set::strings(["a", "b"]);
     let ij = &rows * &cols;
     let x = m.__indexed_var("x", &ij).lb(0.0).build();
-    m.__add_constraints_over("c", &ij, |(i, j): (usize, String)| x[(i, j)].le(5.0));
+    m.__add_constraints_over("c", &ij, |(i, j): (usize, String)| (x[(i, j)]).le(5.0));
     assert_eq!(m.num_constraints(), 4);
     assert!(m.constraint_id("c[0,a]").is_some());
     assert!(m.constraint_id("c[1,b]").is_some());
@@ -247,7 +247,7 @@ fn add_constraints_over_indexes_by_value() {
     let m = Model::new("rule_val");
     let set = Set::range(0..2);
     let x = m.__indexed_var("x", &set).lb(0.0).build();
-    m.__add_constraints_over("c", &set, |i: usize| x[i].le(1.0));
+    m.__add_constraints_over("c", &set, |i: usize| (x[i]).le(1.0));
     assert_eq!(m.num_constraints(), 2);
 }
 

@@ -88,7 +88,8 @@ fn pattern_of_quadratic_matches_extract_quadratic() {
 
     let mut from_extract: Vec<(u32, u32)> = extract_quadratic(&arena, root)
         .expect("degree 2")
-        .hessian
+        .hessian_entries()
+        .collect::<Vec<_>>()
         .iter()
         .map(|&(r, c, _)| (r.0, c.0))
         .collect();

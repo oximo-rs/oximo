@@ -90,10 +90,13 @@ impl SumDomain<i32> for std::ops::Range<i32> {
 /// Macro-facing entry point backing the `sum!` macro. Not part of the stable
 /// public API.
 #[doc(hidden)]
-pub fn __sum_over<'a, E: oximo_expr::Degree, K, D, F>(domain: &D, f: F) -> Expr<'a, E>
+pub fn __sum_over<'a, E: oximo_expr::ExprInput<'a>, K, D, F>(
+    domain: &D,
+    f: F,
+) -> Expr<'a, <E::Degree as oximo_expr::Degree>::Computed>
 where
     D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> Expr<'a, E>,
+    F: FnMut(K) -> E,
 {
     Expr::__sum_terms(domain.keys().map(f)).expect("sum_over on empty domain")
 }
@@ -135,14 +138,14 @@ mod tests {
             let total = __sum_over(&(0..count), |i| x[count - i - 1]);
             let arena = model.arena();
             if count == 1 {
-                assert_eq!(total.id, x[0_usize].id);
+                assert_eq!(total.id(), x[0_usize].id());
             } else {
-                let oximo_expr::ExprNode::Add(children) = arena.get(total.id) else {
+                let oximo_expr::ExprNode::Add(children) = arena.get(total.id()) else {
                     panic!("sum must keep its flat Add representation");
                 };
                 assert_eq!(
                     children.as_slice(),
-                    &(0..count).rev().map(|i| x[i].id).collect::<Vec<_>>()
+                    &(0..count).rev().map(|i| x[i].id()).collect::<Vec<_>>()
                 );
             }
         }
@@ -156,7 +159,7 @@ mod tests {
 
         let total = __sum_over(&items, |i: usize| x[i]);
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 4);
         assert!(terms.coeffs.iter().all(|(_, c)| (c - 1.0).abs() < f64::EPSILON));
     }
@@ -171,7 +174,7 @@ mod tests {
 
         let total = __sum_over(&routes, |(p, q): (String, String)| x[(p, q)]);
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 6);
     }
 
@@ -185,7 +188,7 @@ mod tests {
 
         let total = __sum_over(&plants, |p: String| __sum_over(&markets, |q: String| x[(&p, q)]));
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 6);
     }
 
@@ -197,7 +200,7 @@ mod tests {
 
         let total = __sum_over(&items, |i: usize| x[i]);
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 3);
     }
 
@@ -210,7 +213,7 @@ mod tests {
         let picked: &[usize] = &[0, 2, 4];
         let total = __sum_over(picked, |i: usize| x[i]);
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 3);
     }
 
@@ -223,7 +226,7 @@ mod tests {
         let picked: Vec<usize> = vec![1, 3];
         let total = __sum_over(&picked, |i: usize| x[i]);
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 2);
     }
 
@@ -236,7 +239,7 @@ mod tests {
         let picked: [usize; 4] = [0, 1, 2, 3];
         let total = __sum_over(&picked, |i: usize| x[i]);
         let arena = m.arena();
-        let terms = extract_linear(&arena, total.id).expect("linear");
+        let terms = extract_linear(&arena, total.id()).expect("linear");
         assert_eq!(terms.coeffs.len(), 4);
     }
 
@@ -246,7 +249,7 @@ mod tests {
         let m = Model::new("empty");
         let empty = Set::range(0..0);
         let _x = m.__indexed_var("x", &Set::range(0..1)).lb(0.0).build();
-        let _: Expr = __sum_over(&empty, |_: usize| panic!("closure should not run"));
+        let _: Expr = __sum_over(&empty, |_: usize| -> Expr { panic!("closure should not run") });
     }
 
     #[test]
@@ -255,6 +258,6 @@ mod tests {
         let m = Model::new("empty_slice");
         let _x = m.__indexed_var("x", &Set::range(0..1)).lb(0.0).build();
         let empty: &[usize] = &[];
-        let _: Expr = __sum_over(empty, |_: usize| panic!("closure should not run"));
+        let _: Expr = __sum_over(empty, |_: usize| -> Expr { panic!("closure should not run") });
     }
 }

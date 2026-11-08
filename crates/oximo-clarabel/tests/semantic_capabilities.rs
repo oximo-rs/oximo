@@ -100,7 +100,7 @@ fn explicit_opaque_and_custom_set_lowerings_validate_and_solve_in_native_coordin
     objective!(model, Max, x + y);
     let opaque = model.add_lowered_constraint(
         "opaque",
-        Constraint::new(Opaque(x.erase()), LessThan(2.0)).into_ir(),
+        Constraint::new(Opaque(x.as_dynamic()), LessThan(2.0)).into_ir(),
     );
     let custom = model.add_lowered_constraint(
         "custom_set",
@@ -168,7 +168,7 @@ fn explicitly_lowered_opaque_quadratic_can_use_native_soc_detection() {
     variable!(model, t >= 0.0);
     let source = model.add_lowered_constraint(
         "opaque_soc",
-        Constraint::new(Opaque((x.square() + y.square() - t.square()).erase()), LessThan(0.0))
+        Constraint::new(Opaque((x.square() + y.square() - t.square()).as_dynamic()), LessThan(0.0))
             .into_ir(),
     );
     objective!(model, Min, t);
@@ -191,7 +191,7 @@ fn soc_detection_uses_the_selected_native_row_for_a_custom_source_set() {
     let source = model.add_lowered_constraint(
         "custom_soc",
         Constraint::new(
-            Opaque((scale * (x.square() + y.square()) - t.square()).erase()),
+            Opaque((scale * (x.square() + y.square()) - t.square()).as_dynamic()),
             CustomUpper(0.0),
         )
         .into_ir(),

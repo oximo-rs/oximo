@@ -148,6 +148,23 @@ struct Rewriter<'a> {
 }
 
 impl VisitMut for Rewriter<'_> {
+    // Runtime model context must not be projected into constant expressions.
+    fn visit_expr_repeat_mut(&mut self, expression: &mut syn::ExprRepeat) {
+        self.visit_attributes_mut(&mut expression.attrs);
+        self.visit_expr_mut(&mut expression.expr);
+    }
+
+    fn visit_expr_const_mut(&mut self, _expression: &mut syn::ExprConst) {}
+
+    fn visit_type_mut(&mut self, _ty: &mut syn::Type) {}
+
+    fn visit_generic_argument_mut(&mut self, argument: &mut syn::GenericArgument) {
+        match argument {
+            syn::GenericArgument::Const(_) | syn::GenericArgument::AssocConst(_) => {}
+            _ => visit_mut::visit_generic_argument_mut(self, argument),
+        }
+    }
+
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         if self.error.is_some() {
             return;
@@ -297,11 +314,12 @@ fn expand_in(
         captures.block_pattern(&bind.pat);
     }
     let body = rewrite(body, context.as_ref(), captures)?;
+    let body = quote!(#body);
     let cond = cond.map(|cond| rewrite(cond, context.as_ref(), captures)).transpose()?;
     captures.blocked.truncate(scope);
 
     let Some(cond) = cond else {
-        let mut expr = quote!(#body);
+        let mut expr = body;
         for b in binds.iter().rev() {
             let param = b.closure_param();
             let used = crate::bind::mark_bindings_used(std::slice::from_ref(b));

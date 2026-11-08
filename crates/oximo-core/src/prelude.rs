@@ -48,7 +48,8 @@ pub use crate::sum::SumDomain;
 pub use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
 pub use oximo_expr::{
     AffineBuilder, CapturedExpr, Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId,
-    ParameterSnapshot, UnaryOp, VarId, dot,
+    ParameterHandle, ParameterSnapshot, QuadraticBuildError, QuadraticBuilder, UnaryOp, VarId,
+    VariableHandle, dot,
 };
 #[cfg(feature = "gdp")]
 pub use oximo_macros::{

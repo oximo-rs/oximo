@@ -42,6 +42,9 @@
 //!
 //! Addition and subtraction are entrywise and require equal dimensions.
 //! Scalar multiplication and negation propagate the scalar expression degree.
+//! Borrowed expression scalars, including `param!` handles, work on either side.
+//! Owned arithmetic moves uniquely stored entries.
+//! [`SymmetricMatrix::map_owned`] follows the same rule.
 //! [`SymmetricMatrix::trace`] sums the diagonal.
 //! [`SymmetricMatrix::frobenius`] computes `trace(A' * B)`, counting each
 //! off-diagonal product twice. These operations work with symbolic entries,
@@ -71,7 +74,7 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq)]
 pub struct SymmetricMatrix<T> {
     side_dimension: usize,
-    entries: Arc<[T]>,
+    entries: Arc<Vec<T>>,
 }
 
 /// Invalid dense row input for a symmetric matrix.
@@ -187,8 +190,8 @@ impl<T> SymmetricMatrix<T> {
                 }
                 value
             })
-            .collect();
-        Self { side_dimension: n, entries }
+            .collect::<Vec<_>>();
+        Self { side_dimension: n, entries: Arc::new(entries) }
     }
 
     pub const fn side_dimension(&self) -> usize {
@@ -208,19 +211,29 @@ impl<T> SymmetricMatrix<T> {
     }
 
     /// Consume the matrix into its ordinary upper triangle.
-    /// Copies the shared triangle into an owned vector.
     pub fn into_upper_triangle(self) -> Vec<T>
     where
         T: Clone,
     {
-        self.entries.to_vec()
+        Arc::unwrap_or_clone(self.entries)
     }
 
     pub fn map<U>(&self, f: impl FnMut(&T) -> U) -> SymmetricMatrix<U> {
         SymmetricMatrix {
             side_dimension: self.side_dimension,
-            entries: self.entries.iter().map(f).collect(),
+            entries: Arc::new(self.entries.iter().map(f).collect()),
         }
+    }
+
+    /// Consume entries when uniquely held.
+    pub fn map_owned<U>(self, f: impl FnMut(T) -> U) -> SymmetricMatrix<U>
+    where
+        T: Clone,
+    {
+        SymmetricMatrix::from_upper_triangle(
+            self.side_dimension,
+            self.into_upper_triangle().into_iter().map(f),
+        )
     }
 
     /// Look up an entry; mirrored indices share storage.
@@ -233,27 +246,29 @@ impl<T> SymmetricMatrix<T> {
     }
 
     /// Sum the diagonal entries.
-    pub fn trace(&self) -> T
+    pub fn trace(&self) -> T::Output
     where
-        T: Copy + Add<Output = T>,
+        T: Clone + Add,
+        T::Output: From<T> + Add<T, Output = T::Output>,
     {
-        (1..self.side_dimension).fold(self[(0, 0)], |sum, i| sum + self[(i, i)])
+        (1..self.side_dimension)
+            .fold(self[(0, 0)].clone().into(), |sum, i| sum + self[(i, i)].clone())
     }
 
     /// Frobenius inner product `trace(self' * rhs)`, counting off-diagonals twice.
     ///
     /// # Panics
     /// Panics when the dimensions differ.
-    pub fn frobenius<R: Copy, O>(&self, rhs: &SymmetricMatrix<R>) -> O
+    pub fn frobenius<R: Clone, O>(&self, rhs: &SymmetricMatrix<R>) -> O
     where
-        T: Copy + Mul<R, Output = O>,
+        T: Clone + Mul<R, Output = O>,
         O: Add<Output = O> + Mul<f64, Output = O>,
     {
         assert_eq!(self.side_dimension, rhs.side_dimension, "matrix dimension mismatch");
-        let mut sum = self[(0, 0)] * rhs[(0, 0)];
+        let mut sum = self[(0, 0)].clone() * rhs[(0, 0)].clone();
         for j in 1..self.side_dimension {
             for i in 0..=j {
-                let term = self[(i, j)] * rhs[(i, j)];
+                let term = self[(i, j)].clone() * rhs[(i, j)].clone();
                 sum = sum + term * if i == j { 1.0 } else { 2.0 };
             }
         }
@@ -314,25 +329,37 @@ impl<T> Index<(&usize, &usize)> for SymmetricMatrix<T> {
 
 macro_rules! matrix_binary {
     ($trait:ident, $method:ident, $op:tt) => {
-        impl<L: Copy + $trait<R>, R: Copy> $trait<&SymmetricMatrix<R>> for &SymmetricMatrix<L> {
+        impl<L: Clone + $trait<R>, R: Clone> $trait<&SymmetricMatrix<R>> for &SymmetricMatrix<L> {
             type Output = SymmetricMatrix<L::Output>;
             fn $method(self, rhs: &SymmetricMatrix<R>) -> Self::Output {
                 assert_eq!(self.side_dimension, rhs.side_dimension, "matrix dimension mismatch");
                 SymmetricMatrix::from_upper_triangle(self.side_dimension,
-                    self.entries.iter().zip(rhs.entries.iter()).map(|(&l, &r)| l $op r))
+                    self.entries.iter().zip(rhs.entries.iter()).map(|(l, r)| l.clone() $op r.clone()))
             }
         }
-        impl<L: Copy + $trait<R>, R: Copy> $trait<SymmetricMatrix<R>> for SymmetricMatrix<L> {
+        impl<L: Clone + $trait<R>, R: Clone> $trait<SymmetricMatrix<R>> for SymmetricMatrix<L> {
             type Output = SymmetricMatrix<L::Output>;
-            fn $method(self, rhs: SymmetricMatrix<R>) -> Self::Output { &self $op &rhs }
+            fn $method(self, rhs: SymmetricMatrix<R>) -> Self::Output {
+                assert_eq!(self.side_dimension,rhs.side_dimension,"matrix dimension mismatch");
+                SymmetricMatrix::from_upper_triangle(self.side_dimension,
+                    self.into_upper_triangle().into_iter().zip(rhs.into_upper_triangle()).map(|(l,r)|l $op r))
+            }
         }
-        impl<L: Copy + $trait<R>, R: Copy> $trait<&SymmetricMatrix<R>> for SymmetricMatrix<L> {
+        impl<L: Clone + $trait<R>, R: Clone> $trait<&SymmetricMatrix<R>> for SymmetricMatrix<L> {
             type Output = SymmetricMatrix<L::Output>;
-            fn $method(self, rhs: &SymmetricMatrix<R>) -> Self::Output { &self $op rhs }
+            fn $method(self, rhs: &SymmetricMatrix<R>) -> Self::Output {
+                assert_eq!(self.side_dimension,rhs.side_dimension,"matrix dimension mismatch");
+                SymmetricMatrix::from_upper_triangle(self.side_dimension,
+                    self.into_upper_triangle().into_iter().zip(rhs.entries.iter()).map(|(l,r)|l $op r.clone()))
+            }
         }
-        impl<L: Copy + $trait<R>, R: Copy> $trait<SymmetricMatrix<R>> for &SymmetricMatrix<L> {
+        impl<L: Clone + $trait<R>, R: Clone> $trait<SymmetricMatrix<R>> for &SymmetricMatrix<L> {
             type Output = SymmetricMatrix<L::Output>;
-            fn $method(self, rhs: SymmetricMatrix<R>) -> Self::Output { self $op &rhs }
+            fn $method(self, rhs: SymmetricMatrix<R>) -> Self::Output {
+                assert_eq!(self.side_dimension,rhs.side_dimension,"matrix dimension mismatch");
+                SymmetricMatrix::from_upper_triangle(self.side_dimension,
+                    self.entries.iter().zip(rhs.into_upper_triangle()).map(|(l,r)|l.clone() $op r))
+            }
         }
     };
 }
@@ -343,67 +370,88 @@ mod sealed {
     pub trait Scalar {}
 }
 /// Scalar types accepted by symmetric matrix multiplication.
-pub trait MatrixScalar: Copy + sealed::Scalar {}
+pub trait MatrixScalar: Clone + sealed::Scalar {}
 macro_rules! scalars {
     ($($t:ty),*) => { $(impl sealed::Scalar for $t {} impl MatrixScalar for $t {})* };
 }
 scalars!(f64, f32, i32, u32, i64, usize);
 impl<D: oximo_expr::Degree> sealed::Scalar for oximo_expr::Expr<'_, D> {}
 impl<D: oximo_expr::Degree> MatrixScalar for oximo_expr::Expr<'_, D> {}
+impl<D: oximo_expr::Degree> sealed::Scalar for &oximo_expr::Expr<'_, D> {}
+impl<D: oximo_expr::Degree> MatrixScalar for &oximo_expr::Expr<'_, D> {}
 
-impl<T: Copy + Mul<S>, S: MatrixScalar> Mul<S> for &SymmetricMatrix<T> {
+impl<T: Clone + Mul<S>, S: MatrixScalar> Mul<S> for &SymmetricMatrix<T> {
     type Output = SymmetricMatrix<T::Output>;
     fn mul(self, rhs: S) -> Self::Output {
-        self.map(|&entry| entry * rhs)
+        self.map(|entry| entry.clone() * rhs.clone())
     }
 }
-impl<T: Copy + Mul<S>, S: MatrixScalar> Mul<S> for SymmetricMatrix<T> {
+impl<T: Clone + Mul<S>, S: MatrixScalar> Mul<S> for SymmetricMatrix<T> {
     type Output = SymmetricMatrix<T::Output>;
     fn mul(self, rhs: S) -> Self::Output {
-        &self * rhs
+        self.map_owned(|entry| entry * rhs.clone())
     }
 }
-impl<T: Copy + Neg> Neg for &SymmetricMatrix<T> {
+impl<T: Clone + Neg> Neg for &SymmetricMatrix<T> {
     type Output = SymmetricMatrix<T::Output>;
     fn neg(self) -> Self::Output {
-        self.map(|&entry| -entry)
+        self.map(|entry| -entry.clone())
     }
 }
-impl<T: Copy + Neg> Neg for SymmetricMatrix<T> {
+impl<T: Clone + Neg> Neg for SymmetricMatrix<T> {
     type Output = SymmetricMatrix<T::Output>;
     fn neg(self) -> Self::Output {
-        -&self
+        self.map_owned(Neg::neg)
     }
 }
 
 macro_rules! scalar_left {
     ($($t:ty),*) => { $(
-        impl<T: Copy> Mul<&SymmetricMatrix<T>> for $t where $t: Mul<T> {
+        impl<T: Clone> Mul<&SymmetricMatrix<T>> for $t where $t: Mul<T> {
             type Output = SymmetricMatrix<<$t as Mul<T>>::Output>;
-            fn mul(self, rhs: &SymmetricMatrix<T>) -> Self::Output { rhs.map(|&entry| self * entry) }
+            fn mul(self, rhs: &SymmetricMatrix<T>) -> Self::Output { rhs.map(|entry| self.clone() * entry.clone()) }
         }
-        impl<T: Copy> Mul<SymmetricMatrix<T>> for $t where $t: Mul<T> {
+        impl<T: Clone> Mul<SymmetricMatrix<T>> for $t where $t: Mul<T> {
             type Output = SymmetricMatrix<<$t as Mul<T>>::Output>;
-            fn mul(self, rhs: SymmetricMatrix<T>) -> Self::Output { rhs.map(|&entry| self * entry) }
+            fn mul(self, rhs: SymmetricMatrix<T>) -> Self::Output { rhs.map_owned(|entry| self.clone() * entry) }
         }
     )* };
 }
 scalar_left!(f64, f32, i32, u32, i64, usize);
-impl<'a, D: oximo_expr::Degree, T: Copy> Mul<&SymmetricMatrix<T>> for oximo_expr::Expr<'a, D>
+impl<'a, D: oximo_expr::Degree, T: Clone> Mul<&SymmetricMatrix<T>> for oximo_expr::Expr<'a, D>
 where
     Self: Mul<T>,
 {
     type Output = SymmetricMatrix<<Self as Mul<T>>::Output>;
     fn mul(self, rhs: &SymmetricMatrix<T>) -> Self::Output {
-        rhs.map(|&entry| self * entry)
+        rhs.map(|entry| self.clone() * entry.clone())
     }
 }
-impl<'a, D: oximo_expr::Degree, T: Copy> Mul<SymmetricMatrix<T>> for oximo_expr::Expr<'a, D>
+impl<'a, D: oximo_expr::Degree, T: Clone> Mul<SymmetricMatrix<T>> for oximo_expr::Expr<'a, D>
 where
     Self: Mul<T>,
 {
     type Output = SymmetricMatrix<<Self as Mul<T>>::Output>;
     fn mul(self, rhs: SymmetricMatrix<T>) -> Self::Output {
-        rhs.map(|&entry| self * entry)
+        rhs.map_owned(|entry| self.clone() * entry)
+    }
+}
+
+impl<'a, D: oximo_expr::Degree, T: Clone> Mul<&SymmetricMatrix<T>> for &oximo_expr::Expr<'a, D>
+where
+    Self: Mul<T>,
+{
+    type Output = SymmetricMatrix<<Self as Mul<T>>::Output>;
+    fn mul(self, rhs: &SymmetricMatrix<T>) -> Self::Output {
+        rhs.map(|entry| self * entry.clone())
+    }
+}
+impl<'a, D: oximo_expr::Degree, T: Clone> Mul<SymmetricMatrix<T>> for &oximo_expr::Expr<'a, D>
+where
+    Self: Mul<T>,
+{
+    type Output = SymmetricMatrix<<Self as Mul<T>>::Output>;
+    fn mul(self, rhs: SymmetricMatrix<T>) -> Self::Output {
+        rhs.map_owned(|entry| self * entry)
     }
 }

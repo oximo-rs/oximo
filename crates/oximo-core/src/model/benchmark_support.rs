@@ -162,15 +162,15 @@ pub const THRESHOLD: usize = PAR_KIND_THRESHOLD;
 
 pub fn model(rows: usize, degree: usize) -> Model {
     let model = Model::new("kind_bench");
-    let x = model.__var("x").build();
-    let y = model.__var("y").build();
-    let z = model.__var("z").build();
+    let x = &model.__var("x").build();
+    let y = &model.__var("y").build();
+    let z = &model.__var("z").build();
     model.__minimize(x + y + z);
     for i in 0..rows {
         let lhs = match degree {
-            1 => (x + 2.0 * y - z).erase(),
+            1 => (x + 2.0 * y - z).into_dynamic(),
             2 => x.powi(2) + y,
-            _ => (x * y * z).erase(),
+            _ => (x * y * z).as_dynamic(),
         };
         model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
     }
@@ -179,8 +179,8 @@ pub fn model(rows: usize, degree: usize) -> Model {
 
 pub fn soc_model(rows: usize) -> Model {
     let model = Model::new("kind_soc_bench");
-    let x = model.__var("x").build();
-    let y = model.__var("y").build();
+    let x = &model.__var("x").build();
+    let y = &model.__var("y").build();
     let t = model.__var("t").lb(0.0).build();
     model.__minimize(t);
     for _ in 0..rows {
@@ -254,7 +254,7 @@ pub fn indexed_build(rows: usize, case: IndexedBuildCase, parallel: bool) -> usi
 pub fn scalar_build(rows: usize) -> usize {
     let model = Model::new("scalar_build_bench");
     for i in 0..rows {
-        let x = model.__var(format!("x{i}")).build();
+        let x = &model.__var(format!("x{i}")).build();
         model.__add_constraint(format!("c{i}"), (2.0 * x + 1.0).le(i as f64 + 10.0));
     }
     model.num_variables() + model.num_constraints() + model.arena().len()

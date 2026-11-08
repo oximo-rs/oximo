@@ -22,13 +22,13 @@ fn shared_rows(width: usize, dynamic: bool, indexed: bool) -> u128 {
     let keys = Set::range(0..4096usize);
     let start = Instant::now();
     if indexed {
-        model.__add_constraints_over("row", &keys, |_: usize| expr.erase().le(10.0));
+        model.__add_constraints_over("row", &keys, |_: usize| expr.as_dynamic().le(10.0));
     } else {
         for _ in 0..256 {
             if dynamic {
-                black_box(model.__add_constraint_auto(expr.erase().le(10.0)));
+                black_box(model.__add_constraint_auto(expr.as_dynamic().le(10.0)));
             } else {
-                black_box(model.__add_constraint_auto(expr.le(10.0)));
+                black_box(model.__add_constraint_auto(expr.clone().le(10.0)));
             }
         }
     }
@@ -44,7 +44,7 @@ fn unique_rows(dynamic: bool) -> u128 {
     let start = Instant::now();
     for expr in expressions {
         if dynamic {
-            black_box(model.__add_constraint_auto(expr.erase().le(10.0)));
+            black_box(model.__add_constraint_auto(expr.into_dynamic().le(10.0)));
         } else {
             black_box(model.__add_constraint_auto(expr.le(10.0)));
         }

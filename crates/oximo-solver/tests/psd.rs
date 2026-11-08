@@ -112,7 +112,7 @@ fn matrix_readback_distinguishes_saved_and_current_parameters_and_checks_all_own
     let mut result = SolverResult::for_model(&m);
     result.add_solution([(x.var_id().unwrap(), 3.0)].into_iter().collect(), None);
     let point = result.best().unwrap();
-    let matrix = SymmetricMatrix::from_upper_triangle(2, [p * x + 1.0, p * x, x]);
+    let matrix = SymmetricMatrix::from_upper_triangle(2, [p * x + 1.0, p * x, x.into()]);
     assert_eq!(point.value_of_matrix(&matrix).unwrap().unwrap().upper_triangle(), &[7.0, 6.0, 3.0]);
     m.set_param(p, 4.0).unwrap();
     assert_eq!(point.value_of_matrix(&matrix).unwrap().unwrap().upper_triangle(), &[7.0, 6.0, 3.0]);

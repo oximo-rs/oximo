@@ -6,7 +6,10 @@ use crate::domain::Domain;
 use crate::param::Parameter;
 use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
 use oximo_expr::ModelError;
-use oximo_expr::{Affine, Constant, Expr, ModelMismatchError, ParamId, VarId, extract_linear};
+use oximo_expr::{
+    Expr, ExprInput, ModelMismatchError, ParamId, ParameterHandle, VarId, VariableHandle,
+    extract_linear,
+};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smol_str::SmolStr;
 use std::cell::Ref;
@@ -73,7 +76,7 @@ impl Model {
     /// Called by [`VarBuilder::build`]. Pushes the var into the registry and
     /// returns its `Expr` handle.
     #[inline]
-    pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> Expr<'a, Affine> {
+    pub(crate) fn register_var<'a>(&'a self, b: VarBuilder<'a>) -> VariableHandle<'a> {
         let mut arena = self.arena.borrow_mut();
         let (lo, hi) = (b.lb.resolve(&arena), b.ub.resolve(&arena));
         crate::var::validate_bounds(
@@ -116,7 +119,7 @@ impl Model {
         &'a self,
         items: &[PendingVar],
         domain: Domain,
-    ) -> Vec<Expr<'a, Affine>> {
+    ) -> Vec<VariableHandle<'a>> {
         if items.is_empty() {
             return Vec::new();
         }
@@ -196,7 +199,7 @@ impl Model {
     ///
     /// Panics if `id` is not registered on this model.
     #[must_use]
-    pub fn variable_handle(&self, id: VarId) -> Expr<'_, Affine> {
+    pub fn variable_handle(&self, id: VarId) -> VariableHandle<'_> {
         assert!(id.index() < self.variables.borrow().len(), "unknown variable ID {id:?}");
         Expr::from_var(&self.arena, id)
     }
@@ -218,6 +221,7 @@ impl Model {
     /// Fix a single-variable expression to `value`.
     /// Convenience over [`Self::fix_var`] for handles from the `variable!` macro
     /// or [`crate::IndexedVar`] indexing.
+    /// Pass Copy handles directly: `model.fix(x[i], value)`. Borrowed handles also work.
     ///
     /// # Errors
     ///
@@ -225,11 +229,11 @@ impl Model {
     #[inline]
     pub fn fix<'a>(
         &self,
-        e: impl Into<Expr<'a>>,
+        e: impl ExprInput<'a>,
         value: f64,
     ) -> std::result::Result<(), ModelError> {
-        let e: Expr = e.into();
-        self.ensure_expr_model(e)?;
+        let e = e.as_expression();
+        self.ensure_model_id(e.model_id())?;
         let id = e.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
         self.fix_var(id, value)
     }
@@ -263,6 +267,7 @@ impl Model {
     /// Set the initial (warm-start) value of a single-variable expression.
     /// The macro API has no bound-style syntax for warm starts, so this is the
     /// supported way to seed `variable!`-declared variables.
+    /// Pass Copy handles directly: `model.set_initial(x[i], value)`. Borrowed handles also work.
     ///
     /// # Errors
     ///
@@ -270,11 +275,11 @@ impl Model {
     #[inline]
     pub fn set_initial<'a>(
         &self,
-        e: impl Into<Expr<'a>>,
+        e: impl ExprInput<'a>,
         value: f64,
     ) -> std::result::Result<(), ModelError> {
-        let e: Expr = e.into();
-        self.ensure_expr_model(e)?;
+        let e = e.as_expression();
+        self.ensure_model_id(e.model_id())?;
         let id = e.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
         if !value.is_finite() {
             return Err(ModelError::VariableValue {
@@ -311,18 +316,20 @@ impl Model {
     ///
     /// Accepts constants or bare parameter handles; use constant infinities for
     /// unbounded directions. This also restores bounds after [`Self::fix`].
+    /// Pass Copy handles directly: `model.set_bounds(x[i], lower, upper)`.
+    /// Borrowed handles also work.
     ///
     /// # Errors
     /// Rejects foreign or composed variable handles and any bounds rejected by
     /// [`Self::unfix_var`], leaving the variable unchanged.
     pub fn set_bounds<'a>(
         &self,
-        variable: impl Into<Expr<'a>>,
+        variable: impl ExprInput<'a>,
         lower: impl IntoBound<'a>,
         upper: impl IntoBound<'a>,
     ) -> Result<(), ModelError> {
-        let variable = variable.into();
-        self.ensure_expr_model(variable)?;
+        let variable = variable.as_expression();
+        self.ensure_model_id(variable.model_id())?;
         let id = variable.var_id().ok_or(ModelError::InvalidHandle("variable"))?;
         self.unfix_var(id, lower, upper)
     }
@@ -419,7 +426,7 @@ impl Model {
     ///
     /// Panics if a parameter with the same name is already registered.
     #[doc(hidden)]
-    pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> Expr<'a, Constant> {
+    pub fn __param<'a>(&'a self, name: impl Into<SmolStr>, value: f64) -> ParameterHandle<'a> {
         self.register_param(name.into(), value)
     }
 
@@ -430,7 +437,7 @@ impl Model {
     /// # Panics
     ///
     /// Panics if a parameter with the same name is already registered.
-    pub(super) fn register_param(&self, name: SmolStr, value: f64) -> Expr<'_, Constant> {
+    pub(super) fn register_param(&self, name: SmolStr, value: f64) -> ParameterHandle<'_> {
         let mut names = self.param_names.borrow_mut();
         let std::collections::hash_map::Entry::Vacant(entry) = names.entry(name.clone()) else {
             panic!("parameter name {name:?} is already registered on this model");
@@ -450,7 +457,7 @@ impl Model {
     pub(super) fn register_params_batch<'a>(
         &'a self,
         items: &[PendingParam],
-    ) -> Vec<Expr<'a, Constant>> {
+    ) -> Vec<ParameterHandle<'a>> {
         if items.is_empty() {
             return Vec::new();
         }
@@ -504,10 +511,10 @@ impl Model {
     #[inline]
     pub fn set_param<'a>(
         &self,
-        p: impl Into<Expr<'a>>,
+        p: impl ExprInput<'a>,
         value: f64,
     ) -> std::result::Result<(), ModelError> {
-        let p: Expr = p.into();
+        let p = p.as_expression();
         self.ensure_expr_model(p)?;
         let id = p.param_id().ok_or(ModelError::InvalidHandle("parameter"))?;
         self.set_param_id(id, value)
@@ -543,12 +550,13 @@ impl Model {
     ///
     /// # Errors
     /// Rejects foreign or composed handles and invalid assignments.
-    pub fn set_params(&self, updates: &[(Expr<'_, Constant>, f64)]) -> Result<(), ModelError> {
+    pub fn set_params<'a, P: ExprInput<'a>>(&self, updates: &[(P, f64)]) -> Result<(), ModelError> {
         let ids = updates
             .iter()
-            .map(|&(p, v)| {
+            .map(|(p, v)| {
+                let p = p.as_expression();
                 self.ensure_expr_model(p)?;
-                Ok((p.param_id().ok_or(ModelError::InvalidHandle("parameter"))?, v))
+                Ok((p.param_id().ok_or(ModelError::InvalidHandle("parameter"))?, *v))
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
         self.set_param_ids(&ids)
@@ -572,9 +580,9 @@ impl Model {
     /// Returns [`ModelMismatchError`] if `p` belongs to another model.
     pub fn param_value_of<'a>(
         &self,
-        p: impl Into<Expr<'a>>,
+        p: impl ExprInput<'a>,
     ) -> std::result::Result<Option<f64>, ModelMismatchError> {
-        let p: Expr = p.into();
+        let p = p.as_expression();
         self.ensure_expr_model(p)?;
         Ok(p.param_id().map(|id| self.param_value(id)))
     }
@@ -666,7 +674,7 @@ impl Model {
         &self,
         name: &str,
         n: usize,
-    ) -> SymmetricMatrix<Expr<'_, Affine>> {
+    ) -> SymmetricMatrix<VariableHandle<'_>> {
         let len = crate::triangle_len(n);
         let final_count = self.num_variables().checked_add(len).expect("variable count overflow");
         u32::try_from(final_count - 1).expect("variable count overflow");

@@ -90,6 +90,7 @@ pub fn evaluate<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Resul
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v)),
         ExprNode::Param(p) => ctx.resolve_param(*p, arena).ok_or(EvalError::UnboundParam(*p)),
         ExprNode::Linear { coeffs, constant } => eval_linear(coeffs, *constant, ctx),
+        ExprNode::Quadratic(q) => eval_quadratic(q, ctx),
         _ => eval_compound(arena, id, ctx),
     }
 }
@@ -106,6 +107,16 @@ fn eval_linear<C: EvalContext>(
     Ok(value)
 }
 
+fn eval_quadratic<C: EvalContext>(q: &crate::QuadraticTerms, ctx: &C) -> Result<f64, EvalError> {
+    let mut value = eval_linear(q.linear(), q.constant(), ctx)?;
+    for &(a, b, h) in q.quadratic() {
+        let x = ctx.var(a).ok_or(EvalError::UnboundVar(a))?;
+        let y = ctx.var(b).ok_or(EvalError::UnboundVar(b))?;
+        value += (h * x) * y;
+    }
+    Ok(value)
+}
+
 #[inline]
 fn eval_leaf<C: EvalContext>(
     arena: &ExprArena,
@@ -117,6 +128,7 @@ fn eval_leaf<C: EvalContext>(
         ExprNode::Var(v) => ctx.var(*v).ok_or(EvalError::UnboundVar(*v)),
         ExprNode::Param(p) => ctx.resolve_param(*p, arena).ok_or(EvalError::UnboundParam(*p)),
         ExprNode::Linear { coeffs, constant } => eval_linear(coeffs, *constant, ctx),
+        ExprNode::Quadratic(q) => eval_quadratic(q, ctx),
         _ => return None,
     })
 }
@@ -312,6 +324,7 @@ fn eval_node_array<C: EvalContext>(
             }
             acc
         }
+        ExprNode::Quadratic(q) => eval_quadratic(q, ctx)?,
     })
 }
 
@@ -383,6 +396,7 @@ fn eval_hashed<C: EvalContext>(arena: &ExprArena, id: ExprId, ctx: &C) -> Result
                 }
                 acc
             }
+            ExprNode::Quadratic(q) => eval_quadratic(q, ctx)?,
         };
         values.insert(cur, value);
     }
@@ -405,8 +419,30 @@ pub(crate) fn eval_child(arena: &ExprArena, id: ExprId, next: usize) -> Option<E
                 _ => None,
             }
         }
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {
-            None
+        ExprNode::Const(_)
+        | ExprNode::Var(_)
+        | ExprNode::Param(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ExprArena, ExprNode, QuadraticTerms, VarId, evaluate};
+    #[test]
+    fn polynomial_diagonals_keep_large_and_subnormal_values() {
+        for (c, x, expected) in [
+            (1.0, 1e154, 1e154 * 1e154),
+            (f64::from_bits(1), 2.0, f64::from_bits(4)),
+            (1e308, 1e-154, (1e308 * 1e-154) * 1e-154),
+        ] {
+            let mut arena = ExprArena::new();
+            let terms =
+                QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), c)], Vec::new(), 0.0)
+                    .unwrap();
+            let root = arena.push(ExprNode::Quadratic(std::sync::Arc::new(terms)));
+            assert_eq!(evaluate(&arena, root, &&[x][..]).unwrap().to_bits(), expected.to_bits());
         }
     }
 }

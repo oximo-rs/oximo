@@ -20,6 +20,8 @@ type Part = (bool, String);
 /// is rendered as `0`.
 ///
 /// Parameters render as their current arena value.
+/// Like [`split_linear`], rendering publishes residual IDs, permanently disabling
+/// their in-place quadratic accumulation on a live arena or write guard.
 pub fn render_expr(arena: &ExprArena, id: ExprId, resolve: &impl Fn(VarId) -> String) -> String {
     let (lin, residual) = split_linear(arena, id);
     let mut parts = linear_parts(&lin, resolve);
@@ -174,9 +176,31 @@ pub(crate) fn render_node(
                 render_children(&mut pending, children, PREC_ADD, ", ");
             }
             ExprNode::Linear { .. } => unreachable!("handled above"),
+            ExprNode::Quadratic(q) => {
+                let text = render_quadratic(q, resolve);
+                if parent_prec > PREC_ADD {
+                    out.push('(');
+                }
+                out.push_str(&text);
+                if parent_prec > PREC_ADD {
+                    out.push(')');
+                }
+            }
         }
     }
     out
+}
+
+#[expect(clippy::float_cmp, reason = "only an exact unit coefficient may omit multiplication")]
+fn render_quadratic(q: &crate::QuadraticTerms, resolve: &impl Fn(VarId) -> String) -> String {
+    let mut parts = linear_parts_from_slice(q.linear(), q.constant(), resolve);
+    for (a, b, c) in q.quadratic().iter().copied() {
+        let product = format!("{} * {}", resolve(b), resolve(a));
+        let text =
+            if c.abs() == 1.0 { product } else { format!("{} * {product}", fmt_num(c.abs())) };
+        parts.push((c.is_sign_negative(), text));
+    }
+    join_parts(&parts)
 }
 
 enum RenderTask<'a> {
@@ -264,6 +288,14 @@ pub(crate) fn fmt_num(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unique_quadratic_rendering_uses_canonical_linear_order() {
+        let arena = crate::ExprArenaCell::new(crate::ExprArena::new());
+        let vars: Vec<_> = (0..3).map(|i| crate::Expr::from_var(&arena, VarId(i))).collect();
+        let q = vars[0] * vars[0] + vars[2] + vars[1];
+        let text = render_expr(&arena.borrow(), q.id(), &|v| format!("x{}", v.index()));
+        assert_eq!(text, "x1 + x2 + x0 * x0");
+    }
     use super::*;
     use crate::arena::{ExprArena, ExprNode, VarId};
 

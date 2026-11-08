@@ -216,7 +216,10 @@ fn contains_parameter(arena: &oximo_expr::ExprArena, root: ExprId) -> bool {
                 stack.push(*left);
                 stack.push(*right);
             }
-            ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Linear { .. } => {}
+            ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_) => {}
         }
     }
     false
@@ -235,7 +238,7 @@ impl PlannedIndicator {
         model.lock_bound_parameters(variables, source.name.as_str());
         let lhs = Expr::new(source.lhs, &model.arena);
         let trigger = Expr::from_var(&model.arena, source.trigger);
-        let inactive = if source.active_value { 1.0 - trigger } else { trigger };
+        let inactive = if source.active_value { 1.0 - trigger } else { trigger.into() };
         let mut generated = Vec::with_capacity(2);
         // A zero M still needs a row: the body can differ between trigger values.
         if let Some(big_m) = self.lower_m {
@@ -244,7 +247,9 @@ impl PlannedIndicator {
                 &format!("__oximo_indicator{}_lower", self.source.index()),
             );
             generated.push(
-                model.__add_constraint(name, lhs.ge(source.lower - big_m * inactive)).row_id(),
+                model
+                    .__add_constraint(name, lhs.clone().ge(source.lower - big_m * inactive.clone()))
+                    .row_id(),
             );
         }
         if let Some(big_m) = self.upper_m {

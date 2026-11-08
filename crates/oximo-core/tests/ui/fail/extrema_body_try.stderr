@@ -4,7 +4,7 @@ error[E0277]: the `?` operator can only be used in a closure that returns `Resul
 7 |     let _ = min!(term? for i in 0..3);
   |             ---------^---------------
   |             |        |
-  |             |        cannot use the `?` operator in a closure that returns `Expr<'_, oximo_core::Affine>`
+  |             |        cannot use the `?` operator in a closure that returns `Expr<'_, oximo_expr::degree::VariableDegree>`
   |             this function should return `Result` or `Option` to accept `?`
 
 error[E0277]: the `?` operator can only be used in a closure that returns `Result` or `Option` (or another type that implements `FromResidual`)
@@ -13,5 +13,5 @@ error[E0277]: the `?` operator can only be used in a closure that returns `Resul
 8 |     let _ = max!(term? for i in 0..3 if i > 0);
   |             ---------^------------------------
   |             |        |
-  |             |        cannot use the `?` operator in a closure that returns `Expr<'_, oximo_core::Affine>`
+  |             |        cannot use the `?` operator in a closure that returns `Expr<'_, oximo_expr::degree::VariableDegree>`
   |             this function should return `Result` or `Option` to accept `?`

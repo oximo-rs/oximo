@@ -81,7 +81,12 @@ fn main() {
     for n in [32, 4096] {
         let cell = ExprArenaCell::new(ExprArena::new());
         let vars: Vec<_> = (0..n).map(|i| Expr::from_var(&cell, VarId(i))).collect();
-        let original = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+        let original = vars
+            .iter()
+            .copied()
+            .map(Expr::<oximo_expr::Affine>::from)
+            .reduce(|a, b| a + b)
+            .unwrap();
         let compact = original.compact();
         let snapshot = cell.borrow();
         let values = vec![1.0; usize::try_from(n).unwrap()];

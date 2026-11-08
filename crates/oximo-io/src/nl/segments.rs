@@ -157,6 +157,10 @@ fn write_o_segment<'a, W: Write>(
     if obj.residual.is_empty() {
         w.num(obj.linear.constant)?;
     } else {
+        if obj.linear.constant != 0.0 {
+            w.op(0)?;
+            w.num(obj.linear.constant)?;
+        }
         emit_residual(w, arena, &perm.var_index, &obj.residual, cache)?;
     }
     Ok(())

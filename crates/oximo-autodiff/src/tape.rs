@@ -47,6 +47,7 @@ pub(crate) const OP_ATANH: u32 = 32;
 pub(crate) const OP_ATAN2: u32 = 33;
 pub(crate) const OP_MIN: u32 = 34;
 pub(crate) const OP_MAX: u32 = 35;
+pub(crate) const OP_SCALED_SQUARE: u32 = 36; // (coefficient * x) * x; coefficient=regs[a], x=regs[b]
 
 /// An expression (or weighted sum of expressions) compiled to a flat
 /// instruction tape, evaluable at any point without touching the arena.
@@ -251,6 +252,9 @@ pub(crate) fn eval_tape(
                 OP_ATAN2 => regs[i] = regs[ai].atan2(regs[bi]),
                 OP_MIN => regs[i] = regs[ai].min(regs[bi]),
                 OP_MAX => regs[i] = regs[ai].max(regs[bi]),
+                OP_SCALED_SQUARE => {
+                    regs[i] = (regs[ai] * regs[bi]) * regs[bi];
+                }
                 // Unreachable for a well-formed tape (the builder emits only
                 // the opcodes above).
                 _ => regs[i] = f64::NAN,
@@ -513,6 +517,30 @@ impl Builder {
                     self.push(OP_ADD, sum, c)
                 }
             }
+            ExprNode::Quadratic(q) => {
+                let mut sum = self.push_const(q.constant());
+                for &(v, c) in q.linear() {
+                    let x = self.push(OP_VAR, v.0, 0);
+                    let c = self.push_const(c);
+                    let term = self.push(OP_MUL, c, x);
+                    sum = self.push(OP_ADD, sum, term);
+                }
+
+                for &(a, b, h) in q.quadratic() {
+                    let x = self.push(OP_VAR, a.0, 0);
+                    let h = self.push_const(h);
+                    let term = if a == b {
+                        self.push(OP_SCALED_SQUARE, h, x)
+                    } else {
+                        let y = self.push(OP_VAR, b.0, 0);
+                        let term = self.push(OP_MUL, h, x);
+                        self.push(OP_MUL, term, y)
+                    };
+                    sum = self.push(OP_ADD, sum, term);
+                }
+
+                sum
+            }
         }
     }
 
@@ -742,16 +770,22 @@ fn lowering_child(arena: &ExprArena, id: ExprId, next: usize) -> Option<ExprId> 
             1 => Some(*den),
             _ => None,
         },
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. } => {
-            None
-        }
+        ExprNode::Const(_)
+        | ExprNode::Var(_)
+        | ExprNode::Param(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => None,
     }
 }
 
 fn is_lowering_leaf(node: &ExprNode) -> bool {
     matches!(
         node,
-        ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. }
+        ExprNode::Const(_)
+            | ExprNode::Var(_)
+            | ExprNode::Param(_)
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_)
     )
 }
 

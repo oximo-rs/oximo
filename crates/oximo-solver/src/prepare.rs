@@ -536,7 +536,11 @@ impl PreparedExpressions {
     pub fn has_only_polynomial_operators(&self, root: ExprId) -> bool {
         if matches!(
             self.arena.get(root),
-            ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
+            ExprNode::Const(_)
+                | ExprNode::Param(_)
+                | ExprNode::Var(_)
+                | ExprNode::Linear { .. }
+                | ExprNode::Quadratic(_)
         ) {
             return true;
         }
@@ -555,22 +559,30 @@ impl PreparedExpressions {
     /// Panics for an expression outside this arena or a poisoned cache.
     #[inline]
     pub fn linear(&self, expr: ExprId) -> Option<AffineTerms<'_>> {
-        if let ExprNode::Linear { coeffs, constant } = self.arena.get(expr) {
-            return Some(AffineTerms::Borrowed(LinearTerms::borrowed(coeffs, *constant)));
+        match self.arena.get(expr) {
+            ExprNode::Linear { coeffs, constant } => {
+                Some(AffineTerms::Borrowed(LinearTerms::borrowed(coeffs, *constant)))
+            }
+            ExprNode::Quadratic(q) => q
+                .quadratic()
+                .is_empty()
+                .then(|| AffineTerms::Borrowed(LinearTerms::borrowed(q.linear(), q.constant()))),
+            _ => self.compound_linear(expr),
         }
-        self.compound_linear(expr)
     }
 
     // Keep cache admission out of the direct-affine hot loop in each adapter.
     #[inline(never)]
     fn compound_linear(&self, expr: ExprId) -> Option<AffineTerms<'_>> {
         let quadratic = self.cached_quadratic(expr);
-        if quadratic.as_ref().is_some_and(|terms| !terms.hessian.is_empty()) {
+        if quadratic.as_ref().is_some_and(|terms| !terms.quadratic().is_empty()) {
             return None;
         }
 
         let cached_affine = || {
-            quadratic.as_ref().map(|terms| LinearTerms::owned(terms.linear.clone(), terms.constant))
+            quadratic
+                .as_ref()
+                .map(|terms| LinearTerms::owned(terms.linear().to_vec(), terms.constant()))
         };
         let extract = || {
             if let Some(terms) = cached_affine() {
@@ -616,6 +628,9 @@ impl PreparedExpressions {
     /// Look up successful quadratic terms in the workset, resident cache, then reuse-admitted cache.
     /// Return `None` when no successful result is cached, without extracting coefficients.
     fn cached_quadratic(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let ExprNode::Quadratic(q) = self.arena.get(expr) {
+            return Some(Extracted::Shared(Arc::clone(q)));
+        }
         if let Some(workset) = &self.workset
             && let workset::Lookup::Ready(Some(terms)) = workset.lookup(expr)
         {
@@ -637,6 +652,9 @@ impl PreparedExpressions {
     /// # Panics
     /// Panics for an expression outside this arena or a poisoned cache.
     pub fn quadratic(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let ExprNode::Quadratic(q) = self.arena.get(expr) {
+            return Some(Extracted::Shared(Arc::clone(q)));
+        }
         if let Some(workset) = &self.workset {
             if let Some(cache) = &self.resident
                 && cache.admits(expr)
@@ -663,6 +681,9 @@ impl PreparedExpressions {
     /// Reuse registered quadratic analysis or extract without registering the root.
     #[doc(hidden)]
     pub fn quadratic_once(&self, expr: ExprId) -> Option<Extracted<QuadraticTerms>> {
+        if let ExprNode::Quadratic(q) = self.arena.get(expr) {
+            return Some(Extracted::Shared(Arc::clone(q)));
+        }
         if let Some(workset) = &self.workset {
             match workset.lookup(expr) {
                 workset::Lookup::Ready(value) => return value,
@@ -691,7 +712,7 @@ impl PreparedExpressions {
             }
             return resident_extract(&cache.quadratic, expr, extract).map(Extracted::Shared);
         }
-        self.quadratic.extract(expr, extract, |t| t.linear.len() + t.hessian.len())
+        self.quadratic.extract(expr, extract, |t| t.linear().len() + t.quadratic().len())
     }
 
     /// Detect an optional cone representation using cached polynomial terms.
@@ -770,7 +791,7 @@ mod tests {
                 let attempts = prepared.quadratic_analysis_stats().attempts;
                 for _ in 0..3 {
                     assert!(prepared.linear(root).is_none());
-                    assert_eq!(prepared.quadratic_once(root).unwrap().hessian.len(), 1);
+                    assert_eq!(prepared.quadratic_once(root).unwrap().quadratic().len(), 1);
                 }
                 assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 0);
                 assert_eq!(prepared.quadratic_analysis_stats().attempts, attempts);
@@ -790,7 +811,7 @@ mod tests {
         let sum = arena.push(ExprNode::Add(vec![square, affine].into()));
         let root = arena.push(ExprNode::Add(vec![sum, negated].into()));
         for prepared in polynomial_caches(&arena, root) {
-            assert_eq!(prepared.quadratic(root).unwrap().hessian.len(), 0);
+            assert_eq!(prepared.quadratic(root).unwrap().quadratic().len(), 0);
             let terms = prepared.linear(root).unwrap();
             assert_eq!(terms.coeffs.as_ref(), &[(VarId(0), 3.0)]);
             assert_eq!(terms.constant, 5.0);
@@ -890,7 +911,7 @@ mod tests {
         variable!(model, x);
         param!(model, p = 1.0);
         let root = p * x * x + 3.0 * x + p;
-        objective!(model, Min, root);
+        objective!(model, Min, &root);
 
         let mut persistent = PersistentPreparation::default();
         for value in [1.0, 0.0, 1e-100, 2.0, 0.0] {
@@ -906,7 +927,7 @@ mod tests {
                 let quadratic = prepared.quadratic(root.id()).unwrap();
                 let affine = prepared.linear(root.id());
                 if value == 0.0 {
-                    assert_eq!(quadratic.hessian.len(), 0);
+                    assert_eq!(quadratic.quadratic().len(), 0);
                     let affine = affine.unwrap();
                     assert_eq!(affine.coeffs.as_ref(), &[(x.var_id().unwrap(), 3.0)]);
                     assert_eq!(affine.constant, value);
@@ -921,7 +942,7 @@ mod tests {
                     }
                 } else {
                     assert!(affine.is_none());
-                    assert_eq!(quadratic.hessian[0].2, 2.0 * value);
+                    assert_eq!(quadratic.hessian_entries().collect::<Vec<_>>()[0].2, 2.0 * value);
                 }
                 assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), attempts);
             }
@@ -949,7 +970,7 @@ mod tests {
         variable!(model, t >= 0.0);
         param!(model, p = 1.0);
         let root = p * x * x - t * t;
-        constraint!(model, cone, root <= 0.0);
+        constraint!(model, cone, &root <= 0.0);
         objective!(model, Min, t);
 
         let prepared = LoweringContext::new(&model).unwrap();
@@ -969,12 +990,12 @@ mod tests {
         );
         model.set_param(p, 0.0).unwrap();
         assert!(profile.check_prepared(&model, &prepared).is_err());
-        assert_eq!(prepared.quadratic(root.id()).unwrap().hessian.len(), 2);
+        assert_eq!(prepared.quadratic(root.id()).unwrap().quadratic().len(), 2);
 
         drop(prepared);
         let prepared = LoweringContext::new(&model).unwrap();
         assert_eq!(prepared.kind(), ModelKind::QCP);
-        assert_eq!(prepared.quadratic(root.id()).unwrap().hessian.len(), 1);
+        assert_eq!(prepared.quadratic(root.id()).unwrap().quadratic().len(), 1);
         assert_eq!(prepared.quadratic_analysis_stats().attempts, 1);
     }
 
@@ -1026,7 +1047,7 @@ mod tests {
         assert!(prepared.ensure_matches(&model).is_err());
 
         let root = other.objective().as_ref().unwrap().expr;
-        assert_eq!(prepared.quadratic(root).unwrap().constant, 7.0);
+        assert_eq!(prepared.quadratic(root).unwrap().constant(), 7.0);
     }
 
     #[test]

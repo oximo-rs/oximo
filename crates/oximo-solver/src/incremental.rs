@@ -82,10 +82,10 @@ pub fn snapshot_prepared(
         Some(o) => {
             let lin = prepared.require_quadratic(o.expr, || "the objective".into())?;
             let mut by_id = vec![0.0; vars.len()];
-            for &(v, c) in &lin.linear {
+            for &(v, c) in lin.linear() {
                 by_id[v.index()] = c;
             }
-            (by_id, lin.constant)
+            (by_id, lin.constant())
         }
         None => (vec![0.0; vars.len()], 0.0),
     };
@@ -190,10 +190,10 @@ pub fn refresh_snapshot<'a>(
         fresh.obj_constant = 0.0;
         if let Some(objective) = prepared.objective() {
             let terms = prepared.require_quadratic(objective.expr, || "the objective".into())?;
-            for &(id, value) in &terms.linear {
+            for &(id, value) in terms.linear() {
                 fresh.obj_costs[id.index()] = value;
             }
-            fresh.obj_constant = terms.constant;
+            fresh.obj_constant = terms.constant();
         }
     }
     if let PreparationChange::Selected(targets) = change {

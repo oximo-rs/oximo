@@ -137,6 +137,9 @@ pub enum SolverError {
     UnsupportedNonlinearOperator { backend: &'static str, operator: &'static str },
     #[error("backend error: {0}")]
     Backend(String),
+    /// A checked polynomial/Hessian conversion failed.
+    #[error(transparent)]
+    Hessian(#[from] oximo_expr::HessianConversionError),
     #[error(transparent)]
     Core(#[from] oximo_core::Error),
 }
@@ -154,6 +157,19 @@ impl std::fmt::Debug for SolverError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hessian_conversion_errors_retain_coefficient_context() {
+        let conversion = oximo_expr::HessianConversionError {
+            row: oximo_expr::VarId(2),
+            column: oximo_expr::VarId(2),
+            value: 1e308,
+            kind: oximo_expr::HessianConversionErrorKind::DiagonalOverflow,
+        };
+        let error = SolverError::from(conversion);
+        assert_eq!(error.to_string(), conversion.to_string());
+        assert!(matches!(error, SolverError::Hessian(value) if value == conversion));
+    }
 
     #[test]
     fn unsupported_sos_error_points_to_explicit_reformulation_methods() {

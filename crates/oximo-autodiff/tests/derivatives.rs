@@ -83,6 +83,43 @@ fn objective_gradient_matches_fd() {
 }
 
 #[test]
+fn shifted_square_nonlinear_values_and_derivatives_survive_cancellation() {
+    let model = Model::new("shifted square derivatives");
+    let shift = 100_000_000.0;
+    variable!(model, shift - 2.0 <= x <= shift + 2.0);
+    objective!(model, Min, (x - shift).square().ln());
+    constraint!(model, (x - shift).powi(2).sqrt() <= 2.0);
+
+    let evaluator = NlpEvaluator::new(&model).unwrap();
+    assert_eq!(evaluator.jacobian_structure(), [(0, 0)]);
+    assert_eq!(evaluator.hessian_lagrangian_structure(), [(0, 0)]);
+
+    for offset in [-1.0_f64, 1.0] {
+        let point = [shift + offset];
+        assert_close(evaluator.eval_objective(&point), 0.0, 1e-12, "log value");
+
+        let mut gradient = [f64::NAN];
+        evaluator.eval_objective_gradient(&point, &mut gradient);
+        assert_close(gradient[0], 2.0 / offset, 1e-12, "log gradient");
+
+        let mut value = [f64::NAN];
+        evaluator.eval_constraint(&point, &mut value);
+        assert_close(value[0], 1.0, 1e-12, "square root value");
+
+        let mut jacobian = [f64::NAN];
+        evaluator.eval_constraint_jacobian(&point, &mut jacobian);
+        assert_close(jacobian[0], offset.signum(), 1e-12, "square root gradient");
+
+        let mut hessian = [f64::NAN];
+        evaluator.eval_hessian_lagrangian(&point, 1.0, &[0.0], &mut hessian);
+        assert_close(hessian[0], -2.0, 1e-12, "log Hessian");
+
+        evaluator.eval_hessian_lagrangian(&point, 0.0, &[1.0], &mut hessian);
+        assert_close(hessian[0], 0.0, 1e-12, "square root Hessian");
+    }
+}
+
+#[test]
 fn constraint_jacobian_matches_fd() {
     let m = Model::new("jac");
     variable!(m, -5.0 <= x <= 5.0);
@@ -168,6 +205,118 @@ fn hessian_exact_on_quadratic() {
     assert_close(vals[0], 12.0, 1e-14, "H[0,0] * sigma");
     assert_close(vals[1], 2.0, 1e-14, "H[1,0] * sigma");
     assert_close(vals[2], 4.0, 1e-14, "H[1,1] * sigma");
+}
+
+#[test]
+fn quadratic_hessian_scatter_scales_extreme_diagonals_before_doubling() {
+    let m = Model::new("extreme quadratic Hessian scatter");
+    variable!(m, -1.0 <= x <= 1.0);
+    variable!(m, -1.0 <= y <= 1.0);
+
+    let mut builder = m.quadratic_builder();
+    builder.add_product(1e308, x, x).unwrap();
+    let objective = builder.build();
+    objective!(m, Min, objective);
+    builder.add_product(1e308, y, y).unwrap();
+    let constraint = builder.build();
+    constraint!(m, constraint <= 1.0);
+
+    let ev = NlpEvaluator::new(&m).unwrap();
+    assert_eq!(ev.hessian_lagrangian_structure(), &[(0, 0), (1, 1)]);
+    assert_eq!(ev.num_hessian_seeds(), 0);
+
+    let mut values = [f64::NAN; 2];
+    for point in [[0.0, 0.0], [0.25, -0.5]] {
+        for (sigma, multiplier, expected) in [
+            (1e-308, 0.0, [2.0, 0.0]),
+            (0.0, 1e-308, [0.0, 2.0]),
+            (-1e-308, 2e-308, [-2.0, 4.0]),
+            (0.0, 0.0, [0.0, 0.0]),
+        ] {
+            ev.eval_hessian_lagrangian(&point, sigma, &[multiplier], &mut values);
+            for (i, (&got, &want)) in values.iter().zip(&expected).enumerate() {
+                let context =
+                    format!("extreme H[{i},{i}] at {point:?}, sigma={sigma}, lambda={multiplier}");
+                assert!(got.is_finite(), "{context}: got {got}");
+                assert_close(got, want, 1e-14, &context);
+            }
+        }
+    }
+}
+
+#[test]
+fn quadratic_hessian_scatter_matches_fd_of_lagrangian_gradient() {
+    let m = Model::new("mixed quadratic Hessian scatter");
+    variable!(m, -5.0 <= x <= 5.0);
+    variable!(m, -5.0 <= y <= 5.0);
+    variable!(m, -5.0 <= z <= 5.0);
+    objective!(
+        m,
+        Min,
+        2.0 * x.square() + 13.0 * y.square() - 17.0 * z.square()
+            + 3.0 * x * y
+            + 2.0 * y * x
+            + 7.0 * z * x
+            - 11.0 * y * z
+            + 0.5 * x
+            - y
+            + 3.0 * z
+    );
+    constraint!(
+        m,
+        first,
+        19.0 * x.square() - 23.0 * y.square() + 29.0 * z.square() - 31.0 * y * x
+            + 37.0 * x * z
+            + 41.0 * z * y
+            + x
+            - 2.0 * z
+            <= 100.0
+    );
+    constraint!(
+        m,
+        second,
+        59.0 * y.square() + 43.0 * z.square() + 47.0 * z * x - 53.0 * y * z + 2.0 * y >= -50.0
+    );
+
+    let ev = NlpEvaluator::new(&m).unwrap();
+    assert_eq!(
+        ev.hessian_lagrangian_structure(),
+        &[(0, 0), (1, 0), (1, 1), (2, 0), (2, 1), (2, 2)]
+    );
+    assert_eq!(ev.num_hessian_seeds(), 0);
+
+    let h = 1e-5;
+    for point in [[0.0, 0.0, 0.0], [0.7, -1.1, 1.3], [-2.0, 0.4, -0.8]] {
+        for (sigma, lambda) in [
+            (1.0, [0.0, 0.0]),
+            (0.0, [1.0, 0.0]),
+            (0.0, [0.0, 1.0]),
+            (0.7, [-1.3, 0.6]),
+            (-0.4, [0.9, -1.7]),
+            (0.0, [0.0, 0.0]),
+        ] {
+            let dense = dense_hessian(&ev, &point, sigma, &lambda);
+            for j in 0..3 {
+                let mut xp = point;
+                let mut xm = point;
+                xp[j] += h;
+                xm[j] -= h;
+                let gp = lagrangian_gradient(&ev, &xp, sigma, &lambda);
+                let gm = lagrangian_gradient(&ev, &xm, sigma, &lambda);
+                for i in 0..3 {
+                    let fd = (gp[i] - gm[i]) / (2.0 * h);
+                    assert_close(
+                        dense[i][j],
+                        fd,
+                        1e-7,
+                        &format!(
+                            "quadratic H[{i},{j}] at {point:?}, sigma={sigma}, lambda={lambda:?}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn lagrangian_test_model() -> Model {
@@ -625,7 +774,7 @@ fn smooth_unary_gradients_and_hessians_match_analytic() {
             UnaryOp::Atanh => expr.atanh().into(),
             _ => unreachable!("nonsmooth/binary operation in smooth test"),
         };
-        let grad = gradient_at(&m, expr.into(), &[point]).unwrap();
+        let grad = gradient_at(&m, expr.as_dynamic(), &[point]).unwrap();
         assert_close(grad[0], expected_grad, 1e-10, &format!("{op} gradient"));
 
         objective!(m, Min, expr);
@@ -646,7 +795,7 @@ fn atan2_and_branch_derivatives_match_away_from_kinks() {
     let (xv, yv) = (2.0, 1.0);
     let r2 = xv * xv + yv * yv;
     let atan2 = y.atan2(x);
-    let grad = gradient_at(&m, atan2.into(), &[xv, yv]).unwrap();
+    let grad = gradient_at(&m, atan2.as_dynamic(), &[xv, yv]).unwrap();
     assert_close(grad[0], -yv / r2, 1e-10, "atan2 dx");
     assert_close(grad[1], xv / r2, 1e-10, "atan2 dy");
     objective!(m, Min, atan2);
@@ -664,7 +813,7 @@ fn atan2_and_branch_derivatives_match_away_from_kinks() {
         ("min", x.min(y), [1.0, 2.0], [1.0, 0.0]),
         ("max", x.max(y), [2.0, 1.0], [1.0, 0.0]),
     ] {
-        let grad = gradient_at(&m, expr.into(), &point).unwrap();
+        let grad = gradient_at(&m, expr.as_dynamic(), &point).unwrap();
         for (got, want) in grad.iter().zip(expected) {
             assert_close(*got, want, 1e-10, &format!("{name} gradient"));
         }

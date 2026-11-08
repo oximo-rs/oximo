@@ -78,10 +78,10 @@ fn scalar_queries_preserve_saved_parameters_and_allow_explicit_scenarios() {
     let expr = p * x;
     model.set_param(p, 4.0).unwrap();
 
-    assert_eq!(point.value_of(expr), Ok(Some(6.0)));
-    assert_eq!(point.value_of_with_current_parameters(expr), Ok(Some(12.0)));
-    assert_eq!(result.value_of(expr), Ok(Some(6.0)));
-    assert_eq!(result.value_of_with_current_parameters(expr), Ok(Some(12.0)));
+    assert_eq!(point.value_of(&expr), Ok(Some(6.0)));
+    assert_eq!(point.value_of_with_current_parameters(&expr), Ok(Some(12.0)));
+    assert_eq!(result.value_of(&expr), Ok(Some(6.0)));
+    assert_eq!(result.value_of_with_current_parameters(&expr), Ok(Some(12.0)));
     assert_eq!(result.objective(), Some(6.0));
     assert_eq!(point.value_of(p), Ok(Some(2.0)));
     assert_eq!(point.value_of_with_current_parameters(p), Ok(Some(4.0)));
@@ -105,7 +105,7 @@ fn scalar_queries_preserve_saved_parameters_and_allow_explicit_scenarios() {
         15.0
     );
     assert_eq!(point.parameters.values(), &[2.0]);
-    assert_eq!(point.clone().value_of(expr), Ok(Some(6.0)));
+    assert_eq!(point.value_of(&expr), Ok(Some(6.0)));
 }
 
 #[test]
@@ -223,10 +223,7 @@ fn normalization_shares_original_parameters_with_all_points_and_is_repeatable() 
     assert_eq!(result.parameters.values(), &[2.0]);
     assert_eq!(result.solution(0).unwrap().value_of(p * x), Ok(Some(6.0)));
     assert_eq!(result.solution(1).unwrap().value_of(p * x), Ok(Some(8.0)));
-    assert_eq!(
-        result.solution(1).unwrap().clone().value_of_with_current_parameters(p * x),
-        Ok(Some(16.0))
-    );
+    assert_eq!(result.solution(1).unwrap().value_of_with_current_parameters(p * x), Ok(Some(16.0)));
 }
 
 #[test]

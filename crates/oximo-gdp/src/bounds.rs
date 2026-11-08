@@ -110,11 +110,13 @@ impl Bounds {
 }
 
 fn down(x: f64) -> f64 {
-    if x.is_finite() { x.next_down() } else { x }
+    // An overflowing lower endpoint must stay below the exact result.
+    // Positive overflow rounds down to f64::MAX.
+    x.next_down()
 }
 
 fn up(x: f64) -> f64 {
-    if x.is_finite() { x.next_up() } else { x }
+    x.next_up()
 }
 
 // Transcendental functions use a numerical guard in addition to directed
@@ -123,8 +125,8 @@ fn up(x: f64) -> f64 {
 fn libm_bounds(a: f64, b: f64) -> Bounds {
     let margin = |x: f64| 64.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE);
     Bounds::new(
-        if a.is_finite() { down(a - margin(a)) } else { a },
-        if b.is_finite() { up(b + margin(b)) } else { b },
+        down(if a.is_finite() { a - margin(a) } else { a }),
+        up(if b.is_finite() { b + margin(b) } else { b }),
     )
 }
 
@@ -802,20 +804,8 @@ impl<'a> Bounder<'a> {
 
             let child = |id: ExprId| self.cache.get(id).expect("children visited");
             let bounds = match node {
-                ExprNode::Const(x) => {
-                    if !x.is_finite() {
-                        return Err(BoundError::InvalidNumber);
-                    }
-                    Bounds::point(*x)
-                }
-                ExprNode::Param(p) => {
-                    let x = self.arena.param_value(*p);
-
-                    if !x.is_finite() {
-                        return Err(BoundError::InvalidNumber);
-                    }
-                    Bounds::point(x)
-                }
+                ExprNode::Const(x) => checked_point(*x)?,
+                ExprNode::Param(p) => checked_point(self.arena.param_value(*p))?,
                 ExprNode::Var(v) => self.variable(*v)?,
                 ExprNode::Linear { coeffs, constant } => {
                     if !constant.is_finite() {
@@ -835,6 +825,8 @@ impl<'a> Bounder<'a> {
                     }
                     b
                 }
+                ExprNode::Quadratic(q) => self.quadratic_bounds(q)?,
+
                 ExprNode::Add(cs) => cs.iter().fold(Bounds::point(0.0), |b, &c| b.add(child(c))),
                 ExprNode::Mul(cs) if cs.len() == 2 && cs[0] == cs[1] => {
                     pow(child(cs[0]), Bounds::point(2.0))?
@@ -880,6 +872,39 @@ impl<'a> Bounder<'a> {
         self.completed.insert(root, bounds);
 
         Ok(ExpressionAnalysis { bounds, affine: affine.map(|(_, terms)| terms) })
+    }
+
+    fn quadratic_bounds(&self, q: &oximo_expr::QuadraticTerms) -> Result<Bounds, BoundError> {
+        if !q.constant().is_finite() {
+            return Err(BoundError::InvalidNumber);
+        }
+        let mut bounds = Bounds::point(q.constant());
+        for &(v, c) in q.linear() {
+            if !c.is_finite() {
+                return Err(BoundError::InvalidNumber);
+            }
+            bounds = bounds.add(self.variable(v)?.mul(Bounds::point(c)));
+        }
+        for (a, b, c) in q.quadratic().iter().copied() {
+            if !c.is_finite() {
+                return Err(BoundError::InvalidNumber);
+            }
+            let left = self.variable(a)?;
+            let right = if a == b { left } else { self.variable(b)? };
+
+            // Match coefficient-first evaluation, avoiding overflow or underflow
+            // in an unscaled square or bilinear product.
+            let mut term = Bounds::point(c).mul(left).mul(right);
+            if a == b {
+                if c > 0.0 {
+                    term.lower = term.lower.max(0.0);
+                } else {
+                    term.upper = term.upper.min(0.0);
+                }
+            }
+            bounds = bounds.add(term);
+        }
+        Ok(bounds)
     }
 
     fn affine_terms(&mut self, id: ExprId) -> Option<AffineTerms<'a>> {
@@ -973,6 +998,10 @@ impl<'a> Bounder<'a> {
     }
 }
 
+fn checked_point(value: f64) -> Result<Bounds, BoundError> {
+    if value.is_finite() { Ok(Bounds::point(value)) } else { Err(BoundError::InvalidNumber) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,6 +1025,67 @@ mod tests {
             let rounded = Bounds::point(f64::from_bits(1)).divide_scalar(divisor);
             assert!(rounded.lower < 0.0 && rounded.upper > 0.0);
         }
+    }
+
+    #[test]
+    fn scaled_quadratic_bounds_enclose_extreme_coefficients_and_variable_boxes() {
+        for (coefficient, lower, upper) in [
+            (1e-200, 1e199, 1e200),
+            (-1e-200, -1e200, -1e199),
+            (1e200, 1e-200, 2e-200),
+            (-1e200, -2e-200, 1e-200),
+            (f64::from_bits(1), -2.0, 2.0),
+            (1.0, -2.0, 3.0),
+        ] {
+            for diagonal in [false, true] {
+                let model = oximo_core::Model::new("scaled quadratic enclosure");
+                let x = model.__var("x").bounds(lower, upper).build();
+                let y = model.__var("y").bounds(lower, upper).build();
+                let mut builder = model.quadratic_builder();
+                builder.add_product(coefficient, x, if diagonal { x } else { y }).unwrap();
+                let expression = builder.build();
+                let arena = model.arena();
+                let variables = model.resolved_variables();
+                let bounds = Bounder::new(&arena, &variables).bound(expression.id()).unwrap();
+                assert!(bounds.lower.is_finite() && bounds.upper.is_finite(), "{bounds:?}");
+
+                if diagonal {
+                    assert!(if coefficient > 0.0 {
+                        bounds.lower >= 0.0
+                    } else {
+                        bounds.upper <= 0.0
+                    });
+                }
+
+                for xv in [lower, f64::midpoint(lower, upper), upper] {
+                    for yv in [lower, f64::midpoint(lower, upper), upper] {
+                        encloses(
+                            bounds,
+                            evaluate(&arena, expression.id(), &&[xv, yv][..]).unwrap(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflowed_interval_endpoints_remain_conservative_after_rescaling() {
+        for sign in [-1.0, 1.0] {
+            let value = sign * f64::MAX;
+            let expected = value * 0.5;
+            let product = Bounds::point(value).mul(Bounds::point(2.0));
+            encloses(product.mul(Bounds::point(0.25)), expected);
+            let quotient = Bounds::point(value).divide_scalar(0.5);
+            encloses(quotient.mul(Bounds::point(0.25)), expected);
+            let sum = Bounds::point(value).add(Bounds::point(value));
+            encloses(sum.add(Bounds::point(-value)), value);
+        }
+
+        let square = pow(Bounds::new(1e199, 1e200), Bounds::point(2.0)).unwrap();
+        let scaled = square.mul(Bounds::point(1e-200));
+        encloses(scaled, 1e198);
+        encloses(scaled, 1e200);
     }
 
     #[test]
@@ -1093,19 +1183,19 @@ mod tests {
         let x = m.__var("x").bounds(-3.0, 2.0).build();
         let y = m.__var("y").bounds(1.0, 4.0).build();
         let expressions = [
-            (x.square() + y).erase(),
-            (x / y).erase(),
-            x.atan2(y).erase(),
+            (x.square() + y).as_dynamic(),
+            (x / y).as_dynamic(),
+            x.atan2(y).as_dynamic(),
             x.pow(y),
-            x.min(y).erase(),
-            x.max(y).erase(),
+            x.min(y).as_dynamic(),
+            x.max(y).as_dynamic(),
         ];
         let arena = m.arena();
         let variables = m.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
 
         for (i, e) in expressions.iter().enumerate() {
-            let b = bounder.bound(e.id);
+            let b = bounder.bound(e.id());
 
             if i == 3 {
                 assert!(b.is_err());
@@ -1116,7 +1206,7 @@ mod tests {
 
             for a in [-3.0, -1.0, 0.0, 2.0] {
                 for c in [1.0, 2.0, 4.0] {
-                    encloses(b, evaluate(&arena, e.id, &&[a, c][..]).unwrap());
+                    encloses(b, evaluate(&arena, e.id(), &&[a, c][..]).unwrap());
                 }
             }
         }
@@ -1127,7 +1217,7 @@ mod tests {
         let m = oximo_core::Model::new("deep");
         let x = m.__var("x").bounds(-1.0, 2.0).build();
         let mut arena = m.__sum_context().borrow_mut();
-        let mut id = x.id;
+        let mut id = x.id();
 
         for _ in 0..20_000 {
             id = arena.push(ExprNode::Unary(UnaryOp::Neg, id));
@@ -1150,13 +1240,16 @@ mod tests {
         let arena = m.arena();
         let variables = m.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
-        let first = bounder.bound(cancelled.id).unwrap();
-        let second = bounder.bound(cancelled.id).unwrap();
+        let first = bounder.bound(cancelled.id()).unwrap();
+        let second = bounder.bound(cancelled.id()).unwrap();
         assert_eq!(first.lower.to_bits(), second.lower.to_bits());
         assert_eq!(first.upper.to_bits(), second.upper.to_bits());
-        assert!(matches!(bounder.bound(log.id), Err(BoundError::Domain { operation: "log", .. })));
         assert!(matches!(
-            Bounder::new(&arena, &variables).bound(log.id),
+            bounder.bound(log.id()),
+            Err(BoundError::Domain { operation: "log", .. })
+        ));
+        assert!(matches!(
+            Bounder::new(&arena, &variables).bound(log.id()),
             Err(BoundError::Domain { operation: "log", .. })
         ));
     }
@@ -1168,13 +1261,13 @@ mod tests {
         let p = m.__param("p", 2.0);
         let q = m.__param("q", 5.0);
         let mut arena = m.__sum_context().borrow_mut();
-        let mut shared = x.id;
+        let mut shared = x.id();
 
         for _ in 0..1000 {
             shared = arena.push(ExprNode::Unary(UnaryOp::Neg, shared));
         }
 
-        let roots = [p.id, q.id, p.id]
+        let roots = [p.id(), q.id(), p.id()]
             .map(|parameter| arena.push(ExprNode::Add([shared, parameter].into_iter().collect())));
         drop(arena);
         let arena = m.arena();
@@ -1233,8 +1326,8 @@ mod tests {
         let variables = model.resolved_variables();
         let mut bounder = Bounder::new(&arena, &variables);
         bounder.tighten_global(&rows, &FxHashSet::from_iter([x.var_id().unwrap()]));
-        let xb = bounder.bound(x.id).unwrap();
-        let yb = bounder.bound(y.id).unwrap();
+        let xb = bounder.bound(x.id()).unwrap();
+        let yb = bounder.bound(y.id()).unwrap();
         assert!(xb.lower > -10.0 && xb.upper < 10.0);
 
         for xv in -20..=20 {

@@ -152,10 +152,10 @@ fn build_base(
         }
     }
 
-    for &(variable, coefficient) in &quad.linear {
+    for &(variable, coefficient) in quad.linear() {
         task.put_c_j(index_i32(variable.index(), "variable")?, coefficient).map_err(backend)?;
     }
-    task.put_cfix(quad.constant).map_err(backend)?;
+    task.put_cfix(quad.constant()).map_err(backend)?;
     let mut scratch = TaskScratch::default();
     put_q_objective(task, &quad, &mut scratch)?;
     task.put_obj_sense(objective.as_ref().map_or(Objsense::MINIMIZE, |obj| match obj.sense {
@@ -210,7 +210,7 @@ fn build_rows_and_cones(
         }
         let (linear, constant) = match &terms {
             PolynomialTerms::Affine(terms) => (terms.coeffs.as_ref(), terms.constant),
-            PolynomialTerms::Quadratic(terms) => (terms.linear.as_slice(), terms.constant),
+            PolynomialTerms::Quadratic(terms) => (terms.linear(), terms.constant()),
         };
         let row = task.get_num_con().map_err(backend)?;
         task.append_cons(1).map_err(backend)?;
@@ -432,18 +432,16 @@ pub(crate) fn refresh_task(
             match target {
                 ParameterTarget::Objective => {
                     let q = match prepared.objective() {
-                        Some(o) => {
-                            prepared.require_quadratic(o.expr, || "the objective".into())?.clone()
-                        }
+                        Some(o) => prepared.require_quadratic(o.expr, || "the objective".into())?,
                         None => oximo_solver::prepare::Extracted::Owned(QuadraticTerms::default()),
                     };
                     let mut costs = vec![0.0; prepared.variables().len()];
-                    for &(id, c) in &q.linear {
+                    for &(id, c) in q.linear() {
                         costs[id.index()] = c;
                     }
                     task.put_c_slice(0, index_i32(costs.len(), "variable count")?, &costs)
                         .map_err(backend)?;
-                    task.put_cfix(q.constant).map_err(backend)?;
+                    task.put_cfix(q.constant()).map_err(backend)?;
                     fill_q_triplets(&q, &mut scratch)?;
                     task.put_q_obj(&scratch.indices, &scratch.columns, &scratch.values)
                         .map_err(backend)?;
@@ -476,9 +474,9 @@ pub(crate) fn refresh_task(
                         let Some(native) = meta.row_by_constraint[id.index()] else {
                             return Ok(false);
                         };
-                        put_linear_row(task, native, &q.linear, &mut scratch)?;
+                        put_linear_row(task, native, q.linear(), &mut scratch)?;
                         let (key, lower, upper) =
-                            bounds(row.lower - q.constant, row.upper - q.constant);
+                            bounds(row.lower - q.constant(), row.upper - q.constant());
                         task.put_con_bound(native, key, lower, upper).map_err(backend)?;
                         fill_q_triplets(&q, &mut scratch)?;
                         task.put_q_con_k(
@@ -618,7 +616,7 @@ fn put_q_objective(
     terms: &QuadraticTerms,
     scratch: &mut TaskScratch,
 ) -> Result<(), SolverError> {
-    if terms.hessian.is_empty() {
+    if terms.quadratic().is_empty() {
         return Ok(());
     }
     fill_q_triplets(terms, scratch)?;
@@ -631,7 +629,7 @@ fn put_q_constraint(
     terms: &QuadraticTerms,
     scratch: &mut TaskScratch,
 ) -> Result<(), SolverError> {
-    if terms.hessian.is_empty() {
+    if terms.quadratic().is_empty() {
         return Ok(());
     }
     fill_q_triplets(terms, scratch)?;
@@ -642,11 +640,12 @@ fn fill_q_triplets(terms: &QuadraticTerms, scratch: &mut TaskScratch) -> Result<
     scratch.indices.clear();
     scratch.columns.clear();
     scratch.values.clear();
-    let len = terms.hessian.len();
+    let len = terms.quadratic().len();
     scratch.indices.reserve(len.saturating_sub(scratch.indices.capacity()));
     scratch.columns.reserve(len.saturating_sub(scratch.columns.capacity()));
     scratch.values.reserve(len.saturating_sub(scratch.values.capacity()));
-    for &(row, column, value) in &terms.hessian {
+    for entry in terms.checked_hessian_entries() {
+        let (row, column, value) = entry?;
         scratch.indices.push(index_i32(row.index(), "variable")?);
         scratch.columns.push(index_i32(column.index(), "variable")?);
         scratch.values.push(value);
@@ -945,7 +944,7 @@ pub mod benchmark_support {
         let t = model.__var("t").lb(0.0).build();
         for i in 0..rows {
             let (lhs, rhs) = match degree {
-                1 => ((x + 2.0 * y - t).erase(), i as f64 + 10.0),
+                1 => ((x + 2.0 * y - t).into_dynamic(), i as f64 + 10.0),
                 2 => (x.powi(2) + y, i as f64 + 10.0),
                 _ => (x.powi(2) + y.powi(2) - t.powi(2), 0.0),
             };
@@ -978,6 +977,30 @@ pub mod benchmark_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_hessian_upload_uses_checked_polynomial_conversion() {
+        let terms = QuadraticTerms::from_coefficients(
+            vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
+            Vec::new(),
+            0.0,
+        )
+        .unwrap();
+        let mut scratch = TaskScratch::default();
+        fill_q_triplets(&terms, &mut scratch).unwrap();
+        assert_eq!(scratch.indices, [0, 1]);
+        assert_eq!(scratch.columns, [0, 0]);
+        assert_eq!(scratch.values, [6.0, 5.0]);
+
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1e308)], Vec::new(), 0.0)
+                .unwrap();
+        assert!(matches!(
+            fill_q_triplets(&terms, &mut scratch).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
 
     #[test]
     fn separates_primal_and_dual_solution_statuses() {

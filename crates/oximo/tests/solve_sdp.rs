@@ -85,7 +85,8 @@ fn check_persistent<S: Solver>(solver: &mut S, options: &S::Options) {
     let m = Model::new("sweep");
     variable!(m, t);
     param!(m, p = 1.0);
-    let matrix = SymmetricMatrix::from_upper_triangle(2, [t, p.into(), t]);
+    let matrix =
+        SymmetricMatrix::<Expr<'_, Affine>>::from_upper_triangle(2, [t.into(), p.into(), t.into()]);
     let cone = psd_constraint!(m, &matrix);
     objective!(m, Min, t);
     for expected in [1.0, 2.0, 3.0] {
@@ -139,7 +140,7 @@ fn check_persistent_coefficients<S: PersistentSolver>(solver: &mut S, options: &
     variable!(m, x);
     m.fix(x, 1.0).unwrap();
     param!(m, p = 1.0);
-    let matrix = SymmetricMatrix::from_upper_triangle(2, [t, p * x, t]);
+    let matrix = SymmetricMatrix::from_upper_triangle(2, [t.into(), p * x, t.into()]);
     let cone = psd_constraint!(m, &matrix);
     objective!(m, Min, t);
     let mut persistent = solver.persistent();

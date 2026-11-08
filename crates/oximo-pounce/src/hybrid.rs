@@ -12,7 +12,8 @@
 //! through `TNLP` so the search can augment the objective for its strategies.
 
 use oximo_autodiff::slot::{
-    linear_gradient_add, linear_value, quadratic_gradient_add, quadratic_value,
+    linear_gradient_add, linear_value, quadratic_diagonal_gradient, quadratic_diagonal_hessian,
+    quadratic_gradient_add, quadratic_value,
 };
 use oximo_autodiff::sparsity::hessian_lagrangian_structure;
 use oximo_autodiff::{FunctionSlot, SlotKind};
@@ -62,14 +63,14 @@ fn jacobian_metadata(slots: &[FunctionSlot]) -> JacobianMetadata {
         .iter()
         .map(|slot| match &slot.kind {
             SlotKind::Linear(terms) => terms.coeffs.len(),
-            SlotKind::Quadratic(terms) => terms.linear.len(),
+            SlotKind::Quadratic(terms) => terms.linear().len(),
             SlotKind::Nonlinear(_) => 0,
         })
         .sum();
     let hessian_count = slots
         .iter()
         .map(|slot| match &slot.kind {
-            SlotKind::Quadratic(terms) => terms.hessian.len(),
+            SlotKind::Quadratic(terms) => terms.quadratic().len(),
             SlotKind::Linear(_) | SlotKind::Nonlinear(_) => 0,
         })
         .sum();
@@ -85,9 +86,12 @@ fn jacobian_metadata(slots: &[FunctionSlot]) -> JacobianMetadata {
                 linear_scatter.extend(terms.coeffs.iter().map(|(var, _)| position(var.0)));
             }
             SlotKind::Quadratic(terms) => {
-                linear_scatter.extend(terms.linear.iter().map(|(var, _)| position(var.0)));
+                linear_scatter.extend(terms.linear().iter().map(|(var, _)| position(var.0)));
                 hessian_scatter.extend(
-                    terms.hessian.iter().map(|(row, col, _)| (position(row.0), position(col.0))),
+                    terms
+                        .quadratic()
+                        .iter()
+                        .map(|(row, col, _)| (position(row.0), position(col.0))),
                 );
             }
             SlotKind::Nonlinear(_) => {}
@@ -339,7 +343,7 @@ impl HybridOracle {
 fn scatter_positions(hess: &[(usize, usize)], slot: &FunctionSlot) -> Vec<usize> {
     match &slot.kind {
         SlotKind::Quadratic(q) => q
-            .hessian
+            .quadratic()
             .iter()
             .map(|&(r, c, _)| {
                 hess.binary_search(&(r.index(), c.index()))
@@ -528,25 +532,27 @@ impl DerivativeOracle for HybridOracle {
                 }
                 SlotKind::Quadratic(terms) => {
                     let linear_positions =
-                        &self.jac_linear_scatter[linear_k..linear_k + terms.linear.len()];
-                    for (&position, &(_, coefficient)) in linear_positions.iter().zip(&terms.linear)
+                        &self.jac_linear_scatter[linear_k..linear_k + terms.linear().len()];
+                    for (&position, &(_, coefficient)) in
+                        linear_positions.iter().zip(terms.linear())
                     {
                         row[position] += coefficient;
                     }
-                    linear_k += terms.linear.len();
+                    linear_k += terms.linear().len();
                     let hessian_positions =
-                        &self.jac_hessian_scatter[hessian_k..hessian_k + terms.hessian.len()];
-                    for (&(row_position, col_position), &(row_var, col_var, hessian)) in
-                        hessian_positions.iter().zip(&terms.hessian)
+                        &self.jac_hessian_scatter[hessian_k..hessian_k + terms.quadratic().len()];
+                    for (&(row_position, col_position), &(row_var, col_var, coefficient)) in
+                        hessian_positions.iter().zip(terms.quadratic())
                     {
                         if row_var == col_var {
-                            row[row_position] += hessian * x[row_var.index()];
+                            row[row_position] +=
+                                quadratic_diagonal_gradient(coefficient, x[row_var.index()], 1.0);
                         } else {
-                            row[row_position] += hessian * x[col_var.index()];
-                            row[col_position] += hessian * x[row_var.index()];
+                            row[row_position] += coefficient * x[col_var.index()];
+                            row[col_position] += coefficient * x[row_var.index()];
                         }
                     }
-                    hessian_k += terms.hessian.len();
+                    hessian_k += terms.quadratic().len();
                 }
                 SlotKind::Nonlinear(_) => {
                     for (out, &variable) in row.iter_mut().zip(&slot.support) {
@@ -577,14 +583,22 @@ impl DerivativeOracle for HybridOracle {
     ) {
         vals.fill(0.0);
         if let SlotKind::Quadratic(q) = &self.obj.kind {
-            for (&pos, &(_, _, h)) in self.obj_hess_pos.iter().zip(&q.hessian) {
-                vals[pos] += obj_factor * h;
+            for (&pos, &(r, c, coefficient)) in self.obj_hess_pos.iter().zip(q.quadratic()) {
+                vals[pos] += if r == c {
+                    quadratic_diagonal_hessian(coefficient, obj_factor)
+                } else {
+                    obj_factor * coefficient
+                };
             }
         }
         for ((slot, pos), &l) in self.cons.iter().zip(&self.con_hess_pos).zip(lambda) {
             if let SlotKind::Quadratic(q) = &slot.kind {
-                for (&p, &(_, _, h)) in pos.iter().zip(&q.hessian) {
-                    vals[p] += l * h;
+                for (&p, &(r, c, coefficient)) in pos.iter().zip(q.quadratic()) {
+                    vals[p] += if r == c {
+                        quadratic_diagonal_hessian(coefficient, l)
+                    } else {
+                        l * coefficient
+                    };
                 }
             }
         }
@@ -629,11 +643,11 @@ pub mod benchmark_support {
         model.__minimize(x.powi(2) + y + z);
         for i in 0..rows {
             let lhs = if nonlinear {
-                (x * y * z + (i as f64 + 1.0) * x).erase()
+                (x * y * z + (i as f64 + 1.0) * x).as_dynamic()
             } else if i % 2 == 0 {
                 x.powi(2) + y * z + (i as f64 + 1.0) * x
             } else {
-                (x + 2.0 * y - z).erase()
+                (x + 2.0 * y - z).as_dynamic()
             };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
@@ -650,7 +664,7 @@ pub mod benchmark_support {
             let x = vars[i % n_vars];
             let y = vars[(i + 1) % n_vars];
             let z = vars[(i + 2) % n_vars];
-            let lhs = if i % 2 == 0 { x.powi(2) + y * z } else { (x + 2.0 * y - z).erase() };
+            let lhs = if i % 2 == 0 { x.powi(2) + y * z } else { (x + 2.0 * y - z).as_dynamic() };
             model.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }
         model
@@ -1067,6 +1081,49 @@ mod tests {
     }
 
     #[test]
+    fn subnormal_quadratics_preserve_diagonal_gradients_and_weighted_hessians() {
+        let model = Model::new("subnormal derivatives");
+        variable!(model, x);
+        let tiny = f64::from_bits(1);
+        objective!(model, Min, tiny * x * x);
+        constraint!(model, row, tiny * x * x <= 1.0);
+        let mut oracle = HybridOracle::new(&model);
+        let mut values = [0.0];
+        oracle.eval_objective_gradient(&[0.5], &mut values);
+        assert_eq!(values[0].to_bits(), tiny.to_bits());
+
+        oracle.eval_constraint_jacobian(&[0.5], &mut values);
+        assert_eq!(values[0].to_bits(), tiny.to_bits());
+        for (objective, constraint) in [(0.5, 0.0), (0.0, 0.5)] {
+            oracle.eval_hessian_lagrangian(&[0.5], objective, &[constraint], &mut values);
+            assert_eq!(values[0].to_bits(), tiny.to_bits());
+        }
+    }
+
+    #[test]
+    fn large_polynomial_coefficients_have_finite_zero_gradients_and_scaled_hessians() {
+        let model = Model::new("large coefficient");
+        variable!(model, x);
+        objective!(model, Min, 1e308 * x * x);
+        constraint!(model, row, 1e308 * x * x <= 1.0);
+        let mut oracle = HybridOracle::new(&model);
+        let mut gradient = [1.0];
+        oracle.eval_objective_gradient(&[0.0], &mut gradient);
+        assert_eq!(gradient, [0.0]);
+
+        let mut jacobian = [1.0];
+        oracle.eval_constraint_jacobian(&[0.0], &mut jacobian);
+        assert_eq!(jacobian, [0.0]);
+
+        let mut hessian = [1.0];
+        oracle.eval_hessian_lagrangian(&[0.0], 0.0, &[0.0], &mut hessian);
+        assert_eq!(hessian, [0.0]);
+
+        oracle.eval_hessian_lagrangian(&[0.0], 0.25, &[0.0], &mut hessian);
+        assert_eq!(hessian, [5e307]);
+    }
+
+    #[test]
     fn feasibility_objective_is_the_zero_slot() {
         let m = Model::new("feas");
 
@@ -1154,11 +1211,11 @@ mod tests {
 
         for i in 0..rows {
             let lhs = if nonlinear {
-                (x * y * z + (i as f64 + 1.0) * x).erase()
+                (x * y * z + (i as f64 + 1.0) * x).as_dynamic()
             } else if i % 2 == 0 {
                 x.powi(2) + y * z + (i as f64 + 1.0) * x
             } else {
-                (x + 2.0 * y - z).erase()
+                (x + 2.0 * y - z).as_dynamic()
             };
             m.__add_constraint_auto(lhs.le(i as f64 + 10.0));
         }

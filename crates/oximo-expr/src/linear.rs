@@ -54,8 +54,8 @@ impl SmallLinear {
         true
     }
 
-    fn operand(&mut self, arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> bool {
-        if let ExprNode::Add(children) = arena.get(id) {
+    fn operand(&mut self, arena: &(impl ArenaAccess + ?Sized), node: &ExprNode) -> bool {
+        if let ExprNode::Add(children) = node {
             // We use wide flat numeric prefix because it is cheap if its
             // merged support is small.
             let mut segment = Self::new();
@@ -72,9 +72,9 @@ impl SmallLinear {
             }
             true
         } else {
-            let ok = self.terminal(arena.get(id));
+            let ok = self.terminal(node);
             // Direct leaves have not gone through a sum's initial +0.
-            self.constant = match arena.get(id) {
+            self.constant = match node {
                 ExprNode::Const(c) | ExprNode::Linear { constant: c, .. } => *c,
                 _ => self.constant,
             };
@@ -181,6 +181,9 @@ fn recursive_linear<'a, A: ArenaAccess + ?Sized>(
             Some(LinearTerms { coeffs: Cow::Owned(vec![(*v, 1.0)]), constant: 0.0 })
         }
         ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
+        ExprNode::Quadratic(q) if q.quadratic.is_empty() => {
+            Some(LinearTerms::borrowed(q.linear(), q.constant()))
+        }
         ExprNode::Unary(UnaryOp::Neg, inner) => {
             let inner = *inner;
             recursive_linear(arena, inner, resolve_params).map(|t| {
@@ -351,6 +354,9 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for LinearFolder<'a, '_, A
             }
             ExprNode::Var(v) => Some(LinearTerms::owned(vec![(*v, 1.0)], 0.0)),
             ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
+            ExprNode::Quadratic(q) if q.quadratic.is_empty() => {
+                Some(LinearTerms::borrowed(q.linear(), q.constant()))
+            }
             ExprNode::Add(children) => {
                 return Continue(LinearState::Sum {
                     rest: children,
@@ -670,7 +676,7 @@ pub(crate) fn push_linear(arena: &mut (impl ArenaAccess + ?Sized), t: LinearTerm
     if coeffs.is_empty() {
         return arena.constant(t.constant);
     }
-    arena.push(ExprNode::Linear { coeffs, constant: t.constant })
+    arena.push_immutable(ExprNode::Linear { coeffs, constant: t.constant })
 }
 
 /// Build `lhs + rhs`, eagerly merging small numeric affine operands.
@@ -680,21 +686,62 @@ pub(crate) fn add_into(
     lhs: ExprId,
     rhs: ExprId,
 ) -> ExprId {
+    add_with_ownership(arena, lhs, rhs, false).0
+}
+
+/// Propagate mutable-quadratic eligibility directly for common immutable results.
+pub(crate) fn add_with_ownership(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+    children_shared: bool,
+) -> (ExprId, bool) {
+    let left_node = arena.get(lhs);
+    let right_node = arena.get(rhs);
+    if let (
+        ExprNode::Linear { coeffs: left_coeffs, .. },
+        ExprNode::Linear { coeffs: right_coeffs, .. },
+    ) = (left_node, right_node)
+        && left_coeffs.len().saturating_add(right_coeffs.len()) <= MAX_EAGER_COEFFICIENTS
+    {
+        let mut left = SmallLinear::new();
+        if left.operand(arena, left_node) && left.terminal(right_node) {
+            return (left.push(arena), false);
+        }
+    }
+
+    let rejects_eager_affine = |node: &ExprNode| match node {
+        ExprNode::Unary(op, _) => *op != UnaryOp::Neg,
+        ExprNode::Div(..) | ExprNode::Atan2(..) | ExprNode::Min(_) | ExprNode::Max(_) => true,
+        _ => false,
+    };
+
+    if rejects_eager_affine(left_node) || rejects_eager_affine(right_node) {
+        return (push_sum(arena, lhs, rhs, children_shared), false);
+    }
+    if matches!(left_node, ExprNode::Quadratic(_)) || matches!(right_node, ExprNode::Quadratic(_)) {
+        return if let Some(id) = crate::quadratic_builder::add_small(arena, lhs, rhs, 1.0) {
+            (id, arena.quadratic_root(id))
+        } else {
+            (push_sum(arena, lhs, rhs, children_shared), false)
+        };
+    }
+
     let mut left = SmallLinear::new();
-    if left.operand(arena, lhs) {
-        let merged = if matches!(arena.get(rhs), ExprNode::Add(_)) {
+    if left.operand(arena, left_node) {
+        let merged = if matches!(right_node, ExprNode::Add(_)) {
             let mut right = SmallLinear::new();
-            if right.operand(arena, rhs) {
+            if right.operand(arena, right_node) {
                 left.constant += right.constant;
                 right.coeffs.into_iter().all(|(var, coefficient)| left.add(var, coefficient))
             } else {
                 false
             }
         } else {
-            left.terminal(arena.get(rhs))
+            left.terminal(right_node)
         };
         if merged {
-            return left.push(arena);
+            return (left.push(arena), false);
         }
     }
     if small_affine(arena, &[lhs, rhs])
@@ -707,9 +754,19 @@ pub(crate) fn add_into(
         let coeffs = acc.into_coeffs();
         drop(lt);
         drop(rt);
-        return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
+        return (push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant }), false);
     }
-    arena.push(ExprNode::Add(smallvec![lhs, rhs]))
+    (push_sum(arena, lhs, rhs, children_shared), false)
+}
+
+fn push_sum(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+    children_shared: bool,
+) -> ExprId {
+    let node = ExprNode::Add(smallvec![lhs, rhs]);
+    if children_shared { arena.push_immutable(node) } else { arena.push(node) }
 }
 
 /// Build a flat n-ary sum of `ids` as a single `Add` node.
@@ -718,12 +775,16 @@ pub(crate) fn add_into(
 ///
 /// # Panics
 /// Panics if `ids` is empty (callers supply at least one term).
-pub(crate) fn add_n(arena: &mut (impl ArenaAccess + ?Sized), ids: Children) -> ExprId {
+pub(crate) fn add_n(arena: &mut (impl ArenaAccess + ?Sized), ids: Children) -> (ExprId, bool) {
     match ids.as_slice() {
         [] => panic!("add_n on an empty term list"),
-        [one] => *one,
-        _ => arena.push(ExprNode::Add(ids)),
+        [one] => return (*one, false),
+        _ => {}
     }
+    if let Some(id) = crate::quadratic_builder::sum_numeric(arena, &ids) {
+        return (id, arena.quadratic_root(id));
+    }
+    (arena.push(ExprNode::Add(ids)), false)
 }
 
 /// Build `lhs - rhs`. Same linear fast-path as `add_into`.
@@ -743,7 +804,50 @@ pub(crate) fn mul_into(
     lhs: ExprId,
     rhs: ExprId,
 ) -> ExprId {
-    if let ExprNode::Const(c) = *arena.get(lhs)
+    multiply_into(arena, lhs, rhs, true)
+}
+
+/// Multiply without attempting numeric quadratic expansion.
+pub(crate) fn mul_affine_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+) -> ExprId {
+    multiply_into(arena, lhs, rhs, false)
+}
+
+#[inline]
+fn multiply_into(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    lhs: ExprId,
+    rhs: ExprId,
+    expand_quadratic: bool,
+) -> ExprId {
+    let left = arena.get(lhs);
+    let right = arena.get(rhs);
+    let quadratic_candidate = expand_quadratic
+        && matches!(
+            (left, right),
+            (ExprNode::Const(_), ExprNode::Quadratic(_))
+                | (ExprNode::Quadratic(_), ExprNode::Const(_))
+                | (
+                    ExprNode::Var(_) | ExprNode::Linear { .. },
+                    ExprNode::Var(_) | ExprNode::Linear { .. }
+                )
+        );
+    let constant = |node: &ExprNode| match node {
+        ExprNode::Const(c) => Some(*c),
+        _ => None,
+    };
+    let (left_constant, right_constant) = (constant(left), constant(right));
+    let (left_scalar, right_scalar) = (scalar_leaf(left), scalar_leaf(right));
+    if quadratic_candidate
+        && let Some(id) = crate::quadratic_builder::product_small(arena, lhs, rhs)
+    {
+        return id;
+    }
+
+    if let Some(c) = left_constant
         && small_affine(arena, &[rhs])
         && let Some(t) = as_linear(arena, rhs, false)
     {
@@ -754,7 +858,8 @@ pub(crate) fn mul_into(
         }
         return push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant });
     }
-    if let ExprNode::Const(c) = *arena.get(rhs)
+
+    if let Some(c) = right_constant
         && small_affine(arena, &[lhs])
         && let Some(t) = as_linear(arena, lhs, false)
     {
@@ -767,11 +872,7 @@ pub(crate) fn mul_into(
     }
     // Normalize at the boundary from affine arithmetic to a product of
     // expressions.
-    if !scalar_leaf(arena.get(lhs))
-        && !scalar_leaf(arena.get(rhs))
-        && !small_scalar(arena, lhs)
-        && !small_scalar(arena, rhs)
-    {
+    if !left_scalar && !right_scalar && !small_scalar(arena, lhs) && !small_scalar(arena, rhs) {
         let left = compact_numeric_into(arena, lhs);
         let right = if lhs == rhs { left } else { compact_numeric_into(arena, rhs) };
         if left != lhs || right != rhs {
@@ -981,6 +1082,11 @@ pub(crate) fn pow_into(
     base: ExprId,
     exponent: ExprId,
 ) -> ExprId {
+    if matches!(arena.get(exponent), ExprNode::Const(2.0))
+        && let Some(id) = crate::quadratic_builder::product_small(arena, base, base)
+    {
+        return id;
+    }
     let base = if matches!(arena.get(exponent), ExprNode::Const(e) if e.is_finite() && *e >= 2.0 && (*e - e.round()).abs() < f64::EPSILON)
     {
         compact_numeric_into(arena, base)
@@ -1020,6 +1126,12 @@ pub(crate) fn div_into(
 
 /// Build `-rhs`, eagerly merging small numeric affine operands.
 pub(crate) fn neg_into(arena: &mut (impl ArenaAccess + ?Sized), rhs: ExprId) -> ExprId {
+    if matches!(arena.get(rhs), ExprNode::Quadratic(_)) {
+        let minus = arena.constant(-1.0);
+        if let Some(id) = crate::quadratic_builder::product_small(arena, rhs, minus) {
+            return id;
+        }
+    }
     if small_affine(arena, &[rhs])
         && let Some(t) = as_linear(arena, rhs, false)
     {
@@ -1105,6 +1217,7 @@ fn additive_affinity(arena: &ExprArena, root: ExprId) -> FxHashMap<ExprId, bool>
 ///
 /// As with [`extract_linear`], call [`LinearTerms::into_owned`] before retaining
 /// the linear terms independently of `arena`.
+/// Residual IDs are published to protect them from later in-place updates.
 ///
 /// # Panics
 /// Panics if `id` or a reachable child is not a valid ID in `arena`.
@@ -1114,6 +1227,7 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
     }
     // Non-additive nonlinear roots are already a single residual.
     if !matches!(arena.get(id), ExprNode::Add(_) | ExprNode::Unary(UnaryOp::Neg, _)) {
+        arena.seal(id);
         return (LinearTerms::borrowed(&[], 0.0), vec![SignedExpr { id, neg: false }]);
     }
     let mut lin = CoeffAccum::with_capacity(0);
@@ -1142,7 +1256,10 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
                 }
             }
             ExprNode::Unary(UnaryOp::Neg, inner) => sign_stack.push((*inner, -sign)),
-            _ => residual.push(SignedExpr { id: cur, neg: sign < 0.0 }),
+            _ => {
+                arena.seal(cur);
+                residual.push(SignedExpr { id: cur, neg: sign < 0.0 });
+            }
         }
     }
     let mut coeffs = lin.into_coeffs();
@@ -1153,6 +1270,8 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
 /// Render the first nonlinear summand of `id` as a short infix string, resolving
 /// each [`VarId`] to a display name via `resolve`. Returns `None` when `id` is
 /// fully affine (no nonlinear residual).
+/// Like [`split_linear`], this publishes residual IDs, permanently disabling their
+/// in-place quadratic accumulation when called on a live arena or write guard.
 pub fn describe_nonlinear_term(
     arena: &ExprArena,
     id: ExprId,
@@ -1181,6 +1300,24 @@ mod tests {
             reads: std::cell::Cell<usize>,
         }
         impl ArenaAccess for CountedArena {
+            fn quadratic_root(&mut self, id: ExprId) -> bool {
+                ArenaAccess::quadratic_root(&mut self.arena, id)
+            }
+            fn seal(&self, id: ExprId) {
+                ArenaAccess::seal(&self.arena, id);
+            }
+            fn accumulate_quadratic(
+                &mut self,
+                lhs: ExprId,
+                rhs: ExprId,
+                scale: f64,
+            ) -> Option<ExprId> {
+                ArenaAccess::accumulate_quadratic(&mut self.arena, lhs, rhs, scale)
+            }
+            fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId> {
+                ArenaAccess::scale_quadratic(&mut self.arena, id, scale)
+            }
+
             fn len(&self) -> usize {
                 self.arena.len()
             }

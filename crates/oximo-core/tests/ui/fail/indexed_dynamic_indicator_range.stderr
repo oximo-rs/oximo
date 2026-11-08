@@ -12,12 +12,23 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
 ...
   | impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'_, oximo_core::Constant>`
+...
+  |         impl<'a> IntoAffineFunction<'a> for Expr<'a, $degree> {
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |         |
+  |         `Expr<'_, oximo_expr::degree::ParameterDegree>`
+  |         `Expr<'_, oximo_expr::degree::VariableDegree>`
+...
+  | leaf_functions!(oximo_expr::VariableDegree);
+  | ------------------------------------------- in this macro invocation
+  | leaf_functions!(oximo_expr::ParameterDegree);
+  | -------------------------------------------- in this macro invocation
 note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_indicator_ranges_over`
  --> src/model/indexed.rs
   |
-  |     pub fn __add_indicator_ranges_over<'a, K, B1, B2, F, D: Degree, E: Degree>(
+  |     pub fn __add_indicator_ranges_over<
   |            --------------------------- required by a bound in this associated function
 ...
-  |         Expr<'a, E>: IntoAffineFunction<'a>,
-  |                      ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_indicator_ranges_over`
-  = note: this error originates in the macro `indicator_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)
+  |         E: IntoAffineFunction<'a>,
+  |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_indicator_ranges_over`
+  = note: this error originates in the macro `indicator_constraint` which comes from the expansion of the macro `leaf_functions` (in Nightly builds, run with -Z macro-backtrace for more info)

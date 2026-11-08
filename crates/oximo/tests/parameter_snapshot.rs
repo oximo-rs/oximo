@@ -32,7 +32,7 @@ fn check_scenarios<S: Solver>(mut solver: S, opts: &S::Options) {
 
     assert_eq!(first.value_of(p * x), Ok(Some(2.0 * original_x)));
     assert_eq!(first.value_of_with_current_parameters(p * x), Ok(Some(4.0 * original_x)));
-    assert_eq!(first.best().unwrap().clone().value_of(p * x), Ok(Some(2.0 * original_x)));
+    assert_eq!(first.best().unwrap().value_of(p * x), Ok(Some(2.0 * original_x)));
     assert_eq!((first.objective(), first.primal_status, first.termination.clone()), certificate);
 
     let second = solver.solve(&model, opts).unwrap();

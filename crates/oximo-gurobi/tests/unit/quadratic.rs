@@ -29,7 +29,7 @@ fn sparse_upload_matches_polynomial_values_at_fixed_points() {
     variable!(model, -2.0 <= x <= 2.0);
     variable!(model, -2.0 <= y <= 2.0);
     let root = 2.0 * (x + 2.0 * y + 1.0).square() + x * y - 3.0 * y * y + 2.0 * x - 7.0;
-    objective!(model, Min, root);
+    objective!(model, Min, &root);
     let row = constraint!(model, row, root <= 20.0);
 
     let env = quiet_env();
@@ -78,13 +78,13 @@ fn sparse_affine_batches_keep_duplicates_constants_ranges_and_source_slots() {
     let y_id = y.var_id().unwrap();
     let root =
         arena.borrow_mut().linear(vec![(x_id, 3.0), (x_id, -2.0), (y_id, 5.0), (y_id, -5.0)], 4.0);
-    let expression = oximo_expr::Expr::new(root, arena).try_affine().unwrap();
-    let upper = constraint!(model, upper, expression <= 5.0);
-    let lower = constraint!(model, lower, expression >= 3.0);
-    let equality = constraint!(model, equality, expression == 4.0);
-    let range = constraint!(model, range, -2.0 <= expression <= 4.0);
+    let expression = oximo_expr::Expr::new(root, arena).as_affine().unwrap();
+    let upper = constraint!(model, upper, &expression <= 5.0);
+    let lower = constraint!(model, lower, &expression >= 3.0);
+    let equality = constraint!(model, equality, &expression == 4.0);
+    let range = constraint!(model, range, -2.0 <= &expression <= 4.0);
     let constant = constraint!(model, constant, 0.0 * x + 7.0 <= 8.0);
-    let free = constraint!(model, free, f64::NEG_INFINITY <= expression <= f64::INFINITY);
+    let free = constraint!(model, free, f64::NEG_INFINITY <= &expression <= f64::INFINITY);
 
     let oximo_core::RangeConstraintHandles::Interval(free) = free else {
         panic!("affine free interval")
@@ -244,7 +244,7 @@ fn indicator_divisions_are_validated_before_native_rows() {
     variable!(model, b, Binary);
     variable!(model, x);
     param!(model, p = 1.0);
-    let lhs = (x + (x / p).powi(0)).try_affine().unwrap();
+    let lhs = (x + (x / p).powi(0)).as_affine().unwrap();
     let row = indicator_constraint!(model, row, b == 1 => lhs <= 1.0);
     objective!(model, Min, x);
 
@@ -273,8 +273,8 @@ fn sparse_conversion_matches_generic_coefficients_and_evaluations() {
     variable!(model, -2.0 <= y <= 2.0);
     param!(model, p = 2.0);
     let shared = x + 2.0 * y + 1.0;
-    let root = p * shared * shared + x * y - 3.0 * y * y + 2.0 * x - 7.0;
-    objective!(model, Min, root);
+    let root = p * shared.clone() * shared + x * y - 3.0 * y * y + 2.0 * x - 7.0;
+    objective!(model, Min, &root);
 
     let env = quiet_env();
     let prepared = LoweringContext::new(&model).unwrap();
@@ -299,9 +299,10 @@ fn sparse_conversion_matches_generic_coefficients_and_evaluations() {
             - 3.0 * point[1] * point[1]
             + 2.0 * point[0]
             - 7.0;
-        let actual = q.constant
-            + q.linear.iter().map(|&(v, c)| c * point[v.index()]).sum::<f64>()
-            + q.hessian
+        let actual = q.constant()
+            + q.linear().iter().map(|&(v, c)| c * point[v.index()]).sum::<f64>()
+            + q.hessian_entries()
+                .collect::<Vec<_>>()
                 .iter()
                 .map(|&(v, w, c)| {
                     (if v == w { c / 2.0 } else { c }) * point[v.index()] * point[w.index()]
@@ -317,11 +318,12 @@ fn converter_preserves_small_nonzero_coefficients_and_cancellation() {
     let mut native = gurobi_rs::Model::with_env("exact zeros", &env).unwrap();
     let x = native.add_var("x", Continuous, 0.0, -1.0, 1.0, []).unwrap();
     let q = quadratic_expression(
-        &QuadraticTerms {
-            hessian: vec![(VarId(0), VarId(0), 2e-100), (VarId(0), VarId(0), 0.0)],
-            linear: vec![(VarId(0), 1e-100), (VarId(0), 0.0)],
-            constant: 3.0,
-        },
+        &QuadraticTerms::from_hessian(
+            vec![(VarId(0), VarId(0), 2e-100), (VarId(0), VarId(0), 0.0)],
+            vec![(VarId(0), 1e-100), (VarId(0), 0.0)],
+            3.0,
+        )
+        .unwrap(),
         &[x],
     );
     let (quadratic, linear) = q.into_parts();
@@ -334,8 +336,8 @@ fn converter_preserves_small_nonzero_coefficients_and_cancellation() {
     let model = Model::new("cancelled quadratic");
     variable!(model, -1.0 <= y <= 1.0);
     let square = y * y;
-    let cancelled = constraint!(model, cancel, square - square + y <= 1.0);
-    objective!(model, Max, square - square + 3.0);
+    let cancelled = constraint!(model, cancel, &square - &square + y <= 1.0);
+    objective!(model, Max, &square - &square + 3.0);
 
     let mut built = build(&model, &GurobiOptions::default(), &env).unwrap();
     assert!(matches!(built.constrs[cancelled.index()].rows.as_slice(), [GurobiRow::Lin(_)]));
@@ -453,7 +455,7 @@ fn quadratic_rows_keep_bounds_names_constants_and_source_slots() {
     {
         let row = model.add_constraint(
             format!("row{i}"),
-            Constraint::new(root.into_function(), Interval { lower, upper }),
+            Constraint::new(root.clone().into_function(), Interval { lower, upper }),
         );
         model.set_constraint_active(row, active).unwrap();
     }

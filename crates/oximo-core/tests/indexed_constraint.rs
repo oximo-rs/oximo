@@ -184,9 +184,9 @@ fn range_family_can_mix_interval_and_split_entries() {
     let m = Model::new("mixed_range_ids");
     variable!(m, x);
     constraint!(m, prior, x >= 0.0);
-    let bodies = [x.erase(), x.powi(2), (x + 1.0).erase()];
+    let bodies = [x.as_dynamic(), x.powi(2), (x + 1.0).as_dynamic()];
     let ranges: IndexedRangeConstraint<usize> =
-        constraint!(m, ranges[i in 0..3], 4.0 >= bodies[i] >= 0.0);
+        constraint!(m, ranges[i in 0..3], 4.0 >= &bodies[i] >= 0.0);
     assert_eq!(ranges.len(), 3);
     assert_eq!(m.num_constraints(), 5);
     assert_eq!(
@@ -261,7 +261,7 @@ fn sums_acknowledge_unused_bindings_and_allow_moves() {
         sum!(f64::from(key.into_bytes()[0] - b'0') * x for unused in 0..2, key in keys if true);
     let arena = m.arena();
     for total in [unfiltered, filtered, nested] {
-        let linear = oximo_expr::extract_linear(&arena, total.id).unwrap();
+        let linear = oximo_expr::extract_linear(&arena, total.id()).unwrap();
         assert_eq!(linear.coeffs.len(), 1);
         assert!((linear.coeffs[0].1 - 10.0).abs() < f64::EPSILON);
     }

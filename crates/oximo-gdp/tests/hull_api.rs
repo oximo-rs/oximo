@@ -16,7 +16,7 @@ fn indexed_reference_coordinates_shift_affine_copies_and_last_value_wins() {
 
     variable!(model, 1.0 <= x[i in 0..3] <= 4.0);
     boolean_variable!(model, active);
-    for (_, &variable) in x.iter() {
+    for (_, variable) in x.iter() {
         disjunct_constraint!(model, active, variable <= 3.0);
     }
 

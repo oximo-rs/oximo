@@ -45,6 +45,14 @@ pub(crate) fn finite_inputs(
                     return false;
                 }
             }
+            ExprNode::Quadratic(q) => {
+                if !q.constant.is_finite()
+                    || q.linear.iter().any(|(_, c)| !c.is_finite())
+                    || q.quadratic.iter().any(|(_, _, c)| !c.is_finite())
+                {
+                    return false;
+                }
+            }
             ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::Min(c) | ExprNode::Max(c) => {
                 stack.extend_from_slice(c);
             }
@@ -134,7 +142,8 @@ fn shared_nodes(arena: &(impl ArenaAccess + ?Sized), root: ExprId) -> FxHashSet<
             ExprNode::Const(_)
             | ExprNode::Var(_)
             | ExprNode::Param(_)
-            | ExprNode::Linear { .. } => {}
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_) => {}
         }
     }
     shared

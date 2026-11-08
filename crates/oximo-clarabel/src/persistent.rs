@@ -424,8 +424,8 @@ mod tests {
         let m = Model::new("chordal settings");
         variable!(m, t);
         param!(m, p = 1.0);
-        let matrix = SymmetricMatrix::from_upper_fn(8, |i, j| {
-            if i == j { t } else { (-p * f64::from(u8::from(j == i + 1))).into() }
+        let matrix = SymmetricMatrix::from_upper_fn(8, |i, j| -> Expr<'_, Affine> {
+            if i == j { t.into() } else { (-p * f64::from(u8::from(j == i + 1))).into() }
         });
         let cone = psd_constraint!(m, &matrix);
         objective!(m, Min, t);
@@ -470,7 +470,7 @@ mod tests {
         variable!(m, x);
         m.fix(x, 1.0).unwrap();
         param!(m, p = 1.0);
-        psd_constraint!(m, SymmetricMatrix::from_upper_triangle(2, [t, p * x, t]));
+        psd_constraint!(m, SymmetricMatrix::from_upper_triangle(2, [t.into(), p * x, t.into()]));
         objective!(m, Min, t);
         let options = ClarabelOptions::default().presolve_enable(false);
         let mut solver = Clarabel.persistent();

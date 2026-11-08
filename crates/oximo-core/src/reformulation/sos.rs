@@ -345,7 +345,7 @@ impl PlannedSos {
                     &mut generated_variables,
                 );
                 add_at_most_one(model, self.source, &activations, &mut generated_constraints);
-                for (member, activation) in members.iter().zip(activations.iter().copied()) {
+                for (member, activation) in members.iter().zip(activations.iter().cloned()) {
                     add_planned_member_gates(
                         model,
                         self.source,
@@ -369,9 +369,9 @@ impl PlannedSos {
                         continue;
                     }
                     let activation = match index {
-                        0 => intervals[0],
-                        i if i + 1 == members.len() => intervals[i - 1],
-                        i => intervals[i - 1] + intervals[i],
+                        0 => intervals[0].clone(),
+                        i if i + 1 == members.len() => intervals[i - 1].clone(),
+                        i => (intervals[i - 1]).clone() + (intervals[i]).clone(),
                     };
                     add_planned_member_gates(
                         model,
@@ -476,7 +476,7 @@ fn add_binary_activations<'a>(
             let name = unique_variable_name(model, &base);
             let expression = model.__var(name).binary().build();
             generated.push(expression.var_id().expect("new activation is a variable"));
-            expression.erase()
+            expression.as_dynamic()
         })
         .collect()
 }
@@ -489,7 +489,7 @@ fn add_at_most_one(
 ) {
     let sum = activations
         .iter()
-        .copied()
+        .cloned()
         .reduce(|left, right| left + right)
         .expect("nontrivial SOS has at least one activation");
     let name = unique_constraint_name(model, &format!("__oximo_sos{}_select", sos_id.index()));
@@ -517,7 +517,9 @@ fn add_planned_member_gates(
             &format!("__oximo_sos{}_member_{}_lower", sos_id.index(), planned.member_index),
         );
         generated.push(
-            model.__add_constraint(lower_name, variable.ge(planned.lower * activation)).row_id(),
+            model
+                .__add_constraint(lower_name, variable.ge(planned.lower * activation.clone()))
+                .row_id(),
         );
     }
     if planned.upper > 0.0 {

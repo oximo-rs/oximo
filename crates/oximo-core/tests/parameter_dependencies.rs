@@ -285,7 +285,7 @@ impl Function for ReplacedLowering<'_> {
     type Owned = oximo_core::ScalarFunctionData<oximo_expr::Dynamic>;
 
     fn semantic_data(&self) -> Self::Owned {
-        oximo_core::ScalarFunctionData::from_expression(self.declared)
+        oximo_core::ScalarFunctionData::from_expression(&self.declared)
     }
 }
 
@@ -309,8 +309,8 @@ fn inactive_alternative_lowerings_keep_native_and_semantic_dependencies_distinct
         "alternative",
         Constraint::new(
             ReplacedLowering {
-                declared: (declared_scale * x).erase(),
-                native: (native_scale * x).erase(),
+                declared: (declared_scale * x).as_dynamic(),
+                native: (native_scale * x).as_dynamic(),
             },
             LessThan(4.0),
         )
@@ -377,15 +377,15 @@ fn model_parameter_snapshots_preserve_values_across_rebinding_append_and_drop() 
 fn long_parameter_chains_and_shared_roots_produce_complete_deduplicated_dependencies() {
     let model = Model::new("long shared chain");
     variable!(model, x);
-    let mut root = x.erase();
+    let mut root = x.as_dynamic();
     let mut parameters = Vec::new();
     for i in 0..20_000 {
         let parameter = model.__param(format!("p{i}"), 1.0);
         parameters.push(parameter.param_id().unwrap());
-        root = (root.sin() + parameter).erase();
+        root = (root.sin() + parameter).as_dynamic();
     }
-    let shared = (root * root + root).erase();
-    objective!(model, Min, shared);
+    let shared = (root.clone() * root.clone() + root).as_dynamic();
+    objective!(model, Min, &shared);
     let row = constraint!(model, row, shared <= 1.0);
     let dependencies = model.parameter_dependencies();
     assert_eq!(dependencies.parameters_for(ParameterTarget::Objective), parameters);
@@ -403,15 +403,15 @@ fn long_parameter_chains_and_shared_roots_produce_complete_deduplicated_dependen
 fn distinct_roots_sharing_different_prefixes_keep_complete_dependencies() {
     let model = Model::new("shared prefixes");
     variable!(model, x);
-    let mut root = x.erase();
+    let mut root = x.as_dynamic();
     let mut parameters = Vec::new();
     let mut prefixes = Vec::new();
     for i in 0..256 {
         let parameter = model.__param(format!("p{i}"), 1.0);
         parameters.push(parameter.param_id().unwrap());
-        root = (root.sin() + parameter).erase();
+        root = (root.sin() + parameter).as_dynamic();
         if (i + 1) % 8 == 0 {
-            prefixes.push((root, parameters.len()));
+            prefixes.push((root.clone(), parameters.len()));
         }
     }
     let rows: Vec<_> = prefixes

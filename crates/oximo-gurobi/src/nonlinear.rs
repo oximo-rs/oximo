@@ -388,6 +388,17 @@ fn probe_quadratic_node(
             }
             LoweredExpr::Linear(e)
         }
+        ExprNode::Quadratic(q) => {
+            let mut e = QuadExpr::new();
+            e.add_constant(q.constant());
+            for &(v, c) in q.linear() {
+                e.add_term(c, ctx.variable(v)?);
+            }
+            for (a, b, c) in q.quadratic().iter().copied() {
+                e.add_qterm(c, ctx.variable(a)?, ctx.variable(b)?);
+            }
+            LoweredExpr::Quadratic(e)
+        }
         ExprNode::Unary(UnaryOp::Neg, inner) => {
             let Some(inner) = quadratic_child(ctx, *inner) else {
                 return Ok(cache_quadratic_none(ctx, id));
@@ -479,7 +490,11 @@ fn for_each_child(node: &ExprNode, f: &mut impl FnMut(ExprId)) {
             f(*base);
             f(*exp);
         }
-        ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Param(_)
+        | ExprNode::Var(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }
 
@@ -711,7 +726,8 @@ pub(crate) fn validate_supported(
             ExprNode::Const(_)
             | ExprNode::Var(_)
             | ExprNode::Param(_)
-            | ExprNode::Linear { .. } => {}
+            | ExprNode::Linear { .. }
+            | ExprNode::Quadratic(_) => {}
         }
     }
     Ok(())
@@ -807,6 +823,25 @@ fn append_tree(
                     terms.push(LinearPart::Term(v, coeff));
                 }
                 append_linear_parts(ctx, &terms, parent, tree)?;
+            }
+            ExprNode::Quadratic(q) => {
+                let mut next = parent;
+                for (a, b, c) in q.quadratic().iter().copied() {
+                    let plus = tree.push(Opcode::Plus, 0.0, next)?;
+                    let product = tree.push(Opcode::Multiply, 0.0, Some(plus))?;
+                    tree.push(Opcode::Constant, c, Some(product))?;
+                    let pair = tree.push(Opcode::Multiply, 0.0, Some(product))?;
+                    for v in [a, b] {
+                        let index = ctx.model.var_index(&ctx.variable(v)?).map_err(map_gurobi)?;
+                        tree.push(Opcode::Variable, f64::from(index), Some(pair))?;
+                    }
+                    next = Some(plus);
+                }
+                let mut terms = vec![LinearPart::Constant(q.constant())];
+                for &(v, c) in q.linear() {
+                    terms.push(LinearPart::Term(ctx.variable(v)?, c));
+                }
+                append_linear_parts(ctx, &terms, next, tree)?;
             }
             ExprNode::Unary(UnaryOp::Neg, inner) => {
                 let op = tree.push(Opcode::Uminus, 0.0, parent)?;
@@ -1026,11 +1061,20 @@ mod tests {
         let native_vars: Vec<_> = (0..4096)
             .map(|i| model.add_var(&format!("x{i}"), Continuous, 0.0, 0.0, 0.0, []).unwrap())
             .collect();
-        let sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+        let sum = vars
+            .iter()
+            .copied()
+            .map(oximo_expr::Expr::<oximo_expr::Affine>::from)
+            .reduce(|a, b| a + b)
+            .unwrap();
         let sine = vars[0].sin();
-        let quadratic = vars[0] * vars[0];
-        let roots =
-            [(sine + sum).id(), (sum + sine).id(), (quadratic + sum).id(), (sum + quadratic).id()];
+        let quadratic = (vars[0]) * (vars[0]);
+        let roots = [
+            (sine.clone() + sum.clone()).id(),
+            (sum.clone() + sine).id(),
+            (quadratic.clone() + sum.clone()).id(),
+            (sum.clone() + quadratic).id(),
+        ];
         let arena = cell.borrow();
         for (index, root) in roots.into_iter().enumerate() {
             let mut ctx = LoweringCtx::new(&mut model, &native_vars, 0);

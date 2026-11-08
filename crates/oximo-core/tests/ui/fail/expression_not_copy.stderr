@@ -1,0 +1,14 @@
+error[E0382]: use of moved value: `quadratic`
+ --> tests/ui/fail/expression_not_copy.rs:8:17
+  |
+6 |     let quadratic = x * x;
+  |         --------- move occurs because `quadratic` has type `Expr<'_, oximo_core::Quadratic>`, which does not implement the `Copy` trait
+7 |     let first = quadratic;
+  |                 --------- value moved here
+8 |     let alias = quadratic;
+  |                 ^^^^^^^^^ value used here after move
+  |
+help: consider cloning the value if the performance cost is acceptable
+  |
+7 |     let first = quadratic.clone();
+  |                          ++++++++

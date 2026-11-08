@@ -193,7 +193,11 @@ fn children(node: &ExprNode, mut visit: impl FnMut(ExprId)) {
                 visit(child);
             }
         }
-        ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Param(_)
+        | ExprNode::Var(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }
 
@@ -212,7 +216,11 @@ impl ExpressionAnalysis {
     }
 
     pub(crate) fn leaf(arena: &ExprArena, id: ExprId) -> Option<ExpressionSummary> {
-        match arena.get(id) {
+        Self::leaf_node(arena.get(id))
+    }
+
+    fn leaf_node(node: &ExprNode) -> Option<ExpressionSummary> {
+        match node {
             ExprNode::Const(_) => Some(ExpressionSummary::default()),
             ExprNode::Param(_) => Some(ExpressionSummary {
                 depends_on_parameter: true,
@@ -228,37 +236,53 @@ impl ExpressionAnalysis {
                 depends_on_variable: !coeffs.is_empty(),
                 ..ExpressionSummary::default()
             }),
+            ExprNode::Quadratic(q) => Some(ExpressionSummary {
+                degree: if q.quadratic.is_empty() {
+                    if q.linear.is_empty() { Degree::Zero } else { Degree::One }
+                } else {
+                    Degree::Two
+                },
+                depends_on_variable: !q.quadratic.is_empty() || !q.linear.is_empty(),
+                ..ExpressionSummary::default()
+            }),
             _ => None,
         }
     }
 
     /// Look up a fact for this analysis's immutable arena snapshot.
     pub fn known(&self, arena: &ExprArena, id: ExprId) -> Option<ExpressionSummary> {
-        Self::leaf(arena, id).or_else(|| self.summaries.get(id).copied())
+        let _ = arena.get(id);
+        self.known_node(arena, id)
+    }
+
+    fn known_node(&self, arena: &ExprArena, id: ExprId) -> Option<ExpressionSummary> {
+        self.summaries.get(id).copied().or_else(|| Self::leaf_node(arena.node(id)))
     }
 
     /// Compute all structural facts together, retaining shared descendants.
     /// Use an analysis with one immutable arena, or append-only versions of it.
+    /// The root is published so retained facts survive later owned arithmetic.
     ///
     /// # Panics
     ///
     /// Panics for an invalid expression ID or a graph containing invalid children.
     pub fn summarize(&mut self, arena: &ExprArena, root: ExprId) -> ExpressionSummary {
-        if let Some(summary) = self.known(arena, root) {
+        arena.seal(root);
+        if let Some(summary) = self.known_node(arena, root) {
             return summary;
         }
         self.summaries.prepare(arena.len());
 
         self.stack.push((root, false));
         while let Some((id, visited)) = self.stack.pop() {
-            if self.known(arena, id).is_some() {
+            if self.known_node(arena, id).is_some() {
                 continue;
             }
-            let node = arena.get(id);
+            let node = arena.node(id);
             if !visited {
                 self.stack.push((id, true));
                 children(node, |child| {
-                    if self.known(arena, child).is_none() {
+                    if self.known_node(arena, child).is_none() {
                         self.stack.push((child, false));
                     }
                 });
@@ -269,7 +293,7 @@ impl ExpressionAnalysis {
             arena.record_classification_visit();
             let mut summary = ExpressionSummary::default();
             children(node, |child| {
-                let child = self.known(arena, child).expect("postorder child summary");
+                let child = self.known_node(arena, child).expect("postorder child summary");
                 summary.degree = if matches!(node, ExprNode::Mul(_)) {
                     summary.degree.mul(child.degree)
                 } else {
@@ -286,7 +310,11 @@ impl ExpressionAnalysis {
                 ExprNode::Mul(_) => ExpressionOperator::Multiply,
                 ExprNode::Div(_, _) => ExpressionOperator::Divide,
                 ExprNode::Pow(_, exponent) => {
-                    if self.known(arena, *exponent).expect("exponent summary").depends_on_variable {
+                    if self
+                        .known_node(arena, *exponent)
+                        .expect("exponent summary")
+                        .depends_on_variable
+                    {
                         ExpressionOperator::VariablePower
                     } else {
                         ExpressionOperator::ConstantPower
@@ -302,7 +330,7 @@ impl ExpressionAnalysis {
                 ExprNode::Add(_) | ExprNode::Mul(_) | ExprNode::Unary(UnaryOp::Neg, _) => {
                     summary.degree
                 }
-                ExprNode::Pow(base, exponent) => match arena.get(*exponent) {
+                ExprNode::Pow(base, exponent) => match arena.node(*exponent) {
                     ExprNode::Const(e)
                         if e.is_finite() && (*e - e.round()).abs() < f64::EPSILON && *e >= 0.0 =>
                     {
@@ -312,7 +340,7 @@ impl ExpressionAnalysis {
                             v if v < 2.5 => 2,
                             _ => 3,
                         };
-                        self.known(arena, *base).expect("base summary").degree.pow(n)
+                        self.known_node(arena, *base).expect("base summary").degree.pow(n)
                     }
                     _ => Degree::Higher,
                 },

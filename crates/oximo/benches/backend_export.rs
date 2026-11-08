@@ -42,7 +42,12 @@ fn run_case(case: &str) {
     let n: usize = count.parse().unwrap();
     let model = Model::new("affine_consumers");
     let vars: Vec<_> = (0..n).map(|i| model.__var(format!("x{i}")).build()).collect();
-    let sum = vars.iter().copied().reduce(|a, b| a + b).unwrap();
+    let sum = vars
+        .iter()
+        .copied()
+        .map(oximo_expr::Expr::<oximo_expr::Affine>::from)
+        .reduce(|a, b| a + b)
+        .unwrap();
     let expression = if consumer.ends_with("unary") {
         let mut expression = vars[0].exp();
         for _ in 1..n {
@@ -52,7 +57,7 @@ fn run_case(case: &str) {
     } else {
         sum.exp()
     };
-    model.add_constraint("row", expression.le(1.0));
+    model.add_constraint("row", (&expression).le(1.0));
     model.__minimize(expression);
     match consumer {
         "gams_sum" | "gams_unary" => {

@@ -299,11 +299,12 @@ impl GdpReformulationOptions {
     /// Shifts that lose precision in source bounds or transformed rows are rejected.
     /// Pass a bare variable handle. Compound expressions are rejected at planning time.
     #[must_use]
-    pub fn with_hull_reference_coordinate<D: oximo_expr::Degree>(
+    pub fn with_hull_reference_coordinate<'a, E: oximo_expr::ExprInput<'a>>(
         mut self,
-        variable: Expr<'_, D>,
+        variable: E,
         value: f64,
     ) -> Self {
+        let variable = variable.as_expression();
         self.reference_points.insert((variable.model_id(), variable.var_id()), value);
         self
     }
@@ -329,7 +330,7 @@ impl GdpReformulationOptions {
         coordinates: impl IntoIterator<Item = (V, f64)>,
     ) -> Self {
         for (variable, value) in coordinates {
-            self = self.with_hull_reference_coordinate(*variable.borrow(), value);
+            self = self.with_hull_reference_coordinate(variable.borrow(), value);
         }
         self
     }

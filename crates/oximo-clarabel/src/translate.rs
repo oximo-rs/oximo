@@ -646,10 +646,9 @@ fn build_problem_prepared_with(
 /// `P`/`q` so a maximize is posed as a minimize.), the upper-triangular `P`
 /// triplets, the `q` vector, and the folded constant.
 ///
-/// `extract_quadratic` subsumes the linear case. oximo's Hessian is
-/// lower-triangular with doubled diagonal (the `0.5 x'Qx` convention), matching
-/// Clarabel's `P` up to the triangle side, so entries transpose to
-/// upper-triangular with no scaling.
+/// `extract_quadratic` supplies polynomial coefficients. Clarabel uses
+/// `0.5*x'P*x`, so diagonal entries are doubled at this boundary and
+/// lower-triangle pairs are transposed to the upper triangle.
 fn objective_data(
     prepared: &LoweringContext<'_>,
     n: usize,
@@ -664,12 +663,14 @@ fn objective_data(
     };
     let quad = prepared.require_quadratic(obj.expr, || "the objective".into())?;
     let mut q = vec![0.0; n];
-    for &(var, coef) in &quad.linear {
+    for &(var, coef) in quad.linear() {
         q[var.index()] += sign * coef;
     }
-    let p_trip =
-        quad.hessian.iter().map(|&(row, col, h)| (col.index(), row.index(), sign * h)).collect();
-    Ok((sign, p_trip, q, quad.constant))
+    let p_trip = quad
+        .checked_hessian_entries()
+        .map(|entry| entry.map(|(row, col, h)| (col.index(), row.index(), sign * h)))
+        .collect::<Result<_, _>>()?;
+    Ok((sign, p_trip, q, quad.constant()))
 }
 
 /// Classify every algebraic constraint as linear or SOC. The kind gate
@@ -1236,8 +1237,11 @@ pub mod benchmark_support {
         let t = model.__var("t").lb(0.0).build();
         model.__minimize(t);
         for i in 0..rows {
-            let lhs =
-                if soc { x.powi(2) + y.powi(2) - t.powi(2) } else { (x + 2.0 * y - t).erase() };
+            let lhs = if soc {
+                x.powi(2) + y.powi(2) - t.powi(2)
+            } else {
+                (x + 2.0 * y - t).into_dynamic()
+            };
             model.__add_constraint_auto(lhs.le(if soc { 0.0 } else { i as f64 + 10.0 }));
         }
         model
@@ -1289,6 +1293,27 @@ mod tests {
     use oximo_solver::UniversalOptionsExt;
 
     use super::*;
+
+    #[test]
+    fn objective_hessian_conversion_transposes_pairs_and_checks_overflow() {
+        let model = Model::new("checked Hessian");
+        variable!(model, x);
+        variable!(model, y);
+        objective!(model, Max, -3.0 * x.square() - 5.0 * x * y);
+
+        let prepared = LoweringContext::new(&model).unwrap();
+        let (_, hessian, _, _) = objective_data(&prepared, 2).unwrap();
+        assert_eq!(hessian, [(0, 0, 6.0), (0, 1, 5.0)]);
+
+        drop(prepared);
+        objective!(model, Min, 1e308 * x.square());
+        let prepared = LoweringContext::new(&model).unwrap();
+        assert!(matches!(
+            objective_data(&prepared, 2).unwrap_err(),
+            SolverError::Hessian(error)
+                if error.kind == oximo_expr::HessianConversionErrorKind::DiagonalOverflow
+        ));
+    }
 
     #[test]
     fn concurrent_rebinding_keeps_native_bound_rows_and_coefficients_in_one_snapshot() {
@@ -1507,7 +1532,7 @@ mod tests {
         model.add_soc_constraint(
             "direct",
             [
-                x,
+                x.into_affine_function().expression(),
                 (x + 2.0),
                 model.__constant(-0.0).into_affine_function().expression(),
                 p.into_affine_function().expression(),

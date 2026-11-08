@@ -899,10 +899,11 @@ impl<'a> SourceProjection<'a> {
     ///
     /// # Errors
     /// Returns an ownership error if the expression belongs to another model.
-    pub fn reevaluate_objective_expr<D: oximo_expr::Degree>(
+    pub fn reevaluate_objective_expr<'e>(
         self,
-        expression: oximo_expr::Expr<'_, D>,
+        expression: impl oximo_expr::ExprInput<'e>,
     ) -> Result<Self, ProjectionError> {
+        let expression = expression.as_expression();
         if expression.model_id() != self.source.id() {
             return Err(oximo_core::ModelMismatchError::new(
                 self.source.id(),

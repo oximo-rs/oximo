@@ -19,14 +19,14 @@ pub use oximo_expr::ExtremaBuilder;
 /// empty domain. This is the implementation behind the anchored
 /// `sum!(model, body for ...)` form.
 #[must_use]
-pub fn sum_over_in<'a, E: oximo_expr::Degree, K, D, F>(
+pub fn sum_over_in<'a, E: oximo_expr::ExprInput<'a>, K, D, F>(
     arena: &'a oximo_expr::ExprArenaCell,
     domain: &D,
     f: F,
-) -> oximo_expr::Expr<'a, E>
+) -> oximo_expr::Expr<'a, <E::Degree as oximo_expr::Degree>::Computed>
 where
     D: SumDomain<K> + ?Sized,
-    F: FnMut(K) -> oximo_expr::Expr<'a, E>,
+    F: FnMut(K) -> E,
 {
     oximo_expr::Expr::__sum_terms_in(arena, domain.keys().map(f))
 }
@@ -34,19 +34,19 @@ where
 /// Flatten already-collected `sum!` terms into one expression (a single n-ary
 /// `Add`).
 #[must_use]
-pub fn sum_terms<'a, E: oximo_expr::Degree>(
-    terms: Vec<oximo_expr::Expr<'a, E>>,
-) -> oximo_expr::Expr<'a, E> {
-    terms.into_iter().sum()
+pub fn sum_terms<'a, E: oximo_expr::ExprInput<'a>>(
+    terms: Vec<E>,
+) -> oximo_expr::Expr<'a, <E::Degree as oximo_expr::Degree>::Computed> {
+    oximo_expr::Expr::__sum_terms(terms.into_iter()).expect("Expr::sum on empty iterator")
 }
 
 /// Flatten collected terms, returning a model-owned zero when the collection
 /// is empty. This is used by the filtered anchored `sum!` form.
 #[must_use]
-pub fn sum_terms_in<'a, E: oximo_expr::Degree>(
+pub fn sum_terms_in<'a, E: oximo_expr::ExprInput<'a>>(
     arena: &'a oximo_expr::ExprArenaCell,
-    terms: Vec<oximo_expr::Expr<'a, E>>,
-) -> oximo_expr::Expr<'a, E> {
+    terms: Vec<E>,
+) -> oximo_expr::Expr<'a, <E::Degree as oximo_expr::Degree>::Computed> {
     oximo_expr::Expr::__sum_terms_in(arena, terms.into_iter())
 }
 

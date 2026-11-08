@@ -42,7 +42,7 @@ fn rejects_non_binary_trigger() {
 fn explicit_narrowing_rejects_nonlinear_consequent() {
     let m = Model::new("bad");
     variable!(m, x);
-    assert!(x.powi(2).try_affine().is_err());
+    assert!(x.powi(2).as_affine().is_err());
     assert_eq!(m.num_indicator_constraints(), 0);
 }
 

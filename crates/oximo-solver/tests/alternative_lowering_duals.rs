@@ -9,7 +9,7 @@ impl Function for Scaled<'_> {
     type Owned = ScalarFunctionData<Affine>;
 
     fn semantic_data(&self) -> Self::Owned {
-        ScalarFunctionData::from_expression(self.0)
+        ScalarFunctionData::from_expression(&self.0)
     }
 }
 
@@ -28,8 +28,8 @@ fn explicit_ir_conversion_preserves_semantic_evaluation_and_dual_defaults() {
     let model = Model::new("explicit lowering coordinates");
 
     variable!(model, x);
-    let handle =
-        model.__add_constraint("scaled", Constraint::new(Scaled(x), LessThan(2.0)).into_ir());
+    let handle = model
+        .__add_constraint("scaled", Constraint::new(Scaled(x.into()), LessThan(2.0)).into_ir());
     let mut result = SolverResult::for_model(&model);
 
     result.dual_status = DualStatus::FeasiblePoint;
@@ -51,8 +51,8 @@ fn finalization_uses_saved_parameters_and_preserves_explicit_semantic_mappings()
     variable!(model, x);
     param!(model, cost = 2.0);
     objective!(model, Min, cost * x);
-    let scaled =
-        model.__add_constraint("scaled", Constraint::new(Scaled(x), LessThan(2.0)).into_ir());
+    let scaled = model
+        .__add_constraint("scaled", Constraint::new(Scaled(x.into()), LessThan(2.0)).into_ir());
     let parameters = model.arena().parameter_snapshot();
     let num_variables = model.num_variables();
     model.set_param(cost, 4.0).unwrap();
@@ -93,8 +93,8 @@ fn finalization_keeps_unavailable_dual_markers_after_clearing_uncertified_multip
     let model = Model::new("unavailable semantic multipliers");
 
     variable!(model, x);
-    let scaled =
-        model.__add_constraint("scaled", Constraint::new(Scaled(x), LessThan(2.0)).into_ir());
+    let scaled = model
+        .__add_constraint("scaled", Constraint::new(Scaled(x.into()), LessThan(2.0)).into_ir());
     let mut result = SolverResult::for_model(&model);
     result.dual.insert(scaled.row_id(), 0.5);
     result.semantic_dual.insert(scaled.id(), Some(1.0));
@@ -112,7 +112,10 @@ fn alternative_dual_defaults_survive_normalization_and_preserve_explicit_mapping
     variable!(model, x);
     variable!(model, y);
     let direct = model.add_constraint("direct", x.le(2.0));
-    model.add_constraints([("scaled".into(), Constraint::new(Scaled(y), LessThan(2.0)).into_ir())]);
+    model.add_constraints([(
+        "scaled".into(),
+        Constraint::new(Scaled(y.into()), LessThan(2.0)).into_ir(),
+    )]);
     let scaled =
         model.typed_constraint_handle::<ScalarFunctionData<Affine>, LessThan>("scaled").unwrap();
 
@@ -197,10 +200,13 @@ fn evaluation_requires_a_complete_semantic_scalar_pair() {
 
     variable!(model, x);
     variable!(model, y);
-    model.add_constraints([("scalar".into(), Constraint::new(Scaled(x), LessThan(2.0)).into_ir())]);
+    model.add_constraints([(
+        "scalar".into(),
+        Constraint::new(Scaled(x.into()), LessThan(2.0)).into_ir(),
+    )]);
     model.add_constraints([(
         "opaque".into(),
-        Constraint::new(OpaqueScaled(y), LessThan(2.0)).into_ir(),
+        Constraint::new(OpaqueScaled(y.into()), LessThan(2.0)).into_ir(),
     )]);
     let scalar =
         model.typed_constraint_handle::<ScalarFunctionData<Affine>, LessThan>("scalar").unwrap();
@@ -235,7 +241,7 @@ struct SquaredBound<'a>(Expr<'a, Affine>);
 impl Function for SquaredBound<'_> {
     type Owned = ScalarFunctionData<Affine>;
     fn semantic_data(&self) -> Self::Owned {
-        ScalarFunctionData::from_expression(self.0)
+        ScalarFunctionData::from_expression(&self.0)
     }
 }
 impl FunctionInSet<LessThan> for SquaredBound<'_> {}
@@ -283,7 +289,7 @@ fn native_lowering_is_checked_even_when_the_source_signature_is_supported() {
     objective!(model, Max, x);
     let row = model.add_lowered_constraint(
         "squared",
-        Constraint::new(SquaredBound(x), LessThan(2.0)).into_ir(),
+        Constraint::new(SquaredBound(x.into()), LessThan(2.0)).into_ir(),
     );
     let cold = LinearOnly.profile(&()).check_model(&model);
     let validation = LinearOnly.validate_model(&model, &());
@@ -311,17 +317,17 @@ fn projection_defaults_cannot_restore_generated_alternative_lowerings() {
             variable!(model, x);
             let original = model.add_lowered_constraint(
                 "original",
-                Constraint::new(Scaled(x), LessThan(2.0)).into_ir(),
+                Constraint::new(Scaled(x.into()), LessThan(2.0)).into_ir(),
             );
             let coordinates = SourceCoordinates::capture(&model);
             let generated = model.add_lowered_constraint(
                 "generated",
-                Constraint::new(Scaled(x), LessThan(3.0)).into_ir(),
+                Constraint::new(Scaled(x.into()), LessThan(3.0)).into_ir(),
             );
             let later = interleaved.then(|| {
                 model.add_lowered_constraint(
                     "later",
-                    Constraint::new(Scaled(x), LessThan(4.0)).into_ir(),
+                    Constraint::new(Scaled(x.into()), LessThan(4.0)).into_ir(),
                 )
             });
             let mut result = SolverResult::for_model(&model);

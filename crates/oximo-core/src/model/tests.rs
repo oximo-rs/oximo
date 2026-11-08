@@ -160,7 +160,7 @@ fn metadata_batches_preserve_names_ids_and_atomicity_on_fresh_and_populated_fork
             assert_eq!(parameter.param_id().unwrap().index(), first + offset);
             assert_eq!(model.variable_id(&vars[offset].name), variable.var_id());
             assert_eq!(model.parameter_id(&params[offset].name), parameter.param_id());
-            assert_eq!(model.param_value_of(*parameter).unwrap(), Some(params[offset].value));
+            assert_eq!(model.param_value_of(parameter).unwrap(), Some(params[offset].value));
             assert_eq!(model.resolved_variables()[first + offset].domain, Domain::Integer);
         }
         assert_eq!(source.num_variables(), first);
@@ -235,8 +235,8 @@ fn model_kind_display_uses_standard_ascii_acronyms() {
 #[test]
 fn param_times_var_keeps_model_linear() {
     let m = Model::new("p");
-    let param = m.__param("param", 4.0);
-    let x = m.__var("x").lb(0.0).build();
+    let param = &m.__param("param", 4.0);
+    let x = &m.__var("x").lb(0.0).build();
     m.__minimize(param * x);
     assert_eq!(m.kind(), ModelKind::LP);
 }
@@ -244,13 +244,13 @@ fn param_times_var_keeps_model_linear() {
 #[test]
 fn param_coeff_resolves_and_rebinds() {
     let m = Model::new("p");
-    let param = m.__param("param", 4.0);
-    let x = m.__var("x").lb(0.0).build();
-    let obj = param * x;
+    let param = &m.__param("param", 4.0);
+    let x = &m.__var("x").lb(0.0).build();
+    let obj = *param * x;
 
     let coeff = |m: &Model| {
         let arena = m.arena();
-        extract_linear(&arena, obj.id).expect("linear").coeffs[0].1
+        extract_linear(&arena, obj.id()).expect("linear").coeffs[0].1
     };
     assert!((coeff(&m) - 4.0).abs() < f64::EPSILON);
 
@@ -262,7 +262,7 @@ fn param_coeff_resolves_and_rebinds() {
 #[test]
 fn param_value_reads_live_arena_value() {
     let m = Model::new("p");
-    let param = m.__param("param", 4.0);
+    let param = &m.__param("param", 4.0);
     let id = param.param_id().unwrap();
     assert!((m.param_value(id) - 4.0).abs() < f64::EPSILON);
     assert!((m.param_value_of(param).unwrap().unwrap() - 4.0).abs() < f64::EPSILON);
@@ -270,7 +270,7 @@ fn param_value_reads_live_arena_value() {
     m.set_param(param, 7.5).unwrap();
     assert!((m.param_value(id) - 7.5).abs() < f64::EPSILON);
 
-    let x = m.__var("x").build();
+    let x = &m.__var("x").build();
     assert!(m.param_value_of(x).unwrap().is_none());
 }
 
@@ -278,8 +278,8 @@ fn param_value_reads_live_arena_value() {
 fn handle_mutations_reject_foreign_models_without_changing_colliding_slots() {
     let source = Model::new("source");
     let target = Model::new("target");
-    let source_x = source.__var("x").build();
-    let target_x = target.__var("x").lb(-1.0).ub(1.0).build();
+    let source_x = &source.__var("x").build();
+    let target_x = &target.__var("x").lb(-1.0).ub(1.0).build();
     let source_p = source.__param("p", 7.0);
     let target_p = target.__param("p", 3.0);
 
@@ -298,7 +298,7 @@ fn handle_mutations_reject_foreign_models_without_changing_colliding_slots() {
 #[test]
 fn arena_snapshot_is_not_live_after_parameter_rebind() {
     let m = Model::new("snapshot");
-    let param = m.__param("p", 1.0);
+    let param = &m.__param("p", 1.0);
     let id = param.param_id().unwrap();
     let snapshot = m.arena();
     m.set_param(param, 2.0).unwrap();
@@ -311,16 +311,16 @@ fn arena_snapshot_is_not_live_after_parameter_rebind() {
 fn indexed_constraints_reject_foreign_expression_arenas() {
     let target = Model::new("target");
     let foreign = Model::new("foreign");
-    let x = foreign.__var("x").build();
+    let x = &foreign.__var("x").build();
     let keys = Set::range(0..1024);
-    target.add_constraints_over_with("c", &keys, &|_| x.le(1.0), Some(true));
+    target.add_constraints_over_with("c", &keys, &|_| (*x).le(1.0), Some(true));
 }
 
 #[test]
 fn set_param_invalidates_kind_cache() {
     let m = Model::new("p");
     let p = m.__param("p", 1.0);
-    let x = m.__var("x").lb(0.0).build();
+    let x = &m.__var("x").lb(0.0).build();
     m.__add_constraint("c", (p * x).le(10.0));
     assert_eq!(m.kind(), ModelKind::LP);
     m.set_param(p, 2.0).unwrap();
@@ -330,10 +330,10 @@ fn set_param_invalidates_kind_cache() {
 #[test]
 fn unified_constraints_include_inactive_entries() {
     let m = Model::new("inactive");
-    let x = m.__var("x").build();
-    let t = m.__var("t").lb(0.0).build();
-    m.__add_constraint("row", x.le(1.0));
-    m.add_soc_constraint("cone", [x], t);
+    let x = &m.__var("x").build();
+    let t = &m.__var("t").lb(0.0).build();
+    m.__add_constraint("row", (*x).le(1.0));
+    m.add_soc_constraint("cone", [*x], t);
     m.add_sos_constraint("sos", SosType::Sos1, [(x, 1.0)]);
     m.constraints.borrow_mut()[0].active = false;
     m.soc_constraints.borrow_mut()[0].active = false;
@@ -353,8 +353,8 @@ fn unified_constraints_include_inactive_entries() {
 #[test]
 fn uncached_kind_inference_leaves_kind_cache_empty() {
     let m = Model::new("uncached_kind");
-    let x = m.__var("x").build();
-    m.__minimize(x);
+    let x = &m.__var("x").build();
+    m.__minimize(*x);
     for _ in 0..PAR_KIND_THRESHOLD {
         m.__add_constraint_auto(x.powi(2).le(1.0));
     }
@@ -390,11 +390,11 @@ fn indexed_param_dense_value_and_per_key_rebind() {
     assert!(m.parameter_id("cost[2]").is_some());
     assert!((m.param_value_idx(&cost, 1usize).unwrap().unwrap() - 20.0).abs() < f64::EPSILON);
 
-    let x = m.__var("x").lb(0.0).build();
+    let x = &m.__var("x").lb(0.0).build();
     let obj = cost.at([1]) * x;
     let coeff = |m: &Model| {
         let arena = m.arena();
-        extract_linear(&arena, obj.id).expect("linear").coeffs[0].1
+        extract_linear(&arena, obj.id()).expect("linear").coeffs[0].1
     };
     assert!((coeff(&m) - 20.0).abs() < f64::EPSILON);
 
@@ -433,8 +433,8 @@ fn indexed_param_sparse_string_keyed() {
 #[test]
 fn kind_forced_serial_and_parallel_classification_agree() {
     let qcp = Model::new("qcp");
-    let x = qcp.__var("x").build();
-    let y = qcp.__var("y").build();
+    let x = &qcp.__var("x").build();
+    let y = &qcp.__var("y").build();
     qcp.__minimize(x + y);
     for i in 0..PAR_KIND_THRESHOLD + 3 {
         qcp.__add_constraint_auto((x.powi(2) + y).le(i as f64 + 1.0));
@@ -444,8 +444,8 @@ fn kind_forced_serial_and_parallel_classification_agree() {
     assert_eq!(qcp.infer_kind(false), qcp.infer_kind_with(None));
 
     let socp = Model::new("socp");
-    let x = socp.__var("x").build();
-    let t = socp.__var("t").lb(0.0).build();
+    let x = &socp.__var("x").build();
+    let t = &socp.__var("t").lb(0.0).build();
     socp.__minimize(t);
     for _ in 0..PAR_KIND_THRESHOLD + 3 {
         socp.__add_constraint_auto((x.powi(2) - t.powi(2)).le(0.0));
@@ -455,9 +455,9 @@ fn kind_forced_serial_and_parallel_classification_agree() {
     assert_eq!(socp.infer_kind(false), socp.infer_kind_with(None));
 
     let nlp = Model::new("nlp");
-    let x = nlp.__var("x").build();
-    let y = nlp.__var("y").build();
-    let z = nlp.__var("z").build();
+    let x = &nlp.__var("x").build();
+    let y = &nlp.__var("y").build();
+    let z = &nlp.__var("z").build();
     nlp.__minimize(x + y + z);
     for _ in 0..PAR_KIND_THRESHOLD + 3 {
         nlp.__add_constraint_auto((x * y * z).le(1.0));
@@ -469,12 +469,12 @@ fn kind_forced_serial_and_parallel_classification_agree() {
 #[test]
 fn arena_snapshot_allows_nested_model_reads() {
     let model = Model::new("nested_reads");
-    let x = model.__var("x").build();
+    let x = &model.__var("x").build();
     model.__minimize(x);
 
     let arena = model.arena();
     assert_eq!(model.kind(), ModelKind::LP);
-    assert!(matches!(arena.get(x.id), oximo_expr::ExprNode::Var(_)));
+    assert!(matches!(arena.get(x.id()), oximo_expr::ExprNode::Var(_)));
 }
 
 #[test]
@@ -487,13 +487,14 @@ fn indexed_constraint_handles_match_in_serial_and_parallel() {
 
     fn build(parallel: bool, keys: &Set<usize>) -> Handles {
         let model = Model::new("family_id_parity");
-        let x = model.__var("x").build();
-        model.__add_constraint("prior", x.ge(0.0));
-        let ordinary = model.add_constraints_over_with("c", keys, &|_| x.le(5.0), Some(parallel));
+        let x = &model.__var("x").build();
+        model.__add_constraint("prior", (*x).ge(0.0));
+        let ordinary =
+            model.add_constraints_over_with("c", keys, &|_| (*x).le(5.0), Some(parallel));
         let ranges = model.add_range_constraints_over_with(
             "r",
             keys,
-            &|i| (if i % 2 == 0 { (x + 1.0).erase() } else { x.powi(2) }, 0.0, 10.0),
+            &|i| (if i % 2 == 0 { (*x + 1.0).as_dynamic() } else { x.powi(2) }, 0.0, 10.0),
             Some(parallel),
         );
         for (key, id) in ordinary.iter() {
@@ -649,7 +650,7 @@ fn indexed_build_forced_parallel_matches_serial_for_every_family() {
 #[test]
 fn parallel_duplicate_name_failure_does_not_mutate_model_or_arena() {
     let model = Model::new("indexed_atomicity");
-    let x = model.__var("x").build();
+    let x = &model.__var("x").build();
     let duplicate_keys = Set::from_ints([0usize, 0]);
     let arena_len = model.arena().len();
     let rule = |i: usize| (x + i as f64).le(1.0);
@@ -668,12 +669,12 @@ fn parallel_duplicate_name_failure_does_not_mutate_model_or_arena() {
 fn parallel_range_failure_does_not_mutate_model_or_arena() {
     for duplicate_name in [false, true] {
         let model = Model::new("range_batch_atomicity");
-        let x = model.__var("x").build();
+        let x = &model.__var("x").build();
         let prior = model.__add_constraint("r[17]_hi", x.le(2.0));
         let arena_len = model.arena().len();
         let keys = Set::range(0..128usize);
         let rule = |i: usize| {
-            let body = if i.is_multiple_of(2) { (x + 1.0).erase() } else { x.powi(2) };
+            let body = if i.is_multiple_of(2) { (x + 1.0).as_dynamic() } else { x.powi(2) };
             assert!(duplicate_name || i != 17, "deliberate range callback panic");
             (body, 0.0, 10.0)
         };
@@ -687,7 +688,7 @@ fn parallel_range_failure_does_not_mutate_model_or_arena() {
 
         // The failed batch must also release the arena for subsequent builds.
         let family =
-            model.add_range_constraints_over_with("after", &keys, &|_| (x, 0.0, 1.0), Some(true));
+            model.add_range_constraints_over_with("after", &keys, &|_| (*x, 0.0, 1.0), Some(true));
         assert_eq!(family.get(0).unwrap().ids(), RangeConstraintIds::Interval(ConstraintId(1)));
         assert_eq!(model.num_constraints(), 129);
     }
@@ -696,7 +697,7 @@ fn parallel_range_failure_does_not_mutate_model_or_arena() {
 #[test]
 fn parallel_callback_panic_does_not_mutate_model_or_arena() {
     let model = Model::new("indexed_callback_atomicity");
-    let x = model.__var("x").build();
+    let x = &model.__var("x").build();
     let keys = Set::range(0..128usize);
     let arena_len = model.arena().len();
     let rule = |i: usize| {

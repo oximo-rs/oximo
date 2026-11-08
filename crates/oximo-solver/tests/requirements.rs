@@ -67,7 +67,7 @@ fn independent_failures_accumulate_with_all_origins_and_stable_order() {
     variable!(model, x, Integer);
     variable!(model, y, Integer);
     let shared = x.tan();
-    let first = constraint!(model, first, shared + shared <= 1.0);
+    let first = constraint!(model, first, &shared + &shared <= 1.0);
     let second = constraint!(model, second, shared <= 2.0);
     objective!(model, Min, x.sin());
 
@@ -388,9 +388,9 @@ fn deep_expression_walk_is_iterative() {
     let model = Model::new("deep");
 
     variable!(model, x);
-    let mut expression = x.erase();
+    let mut expression = x.as_dynamic();
     for _ in 0..8_000 {
-        expression = expression.sin().erase();
+        expression = expression.sin().as_dynamic();
     }
     objective!(model, Min, expression);
 
@@ -513,8 +513,8 @@ fn cold_structural_matching_and_full_validation_return_the_same_named_failures()
     variable!(model, x, Integer);
     variable!(model, y, Integer);
     let shared = x.tan();
-    constraint!(model, first_named_row, shared <= 1.0);
-    constraint!(model, second_named_row, shared <= 2.0);
+    constraint!(model, first_named_row, &shared <= 1.0);
+    constraint!(model, second_named_row, &shared <= 2.0);
     objective!(model, Min, shared + y);
 
     let profile = lp_profile().with_support(

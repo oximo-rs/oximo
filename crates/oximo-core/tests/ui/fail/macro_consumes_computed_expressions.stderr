@@ -1,0 +1,34 @@
+error[E0382]: use of moved value: `e`
+ --> tests/ui/fail/macro_consumes_computed_expressions.rs:9:13
+  |
+7 |     let e = x + y;
+  |         - move occurs because `e` has type `Expr<'_, oximo_core::Affine>`, which does not implement the `Copy` trait
+8 |     objective!(m, Min, e + x);
+  |                        ----- `e` moved due to usage in operator
+9 |     let _ = e + y;
+  |             ^ value used here after move
+  |
+note: calling this operator moves the left-hand side
+ --> $RUST/core/src/ops/arith.rs
+  |
+  |     fn add(self, rhs: Rhs) -> Self::Output;
+  |            ^^^^
+help: consider cloning the value if the performance cost is acceptable
+  |
+8 |     objective!(m, Min, e.clone() + x);
+  |                         ++++++++
+
+error[E0382]: use of moved value: `f`
+  --> tests/ui/fail/macro_consumes_computed_expressions.rs:13:13
+   |
+11 |     let f = x + y;
+   |         - move occurs because `f` has type `Expr<'_, oximo_core::Affine>`, which does not implement the `Copy` trait
+12 |     objective!(m, Min, f);
+   |                        - value moved here
+13 |     let _ = f + x;
+   |             ^ value used here after move
+   |
+help: consider borrowing `f`
+   |
+12 |     objective!(m, Min, &f);
+   |                        +

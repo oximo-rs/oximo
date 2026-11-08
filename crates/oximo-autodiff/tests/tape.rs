@@ -6,11 +6,121 @@ use oximo_autodiff::slot::{
     FunctionSlot, SlotKind, linear_gradient_add, linear_value, quadratic_gradient_add,
     quadratic_value,
 };
+
+#[test]
+fn diagonal_values_agree_across_expression_tape_and_quadratic_slot() {
+    use oximo_expr::QuadraticTerms;
+    for h in [
+        f64::from_bits(1),
+        f64::from_bits(3),
+        f64::from_bits(f64::MIN_POSITIVE.to_bits() + 1),
+        f64::MIN_POSITIVE,
+        2.0 * f64::MIN_POSITIVE,
+        f64::MAX,
+        2.0,
+        -2.0,
+        -f64::from_bits(1),
+    ] {
+        let mut arena = ExprArena::new();
+        let terms =
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), h)], Vec::new(), 0.0)
+                .unwrap();
+        let root = arena.push(ExprNode::Quadratic(std::sync::Arc::new(terms.clone())));
+        let tape = Tape::compile(&arena, root);
+
+        for x in [2.0, -2.0, 0.5, 1.0, 1.5, 1e154, -1e154, f64::MAX, 0.25 * f64::MIN_POSITIVE] {
+            let expected = quadratic_value(&terms, &[x]);
+            let value = evaluate(&arena, root, &&[x][..]).unwrap();
+            let mut registers = vec![0.0; tape.n_regs()];
+            let taped = tape.value(&[x], &[], &[], &mut registers);
+            assert_eq!(value.to_bits(), expected.to_bits());
+            assert_eq!(taped.to_bits(), expected.to_bits());
+
+            if x.to_bits() == 2.0_f64.to_bits() {
+                assert_eq!(value.to_bits(), ((h * 2.0) * 2.0).to_bits());
+            }
+        }
+    }
+}
+
+#[test]
+fn large_square_remains_finite_in_expression_tape_and_slot() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let x = Expr::from_var(&arena, VarId(0));
+    let square = x.square();
+    let snapshot = arena.borrow();
+    let value = 1e154_f64;
+    let expected = value * value;
+    assert!(expected.is_finite());
+    assert_eq!(
+        evaluate(&snapshot, square.id(), &&[value][..]).unwrap().to_bits(),
+        expected.to_bits()
+    );
+
+    let tape = Tape::compile(&snapshot, square.id());
+    let mut registers = vec![0.0; tape.n_regs()];
+    assert_eq!(tape.value(&[value], &[], &[], &mut registers).to_bits(), expected.to_bits());
+
+    let SlotKind::Quadratic(terms) = FunctionSlot::classify(&snapshot, square.id()).kind else {
+        panic!("quadratic slot")
+    };
+    assert_eq!(quadratic_value(&terms, &[value]).to_bits(), expected.to_bits());
+}
+
+#[test]
+fn ordinary_affine_squares_preserve_nonlinear_values_in_the_tape() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let x = Expr::from_var(&arena, VarId(0));
+    let factor = x - 100_000_000.0;
+    let squares = [
+        factor.square().into_dynamic(),
+        factor.powi(2),
+        factor.powf(2.0),
+        factor.pow(Expr::constant(&arena, 2.0)),
+        (&factor * &factor).into_dynamic(),
+        (factor.clone() * factor).into_dynamic(),
+        ((x - 100_000_000.0) * (x - 100_000_000.0)).into_dynamic(),
+    ];
+
+    for square in squares {
+        let expression = square.ln();
+        let snapshot = arena.borrow();
+        let point = [100_000_001.0];
+        let direct = evaluate(&snapshot, expression.id(), &&point[..]).unwrap();
+        assert_eq!(direct.to_bits(), 0.0_f64.to_bits());
+
+        let tape = Tape::compile(&snapshot, expression.id());
+        let mut registers = vec![0.0; tape.n_regs()];
+        let taped = tape.value(&point, &[], &[], &mut registers);
+        assert_eq!(taped.to_bits(), direct.to_bits());
+    }
+}
+
+#[test]
+fn factored_square_preserves_a_nonlinear_domain_in_expression_and_tape() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let x = Expr::from_var(&arena, VarId(0));
+    let shifted = x - 100_000_000.0;
+    let square = shifted.square_factored();
+    let expression = square.ln();
+    let snapshot = arena.borrow();
+    assert!(matches!(snapshot.get(square.id()), ExprNode::Mul(_)));
+
+    let lowered = oximo_expr::extract_quadratic(&snapshot, square.id()).unwrap();
+    assert_eq!(lowered.hessian_entries().collect::<Vec<_>>(), [(VarId(0), VarId(0), 2.0)]);
+
+    let values = [100_000_001.0];
+    assert_eq!(evaluate(&snapshot, expression.id(), &&values[..]).unwrap(), 0.0);
+
+    let tape = Tape::compile(&snapshot, expression.id());
+    let mut registers = vec![0.0; tape.n_regs()];
+    assert_eq!(tape.value(&values, &[], &[], &mut registers), 0.0);
+}
 use oximo_autodiff::sparsity::{
     hessian_lagrangian_structure, jacobian_structure, variable_support,
 };
 use oximo_autodiff::tape::{CompiledBatch, CompiledExpr, Tape, TapeScratch};
-use oximo_expr::{ExprArena, ExprId, ExprNode, UnaryOp, VarId, evaluate};
+use oximo_expr::{Expr, ExprArena, ExprArenaCell, ExprId, ExprNode, UnaryOp, VarId, evaluate};
 
 fn assert_close(got: f64, want: f64, tol: f64, what: &str) {
     let denom = want.abs().max(1.0);
@@ -23,10 +133,15 @@ fn deferred_and_builder_affine_expressions_compile_and_rebind() {
     let variables: Vec<_> = (0..128).map(|i| oximo_expr::Expr::from_var(&cell, VarId(i))).collect();
     let param = cell.borrow_mut().new_param(2.0);
     let parameter = oximo_expr::Expr::from_param(&cell, param);
-    let deferred =
-        variables.iter().copied().reduce(|a, b| a + b).unwrap() + parameter * variables[0];
+    let deferred = variables
+        .iter()
+        .copied()
+        .map(oximo_expr::Expr::<oximo_expr::Affine>::from)
+        .reduce(|a, b| a + b)
+        .unwrap()
+        + parameter * (variables[0]);
     let mut builder = oximo_expr::AffineBuilder::new(&cell);
-    for &variable in &variables {
+    for variable in &variables {
         builder.add_term(1.0, variable);
     }
     builder.add_term(1.0, parameter * variables[0]);
@@ -296,7 +411,7 @@ fn tape_matches_direct_evaluation_for_full_nonlinear_vocabulary() {
     let arena = cell.borrow();
     let points = [vec![0.75, -0.5], vec![1.25, 0.25]];
     for root in roots {
-        check_matches_evaluate(&arena, root.id, &points);
+        check_matches_evaluate(&arena, root.id(), &points);
     }
 }
 

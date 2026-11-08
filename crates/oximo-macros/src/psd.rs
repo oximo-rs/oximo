@@ -12,12 +12,14 @@ pub(crate) fn symmetric_variable(input: TokenStream) -> syn::Result<TokenStream>
             "expected symmetric_variable!(model, X[n])",
         ));
     }
-    let model: syn::Expr = syn::parse2(parts[0].clone())?;
-    let mut tokens = parts[1].clone().into_iter();
+    let mut parts = parts.into_iter();
+    let model: syn::Expr = syn::parse2(parts.next().expect("validated model argument"))?;
+    let specification = parts.next().expect("validated matrix specification");
+    let mut tokens = specification.clone().into_iter();
     let (Some(TokenTree::Ident(name)), Some(TokenTree::Group(dim)), None) =
         (tokens.next(), tokens.next(), tokens.next())
     else {
-        return Err(syn::Error::new_spanned(&parts[1], "expected X[n]"));
+        return Err(syn::Error::new_spanned(&specification, "expected X[n]"));
     };
     if dim.delimiter() != Delimiter::Bracket {
         return Err(syn::Error::new(dim.span(), "expected X[n]"));
@@ -35,23 +37,26 @@ pub(crate) fn constraint(input: TokenStream) -> syn::Result<TokenStream> {
             "expected psd_constraint!(model, [name,] matrix)",
         ));
     }
-    let mut sums = crate::sum::ModelSums::new(syn::parse2(parts[0].clone())?);
+    let mut parts = parts.into_iter();
+    let mut sums =
+        crate::sum::ModelSums::new(syn::parse2(parts.next().expect("validated model argument"))?);
     let model = sums.receiver();
     let root = oximo_root();
-    if parts.len() == 2 {
-        let matrix = sums.rewrite(crate::index::parse_value_expr(parts[1].clone())?)?;
+    let name_or_matrix = parts.next().expect("validated constraint argument");
+    let Some(matrix_input) = parts.next() else {
+        let matrix = sums.rewrite(crate::index::parse_value_expr(name_or_matrix)?)?;
         return Ok(sums.wrap(quote!((#model).__add_psd_constraint_auto(#matrix))));
-    }
-    if let Some(name) = crate::constraint::computed_name(&parts[1]) {
-        let matrix = sums.rewrite(crate::index::parse_value_expr(parts[2].clone())?)?;
+    };
+    if let Some(name) = crate::constraint::computed_name(&name_or_matrix) {
+        let matrix = sums.rewrite(crate::index::parse_value_expr(matrix_input)?)?;
         return Ok(sums.wrap(quote!((#model).add_psd_constraint(#name, #matrix))));
     }
-    let Named { name, binds, cond } = parse_named(parts[1].clone())?;
+    let Named { name, binds, cond } = parse_named(name_or_matrix)?;
     let text = name.to_string();
     if let Some(binds) = &binds {
         sums.indexed(binds);
     }
-    let matrix = sums.rewrite(crate::index::parse_value_expr(parts[2].clone())?)?;
+    let matrix = sums.rewrite(crate::index::parse_value_expr(matrix_input)?)?;
     let expansion = if let Some(binds) = binds {
         let param = family_closure_param(&binds);
         let used = mark_bindings_used(&binds);

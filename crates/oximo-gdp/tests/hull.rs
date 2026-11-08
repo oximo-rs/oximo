@@ -89,6 +89,29 @@ fn flat_hull_is_affine_and_preserves_integer_feasibility() {
 }
 
 #[test]
+fn hull_preserves_the_domain_and_feasibility_of_a_shifted_square_root() {
+    let model = Model::new("shifted square root Hull");
+    variable!(model, 0.0 <= x <= 2.0);
+    let inside = disjunct!(model, inside, |d| {
+        constraint!(d, (x - 1.0).square().sqrt() <= 0.5);
+    });
+    let outside = disjunct!(model, outside, |_d| {});
+    disjunction!(model, [inside, outside]);
+
+    let report = model.reformulate_gdp(Hull::default()).unwrap();
+    for point in [0.0_f64, 0.5, 1.0, 1.5, 2.0] {
+        for selected in [false, true] {
+            let source = [point, f64::from(selected), f64::from(!selected)];
+            assert_eq!(
+                satisfied(&model, &lift(&model, &report, &source)),
+                !selected || (point - 1.0).abs() <= 0.5,
+                "x={point}, inside={selected}"
+            );
+        }
+    }
+}
+
+#[test]
 fn nested_and_mixed_hull_preserve_integer_feasibility_in_both_orders() {
     for inner_first in [false, true] {
         for parent_hull in [false, true] {
@@ -1343,7 +1366,7 @@ fn distinct_sparse_coordinates_use_two_copies_each_with_bulk_references() {
     let coordinates: Vec<_> =
         (0..1000).map(|i| model.__var(format!("x{i}")).bounds(-2.0, 2.0).build()).collect();
     let branches: Vec<_> = (0..1000).map(|i| model.add_boolean(format!("b{i}"))).collect();
-    for (&x, branch) in coordinates.iter().zip(&branches) {
+    for (x, branch) in coordinates.iter().zip(&branches) {
         branch.context().add_constraint("limit", x.le(1.0));
     }
     disjunction!(model, branches.clone());
@@ -1396,7 +1419,7 @@ fn shared_nonlinear_source_preparation_keeps_each_bound_and_parameter_snapshot()
     param!(model, factor = 1.0);
     boolean_variable!(model, active);
     let body = factor * x * x + 1e16 * active.binary() - 1.0;
-    disjunct_constraint!(model, active, first, body <= 1e16);
+    disjunct_constraint!(model, active, first, &body <= 1e16);
     disjunct_constraint!(model, active, second, body <= 1e16 + 2.0);
     model.plan_gdp(Hull::default()).unwrap();
     factor.set_param_value(2.0).unwrap();

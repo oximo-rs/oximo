@@ -236,8 +236,8 @@ fn dynamic_quadratic_soc_term_requires_successful_narrowing() {
     let m = Model::new("bad_soc");
     variable!(m, x);
     variable!(m, t >= 0.0);
-    assert!((x * x).erase().try_affine().is_err());
-    assert!(t.erase().try_affine().is_ok());
+    assert!((x * x).as_dynamic().as_affine().is_err());
+    assert!(t.as_dynamic().as_affine().is_ok());
 }
 
 #[test]
@@ -434,6 +434,31 @@ fn fix_pins_var_expr_and_indexed_entry() {
     let vars = m.resolved_variables();
     assert_eq!(vars[aid.index()].lb, 1.0);
     assert_eq!(vars[aid.index()].ub, 1.0);
+}
+
+#[test]
+#[expect(
+    clippy::needless_borrows_for_generic_args,
+    reason = "this regression explicitly covers borrowed variable-handle inputs"
+)]
+fn indexed_variable_mutations_accept_borrowed_handles() {
+    let m = Model::new("borrowed_mutations");
+    let keys = Set::strings(["a", "b"]);
+    variable!(m, 0.0 <= w[k in keys] <= 10.0);
+
+    m.fix(&w["a"], 1.0).unwrap();
+    m.set_bounds(&w["a"], 0.0, 5.0).unwrap();
+    m.set_initial(&w["a"], 2.0).unwrap();
+    m.fix(&w["a"], 3.0).unwrap();
+
+    let id = w["a"].var_id().unwrap();
+    let vars = m.resolved_variables();
+    assert_eq!(
+        (vars[id.index()].lb, vars[id.index()].ub, vars[id.index()].initial),
+        (3.0, 3.0, Some(2.0))
+    );
+    drop(vars);
+    constraint!(m, still_usable, w["a"] + w["b"] <= 10.0);
 }
 
 #[test]

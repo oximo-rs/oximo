@@ -77,6 +77,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::redundant_clone,
+        reason = "the regression verifies options implement Clone correctly"
+    )]
     fn universal_options_clone_eq() {
         let a = TestOpts::default().threads(2).verbose(true);
         let b = UniversalOptions { threads: Some(2), verbose: Some(true), ..Default::default() };

@@ -659,21 +659,6 @@ fn parse_bound(data: &mut ParsedMps, items: &[Field<'_>], line: usize) -> Result
     Ok(())
 }
 
-fn quadratic_coefficient(
-    format: MpsQuadraticFormat,
-    diagonal: bool,
-    objective: bool,
-    value: f64,
-) -> f64 {
-    if objective || format != MpsQuadraticFormat::Gurobi {
-        if diagonal { value / 2.0 } else { value }
-    } else if diagonal {
-        value
-    } else {
-        2.0 * value
-    }
-}
-
 fn qsection_targets_objective(data: &ParsedMps, name: &str, line: usize) -> Result<bool, IoError> {
     if name == "OBJ" {
         if data.objective_row.as_deref() != Some("OBJ") && data.row_index.contains_key("OBJ") {
@@ -693,7 +678,6 @@ fn parse_quadratic_record(
     section: &Section,
     items: &[Field<'_>],
     line: usize,
-    options: MpsReadOptions,
 ) -> Result<(), IoError> {
     if items.len() != 3 {
         return Err(invalid_mps(line, 1, "quadratic records require three fields"));
@@ -722,26 +706,31 @@ fn parse_quadratic_record(
             invalid_mps(line, 1, format!("quadratic section names unknown row {row_name:?}"))
         })?)
     };
-    let coefficient =
-        quadratic_coefficient(options.quadratic_format, left == right, objective, value);
-    let mut store_coefficient = true;
     if matches!(section, Section::QMatrix | Section::QcMatrix(_)) && left != right {
         let triangle = data.quadratic_triangles.entry((row, pair.0, pair.1)).or_default();
-        let first_record = triangle.upper.is_none() && triangle.lower.is_none();
         let side = if left < right { &mut triangle.upper } else { &mut triangle.lower };
-        let same_side = side.is_some();
-        *side = Some(side.take().unwrap_or(0.0) + coefficient);
-        store_coefficient = first_record || same_side;
-    }
-    if !store_coefficient {
+        let combined = side.unwrap_or(0.0) + value;
+        if !combined.is_finite() {
+            return Err(invalid_mps(
+                line,
+                items[2].column,
+                "quadratic record accumulation overflow",
+            ));
+        }
+        *side = Some(combined);
         return Ok(());
     }
-    if objective {
-        *data.objective_quadratic.entry(pair).or_insert(0.0) += coefficient;
-        return Ok(());
+    let target = if objective {
+        &mut data.objective_quadratic
+    } else {
+        &mut data.rows[row.expect("quadratic constraint row")].quadratic
+    };
+    let current = target.entry(pair).or_insert(0.0);
+    let combined = *current + value;
+    if !combined.is_finite() {
+        return Err(invalid_mps(line, items[2].column, "quadratic record accumulation overflow"));
     }
-    *data.rows[row.expect("quadratic constraint row")].quadratic.entry(pair).or_insert(0.0) +=
-        coefficient;
+    *current = combined;
     Ok(())
 }
 
@@ -760,6 +749,102 @@ fn validate_quadratic_triangles(data: &ParsedMps, line: usize) -> Result<(), IoE
             ));
         }
     }
+    Ok(())
+}
+
+fn normalize_quadratic_records(
+    data: &mut ParsedMps,
+    options: MpsReadOptions,
+    line: usize,
+) -> Result<(), IoError> {
+    validate_quadratic_triangles(data, line)?;
+    for ((row, left, right), triangle) in std::mem::take(&mut data.quadratic_triangles) {
+        let value = triangle.upper.or(triangle.lower).expect("matrix record exists");
+        let target = if let Some(row) = row {
+            &mut data.rows[row].quadratic
+        } else {
+            &mut data.objective_quadratic
+        };
+        target.insert((left, right), value);
+    }
+
+    normalize_quadratic_coefficients(
+        &mut data.objective_quadratic,
+        &data.columns,
+        true,
+        options.quadratic_format,
+        line,
+    )?;
+    for row in &mut data.rows {
+        normalize_quadratic_coefficients(
+            &mut row.quadratic,
+            &data.columns,
+            false,
+            options.quadratic_format,
+            line,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn normalize_quadratic_coefficients(
+    coefficients: &mut FxHashMap<(usize, usize), f64>,
+    columns: &[ParsedColumn],
+    objective: bool,
+    format: MpsQuadraticFormat,
+    line: usize,
+) -> Result<(), IoError> {
+    if coefficients.is_empty() {
+        return Ok(());
+    }
+
+    if objective || format != MpsQuadraticFormat::Gurobi {
+        let variable = |index: usize| {
+            u32::try_from(index)
+                .map(VarId)
+                .map_err(|_| invalid_mps(line, 1, "too many quadratic variables"))
+        };
+        let entries = std::mem::take(coefficients)
+            .into_iter()
+            .map(|((a, b), h)| Ok((variable(a)?, variable(b)?, h)))
+            .collect::<Result<Vec<_>, IoError>>()?;
+        let convert_error = |error: oximo_expr::HessianConversionError| {
+            invalid_mps(
+                line,
+                1,
+                format!(
+                    "quadratic columns {:?}, {:?}: {error}",
+                    columns[error.row.index()].name,
+                    columns[error.column.index()].name
+                ),
+            )
+        };
+        let matrix = oximo_expr::LowerTriangularHessian::new(entries).map_err(convert_error)?;
+        let terms = QuadraticTerms::try_from(matrix).map_err(convert_error)?;
+        coefficients.extend(
+            terms.quadratic().iter().map(|&(r, c, value)| {
+                ((r.index().min(c.index()), r.index().max(c.index())), value)
+            }),
+        );
+    } else {
+        for (&(a, b), coefficient) in coefficients.iter_mut() {
+            if a != b {
+                *coefficient *= 2.0;
+            }
+            if !coefficient.is_finite() {
+                return Err(invalid_mps(
+                    line,
+                    1,
+                    format!(
+                        "quadratic coefficient for {:?}, {:?} overflowed",
+                        columns[a].name, columns[b].name
+                    ),
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -836,7 +921,6 @@ fn parse_mps_line(
     saw_name: &mut bool,
     line: &str,
     line_no: usize,
-    options: MpsReadOptions,
 ) -> Result<(), IoError> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -902,7 +986,7 @@ fn parse_mps_line(
         Section::Ranges => parse_ranges(data, &items, line_no)?,
         Section::Bounds => parse_bound(data, &items, line_no)?,
         Section::QuadObj | Section::QMatrix | Section::QcMatrix(_) | Section::QSec(_) => {
-            parse_quadratic_record(data, section, &items, line_no, options)?;
+            parse_quadratic_record(data, section, &items, line_no)?;
         }
         Section::Sos => parse_sos_record(data, &items, line_no)?,
         Section::Indicators => parse_indicator_record(data, &items, line_no)?,
@@ -977,7 +1061,7 @@ fn parse_mps<R: BufRead>(
         }
         last_line += 1;
         let line = line_buffer.trim_end_matches(['\r', '\n']);
-        parse_mps_line(&mut data, &mut section, &mut saw_name, line, last_line, options)?;
+        parse_mps_line(&mut data, &mut section, &mut saw_name, line, last_line)?;
     }
     let last_line = last_line.max(1);
     if data.intorg {
@@ -992,7 +1076,7 @@ fn parse_mps<R: BufRead>(
     if data.seen_sections & SEEN_END == 0 {
         return Err(invalid_mps(last_line, 1, "missing ENDATA"));
     }
-    validate_quadratic_triangles(&data, last_line)?;
+    normalize_quadratic_records(&mut data, options, last_line)?;
     build_mps_model(data)
 }
 
@@ -1003,17 +1087,17 @@ fn expression<'a>(
     quadratic: impl IntoIterator<Item = ((usize, usize), f64)>,
     constant: f64,
 ) -> Expr<'a> {
-    let mut expr = model.__constant(constant).erase();
+    let mut expr = model.__constant(constant).as_dynamic();
     for (column, coefficient) in linear {
         if coefficient != 0.0 {
-            expr = expr + coefficient * variables[column];
+            expr = expr + coefficient * &variables[column];
         }
     }
     let mut quadratic: Vec<_> =
         quadratic.into_iter().filter(|(_, coefficient)| *coefficient != 0.0).collect();
     quadratic.sort_unstable_by_key(|((left, right), _)| (*left, *right));
     for ((left, right), coefficient) in quadratic {
-        expr = expr + coefficient * variables[left] * variables[right];
+        expr = expr + coefficient * &variables[left] * &variables[right];
     }
     expr
 }
@@ -1073,7 +1157,7 @@ fn write_quadratic_section<W: Write>(
     objective: bool,
 ) -> Result<(), IoError> {
     writeln!(out, "{header}")?;
-    for &(left, right, hessian) in &terms.hessian {
+    for &(left, right, hessian) in terms.quadratic() {
         let (first, second) = if objective {
             // Gurobi and MOSEK document lower-triangular objective records.
             // CPLEX's QUADOBJ convention uses the upper triangle.
@@ -1089,8 +1173,30 @@ fn write_quadratic_section<W: Write>(
         };
         let left_name = &variable_names[first.index()];
         let right_name = &variable_names[second.index()];
-        let coefficient =
-            if objective || format != MpsQuadraticFormat::Gurobi { hessian } else { hessian / 2.0 };
+        let coefficient = if left == right {
+            if objective || format != MpsQuadraticFormat::Gurobi { 2.0 * hessian } else { hessian }
+        } else if objective || format != MpsQuadraticFormat::Gurobi {
+            hessian
+        } else {
+            0.5 * hessian
+        };
+
+        if !objective
+            && format == MpsQuadraticFormat::Gurobi
+            && left != right
+            && (2.0 * coefficient).to_bits() != hessian.to_bits()
+        {
+            return Err(invalid_mps(
+                0,
+                0,
+                format!(
+                    "quadratic coefficient ({left_name}, {right_name}) = {hessian} has no exactly representable Gurobi QCMATRIX entry"
+                ),
+            ));
+        }
+        if !coefficient.is_finite() {
+            return Err(invalid_mps(0, 0, "quadratic matrix coefficient exceeds finite f64 range"));
+        }
         writeln!(out, "    {left_name:<10} {right_name:<10} {coefficient}")?;
         if !objective && format != MpsQuadraticFormat::Mosek && first != second {
             // Gurobi and CPLEX require QCMATRIX to contain a symmetric Q.
@@ -1230,7 +1336,7 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
                 .bounds(model_lower, column.upper)
                 .domain(domain)
                 .build()
-                .erase(),
+                .as_dynamic(),
         );
     }
     let mut pending_indicators = Vec::new();
@@ -1243,12 +1349,19 @@ fn build_mps_model(data: ParsedMps) -> Result<Model, IoError> {
         }
     }
     for (name, trigger, active, expr, lower, upper) in pending_indicators {
-        model.__add_indicator_interval(name, variables[trigger], active, expr, lower, upper);
+        model.__add_indicator_interval(
+            name,
+            (variables[trigger]).clone(),
+            active,
+            expr,
+            lower,
+            upper,
+        );
     }
     for set in data.sos {
         let members = set.members.into_iter().map(|(name, weight)| {
             let index = *data.column_index.get(&name).expect("validated SOS variable");
-            (variables[index], weight)
+            (&variables[index], weight)
         });
         model.add_sos_constraint(set.name, set.sos_type, members);
     }
@@ -1384,12 +1497,12 @@ pub fn write_mps_with<W: Write>(
 
     // Build column index: VarId to [(row_name, coef)] in row order (OBJ first, then constraints).
     let mut col_index: FxHashMap<VarId, Vec<(&str, f64)>> = FxHashMap::default();
-    for (v, c) in &obj_terms.linear {
+    for (v, c) in obj_terms.linear() {
         col_index.entry(*v).or_default().push(("OBJ", *c));
     }
 
     for (row_name, terms) in row_names.iter().zip(con_terms.iter()) {
-        for (v, coef) in &terms.linear {
+        for (v, coef) in terms.linear() {
             col_index.entry(*v).or_default().push((row_name.as_ref(), *coef));
         }
     }
@@ -1455,7 +1568,7 @@ pub fn write_mps_with<W: Write>(
     }
 
     writeln!(out, "RHS")?;
-    let obj_constant = obj_terms.constant;
+    let obj_constant = obj_terms.constant();
     if obj_constant != 0.0 {
         writeln!(out, "    RHS       OBJ       {}", -obj_constant)?;
     }
@@ -1468,7 +1581,7 @@ pub fn write_mps_with<W: Write>(
             // Free `N` row: carries no RHS.
             None => continue,
         };
-        let adjusted = rhs - t.constant;
+        let adjusted = rhs - t.constant();
         if adjusted != 0.0 {
             writeln!(out, "    RHS       {row_name:<10} {adjusted}")?;
         }
@@ -1537,7 +1650,7 @@ pub fn write_mps_with<W: Write>(
         write_sos_section(out, &sos, &variable_names)?;
     }
 
-    if !obj_terms.hessian.is_empty() {
+    if !obj_terms.quadratic().is_empty() {
         let header = if options.quadratic_format == MpsQuadraticFormat::Mosek {
             "QSECTION OBJ"
         } else {
@@ -1553,7 +1666,7 @@ pub fn write_mps_with<W: Write>(
         )?;
     }
     for (row_name, terms) in row_names.iter().zip(con_terms.iter()) {
-        if terms.hessian.is_empty() {
+        if terms.quadratic().is_empty() {
             continue;
         }
         let header = match options.quadratic_format {
@@ -1585,13 +1698,13 @@ fn rebuild_quadratic<'a>(
     variables: &[Expr<'a>],
     terms: &QuadraticTerms,
 ) -> Expr<'a> {
-    let mut expr = model.__constant(terms.constant).erase();
-    for &(var, coefficient) in &terms.linear {
-        expr = expr + coefficient * variables[var.index()];
+    let mut expr = model.__constant(terms.constant()).as_dynamic();
+    for &(var, coefficient) in terms.linear() {
+        expr = expr + coefficient * &variables[var.index()];
     }
-    for &(left, right, hessian) in &terms.hessian {
-        let coefficient = if left == right { hessian / 2.0 } else { hessian };
-        expr = expr + coefficient * variables[left.index()] * variables[right.index()];
+    for &(left, right, hessian) in terms.quadratic() {
+        let coefficient = hessian;
+        expr = expr + coefficient * &variables[left.index()] * &variables[right.index()];
     }
     expr
 }
@@ -1609,7 +1722,7 @@ fn write_mps_with_indicators<W: Write>(
     let variables: Vec<_> = source_vars
         .iter()
         .map(|v| {
-            temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build().erase()
+            temporary.__var(v.name.clone()).bounds(v.lb, v.ub).domain(v.domain).build().as_dynamic()
         })
         .collect();
     let mut raw_row_names = Vec::new();
@@ -1627,7 +1740,7 @@ fn write_mps_with_indicators<W: Write>(
     let mut records: Vec<(usize, VarId, bool)> = Vec::new();
     for indicator in model.indicator_constraints().iter().filter(|c| c.active) {
         let terms = extract_quadratic(&arena, indicator.lhs).expect("validated affine indicator");
-        if !terms.hessian.is_empty() {
+        if !terms.quadratic().is_empty() {
             return Err(IoError::UnsupportedMps {
                 section: "INDICATORS".into(),
                 feature: "quadratic indicator row".into(),
@@ -1666,7 +1779,7 @@ fn write_mps_with_indicators<W: Write>(
         temporary.add_sos_constraint(
             set.name.clone(),
             set.sos_type,
-            set.members.iter().map(|member| (variables[member.variable.index()], member.weight)),
+            set.members.iter().map(|member| (&variables[member.variable.index()], member.weight)),
         );
     }
     if model.is_feasibility() {

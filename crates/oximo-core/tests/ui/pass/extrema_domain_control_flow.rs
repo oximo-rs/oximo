@@ -27,13 +27,13 @@ fn main() -> Result<(), &'static str> {
     let nested_lo = min!(x[j] for i in domain()?, j in Ok::<_, &str>(0..i)? if allowed(j)?);
     let nested_hi = max!(x[j] for i in domain()?, j in Ok::<_, &str>(0..i)? if allowed(j)?);
     let arena = model.arena();
-    assert!(matches!(arena.get(lo.id), ExprNode::Min(children) if children.len() == 3));
-    assert!(matches!(arena.get(hi.id), ExprNode::Max(children) if children.len() == 3));
+    assert!(matches!(arena.get(lo.id()), ExprNode::Min(children) if children.len() == 3));
+    assert!(matches!(arena.get(hi.id()), ExprNode::Max(children) if children.len() == 3));
     for expr in [filtered_lo, nested_lo] {
-        assert!(matches!(arena.get(expr.id), ExprNode::Min(children) if children.len() == 2));
+        assert!(matches!(arena.get(expr.id()), ExprNode::Min(children) if children.len() == 2));
     }
     for expr in [filtered_hi, nested_hi] {
-        assert!(matches!(arena.get(expr.id), ExprNode::Max(children) if children.len() == 2));
+        assert!(matches!(arena.get(expr.id()), ExprNode::Max(children) if children.len() == 2));
     }
     let _future = async_extrema();
     Ok(())

@@ -249,7 +249,7 @@ mod sealed {
 /// implementation.
 #[doc(hidden)]
 pub trait Family: sealed::Sealed {
-    type Degree: oximo_expr::Degree;
+    type Degree: oximo_expr::LeafDegree;
     /// Type name used in [`Debug`](std::fmt::Debug) output.
     const NAME: &'static str;
 }
@@ -267,11 +267,11 @@ pub struct ParamFamily;
 impl sealed::Sealed for VarFamily {}
 impl sealed::Sealed for ParamFamily {}
 impl Family for VarFamily {
-    type Degree = oximo_expr::Affine;
+    type Degree = oximo_expr::VariableDegree;
     const NAME: &'static str = "IndexedVar";
 }
 impl Family for ParamFamily {
-    type Degree = oximo_expr::Constant;
+    type Degree = oximo_expr::ParameterDegree;
     const NAME: &'static str = "IndexedParam";
 }
 
@@ -516,7 +516,7 @@ mod tests {
             let Storage::Dense { data, keys, .. } = storage else {
                 panic!("expected dense storage")
             };
-            assert_eq!(data.iter().map(|expr| expr.id).collect::<Vec<_>>(), [x.id, y.id]);
+            assert_eq!(data.iter().map(Expr::id).collect::<Vec<_>>(), [x.id(), y.id()]);
             assert_eq!(keys, [IndexKey::Int(-1), IndexKey::Int(0)]);
         }
     }

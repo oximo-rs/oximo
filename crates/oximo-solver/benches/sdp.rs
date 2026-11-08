@@ -39,18 +39,19 @@ fn bench(c: &mut Criterion) {
         let model = Model::new("readback");
         let x = model.add_symmetric_variable("X", n);
         param!(model, p = 2.0);
-        let affine = x.map(|&entry| p * entry + 1.0);
+        let affine = x.map(|entry| p * entry + 1.0);
         let point = SolutionPoint {
             model_id: model.id(),
             primal: x.upper_triangle().iter().map(|entry| (entry.var_id().unwrap(), 3.0)).collect(),
             objective: None,
             parameters: model.arena().parameter_snapshot(),
         };
-        for (name, matrix) in [("variables", &x), ("affine", &affine)] {
-            readback.bench_function(BenchmarkId::new(name, n), |b| {
-                b.iter(|| black_box(point.value_of_matrix(black_box(matrix)).unwrap().unwrap()));
-            });
-        }
+        readback.bench_function(BenchmarkId::new("variables", n), |b| {
+            b.iter(|| black_box(point.value_of_matrix(black_box(&x)).unwrap().unwrap()));
+        });
+        readback.bench_function(BenchmarkId::new("affine", n), |b| {
+            b.iter(|| black_box(point.value_of_matrix(black_box(&affine)).unwrap().unwrap()));
+        });
     }
     readback.finish();
 
@@ -62,9 +63,9 @@ fn bench(c: &mut Criterion) {
         let shared = x + 2.0 * y + 1.0;
         // Distinct direct affine roots expose unnecessary coefficient copies.
         let distinct = SymmetricMatrix::from_upper_fn(n, |i, j| {
-            shared + f64::from(u32::try_from(i + j).unwrap())
+            &shared + f64::from(u32::try_from(i + j).unwrap())
         });
-        let repeated = SymmetricMatrix::from_upper_fn(n, |_, _| shared);
+        let repeated = SymmetricMatrix::from_upper_fn(n, |_, _| shared.clone());
         let distinct_id = model.add_psd_constraint("distinct", distinct);
         let repeated_id = model.add_psd_constraint("repeated", repeated);
         objective!(model, Min, x);

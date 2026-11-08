@@ -514,7 +514,11 @@ fn children(node: &ExprNode, mut visit: impl FnMut(ExprId)) {
                 visit(child);
             }
         }
-        ExprNode::Const(_) | ExprNode::Param(_) | ExprNode::Var(_) | ExprNode::Linear { .. } => {}
+        ExprNode::Const(_)
+        | ExprNode::Param(_)
+        | ExprNode::Var(_)
+        | ExprNode::Linear { .. }
+        | ExprNode::Quadratic(_) => {}
     }
 }
 
@@ -802,7 +806,7 @@ mod cache_tests {
         param!(model, p = 2.0);
 
         let shared = (p * x).sin() + x.abs();
-        let root = shared * shared + x.pow(x) + (p * x * x);
+        let root = shared.clone() * shared + x.pow(x) + (p * x * x);
         let arena = model.arena();
         let snapshot = (*arena).clone();
         snapshot.__enable_preparation_classifications();
@@ -824,7 +828,7 @@ mod cache_tests {
         param!(model, q = 3.0);
 
         let shared = p * x * x;
-        let root = shared + shared + q * x + x * x;
+        let root = shared.clone() + shared + q * x + x * x;
         let arena = model.arena();
         let mut expressions = ExpressionRequirements::default();
         expressions.collect_numeric_parameters(&arena, root.id());
@@ -843,8 +847,9 @@ mod cache_tests {
     fn prepared_operator_proofs_are_snapshot_local_and_keep_hidden_operators() {
         let model = Model::new("operator proof");
         variable!(model, x);
-        let root = x * x;
-        objective!(model, Min, root);
+        param!(model, p = 1.0);
+        let root = p * x * x;
+        objective!(model, Min, &root);
         let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
         assert!(!prepared.has_only_polynomial_operators(root.id()));
 
@@ -859,7 +864,7 @@ mod cache_tests {
         drop(next);
         drop(prepared);
         let hidden = x.sin().powi(0);
-        objective!(model, Min, hidden);
+        objective!(model, Min, &hidden);
         let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
         for_prepared(&model, &prepared, false);
         assert!(!prepared.has_only_polynomial_operators(hidden.id()));
@@ -872,8 +877,8 @@ mod cache_tests {
         param!(model, p = 1.0);
         let polynomial = p * x * x;
         let division = x / p;
-        constraint!(model, division <= 2.0);
-        objective!(model, Min, polynomial);
+        constraint!(model, &division <= 2.0);
+        objective!(model, Min, &polynomial);
 
         let profile = crate::SolverProfile::new("unsupported");
         for detailed in [false, true] {
@@ -888,7 +893,7 @@ mod cache_tests {
         }
 
         let hidden = x.asin().powi(0);
-        objective!(model, Min, hidden);
+        objective!(model, Min, &hidden);
         let expected = profile.check_model(&model);
         for _ in 0..2 {
             let prepared = crate::prepare::LoweringContext::new(&model).unwrap();
@@ -913,7 +918,7 @@ mod cache_tests {
                 }
                 ExprClass::Nonlinear => AnyScalarFunction::Nonlinear((p * x.exp()).into_function()),
             };
-            model.minimize(function);
+            model.minimize(function.clone());
 
             let row = model.add_constraint("runtime_row", Constraint::new(function, LessThan(2.0)));
             let first = for_matching(&model);
@@ -1013,9 +1018,9 @@ mod cache_tests {
         param!(model, p = 2.0);
         for i in 0..20 {
             model.add_constraint(format!("affine_{i}"), (p * x + y).le(f64::from(i)));
-            model.add_constraint(format!("dynamic_{i}"), x.erase().le(f64::from(i)));
+            model.add_constraint(format!("dynamic_{i}"), x.as_dynamic().le(f64::from(i)));
         }
-        constraint!(model, nonlinear, x.sin().erase() <= 2.0);
+        constraint!(model, nonlinear, x.sin().as_dynamic() <= 2.0);
         constraint!(model, quadratic, x.square() <= 4.0);
         constraint!(model, other_set, x == y);
         objective!(model, Min, x);
@@ -1045,9 +1050,9 @@ mod cache_tests {
         p.set_param_value(2.0).unwrap();
         assert!(Rc::ptr_eq(&first, &for_validation(&model)));
 
-        let mut unused = x.erase();
+        let mut unused = x.as_dynamic();
         for _ in 0..20_000 {
-            unused = unused.sin().erase();
+            unused = unused.sin().as_dynamic();
         }
         assert!(Rc::ptr_eq(&first, &for_validation(&model)));
         assert_eq!(first.entries, ModelRequirements::infer(&model).entries);
@@ -1189,12 +1194,12 @@ mod cache_tests {
         let model = Model::new("shared operators");
 
         variable!(model, x);
-        let mut shared = x.erase();
+        let mut shared = x.as_dynamic();
         for _ in 0..1000 {
-            shared = shared.sin().erase();
+            shared = shared.sin().as_dynamic();
         }
         for i in 0..100 {
-            model.add_constraint(format!("row {i}"), shared.le(2.0));
+            model.add_constraint(format!("row {i}"), shared.clone().le(2.0));
         }
         objective!(model, Min, x);
 
@@ -1242,7 +1247,7 @@ mod cache_tests {
         impl Function for Custom<'_> {
             type Owned = CustomData;
             fn semantic_data(&self) -> CustomData {
-                CustomData(ScalarFunctionData::from_expression(self.0))
+                CustomData(ScalarFunctionData::from_expression(&self.0))
             }
         }
         impl FunctionInSet<LessThan> for Custom<'_> {}
@@ -1257,7 +1262,7 @@ mod cache_tests {
 
         variable!(model, x);
         objective!(model, Min, x);
-        model.add_constraint("custom", Constraint::new(Custom(x), LessThan(2.0)));
+        model.add_constraint("custom", Constraint::new(Custom(x.into()), LessThan(2.0)));
         let first = for_validation(&model);
         let second = for_validation(&model);
         assert!(!Rc::ptr_eq(&first, &second));

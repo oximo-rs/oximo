@@ -20,8 +20,8 @@ fn preparation_freezes_parameters_and_shares_compound_decompositions() {
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(prepared.sense(), ObjectiveSense::Maximize);
     model.set_param(p, 7.0).unwrap();
-    assert_eq!(prepared.quadratic(expr).unwrap().linear[0].1, 2.0);
-    assert_eq!(LoweringContext::new(&model).unwrap().quadratic(expr).unwrap().linear[0].1, 7.0);
+    assert_eq!(prepared.quadratic(expr).unwrap().linear()[0].1, 2.0);
+    assert_eq!(LoweringContext::new(&model).unwrap().quadratic(expr).unwrap().linear()[0].1, 7.0);
 }
 
 #[test]

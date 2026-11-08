@@ -6,5 +6,5 @@ fn main() {
     let model = Model::new("contract");
     variable!(model, x);
     variable!(model, b, Bin);
-    indicator_constraint!(model, b == 1 => 0.0 <= x.erase() <= 1.0);
+    indicator_constraint!(model, b == 1 => 0.0 <= x.as_dynamic() <= 1.0);
 }

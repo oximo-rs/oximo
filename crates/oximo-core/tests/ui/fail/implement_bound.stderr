@@ -10,14 +10,14 @@ help: the trait `var::sealed::Sealed` is not implemented for `ForeignBound`
 5 | struct ForeignBound;
   | ^^^^^^^^^^^^^^^^^^^
   = help: the following other types implement trait `var::sealed::Sealed`:
-            Expr<'_, oximo_core::Constant>
+            &T
+            Expr<'_, D>
             f32
             f64
             i16
             i32
             i64
             i8
-            isize
           and $N others
 note: required by a bound in `oximo_core::IntoBound`
  --> src/var.rs

@@ -5,7 +5,7 @@ use oximo_core::prelude::*;
 use oximo_expr::{evaluate, extract_linear};
 
 fn value<D: oximo_expr::Degree>(expr: Expr<'_, D>) -> f64 {
-    evaluate(&expr.arena.borrow(), expr.id, &&[1.0, 2.0, 3.0][..]).unwrap()
+    evaluate(&expr.arena().borrow(), expr.id(), &&[1.0, 2.0, 3.0][..]).unwrap()
 }
 
 #[test]
@@ -21,8 +21,8 @@ fn empty_domains_and_filters_do_not_evaluate_the_body() {
         sum!(m, forbidden() for i in 0..3 if i > 10),
     ];
     for expr in terms {
-        assert_eq!(value(expr), 0.0);
-        assert!(std::ptr::eq(expr.arena, m.__sum_context()));
+        assert_eq!(value(expr.clone()), 0.0);
+        assert!(std::ptr::eq(expr.arena(), m.__sum_context()));
     }
 }
 
@@ -176,7 +176,7 @@ fn explicit_model_anchors_respect_local_shadowing() {
         sum!(m, {
             let m = &other;
             let inner = sum!(m, y for _j in 0..1);
-            inner_owned_by_other.set(std::ptr::eq(inner.arena, y.arena));
+            inner_owned_by_other.set(std::ptr::eq(inner.arena(), y.arena()));
             inner
         } for _i in 0..1)
     }));

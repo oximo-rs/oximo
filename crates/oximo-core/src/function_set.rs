@@ -29,8 +29,8 @@
 //! every scalar degree supports inequalities and equalities.
 //!
 //! Use `x.square()` or `x * x` for a statically quadratic expression. Runtime
-//! powers such as `x.powi(n)` return [`Dynamic`]. [`Expr::erase`] gives mixed
-//! degrees a common type; [`Expr::try_affine`] and [`Expr::try_quadratic`] check
+//! powers such as `x.powi(n)` return [`Dynamic`]. [`Expr::as_dynamic`] gives mixed
+//! degrees a common type; [`Expr::as_affine`] and [`Expr::as_quadratic`] check
 //! the expression before narrowing its degree.
 //!
 //! # Modeling and validation
@@ -174,14 +174,14 @@ macro_rules! scalar_function {
     ($(#[$meta:meta])* $name:ident, $degree:ty) => {
         /// A scalar function retaining its symbolic arena representation.
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug)]
+        #[derive(Clone, Debug)]
         pub struct $name<'a>(Expr<'a, $degree>);
 
         impl Function for $name<'_> {
             type Owned = crate::semantic::ScalarFunctionData<$degree>;
 
             fn semantic_data(&self) -> Self::Owned {
-                crate::semantic::ScalarFunctionData::new(self.0.model_id(), self.0.id())
+                crate::semantic::ScalarFunctionData::new(self.0.model_id(), self.0.publish_id())
             }
         }
 
@@ -197,6 +197,15 @@ macro_rules! scalar_function {
             #[inline]
             fn from(expr: Expr<'a, $degree>) -> Self {
                 Self(expr)
+            }
+        }
+
+        impl<'a, D: Degree> From<&Expr<'a, D>> for $name<'a>
+        where
+            Self: From<Expr<'a, D>>,
+        {
+            fn from(expr: &Expr<'a, D>) -> Self {
+                Self::from(expr.clone())
             }
         }
     };
@@ -218,15 +227,15 @@ impl<'a> From<Expr<'a, Constant>> for ScalarAffineFunction<'a> {
     }
 }
 impl<'a> TryFrom<Expr<'a>> for ScalarAffineFunction<'a> {
-    type Error = ExprClass;
+    type Error = Expr<'a>;
     fn try_from(expr: Expr<'a>) -> Result<Self, Self::Error> {
-        expr.try_affine().map(Self)
+        expr.into_affine().map(Self)
     }
 }
 impl<'a> TryFrom<Expr<'a>> for ScalarQuadraticFunction<'a> {
-    type Error = ExprClass;
+    type Error = Expr<'a>;
     fn try_from(expr: Expr<'a>) -> Result<Self, Self::Error> {
-        expr.try_quadratic().map(Self)
+        expr.into_quadratic().map(Self)
     }
 }
 
@@ -242,26 +251,26 @@ impl<'a> From<Expr<'a, Affine>> for ScalarQuadraticFunction<'a> {
 }
 impl<'a> From<Expr<'a, Constant>> for ScalarNonlinearFunction<'a> {
     fn from(e: Expr<'a, Constant>) -> Self {
-        Self(e.nonlinear())
+        Self(e.into_nonlinear())
     }
 }
 impl<'a> From<Expr<'a, Affine>> for ScalarNonlinearFunction<'a> {
     fn from(e: Expr<'a, Affine>) -> Self {
-        Self(e.nonlinear())
+        Self(e.into_nonlinear())
     }
 }
 impl<'a> From<Expr<'a, Quadratic>> for ScalarNonlinearFunction<'a> {
     fn from(e: Expr<'a, Quadratic>) -> Self {
-        Self(e.nonlinear())
+        Self(e.into_nonlinear())
     }
 }
 impl<'a> From<Expr<'a, Dynamic>> for ScalarNonlinearFunction<'a> {
     fn from(e: Expr<'a, Dynamic>) -> Self {
-        Self(e.nonlinear())
+        Self(e.into_nonlinear())
     }
 }
 
-/// Statically affine inputs. Narrow dynamic expressions explicitly with `try_affine`.
+/// Statically affine inputs. Narrow dynamic expressions explicitly with [`Expr::into_affine`] or [`Expr::as_affine`].
 pub trait IntoAffineFunction<'a> {
     fn into_affine_function(self) -> ScalarAffineFunction<'a>;
 }
@@ -285,7 +294,7 @@ impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
 }
 
 /// Runtime-classified scalar function for explicit dynamic expressions.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum AnyScalarFunction<'a> {
     Affine(ScalarAffineFunction<'a>),
     Quadratic(ScalarQuadraticFunction<'a>),
@@ -296,17 +305,13 @@ impl Function for AnyScalarFunction<'_> {
     type Owned = AnyScalarFunctionData;
 
     fn semantic_data(&self) -> Self::Owned {
-        let expression = self.expression();
-        let class = match self {
-            Self::Affine(_) => ExprClass::Linear,
-            Self::Quadratic(_) => ExprClass::Quadratic,
-            Self::Nonlinear(_) => ExprClass::Nonlinear,
+        let (model_id, id, class) = match self {
+            Self::Affine(f) => (f.0.model_id(), f.0.publish_id(), ExprClass::Linear),
+            Self::Quadratic(f) => (f.0.model_id(), f.0.publish_id(), ExprClass::Quadratic),
+            Self::Nonlinear(f) => (f.0.model_id(), f.0.publish_id(), ExprClass::Nonlinear),
         };
         AnyScalarFunctionData {
-            expression: crate::semantic::ScalarFunctionData::new(
-                expression.model_id(),
-                expression.id(),
-            ),
+            expression: crate::semantic::ScalarFunctionData::new(model_id, id),
             class,
         }
     }
@@ -345,9 +350,9 @@ impl crate::semantic::SemanticFunction for AnyScalarFunctionData {
 impl<'a> AnyScalarFunction<'a> {
     pub fn expression(self) -> Expr<'a> {
         match self {
-            Self::Affine(f) => f.0.erase(),
-            Self::Quadratic(f) => f.0.erase(),
-            Self::Nonlinear(f) => f.0.erase(),
+            Self::Affine(f) => f.0.into_dynamic(),
+            Self::Quadratic(f) => f.0.into_dynamic(),
+            Self::Nonlinear(f) => f.0.into_dynamic(),
         }
     }
 }
@@ -361,17 +366,17 @@ pub trait IntoFunction {
 /// Scalar function behavior shared by the built-in degree conversions.
 pub trait ScalarFunction<'a>:
     Function
-    + Copy
+    + Clone
     + FunctionInSet<LessThan>
     + FunctionInSet<GreaterThan>
     + FunctionInSet<EqualTo>
     + FunctionInSet<Interval>
 {
-    /// Borrow the scalar expression without changing its declared function identity.
+    /// Consume the function and return its scalar expression.
     fn expression(self) -> Expr<'a>;
 
     /// Whether this function can use one affine interval row.
-    fn is_affine(self) -> bool;
+    fn is_affine(&self) -> bool;
 }
 
 /// Maps a sealed expression degree onto its canonical function representation.
@@ -414,7 +419,7 @@ impl FunctionDegree for Dynamic {
     }
     #[inline]
     fn canonicalize(expr: Expr<'_, Self>) -> Self::Function<'_> {
-        match expr.classified() {
+        match expr.into_classified() {
             oximo_expr::ClassifiedExpr::Affine(e) => AnyScalarFunction::Affine(e.into()),
             oximo_expr::ClassifiedExpr::Quadratic(e) => AnyScalarFunction::Quadratic(e.into()),
             oximo_expr::ClassifiedExpr::Nonlinear(e) => AnyScalarFunction::Nonlinear(e.into()),
@@ -533,7 +538,7 @@ impl<'a> AlgebraicConstraintIr<'a> {
     /// Panics for invalid bounds or a non-affine expression.
     pub fn into_affine(self) -> AffineConstraintIr<'a> {
         validate_bounds(self.lower, self.upper);
-        self.lhs.try_affine().expect("indicator consequent must be affine");
+        self.lhs.as_affine().expect("indicator consequent must be affine");
         AffineConstraintIr(self)
     }
 }
@@ -549,8 +554,8 @@ where
     where
         F: ScalarFunction<'a>,
     {
-        let expression = self.function.expression();
         let semantic = crate::semantic::ScalarConstraintSource::capture(&self.function, &self.set);
+        let expression = self.function.expression();
         AlgebraicConstraintIr::declared(expression, semantic).into_affine()
     }
 }
@@ -573,9 +578,10 @@ where
 {
     fn into_affine_constraint(self) -> AffineConstraintIr<'a> {
         let semantic = crate::semantic::ScalarConstraintSource::capture(&self.function, &self.set);
-        let expression = self.function.into_affine_function().expression().erase();
+        let expression = self.function.into_affine_function().expression().into_dynamic();
+        let node_count = expression.arena().__node_count();
         let ir = AlgebraicConstraintIr::declared(expression, semantic);
-        ir.semantic.validate_roots(expression.arena().__node_count());
+        ir.semantic.validate_roots(node_count);
         AffineConstraintIr(ir)
     }
 }
@@ -603,7 +609,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(f64::NEG_INFINITY, set.0);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: f64::NEG_INFINITY,
                     upper: set.0,
                     semantic,
@@ -628,7 +634,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(set.0, f64::INFINITY);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: set.0,
                     upper: f64::INFINITY,
                     semantic,
@@ -653,7 +659,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(set.0, set.0);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: set.0,
                     upper: set.0,
                     semantic,
@@ -677,7 +683,7 @@ macro_rules! scalar_pairs {
             ) -> Self::Ir {
                 validate_bounds(set.lower, set.upper);
                 AlgebraicConstraintIr {
-                    lhs: self.expression().erase(),
+                    lhs: self.expression().into_dynamic(),
                     lower: set.lower,
                     upper: set.upper,
                     semantic,
@@ -696,11 +702,11 @@ scalar_pairs!(AnyScalarFunction);
 impl<'a> ScalarFunction<'a> for ScalarDynamicFunction<'a> {
     #[inline]
     fn expression(self) -> Expr<'a> {
-        ScalarDynamicFunction::expression(self).erase()
+        ScalarDynamicFunction::expression(self).into_dynamic()
     }
 
     #[inline]
-    fn is_affine(self) -> bool {
+    fn is_affine(&self) -> bool {
         self.0.__class() == ExprClass::Linear
     }
 }
@@ -708,11 +714,11 @@ impl<'a> ScalarFunction<'a> for ScalarDynamicFunction<'a> {
 impl<'a> ScalarFunction<'a> for ScalarAffineFunction<'a> {
     #[inline]
     fn expression(self) -> Expr<'a> {
-        ScalarAffineFunction::expression(self).erase()
+        ScalarAffineFunction::expression(self).into_dynamic()
     }
 
     #[inline]
-    fn is_affine(self) -> bool {
+    fn is_affine(&self) -> bool {
         true
     }
 }
@@ -720,11 +726,11 @@ impl<'a> ScalarFunction<'a> for ScalarAffineFunction<'a> {
 impl<'a> ScalarFunction<'a> for ScalarQuadraticFunction<'a> {
     #[inline]
     fn expression(self) -> Expr<'a> {
-        ScalarQuadraticFunction::expression(self).erase()
+        ScalarQuadraticFunction::expression(self).into_dynamic()
     }
 
     #[inline]
-    fn is_affine(self) -> bool {
+    fn is_affine(&self) -> bool {
         self.0.__class() == ExprClass::Linear
     }
 }
@@ -732,11 +738,11 @@ impl<'a> ScalarFunction<'a> for ScalarQuadraticFunction<'a> {
 impl<'a> ScalarFunction<'a> for ScalarNonlinearFunction<'a> {
     #[inline]
     fn expression(self) -> Expr<'a> {
-        ScalarNonlinearFunction::expression(self).erase()
+        ScalarNonlinearFunction::expression(self).into_dynamic()
     }
 
     #[inline]
-    fn is_affine(self) -> bool {
+    fn is_affine(&self) -> bool {
         self.0.__class() == ExprClass::Linear
     }
 }
@@ -744,11 +750,11 @@ impl<'a> ScalarFunction<'a> for ScalarNonlinearFunction<'a> {
 impl<'a> ScalarFunction<'a> for AnyScalarFunction<'a> {
     #[inline]
     fn expression(self) -> Expr<'a> {
-        AnyScalarFunction::expression(self).erase()
+        AnyScalarFunction::expression(self).into_dynamic()
     }
 
     #[inline]
-    fn is_affine(self) -> bool {
+    fn is_affine(&self) -> bool {
         matches!(self, Self::Affine(_))
     }
 }
@@ -767,15 +773,18 @@ impl Function for VectorAffineFunction<'_> {
     fn semantic_data(&self) -> Self::Owned {
         Self::Owned {
             model_id: self.first.model_id(),
-            components: std::iter::once(self.first.id()).chain(self.rest.iter().copied()).collect(),
+            components: std::iter::once(self.first.publish_id())
+                .chain(self.rest.iter().copied())
+                .collect(),
         }
     }
 }
 
 impl<'a> VectorAffineFunction<'a> {
     pub(crate) fn into_data(mut self) -> crate::VectorAffineData {
-        self.rest.insert(0, self.first.id());
-        crate::VectorAffineData { model_id: self.first.model_id(), components: self.rest.into() }
+        let model_id = self.first.model_id();
+        self.rest.insert(0, self.first.into_id());
+        crate::VectorAffineData { model_id, components: self.rest.into() }
     }
 
     /// Construct a nonempty vector, checking that every component has one owner.
@@ -790,10 +799,10 @@ impl<'a> VectorAffineFunction<'a> {
         let mut rest = Vec::with_capacity(components.size_hint().0.saturating_add(1));
         rest.extend(components.map(|f| {
             assert!(
-                std::ptr::eq(first.arena, f.0.arena),
+                std::ptr::eq(first.arena(), f.0.arena()),
                 "affine vector components must belong to the same model"
             );
-            f.0.id
+            f.0.into_id()
         }));
         Self { first, rest }
     }
@@ -911,7 +920,7 @@ impl<'a> ScalarConstraintInput for AlgebraicConstraintIr<'a> {
         );
         PreparedScalarConstraint {
             view: crate::semantic::ScalarConstraintView {
-                lhs: self.lhs.id,
+                lhs: self.lhs.into_id(),
                 lower: self.lower,
                 upper: self.upper,
             },
@@ -955,3 +964,44 @@ impl FunctionInSet<EqualTo> for AnyScalarFunctionData {}
 impl FunctionInSet<Interval> for AnyScalarFunctionData {}
 impl FunctionInSet<crate::SpecialOrderedSet> for crate::VariableVectorData {}
 impl FunctionInSet<crate::IndicatorSet> for crate::IndicatorFunctionData {}
+
+impl<T: Clone + IntoFunction> IntoFunction for &T {
+    type Function = T::Function;
+    fn into_function(self) -> Self::Function {
+        self.clone().into_function()
+    }
+}
+impl<'a, T: Clone + IntoAffineFunction<'a>> IntoAffineFunction<'a> for &T {
+    fn into_affine_function(self) -> ScalarAffineFunction<'a> {
+        self.clone().into_affine_function()
+    }
+}
+
+macro_rules! leaf_functions {
+    ($degree:ty) => {
+        impl<'a> From<Expr<'a, $degree>> for ScalarAffineFunction<'a> {
+            fn from(expr: Expr<'a, $degree>) -> Self {
+                Self::from(Expr::<'a, Affine>::from(expr))
+            }
+        }
+        impl<'a> From<Expr<'a, $degree>> for ScalarQuadraticFunction<'a> {
+            fn from(expr: Expr<'a, $degree>) -> Self {
+                Self::from(Expr::<'a, Quadratic>::from(expr))
+            }
+        }
+        impl<'a> From<Expr<'a, $degree>> for ScalarNonlinearFunction<'a> {
+            fn from(expr: Expr<'a, $degree>) -> Self {
+                Self::from(expr.into_nonlinear())
+            }
+        }
+        impl<'a> IntoAffineFunction<'a> for Expr<'a, $degree> {
+            fn into_affine_function(self) -> ScalarAffineFunction<'a> {
+                self.into()
+            }
+        }
+    };
+}
+leaf_functions!(oximo_expr::VariableDegree);
+leaf_functions!(oximo_expr::ParameterDegree);
+degree_function!(oximo_expr::VariableDegree, ScalarAffineFunction);
+degree_function!(oximo_expr::ParameterDegree, ScalarAffineFunction);

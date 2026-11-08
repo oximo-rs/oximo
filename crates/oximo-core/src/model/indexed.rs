@@ -24,7 +24,7 @@ use crate::sos::{SosMember, SosType, validate_members};
 use crate::{
     IntoSymmetricAffineFunction, PositiveSemidefiniteCone, PsdConstraint, PsdConstraintId,
 };
-use oximo_expr::{Degree, Expr, ExprClass, ModelMismatchError};
+use oximo_expr::{Expr, ExprClass, ExprInput, ModelMismatchError};
 use rayon::prelude::*;
 use smol_str::SmolStr;
 use std::fmt;
@@ -56,12 +56,14 @@ fn prepare_range<
     D: crate::function_set::FunctionDegree,
     B1: IntoRhs<'a, D>,
     B2: IntoRhs<'a, D>,
+    E: ExprInput<'a, Degree = D>,
 >(
     name: SmolStr,
-    mid: Expr<'a, D>,
+    mid: E,
     lo: B1,
     hi: B2,
 ) -> (PendingConstraint, Option<PendingConstraint>) {
+    let mid = mid.into_expression();
     let origin = name.clone();
     let mut pending = if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound()) {
         let function = mid.into_function();
@@ -79,7 +81,7 @@ fn prepare_range<
             (
                 PendingConstraint::from_expr(
                     format!("{name}_lo").into(),
-                    Constraint::new(function, GreaterThan(lower)),
+                    Constraint::new(function.clone(), GreaterThan(lower)),
                 ),
                 Some(PendingConstraint::from_expr(
                     format!("{name}_hi").into(),
@@ -89,7 +91,7 @@ fn prepare_range<
         }
     } else {
         (
-            PendingConstraint::from_expr(format!("{name}_lo").into(), mid.ge(lo)),
+            PendingConstraint::from_expr(format!("{name}_lo").into(), mid.clone().ge(lo)),
             Some(PendingConstraint::from_expr(format!("{name}_hi").into(), mid.le(hi))),
         )
     };
@@ -351,7 +353,15 @@ impl Model {
     /// Macro-facing entry point for a two-sided range family. Each key maps to
     /// one interval row or separate lower/upper rows (see [`Self::__add_range`]).
     #[doc(hidden)]
-    pub fn __add_range_constraints_over<'a, K, B1, B2, F, D: crate::function_set::FunctionDegree>(
+    pub fn __add_range_constraints_over<
+        'a,
+        K,
+        B1,
+        B2,
+        F,
+        D: crate::function_set::FunctionDegree,
+        E: ExprInput<'a, Degree = D>,
+    >(
         &'a self,
         name: &str,
         set: &Set<K>,
@@ -361,7 +371,7 @@ impl Model {
         K: FromIndexKey,
         B1: IntoRhs<'a, D>,
         B2: IntoRhs<'a, D>,
-        F: Fn(K) -> (Expr<'a, D>, B1, B2) + Send + Sync,
+        F: Fn(K) -> (E, B1, B2) + Send + Sync,
     {
         self.add_range_constraints_over_with(name, set, &rule, None)
     }
@@ -373,6 +383,7 @@ impl Model {
         B2,
         F,
         D: crate::function_set::FunctionDegree,
+        E: ExprInput<'a, Degree = D>,
     >(
         &'a self,
         name: &str,
@@ -384,7 +395,7 @@ impl Model {
         K: FromIndexKey,
         B1: IntoRhs<'a, D>,
         B2: IntoRhs<'a, D>,
-        F: Fn(K) -> (Expr<'a, D>, B1, B2) + Send + Sync,
+        F: Fn(K) -> (E, B1, B2) + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
 
@@ -394,7 +405,7 @@ impl Model {
 
             for key in &keys {
                 let (mid, lo, hi) = rule(K::from_index_key(key));
-                self.assert_expr_belongs(mid);
+                self.assert_expr_belongs(mid.as_expression());
                 ids.push(self.__add_range(&format_index_name_small(name, key), mid, lo, hi));
             }
             return IndexedRangeConstraint::new(keys, set.axes(), ids);
@@ -421,7 +432,7 @@ impl Model {
                     };
                     for key in chunk {
                         let (mid, lo, hi) = rule(K::from_index_key(key));
-                        assert_expr_arena(mid, expected_arena);
+                        assert_expr_arena(mid.as_expression(), expected_arena);
                         let (first, upper) =
                             prepare_range(format_index_name_small(name, key), mid, lo, hi);
                         prepared.row_counts.push(if upper.is_some() { 2 } else { 1 });
@@ -510,12 +521,12 @@ impl Model {
                     .map(|key| {
                         let function =
                             rule(K::from_index_key(key)).__into_symmetric_affine_function(arena);
-                        for &entry in function.matrix().upper_triangle() {
+                        for entry in function.matrix().upper_triangle() {
                             assert_expr_arena(entry, expected_arena);
                         }
                         (
                             format_index_name_small(prefix, key),
-                            function.matrix().map(|entry| entry.id()),
+                            function.matrix().map(Expr::publish_id),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -737,7 +748,7 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_sos_constraints_over<'a, K, T, F, D: Degree>(
+    pub fn __add_sos_constraints_over<'a, K, T, F, E: ExprInput<'a>>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -745,13 +756,13 @@ impl Model {
         rule: F,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = (Expr<'a, D>, f64)>,
+        T: IntoIterator<Item = (E, f64)>,
         F: Fn(K) -> T + Send + Sync,
     {
         self.add_sos_constraints_over_with(name_prefix, set, sos_type, &rule, None);
     }
 
-    pub(super) fn add_sos_constraints_over_with<'a, K, T, F, D: Degree>(
+    pub(super) fn add_sos_constraints_over_with<'a, K, T, F, E: ExprInput<'a>>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -760,7 +771,7 @@ impl Model {
         forced_parallel: Option<bool>,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = (Expr<'a, D>, f64)>,
+        T: IntoIterator<Item = (E, f64)>,
         F: Fn(K) -> T + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
@@ -770,6 +781,7 @@ impl Model {
             let members: Vec<_> = rule(K::from_index_key(key))
                 .into_iter()
                 .map(|(expr, weight)| {
+                    let expr = expr.as_expression();
                     assert_expr_arena(expr, expected_arena);
                     let variable = expr.var_id().expect("SOS members must be bare variables");
                     SosMember { variable, weight }
@@ -781,7 +793,7 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_sos_constraints_over_auto_weights<'a, K, T, F, D: Degree>(
+    pub fn __add_sos_constraints_over_auto_weights<'a, K, T, F, E: ExprInput<'a>>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -789,13 +801,13 @@ impl Model {
         rule: F,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = Expr<'a, D>>,
+        T: IntoIterator<Item = E>,
         F: Fn(K) -> T + Send + Sync,
     {
         self.add_sos_constraints_over_auto_weights_with(name_prefix, set, sos_type, &rule, None);
     }
 
-    pub(super) fn add_sos_constraints_over_auto_weights_with<'a, K, T, F, D: Degree>(
+    pub(super) fn add_sos_constraints_over_auto_weights_with<'a, K, T, F, E: ExprInput<'a>>(
         &'a self,
         name_prefix: &str,
         set: &Set<K>,
@@ -804,7 +816,7 @@ impl Model {
         forced_parallel: Option<bool>,
     ) where
         K: FromIndexKey,
-        T: IntoIterator<Item = Expr<'a, D>>,
+        T: IntoIterator<Item = E>,
         F: Fn(K) -> T + Send + Sync,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
@@ -819,6 +831,7 @@ impl Model {
                         .checked_add(1)
                         .and_then(|index| u32::try_from(index).ok())
                         .expect("SOS member count exceeds positional weight range");
+                    let expr = expr.as_expression();
                     assert_expr_arena(expr, expected_arena);
                     let variable = expr.var_id().expect("SOS members must be bare variables");
                     SosMember { variable, weight: f64::from(weight) }
@@ -830,7 +843,7 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_indicator_constraints_over<'a, K, F, C, D: Degree>(
+    pub fn __add_indicator_constraints_over<'a, K, F, C, E: ExprInput<'a>>(
         &'a self,
         prefix: &str,
         set: &Set<K>,
@@ -838,7 +851,7 @@ impl Model {
     ) -> IndexedIndicatorConstraint<K>
     where
         K: FromIndexKey,
-        F: Fn(K) -> (Expr<'a, D>, bool, C),
+        F: Fn(K) -> (E, bool, C),
         C: IntoAffineConstraint<'a>,
     {
         let keys: Vec<IndexKey> = set.iter().collect();
@@ -846,7 +859,7 @@ impl Model {
             .iter()
             .map(|key| {
                 let (trigger, value, consequent) = rule(K::from_index_key(key));
-                let trigger = self.indicator_trigger(trigger.erase());
+                let trigger = self.indicator_trigger(trigger.into_expression().into_dynamic());
                 self.prepare_indicator(
                     format_index_name_small(prefix, key),
                     trigger,
@@ -864,7 +877,15 @@ impl Model {
     }
 
     #[doc(hidden)]
-    pub fn __add_indicator_ranges_over<'a, K, B1, B2, F, D: Degree, E: Degree>(
+    pub fn __add_indicator_ranges_over<
+        'a,
+        K,
+        B1,
+        B2,
+        F,
+        T: ExprInput<'a>,
+        E: IntoAffineFunction<'a>,
+    >(
         &'a self,
         prefix: &str,
         set: &Set<K>,
@@ -874,32 +895,36 @@ impl Model {
         K: FromIndexKey,
         B1: IntoRhs<'a>,
         B2: IntoRhs<'a>,
-        F: Fn(K) -> (Expr<'a, D>, bool, Expr<'a, E>, B1, B2),
-        Expr<'a, E>: IntoAffineFunction<'a>,
+        F: Fn(K) -> (T, bool, E, B1, B2),
     {
         let keys: Vec<IndexKey> = set.iter().collect();
         let mut pending = Vec::new();
         let mut row_counts = Vec::with_capacity(keys.len());
         for key in &keys {
             let (trigger, value, mid, lo, hi) = rule(K::from_index_key(key));
-            let mid = mid.into_affine_function().expression().erase();
-            self.assert_expr_belongs(mid);
-            let trigger = self.indicator_trigger(trigger.erase());
+            let mid = mid.into_affine_function().expression().as_dynamic();
+            self.assert_expr_belongs(&mid);
+            let trigger = self.indicator_trigger(trigger.into_expression().into_dynamic());
             let name = format_index_name_small(prefix, key);
 
             if let (Some(lower), Some(upper)) = (lo.const_bound(), hi.const_bound())
                 && mid.__class() == ExprClass::Linear
             {
-                pending.push(
-                    self.prepare_indicator_interval(name, trigger, value, mid.id, lower, upper),
-                );
+                pending.push(self.prepare_indicator_interval(
+                    name,
+                    trigger,
+                    value,
+                    mid.publish_id(),
+                    lower,
+                    upper,
+                ));
                 row_counts.push(1_u8);
             } else {
                 pending.push(self.prepare_indicator(
                     format!("{name}_lo").into(),
                     trigger,
                     value,
-                    mid.ge(lo).into_checked_affine(),
+                    mid.clone().ge(lo).into_checked_affine(),
                 ));
                 pending.push(self.prepare_indicator(
                     format!("{name}_hi").into(),

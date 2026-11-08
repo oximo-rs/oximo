@@ -4,6 +4,97 @@
 use oximo_core::prelude::*;
 
 #[test]
+fn sum_preserves_indexed_mutating_receivers_and_assignment_places() {
+    let model = Model::new("ordinary Rust inside macros");
+    variable!(model, x);
+    let mut weights = [vec![1.0, 2.0, 3.0]];
+    let expression = sum!(model,weights[0].pop().unwrap()*x for _i in 0..3);
+    assert_eq!(weights[0].as_slice(), []);
+    assert_eq!(
+        oximo_expr::extract_linear(&model.arena(), expression.id()).unwrap().coeffs.as_ref(),
+        [(x.var_id().unwrap(), 6.0)]
+    );
+
+    let mut cells = vec![vec![0.0; 2]];
+    let expression = sum!(model,{
+        cells[0][i]=f64::from(u32::try_from(i).unwrap());
+        cells[0][i]+=1.0;
+        cells[0][i]*x
+    } for i in 0..2);
+    assert_eq!(cells, [vec![1.0, 2.0]]);
+    assert_eq!(
+        oximo_expr::extract_linear(&model.arena(), expression.id()).unwrap().coeffs.as_ref(),
+        [(x.var_id().unwrap(), 3.0)]
+    );
+
+    objective!(model, Min, {
+        cells[0][0] = 4.0;
+        cells[0][0] * x
+    });
+    constraint!(model, receiver, f64::from(u32::try_from(weights[0].len()).unwrap()) * x <= 1.0);
+    assert_eq!(cells[0][0], 4.0);
+}
+
+#[test]
+fn chained_indexing_never_clones_an_intermediate_row() {
+    #[derive(Debug)]
+    struct Row(Vec<f64>);
+    impl Clone for Row {
+        fn clone(&self) -> Self {
+            panic!("row must not be cloned")
+        }
+    }
+    impl std::ops::Index<usize> for Row {
+        type Output = f64;
+        fn index(&self, i: usize) -> &f64 {
+            &self.0[i]
+        }
+    }
+
+    let model = Model::new("nested lookups");
+    variable!(model, x);
+    let data = [Row(vec![1.0, 2.0]), Row(vec![3.0, 4.0])];
+    let expression = sum!(model,data[i][j]*x for i in 0..2,j in 0..2);
+    assert_eq!(
+        oximo_expr::extract_linear(&model.arena(), expression.id()).unwrap().coeffs.as_ref(),
+        [(x.var_id().unwrap(), 10.0)]
+    );
+
+    objective!(model, Min, data[0][1] * x);
+    constraint!(model, lookups, data[1][0] * x <= 5.0);
+}
+
+#[test]
+fn copy_coefficients_do_not_invoke_user_defined_clone() {
+    #[derive(Copy)]
+    struct Coefficient(f64);
+    #[expect(
+        clippy::expl_impl_clone_on_copy,
+        clippy::non_canonical_clone_impl,
+        reason = "panicking Clone detects accidental cloning of Copy operands"
+    )]
+    impl Clone for Coefficient {
+        fn clone(&self) -> Self {
+            panic!("ordinary Copy operands must not call Clone")
+        }
+    }
+    impl<'a> std::ops::Mul<VariableHandle<'a>> for Coefficient {
+        type Output = Expr<'a, Affine>;
+        fn mul(self, rhs: VariableHandle<'a>) -> Self::Output {
+            self.0 * rhs
+        }
+    }
+    let model = Model::new("copy semantics");
+    variable!(model, x);
+    let weights = [Coefficient(1.0), Coefficient(2.0)];
+    let expression = sum!(model,weights[i]*x for i in 0..2);
+    assert_eq!(
+        oximo_expr::extract_linear(&model.arena(), expression.id()).unwrap().coeffs.as_ref(),
+        [(x.var_id().unwrap(), 3.0)]
+    );
+}
+
+#[test]
 fn scalar_variables_bounds_and_objective() {
     let m = Model::new("scalar");
     variable!(m, x >= 0.0);
@@ -96,12 +187,12 @@ fn anchored_sum_uses_zero_for_empty_domain_and_filter() {
     let arena = m.arena();
 
     assert!(
-        matches!(arena.get(empty_domain.id), oximo_core::ExprNode::Const(value) if *value == 0.0)
+        matches!(arena.get(empty_domain.id()), oximo_core::ExprNode::Const(value) if *value == 0.0)
     );
     assert!(
-        matches!(arena.get(empty_filter.id), oximo_core::ExprNode::Const(value) if *value == 0.0)
+        matches!(arena.get(empty_filter.id()), oximo_core::ExprNode::Const(value) if *value == 0.0)
     );
-    let terms = oximo_expr::extract_linear(&arena, nonempty.id).expect("linear");
+    let terms = oximo_expr::extract_linear(&arena, nonempty.id()).expect("linear");
     assert_eq!(terms.coeffs.len(), 3);
 }
 
@@ -763,7 +854,7 @@ fn soc_macro_accepts_explicitly_narrowed_dynamic_terms() {
     let m = Model::new("soc_bad");
     variable!(m, x);
     variable!(m, t >= 0.0);
-    soc_constraint!(m, cone, [x.erase().try_affine().unwrap()] <= t);
+    soc_constraint!(m, cone, [x.as_dynamic().as_affine().unwrap()] <= t);
     assert_eq!(m.num_soc_constraints(), 1);
 }
 
@@ -776,14 +867,14 @@ fn extrema_macros_flatten_indices_filters_and_keep_order() {
     let hi = max!(x[i] for i in 0..6 if i % 2 == 1);
     let arena = m.arena();
     assert!(matches!(
-        arena.get(lo.id),
+        arena.get(lo.id()),
         oximo_core::ExprNode::Min(children)
-            if children.as_slice() == [x[0].id, x[1].id, x[2].id, x[3].id]
+            if children.as_slice() == [x[0].id(), x[1].id(), x[2].id(), x[3].id()]
     ));
     assert!(matches!(
-        arena.get(hi.id),
+        arena.get(hi.id()),
         oximo_core::ExprNode::Max(children)
-            if children.as_slice() == [x[1].id, x[3].id, x[5].id]
+            if children.as_slice() == [x[1].id(), x[3].id(), x[5].id()]
     ));
 }
 
@@ -795,8 +886,12 @@ fn extrema_macros_accept_typed_sets() {
     let lo = min!(x[&p] for p: String in plants);
     let hi = max!(x[&p] for p: String in plants if p != "b");
     let arena = m.arena();
-    assert!(matches!(arena.get(lo.id), oximo_core::ExprNode::Min(children) if children.len() == 3));
-    assert!(matches!(arena.get(hi.id), oximo_core::ExprNode::Max(children) if children.len() == 2));
+    assert!(
+        matches!(arena.get(lo.id()), oximo_core::ExprNode::Min(children) if children.len() == 3)
+    );
+    assert!(
+        matches!(arena.get(hi.id()), oximo_core::ExprNode::Max(children) if children.len() == 2)
+    );
 }
 
 #[test]
@@ -810,8 +905,8 @@ fn extrema_macros_skip_empty_inner_domains() {
     let hi = max!(x[i] for i in 0..2, j in 0..i);
 
     assert_eq!(evaluated, 1);
-    assert_eq!(lo.id, x[1].id);
-    assert_eq!(hi.id, x[1].id);
+    assert_eq!(lo.id(), x[1].id());
+    assert_eq!(hi.id(), x[1].id());
     assert_eq!(m.arena().len(), before);
 }
 
@@ -826,14 +921,14 @@ fn extrema_macros_skip_multiple_empty_inner_branches_in_order() {
     let arena = m.arena();
     assert_eq!(arena.len(), before + 2);
     assert!(matches!(
-        arena.get(lo.id),
+        arena.get(lo.id()),
         oximo_core::ExprNode::Min(children)
-            if children.as_slice() == [x[1].id, x[3].id, x[5].id]
+            if children.as_slice() == [x[1].id(), x[3].id(), x[5].id()]
     ));
     assert!(matches!(
-        arena.get(hi.id),
+        arena.get(hi.id()),
         oximo_core::ExprNode::Max(children)
-            if children.as_slice() == [x[1].id, x[3].id, x[5].id]
+            if children.as_slice() == [x[1].id(), x[3].id(), x[5].id()]
     ));
 }
 
@@ -846,14 +941,14 @@ fn filtered_extrema_macros_skip_empty_inner_domains_in_order() {
     let hi = max!(x[2 * i + j] for i in 0..4, j in 0..i if j % 2 == 0);
     let arena = m.arena();
     assert!(matches!(
-        arena.get(lo.id),
+        arena.get(lo.id()),
         oximo_core::ExprNode::Min(children)
-            if children.as_slice() == [x[2].id, x[4].id, x[6].id, x[8].id]
+            if children.as_slice() == [x[2].id(), x[4].id(), x[6].id(), x[8].id()]
     ));
     assert!(matches!(
-        arena.get(hi.id),
+        arena.get(hi.id()),
         oximo_core::ExprNode::Max(children)
-            if children.as_slice() == [x[2].id, x[4].id, x[6].id, x[8].id]
+            if children.as_slice() == [x[2].id(), x[4].id(), x[6].id(), x[8].id()]
     ));
 }
 
@@ -899,8 +994,12 @@ fn extrema_body_return_is_local_and_evaluates_each_surviving_term() {
     let hi = max!({ evaluated += 1; return x[i]; } for i in 0..3 if i != 1);
     assert_eq!(evaluated, 5);
     let arena = m.arena();
-    assert!(matches!(arena.get(lo.id), oximo_core::ExprNode::Min(children) if children.len() == 3));
-    assert!(matches!(arena.get(hi.id), oximo_core::ExprNode::Max(children) if children.len() == 2));
+    assert!(
+        matches!(arena.get(lo.id()), oximo_core::ExprNode::Min(children) if children.len() == 3)
+    );
+    assert!(
+        matches!(arena.get(hi.id()), oximo_core::ExprNode::Max(children) if children.len() == 2)
+    );
 }
 
 #[test]
@@ -909,16 +1008,16 @@ fn extrema_domains_and_filters_propagate_errors_without_committing_nodes() {
         if fail_filter {
             let allowed = |i| if i == 1 { Err("filter") } else { Ok(true) };
             if is_min {
-                let _ = min!(x for i in 0..3 if allowed(i)?);
+                let _ = min!(&x for i in 0..3 if allowed(i)?);
             } else {
-                let _ = max!(x for i in 0..3 if allowed(i)?);
+                let _ = max!(&x for i in 0..3 if allowed(i)?);
             }
         } else {
             let domain = Err::<std::ops::Range<usize>, _>("domain");
             if is_min {
-                let _ = min!(x for i in domain?);
+                let _ = min!(&x for i in domain?);
             } else {
-                let _ = max!(x for i in domain?);
+                let _ = max!(&x for i in domain?);
             }
         }
         Ok(())
@@ -928,8 +1027,8 @@ fn extrema_domains_and_filters_propagate_errors_without_committing_nodes() {
     variable!(model, x);
     let before = model.arena().len();
     for is_min in [true, false] {
-        assert_eq!(build(x, is_min, false), Err("domain"));
-        assert_eq!(build(x, is_min, true), Err("filter"));
+        assert_eq!(build(x.into(), is_min, false), Err("domain"));
+        assert_eq!(build(x.into(), is_min, true), Err("filter"));
         assert_eq!(model.arena().len(), before);
     }
 }
@@ -938,18 +1037,18 @@ fn extrema_domains_and_filters_propagate_errors_without_committing_nodes() {
 fn extrema_domain_and_filter_returns_target_the_caller() {
     fn domain_return(x: Expr<'_, Affine>, is_min: bool, leave: bool) -> bool {
         let _ = if is_min {
-            min!(x for i: usize in { if leave { return true; } 0..2 })
+            min!(&x for i: usize in { if leave { return true; } 0..2 })
         } else {
-            max!(x for i: usize in { if leave { return true; } 0..2 })
+            max!(&x for i: usize in { if leave { return true; } 0..2 })
         };
         false
     }
 
     fn filter_return(x: Expr<'_, Affine>, is_min: bool) -> bool {
         let _ = if is_min {
-            min!(x for i in 0..2 if { if i == 1 { return true; } true })
+            min!(&x for i in 0..2 if { if i == 1 { return true; } true })
         } else {
-            max!(x for i in 0..2 if { if i == 1 { return true; } true })
+            max!(&x for i in 0..2 if { if i == 1 { return true; } true })
         };
         false
     }
@@ -957,9 +1056,9 @@ fn extrema_domain_and_filter_returns_target_the_caller() {
     let model = Model::new("extrema_return");
     variable!(model, x);
     for is_min in [true, false] {
-        assert!(domain_return(x, is_min, true));
-        assert!(!domain_return(x, is_min, false));
-        assert!(filter_return(x, is_min));
+        assert!(domain_return(x.into(), is_min, true));
+        assert!(!domain_return(x.into(), is_min, false));
+        assert!(filter_return(x.into(), is_min));
     }
 }
 
@@ -973,8 +1072,8 @@ fn extrema_macros_do_not_capture_caller_accumulator_bindings() {
     let lo = min!(__terms for i in 0..2 if i == 1);
     let hi = max!(__emit for i in 0..1);
 
-    assert_eq!(lo.id, x.id);
-    assert_eq!(hi.id, x.id);
+    assert_eq!(lo.id(), x.id());
+    assert_eq!(hi.id(), x.id());
 }
 
 #[test]
@@ -1001,4 +1100,22 @@ fn max_macro_empty_filter_has_specific_diagnostic() {
     let m = Model::new("empty_max_filter");
     variable!(m, x);
     let _ = max!(x for i in 0..3 if i > 10);
+}
+#[test]
+fn fresh_objective_inputs_need_no_clone() {
+    use oximo_core::objective::IntoObjectiveExpression;
+
+    struct MoveOnly<'a>(Expr<'a, Affine>);
+    impl<'a> IntoObjectiveExpression<'a> for MoveOnly<'a> {
+        type Degree = Affine;
+        fn into_objective_expression(self, _: &'a oximo_expr::ExprArenaCell) -> Expr<'a, Affine> {
+            self.0
+        }
+    }
+
+    let model = Model::new("move objective input");
+    let x = model.__var("x").build();
+    let id = x.id();
+    objective!(model, Min, MoveOnly(x.into()));
+    assert_eq!(model.objective().as_ref().unwrap().expr, id);
 }

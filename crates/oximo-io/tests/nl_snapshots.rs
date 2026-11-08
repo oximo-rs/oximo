@@ -114,8 +114,7 @@ fn nl_nlp_rosenbrock() {
     assert!(s.contains(" 0 2 0\t# nonlinear vars in constraints, objectives, both\n"));
     // No J segments.
     assert!(!s.contains("\nJ"));
-    // G has 2 entries with coef 0 (both vars nonlinear in obj).
-    assert!(s.contains("\nG0 2\n0 0\n1 0\n"));
+    assert!(s.contains("\nG0 2\n0 0\n1 0\n"), "nl body:\n{s}");
     // Objective body starts with O0 0 followed by an expression.
     assert!(s.contains("O0 0\n"));
 }
@@ -189,4 +188,152 @@ fn nl_nonlinear_integer_order() {
     // The b segment is emitted in NL variable order. y (bounds [0,5]) before
     // x (free) proves the interleaved ordering: NlBothI precedes NlOnlyC.
     assert!(s.contains("\nb\n0 0 5\n3\n"), "y must precede x in var order:\n{s}");
+}
+
+#[test]
+fn shifted_square_nonlinear_values_survive_nl_roundtrips() {
+    use oximo_expr::evaluate;
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+
+    let model = Model::new("shifted square NL roundtrip");
+    variable!(model, x);
+    let shift = 100_000_000.0_f64;
+    objective!(model, Min, (x - shift).square().ln());
+
+    for options in [WriteOptions::default(), WriteOptions::binary()] {
+        let mut bytes = Vec::new();
+        write_nl_with(&model, &mut bytes, &options).unwrap();
+        let imported = read_nl(bytes.as_slice()).unwrap();
+        for point in [shift - 1.0, shift + 1.0, shift + 2.0] {
+            let expected = ((point - shift) * (point - shift)).ln();
+            let actual = evaluate(
+                &imported.arena(),
+                imported.objective().as_ref().unwrap().expr,
+                &&[point][..],
+            )
+            .unwrap();
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
+}
+
+#[test]
+fn compact_quadratics_preserve_affine_parts_and_objective_offsets_in_nl() {
+    use oximo_expr::evaluate;
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+
+    let model = Model::new("compact NL roundtrip");
+    variable!(model, x);
+    variable!(model, y);
+    let mut builder = model.quadratic_builder();
+    builder.add_product(2.0, x, x).unwrap();
+    builder.add_product(3.0, x, y).unwrap();
+    builder.add_term(4.0, x).unwrap();
+    builder.add_constant(5.0).unwrap();
+    let q = builder.build();
+    objective!(model, Min, &q);
+    constraint!(model, row, q <= 20.0);
+
+    for options in [WriteOptions::default(), WriteOptions::binary()] {
+        let mut bytes = Vec::new();
+        write_nl_with(&model, &mut bytes, &options).unwrap();
+        let imported = read_nl(bytes.as_slice()).unwrap();
+        for values in [[1.0, 2.0], [-2.0, 3.0], [0.0, 0.0]] {
+            let expected =
+                2.0 * values[0] * values[0] + 3.0 * values[0] * values[1] + 4.0 * values[0] + 5.0;
+            let actual = evaluate(
+                &imported.arena(),
+                imported.objective().as_ref().unwrap().expr,
+                &&values[..],
+            )
+            .unwrap();
+            assert!((actual - expected).abs() < 1e-12);
+            let rows = imported.constraints();
+            let row = &rows.algebraic()[0];
+            let value = evaluate(&imported.arena(), row.lhs, &&values[..]).unwrap();
+            assert_eq!(value <= row.upper, expected <= 20.0);
+        }
+    }
+}
+
+#[test]
+fn compact_quadratic_residuals_roundtrip_in_additions_negations_and_functions() {
+    use oximo_expr::evaluate;
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+
+    let model = Model::new("nested compact NL roundtrip");
+    variable!(model, x);
+    variable!(model, y);
+    let mut builder = model.quadratic_builder();
+    builder.add_product(2.0, x, y).unwrap();
+    builder.add_term(3.0, y).unwrap();
+    builder.add_constant(4.0).unwrap();
+    let quadratic = builder.build();
+
+    for expression in [&quadratic + x.sin(), -(&quadratic + x.sin()), quadratic.sin()] {
+        let root = expression.id();
+        model.__minimize(expression);
+        for options in [WriteOptions::default(), WriteOptions::binary()] {
+            let mut bytes = Vec::new();
+            write_nl_with(&model, &mut bytes, &options).unwrap();
+            let imported = read_nl(bytes.as_slice()).unwrap();
+            for values in [[0.0, 0.0], [1.0, 2.0], [-2.0, 3.0]] {
+                let expected = evaluate(&model.arena(), root, &&values[..]).unwrap();
+                let actual = evaluate(
+                    &imported.arena(),
+                    imported.objective().as_ref().unwrap().expr,
+                    &&values[..],
+                )
+                .unwrap();
+                assert!((actual - expected).abs() < 1e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn polynomial_affine_cancellation_preserves_nl_objective_offsets_and_row_bounds() {
+    use oximo_expr::{Dynamic, Expr, ExprNode, QuadraticTerms, evaluate};
+    use oximo_io::{WriteOptions, read_nl, write_nl_with};
+    use std::sync::Arc;
+
+    let model = Model::new("compensated polynomial NL split");
+    variable!(model, x);
+    let variable = x.var_id().unwrap();
+    let root = {
+        let mut arena = x.arena().borrow_mut();
+        let children = [1e16, 1.0, -1e16]
+            .into_iter()
+            .map(|value| {
+                arena.push(ExprNode::Quadratic(Arc::new(
+                    QuadraticTerms::from_coefficients(
+                        vec![(variable, variable, 1.0)],
+                        vec![(variable, value)],
+                        value,
+                    )
+                    .unwrap(),
+                )))
+            })
+            .collect();
+        arena.push(ExprNode::Add(children))
+    };
+    let expression = Expr::<Dynamic>::new(root, x.arena());
+    objective!(model, Min, &expression);
+    constraint!(model, row, expression <= 5.0);
+
+    for options in [WriteOptions::default(), WriteOptions::binary()] {
+        let mut bytes = Vec::new();
+        write_nl_with(&model, &mut bytes, &options).unwrap();
+        let imported = read_nl(bytes.as_slice()).unwrap();
+        assert_eq!(imported.constraints().algebraic()[0].upper, 4.0);
+        for value in [0.0, 1.0, -1.0] {
+            let actual = evaluate(
+                &imported.arena(),
+                imported.objective().as_ref().unwrap().expr,
+                &&[value][..],
+            )
+            .unwrap();
+            assert_eq!(actual, 3.0 * value * value + value + 1.0);
+        }
+    }
 }
