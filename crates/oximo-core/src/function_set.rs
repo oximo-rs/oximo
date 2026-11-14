@@ -218,7 +218,8 @@ scalar_function!(
     /// Its degree is checked only when needed. Scalar inequalities and
     /// equalities accept every degree, so registering them needs no graph walk.
     /// Use [`IntoFunction::into_function`] on its expression for a checked class.
-    ScalarDynamicFunction, Dynamic
+    ScalarDynamicFunction,
+    Dynamic
 );
 
 impl<'a> From<Expr<'a, Constant>> for ScalarAffineFunction<'a> {

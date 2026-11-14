@@ -9,5 +9,7 @@ error[E0271]: type mismatch resolving `<[GeneratedVarId; 1] as IntoIterator>::It
 note: required by a bound in `SourceProjection::<'a>::with_source_variables`
   --> src/reconstruct.rs
    |
+   | impl<'a> SourceProjection<'a> {
+...
    |     pub fn with_source_variables(mut self, variables: impl IntoIterator<Item = VarId>) -> Self {
    |                                                                         ^^^^^^^^^^^^ required by this bound in `SourceProjection::<'a>::with_source_variables`

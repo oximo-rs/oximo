@@ -223,7 +223,8 @@ constraint_family!(
     ///
     /// Each key maps to one interval ID or separate lower/upper IDs. Entries can
     /// have different lowering forms within the same family.
-    IndexedRangeConstraint, RangeConstraintHandles
+    IndexedRangeConstraint,
+    RangeConstraintHandles
 );
 
 /// Backing storage for an [`IndexedFamily`].
