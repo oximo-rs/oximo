@@ -410,7 +410,7 @@ mod tests {
         let arena = ExprArenaCell::new(ExprArena::new());
         let mut builder = QuadraticBuilder::new(&arena);
         for i in 0..4096 {
-            builder.add_monomial(1.0, VarId(i), VarId(i)).unwrap();
+            builder.add_monomial_raw(1.0, VarId(i), VarId(i)).unwrap();
         }
 
         let expression = builder.build();

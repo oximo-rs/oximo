@@ -10,7 +10,8 @@ use crate::degree::{
 pub struct Expr<'a, D: Degree = Dynamic> {
     pub(crate) id: ExprId,
     pub(crate) arena: &'a ExprArenaCell,
-    model_id: ModelId,
+    variable_id: VarId,
+    has_variable_id: bool,
     pub(crate) owned: bool,
     publication: D::Publication,
     degree: std::marker::PhantomData<D>,
@@ -35,7 +36,8 @@ impl<D: Degree> Clone for Expr<'_, D> {
         Self {
             id: self.id,
             arena: self.arena,
-            model_id: self.model_id,
+            variable_id: self.variable_id,
+            has_variable_id: self.has_variable_id,
             owned: false,
             publication: D::Publication::new(true),
             degree: std::marker::PhantomData,
@@ -44,7 +46,7 @@ impl<D: Degree> Clone for Expr<'_, D> {
 }
 impl<D: Degree> std::fmt::Debug for Expr<'_, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Expr").field("id", &self.id).field("model_id", &self.model_id).finish()
+        f.debug_struct("Expr").field("id", &self.id).field("model_id", &self.model_id()).finish()
     }
 }
 
@@ -69,13 +71,32 @@ impl<'a> Expr<'a> {
 
     #[inline]
     pub fn from_var(arena: &'a ExprArenaCell, var: VarId) -> VariableHandle<'a> {
-        Expr::from_id(arena.with_mut(|a| a.var(var)), arena)
+        Expr::from_variable_node(arena.with_mut(|a| a.var(var)), var, arena)
     }
 
     /// Make a symbolic, variable-independent parameter handle.
     #[inline]
     pub fn from_param(arena: &'a ExprArenaCell, param: ParamId) -> ParameterHandle<'a> {
         Expr::from_id(arena.with_mut(|a| a.push(ExprNode::Param(param))), arena)
+    }
+}
+impl<'a> Expr<'a, VariableDegree> {
+    /// Construct a leaf while its node and variable identity are already known.
+    pub(crate) fn from_variable_node(
+        id: ExprId,
+        variable: VarId,
+        arena: &'a ExprArenaCell,
+    ) -> Self {
+        let mut result = Self::from_id(id, arena);
+        result.variable_id = variable;
+        result.has_variable_id = true;
+        result
+    }
+
+    #[inline]
+    pub(crate) fn known_var_id(&self) -> VarId {
+        debug_assert!(self.has_variable_id, "variable handles must cache their identity");
+        self.variable_id
     }
 }
 impl<'a, D: Degree> Expr<'a, D> {
@@ -92,7 +113,8 @@ impl<'a, D: Degree> Expr<'a, D> {
         Self {
             id,
             arena,
-            model_id: arena.model_id(),
+            variable_id: VarId(0),
+            has_variable_id: false,
             owned: false,
             publication: D::Publication::new(true),
             degree: std::marker::PhantomData,
@@ -117,9 +139,15 @@ impl<'a, D: Degree> Expr<'a, D> {
     }
 
     pub(crate) fn into_degree<E: Degree>(self) -> Expr<'a, E> {
-        let mut result = Expr::from_construction(self.id, self.owned, self.arena);
-        result.publication = E::Publication::new(self.publication.is_published());
-        result
+        Expr {
+            id: self.id,
+            arena: self.arena,
+            variable_id: self.variable_id,
+            has_variable_id: self.has_variable_id,
+            owned: self.owned,
+            publication: E::Publication::new(self.publication.is_published()),
+            degree: std::marker::PhantomData,
+        }
     }
 
     /// Consume the handle without publishing an alias or losing unique ownership.
@@ -191,11 +219,10 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// Sharing permanently seals an owned quadratic. Use [`Self::into_classified`]
     /// when consuming a handle.
     pub fn as_classified(&self) -> ClassifiedExpr<'a> {
-        self.seal();
         match self.__class() {
-            ExprClass::Linear => ClassifiedExpr::Affine(Expr::from_id(self.id, self.arena)),
-            ExprClass::Quadratic => ClassifiedExpr::Quadratic(Expr::from_id(self.id, self.arena)),
-            ExprClass::Nonlinear => ClassifiedExpr::Nonlinear(Expr::from_id(self.id, self.arena)),
+            ExprClass::Linear => ClassifiedExpr::Affine(self.clone().into_degree()),
+            ExprClass::Quadratic => ClassifiedExpr::Quadratic(self.clone().into_degree()),
+            ExprClass::Nonlinear => ClassifiedExpr::Nonlinear(self.clone().into_degree()),
         }
     }
 
@@ -203,14 +230,12 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// Borrowed dynamic view that seals unique roots.
     /// Use [`Self::into_dynamic`] when consuming a handle.
     pub fn as_dynamic(&self) -> Expr<'a> {
-        self.seal();
-        Expr::from_id(self.id, self.arena)
+        self.clone().into_degree()
     }
 
     /// Borrowed nonlinear view. Use [`Self::into_nonlinear`] to consume a handle.
     pub fn as_nonlinear(&self) -> Expr<'a, Nonlinear> {
-        self.seal();
-        Expr::from_id(self.id, self.arena)
+        self.clone().into_degree()
     }
 
     /// Read the current node identity without publishing or sealing it.
@@ -255,6 +280,9 @@ impl<'a, D: Degree> Expr<'a, D> {
     where
         D: crate::degree::AddDegree<Affine, Output = Affine>,
     {
+        if self.has_variable_id {
+            return self.clone().into_degree();
+        }
         self.seal();
         if self.arena.with_ref(|arena| {
             matches!(
@@ -262,7 +290,7 @@ impl<'a, D: Degree> Expr<'a, D> {
                 ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Linear { .. }
             )
         }) {
-            return Expr::from_id(self.id, self.arena);
+            return self.clone().into_degree();
         }
         let mut builder = crate::AffineBuilder::new(self.arena);
         builder.add_term(1.0, self);
@@ -315,12 +343,7 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// Returns the actual expression class if it is not affine.
     pub fn as_affine(&self) -> Result<Expr<'a, Affine>, ExprClass> {
         let class = self.__class();
-        if class == ExprClass::Linear {
-            self.seal();
-            Ok(Expr::from_id(self.id, self.arena))
-        } else {
-            Err(class)
-        }
+        if class == ExprClass::Linear { Ok(self.clone().into_degree()) } else { Err(class) }
     }
 
     /// Borrow a checked view of polynomial degree at most two, sealing unique
@@ -330,19 +353,14 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// Returns the actual expression class for a nonlinear expression.
     pub fn as_quadratic(&self) -> Result<Expr<'a, Quadratic>, ExprClass> {
         let class = self.__class();
-        if class <= ExprClass::Quadratic {
-            self.seal();
-            Ok(Expr::from_id(self.id, self.arena))
-        } else {
-            Err(class)
-        }
+        if class <= ExprClass::Quadratic { Ok(self.clone().into_degree()) } else { Err(class) }
     }
 
     /// Identity of the model/expression arena that created this handle.
     #[inline]
     #[must_use]
     pub fn model_id(&self) -> ModelId {
-        self.model_id
+        self.arena.model_id()
     }
 
     #[inline]
@@ -353,10 +371,18 @@ impl<'a, D: Degree> Expr<'a, D> {
     /// If this handle is a bare variable, return its [`VarId`].
     /// `None` for compound expressions (sums, products, constants, ...).
     pub fn var_id(&self) -> Option<VarId> {
+        if let Some(variable) = self.cached_var_id() {
+            return Some(variable);
+        }
         self.arena.with_ref(|arena| match arena.get(self.id) {
             ExprNode::Var(id) => Some(*id),
             _ => None,
         })
+    }
+
+    #[inline]
+    pub(crate) fn cached_var_id(&self) -> Option<VarId> {
+        self.has_variable_id.then_some(self.variable_id)
     }
 
     /// If this handle is a bare parameter, return its [`ParamId`].
@@ -585,6 +611,9 @@ impl<'a, D: Degree> Expr<'a, D> {
 
     #[doc(hidden)]
     pub fn __class(&self) -> ExprClass {
+        if self.has_variable_id {
+            return ExprClass::Linear;
+        }
         self.arena.with_ref(|arena| classify_access(arena, self.id))
     }
 }
@@ -771,6 +800,79 @@ mod tests {
         let result = expression + x;
         assert_ne!(result.id(), root);
         assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 9.0);
+    }
+
+    #[test]
+    fn variable_identity_survives_cloning_and_degree_conversions_without_arena_reads() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let _ = Expr::constant(&arena, 2.0);
+        let variable = Expr::from_var(&arena, VarId(42));
+        assert_ne!(variable.id.0, 42, "expression and variable IDs must be distinguished");
+
+        arena.reset_access_count();
+        let dynamic = variable.into_dynamic();
+        let views = [
+            dynamic.clone(),
+            variable.compact().into_dynamic(),
+            dynamic.as_affine().unwrap().compact().into_dynamic(),
+            variable.as_dynamic(),
+            variable.as_nonlinear().into_dynamic(),
+            variable.into_nonlinear().into_dynamic(),
+            variable.as_affine().unwrap().into_dynamic(),
+            variable.as_quadratic().unwrap().into_dynamic(),
+            variable.into_affine().unwrap().into_dynamic(),
+            variable.into_quadratic().unwrap().into_dynamic(),
+            dynamic.clone().into_affine().unwrap().into_dynamic(),
+            dynamic.clone().into_quadratic().unwrap().into_dynamic(),
+        ];
+
+        let ClassifiedExpr::Affine(classified) = variable.as_classified() else {
+            panic!("variable must be affine");
+        };
+
+        let ClassifiedExpr::Affine(consumed) = dynamic.clone().into_classified() else {
+            panic!("variable must be affine");
+        };
+
+        for view in
+            views.iter().chain([&dynamic, &classified.into_dynamic(), &consumed.into_dynamic()])
+        {
+            assert_eq!(view.__class(), ExprClass::Linear);
+            assert_eq!(view.var_id(), Some(VarId(42)));
+            assert_eq!(view.model_id(), arena.model_id());
+        }
+        assert_eq!(arena.access_count(), 0);
+    }
+
+    #[test]
+    fn scalar_and_bulk_guard_constructors_cache_the_actual_variable_ids() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let (scalar, family) = {
+            let mut guard = arena.borrow_mut();
+            guard.constant(1.0);
+            let scalar = guard.var_expr(VarId(9));
+            let family: Vec<_> = guard.__extend_vars(20..23).collect();
+            (scalar, family)
+        };
+        arena.reset_access_count();
+        assert_eq!(scalar.var_id(), Some(VarId(9)));
+
+        for (offset, variable) in family.iter().enumerate() {
+            assert_eq!(variable.var_id(), Some(VarId(u32::try_from(20 + offset).unwrap())));
+        }
+        assert_eq!(arena.access_count(), 0);
+    }
+
+    #[test]
+    fn computed_handles_do_not_inherit_a_variables_cached_identity() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let variable = Expr::from_var(&arena, VarId(42));
+        assert_eq!((variable + 1.0).var_id(), None);
+        assert_eq!(variable.square().var_id(), None);
+
+        let raw = Expr::new(variable.id(), &arena);
+        assert_eq!(raw.cached_var_id(), None);
+        assert_eq!(raw.var_id(), Some(VarId(42)));
     }
 
     #[test]

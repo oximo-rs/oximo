@@ -1,6 +1,6 @@
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
-use crate::arena::{ExprArena, ExprId, ExprNode, UnaryOp, VarId};
+use crate::arena::{ArenaAccess, ExprArena, ExprId, ExprNode, UnaryOp, VarId};
 
 /// Canonical polynomial coefficients of a degree-at-most-two expression.
 ///
@@ -421,8 +421,8 @@ fn recursive_poly(arena: &ExprArena, id: ExprId) -> Option<Poly> {
     }
 }
 
-struct PolyFolder<'a> {
-    arena: &'a ExprArena,
+struct PolyFolder<'a, A: ArenaAccess + ?Sized> {
+    arena: &'a A,
     root: ExprId,
     flatten_sums: &'a std::cell::Cell<Option<bool>>,
     sum_magnitude: &'a std::cell::Cell<f64>,
@@ -438,14 +438,14 @@ struct Monomial {
 
 const MONOMIAL_VISITS: usize = 64;
 
-fn monomial(arena: &ExprArena, id: ExprId) -> Option<Monomial> {
+fn monomial(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Option<Monomial> {
     let mut remaining = MONOMIAL_VISITS;
     monomial_with_budget(arena, id, 0, &mut remaining)
 }
 
 #[expect(clippy::float_cmp, reason = "only exact squares and zero constant terms qualify")]
 fn monomial_with_budget(
-    arena: &ExprArena,
+    arena: &(impl ArenaAccess + ?Sized),
     id: ExprId,
     depth: usize,
     remaining: &mut usize,
@@ -457,7 +457,7 @@ fn monomial_with_budget(
     // Depth alone cannot bound repeated visits to shared, wide products.
     *remaining = remaining.checked_sub(1)?;
     let constant = |coefficient| Monomial { variables: [VarId(0); 2], degree: 0, coefficient };
-    let term = match arena.node(id) {
+    let term = match arena.get(id) {
         ExprNode::Const(c) => constant(*c),
         ExprNode::Param(p) => constant(arena.param_value(*p)),
         ExprNode::Var(v) => Monomial { variables: [*v, *v], degree: 1, coefficient: 1.0 },
@@ -496,7 +496,7 @@ fn monomial_with_budget(
 
             acc
         }
-        ExprNode::Pow(base, exponent) if matches!(arena.node(*exponent), ExprNode::Const(e) if *e == 2.0) =>
+        ExprNode::Pow(base, exponent) if matches!(arena.get(*exponent), ExprNode::Const(e) if *e == 2.0) =>
         {
             let mut term = monomial_with_budget(arena, *base, depth + 1, remaining)?;
             if term.degree > 1 {
@@ -514,10 +514,10 @@ fn monomial_with_budget(
     term.coefficient.is_finite().then_some(term)
 }
 
-fn flat_monomials(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
+fn flat_monomials(arena: &(impl ArenaAccess + ?Sized), children: &[ExprId]) -> Option<Poly> {
     if !children.first().into_iter().chain(children.last()).any(|&id| {
         matches!(
-            arena.node(id),
+            arena.get(id),
             ExprNode::Mul(_) | ExprNode::Pow(_, _) | ExprNode::Unary(UnaryOp::Neg, _)
         )
     }) {
@@ -539,8 +539,8 @@ fn flat_monomials(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
 }
 
 #[inline(never)]
-fn flat_poly(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
-    let terminal = |id| match arena.node(id) {
+fn flat_poly(arena: &(impl ArenaAccess + ?Sized), children: &[ExprId]) -> Option<Poly> {
+    let terminal = |id| match arena.get(id) {
         ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) => true,
         ExprNode::Linear { coeffs, .. } => coeffs.len() <= 1,
         _ => false,
@@ -552,7 +552,7 @@ fn flat_poly(arena: &ExprArena, children: &[ExprId]) -> Option<Poly> {
     }
     let mut acc = Poly::default();
     for &child in children {
-        match arena.node(child) {
+        match arena.get(child) {
             ExprNode::Var(var) => {
                 *acc.linear.entry(*var).or_insert(0.0) += 1.0;
                 acc.constant += 0.0;
@@ -586,13 +586,13 @@ struct PolyState<'a> {
     op: PolyOp,
 }
 
-impl<'a> crate::fold::Folder for PolyFolder<'a> {
+impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for PolyFolder<'a, A> {
     type Value = Poly;
     type State = PolyState<'a>;
 
     fn start(&self, id: ExprId) -> std::ops::ControlFlow<Option<Poly>, Self::State> {
         use std::ops::ControlFlow::{Break, Continue};
-        let (rest, op, value) = match self.arena.node(id) {
+        let (rest, op, value) = match self.arena.get(id) {
             ExprNode::Const(c) => return Break(Some(Poly::constant(*c))),
             ExprNode::Param(p) => return Break(Some(Poly::constant(self.arena.param_value(*p)))),
             ExprNode::Var(v) => return Break(Some(Poly::var(*v))),
@@ -618,7 +618,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
                 (std::slice::from_ref(c), PolyOp::Neg, Poly::default())
             }
             ExprNode::Pow(base, exp) => {
-                let ExprNode::Const(e) = self.arena.node(*exp) else { return Break(None) };
+                let ExprNode::Const(e) = self.arena.get(*exp) else { return Break(None) };
                 if !e.is_finite() || (*e - e.round()).abs() >= f64::EPSILON || *e < 0.0 {
                     return Break(None);
                 }
@@ -656,7 +656,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
             if matches!(state.op, PolyOp::Add) {
                 let acc = state.value.as_mut().expect("checked above");
                 // Avoid creating a one-entry hash table for every variable in a sum.
-                match self.arena.node(child) {
+                match self.arena.get(child) {
                     ExprNode::Var(v) => {
                         acc.constant += 0.0;
                         *acc.linear.entry(*v).or_insert(0.0) += 1.0;
@@ -719,7 +719,7 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
 
     fn inline(&self, state: &mut Self::State, child: ExprId) -> bool {
         if matches!(state.op, PolyOp::Add)
-            && let ExprNode::Add(children) = self.arena.node(child)
+            && let ExprNode::Add(children) = self.arena.get(child)
         {
             let flatten = self.flatten_sums.get().unwrap_or_else(|| {
                 let flatten = !crate::linear::bounded_affine(self.arena, &[self.root], true);
@@ -739,14 +739,14 @@ impl<'a> crate::fold::Folder for PolyFolder<'a> {
     }
 }
 
-fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
+fn as_poly(arena: &(impl ArenaAccess + ?Sized), mut id: ExprId) -> Option<Poly> {
     let mut negations = 0;
-    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.node(id) {
+    while let ExprNode::Unary(UnaryOp::Neg, child) = arena.get(id) {
         id = *child;
         negations += 1;
     }
     if negations == 0
-        && let ExprNode::Add(children) = arena.node(id)
+        && let ExprNode::Add(children) = arena.get(id)
         && let Some(poly) = flat_poly(arena, children)
     {
         return Some(poly);
@@ -800,6 +800,13 @@ fn as_poly(arena: &ExprArena, mut id: ExprId) -> Option<Poly> {
 /// A purely linear (or constant) expression yields no quadratic terms.
 /// Nonfinite extracted coefficients (including arithmetic overflow) return `None`.
 pub fn extract_quadratic(arena: &ExprArena, id: ExprId) -> Option<QuadraticTerms> {
+    extract_quadratic_access(arena, id)
+}
+
+pub(crate) fn extract_quadratic_access(
+    arena: &(impl ArenaAccess + ?Sized),
+    id: ExprId,
+) -> Option<QuadraticTerms> {
     if let ExprNode::Quadratic(q) = arena.get(id) {
         return Some(q.canonical_clone());
     }
@@ -840,21 +847,24 @@ fn canonicalize(poly: Poly) -> QuadraticTerms {
 /// Return `None` when the expression shape, variable IDs, or finite accumulation
 /// requirements do not fit this path, allowing `extract_quadratic` to fall back
 /// to the general polynomial extractor.
-fn dense_expanded_quadratic(arena: &ExprArena, root: ExprId) -> Option<QuadraticTerms> {
+fn dense_expanded_quadratic(
+    arena: &(impl ArenaAccess + ?Sized),
+    root: ExprId,
+) -> Option<QuadraticTerms> {
     const VARIABLES: usize = 64;
     const TRIANGLE: usize = VARIABLES * (VARIABLES + 1) / 2;
     const MIN_TERMS: usize = 128;
 
-    let ExprNode::Add(children) = arena.node(root) else { return None };
+    let ExprNode::Add(children) = arena.get(root) else { return None };
     let (affine, terms) = if children.len() >= MIN_TERMS {
-        if let ExprNode::Linear { coeffs, constant } = arena.node(children[0]) {
+        if let ExprNode::Linear { coeffs, constant } = arena.get(children[0]) {
             (Some((coeffs, *constant)), &children[1..])
         } else {
             (None, children.as_slice())
         }
     } else if let [linear, quadratic] = children.as_slice()
-        && let ExprNode::Linear { coeffs, constant } = arena.node(*linear)
-        && let ExprNode::Add(terms) = arena.node(*quadratic)
+        && let ExprNode::Linear { coeffs, constant } = arena.get(*linear)
+        && let ExprNode::Add(terms) = arena.get(*quadratic)
         && terms.len() >= MIN_TERMS
     {
         (Some((coeffs, *constant)), terms.as_slice())
@@ -1017,16 +1027,16 @@ mod tests {
         let mut arena = ExprArena::new();
         let cell = crate::ExprArenaCell::new(ExprArena::new());
         let mut builder = crate::QuadraticBuilder::new(&cell);
-        builder.add_monomial(1e308, VarId(0), VarId(0)).unwrap();
+        builder.add_monomial_raw(1e308, VarId(0), VarId(0)).unwrap();
         assert_eq!(builder.build_terms().quadratic(), [(VarId(0), VarId(0), 1e308)]);
 
-        builder.add_monomial(1e308, VarId(0), VarId(0)).unwrap();
-        builder.add_monomial(-1e308, VarId(0), VarId(0)).unwrap();
+        builder.add_monomial_raw(1e308, VarId(0), VarId(0)).unwrap();
+        builder.add_monomial_raw(-1e308, VarId(0), VarId(0)).unwrap();
         assert_eq!(builder.build_terms().quadratic(), []);
 
-        builder.add_monomial(f64::MAX, VarId(0), VarId(0)).unwrap();
+        builder.add_monomial_raw(f64::MAX, VarId(0), VarId(0)).unwrap();
         assert_eq!(
-            builder.add_monomial(f64::MAX, VarId(0), VarId(0)).unwrap_err(),
+            builder.add_monomial_raw(f64::MAX, VarId(0), VarId(0)).unwrap_err(),
             crate::QuadraticBuildError::AccumulationOverflow
         );
         assert_eq!(builder.build_terms().quadratic()[0].2, f64::MAX);

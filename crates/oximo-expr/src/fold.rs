@@ -27,6 +27,19 @@ pub(crate) fn finite_inputs(
     root: ExprId,
     resolve_params: bool,
 ) -> bool {
+    validate_numeric_inputs(arena, root, resolve_params).is_ok()
+}
+
+pub(crate) enum NumericInputError {
+    Parameterized,
+    NonFinite,
+}
+
+pub(crate) fn validate_numeric_inputs(
+    arena: &(impl ArenaAccess + ?Sized),
+    root: ExprId,
+    resolve_params: bool,
+) -> Result<(), NumericInputError> {
     let mut seen = FxHashSet::default();
     let mut stack = SmallVec::<[ExprId; 16]>::from_slice(&[root]);
     while let Some(id) = stack.pop() {
@@ -34,15 +47,18 @@ pub(crate) fn finite_inputs(
             continue;
         }
         match arena.get(id) {
-            ExprNode::Const(c) if !c.is_finite() => return false,
+            ExprNode::Const(c) if !c.is_finite() => return Err(NumericInputError::NonFinite),
             ExprNode::Param(p) => {
-                if !resolve_params || !arena.param_value(*p).is_finite() {
-                    return false;
+                if !resolve_params {
+                    return Err(NumericInputError::Parameterized);
+                }
+                if !arena.param_value(*p).is_finite() {
+                    return Err(NumericInputError::NonFinite);
                 }
             }
             ExprNode::Linear { coeffs, constant } => {
                 if !constant.is_finite() || coeffs.iter().any(|(_, c)| !c.is_finite()) {
-                    return false;
+                    return Err(NumericInputError::NonFinite);
                 }
             }
             ExprNode::Quadratic(q) => {
@@ -50,7 +66,7 @@ pub(crate) fn finite_inputs(
                     || q.linear.iter().any(|(_, c)| !c.is_finite())
                     || q.quadratic.iter().any(|(_, _, c)| !c.is_finite())
                 {
-                    return false;
+                    return Err(NumericInputError::NonFinite);
                 }
             }
             ExprNode::Add(c) | ExprNode::Mul(c) | ExprNode::Min(c) | ExprNode::Max(c) => {
@@ -63,7 +79,7 @@ pub(crate) fn finite_inputs(
             ExprNode::Const(_) | ExprNode::Var(_) => {}
         }
     }
-    true
+    Ok(())
 }
 
 pub(crate) trait Folder {

@@ -767,8 +767,8 @@ mod tests {
             let mut builder = crate::QuadraticBuilder::new(&arena);
             let coefficient = if failure == 0 { -0.75 * f64::MAX } else { 1.0 };
             let constant = if failure == 1 { -0.75 * f64::MAX } else { 3.0 };
-            builder.add_monomial(coefficient, VarId(0), VarId(0)).unwrap();
-            builder.add_monomial(1.0, VarId(1), VarId(1)).unwrap();
+            builder.add_monomial_raw(coefficient, VarId(0), VarId(0)).unwrap();
+            builder.add_monomial_raw(1.0, VarId(1), VarId(1)).unwrap();
             builder.add_constant(constant).unwrap();
 
             let right = builder.build();

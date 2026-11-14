@@ -1577,8 +1577,13 @@ impl<'a> ExprArenaWriteGuard<'a> {
         variables: std::ops::Range<usize>,
     ) -> impl ExactSizeIterator<Item = crate::VariableHandle<'a>> + use<'a> {
         let cell = self.cell;
-        self.guard.__extend_vars(variables).map(move |id| {
-            crate::Expr::from_id(ExprId(u32::try_from(id).expect("checked expression count")), cell)
+        let variable_ids = variables.clone();
+        self.guard.__extend_vars(variables).zip(variable_ids).map(move |(id, variable)| {
+            crate::Expr::from_variable_node(
+                ExprId(u32::try_from(id).expect("checked expression count")),
+                VarId(u32::try_from(variable).expect("checked variable count")),
+                cell,
+            )
         })
     }
 
@@ -1602,7 +1607,7 @@ impl<'a> ExprArenaWriteGuard<'a> {
 
     pub fn var_expr(&mut self, var: VarId) -> crate::VariableHandle<'a> {
         let id = self.guard.var(var);
-        crate::Expr::from_id(id, self.cell)
+        crate::Expr::from_variable_node(id, var, self.cell)
     }
 
     pub fn param_expr(&mut self, param: ParamId) -> crate::ParameterHandle<'a> {

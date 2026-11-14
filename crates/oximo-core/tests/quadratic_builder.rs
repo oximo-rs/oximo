@@ -2,6 +2,120 @@ use oximo_core::prelude::*;
 use oximo_expr::{ExprClass, ExprNode, QuadraticBuildError, evaluate, extract_quadratic};
 
 #[test]
+fn checked_quadratic_ingestion_composes_compact_and_factored_inputs() {
+    let model = Model::new("checked polynomial composition");
+    variable!(model, x);
+    variable!(model, y);
+    let compact = x * x + 2.0 * x * y + 3.0 * x + 4.0;
+    let factored = ((x + 1.0) * (y + 2.0)).into_dynamic();
+    let constant = Expr::constant(x.arena(), 2.0);
+    let before = model.arena().len();
+
+    let mut builder = model.quadratic_builder();
+    builder.add_quadratic(2.0, &compact).unwrap();
+    builder.add_quadratic(-3.0, &factored).unwrap();
+    builder.add_quadratic(5.0, x).unwrap();
+    builder.add_quadratic(3.0, constant).unwrap();
+    let terms = builder.build_terms();
+    assert_eq!(model.arena().len(), before);
+
+    let (x, y) = (x.var_id().unwrap(), y.var_id().unwrap());
+    assert_eq!(terms.quadratic(), [(x, x, 2.0), (y, x, 1.0)]);
+    assert_eq!(terms.linear(), [(x, 5.0), (y, -3.0)]);
+    assert_eq!(terms.constant(), 8.0);
+}
+
+#[test]
+fn checked_quadratic_ingestion_rejects_foreign_and_symbolic_inputs_even_at_zero_scale() {
+    let model = Model::new("checked polynomial provenance");
+    let other = Model::new("foreign polynomial");
+    variable!(model, x);
+    variable!(other, foreign);
+    param!(model, p = 2.0);
+    let foreign = foreign * foreign;
+    let symbolic = (p * x * x).into_dynamic();
+    let nonlinear = x.sin();
+    let mut builder = model.quadratic_builder();
+    builder.add_constant(7.0).unwrap();
+
+    for scale in [0.0, 1.0] {
+        assert_eq!(
+            builder.add_quadratic(scale, &foreign).unwrap_err(),
+            QuadraticBuildError::ForeignArena
+        );
+        assert_eq!(
+            builder.add_quadratic(scale, &symbolic).unwrap_err(),
+            QuadraticBuildError::ParameterizedInput
+        );
+        assert_eq!(
+            builder.add_quadratic(scale, p).unwrap_err(),
+            QuadraticBuildError::ParameterizedInput
+        );
+        assert_eq!(
+            builder.add_quadratic(scale, &nonlinear).unwrap_err(),
+            QuadraticBuildError::NotQuadratic
+        );
+    }
+
+    p.set_param_value(0.0).unwrap();
+    assert_eq!(
+        builder.add_quadratic(1.0, &symbolic).unwrap_err(),
+        QuadraticBuildError::ParameterizedInput
+    );
+
+    let terms = builder.build_terms();
+    assert_eq!(terms.linear(), []);
+    assert_eq!(terms.quadratic(), []);
+    assert_eq!(terms.constant(), 7.0);
+}
+
+#[test]
+fn checked_quadratic_ingestion_rejects_numeric_failures_atomically() {
+    let model = Model::new("checked polynomial validation");
+    variable!(model, x);
+    variable!(model, y);
+    let huge = f64::MAX * x * x + y + 1.0;
+    let overflow = (f64::MAX * x).square();
+    let nonfinite = Expr::constant(x.arena(), f64::INFINITY);
+    let mut builder = model.quadratic_builder();
+    builder.add_constant(7.0).unwrap();
+    builder.add_linear(3.0, y).unwrap();
+    builder.add_monomial(f64::MAX, x, x).unwrap();
+
+    for scale in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            builder.add_quadratic(scale, x).unwrap_err(),
+            QuadraticBuildError::NonFiniteInput
+        );
+    }
+    assert_eq!(
+        builder.add_quadratic(2.0, &huge).unwrap_err(),
+        QuadraticBuildError::ProductOverflow
+    );
+    assert_eq!(
+        builder.add_quadratic(1.0, &huge).unwrap_err(),
+        QuadraticBuildError::AccumulationOverflow
+    );
+
+    for scale in [0.0, 1.0] {
+        assert_eq!(
+            builder.add_quadratic(scale, &nonfinite).unwrap_err(),
+            QuadraticBuildError::NonFiniteInput
+        );
+        assert_eq!(
+            builder.add_quadratic(scale, &overflow).unwrap_err(),
+            QuadraticBuildError::ExpansionFailed
+        );
+    }
+
+    let terms = builder.build_terms();
+    let (x, y) = (x.var_id().unwrap(), y.var_id().unwrap());
+    assert_eq!(terms.linear(), [(y, 3.0)]);
+    assert_eq!(terms.quadratic(), [(x, x, f64::MAX)]);
+    assert_eq!(terms.constant(), 7.0);
+}
+
+#[test]
 fn registered_soc_sources_survive_consuming_arithmetic() {
     let model = Model::new("SOC publication");
     variable!(model, x);
@@ -105,6 +219,89 @@ fn semantic_publication_protects_ids_before_model_registration() {
     let grown = expression + x;
     assert_ne!(grown.id(), original);
     assert_eq!(evaluate(&model.arena(), original, &&[3.0][..]).unwrap(), 9.0);
+}
+
+#[test]
+fn variable_coefficients_reject_foreign_id_collisions_without_changing_pending_terms() {
+    let model = Model::new("checked coefficients");
+    variable!(model, x);
+    variable!(model, y);
+    let other = Model::new("foreign coefficients");
+    variable!(other, foreign);
+    assert_eq!(x.var_id(), foreign.var_id(), "raw variable IDs collide across models");
+
+    let before = model.arena().len();
+    let mut builder = model.quadratic_builder();
+    builder.add_constant(7.0).unwrap();
+    builder.add_linear(3.0, x).unwrap();
+    builder.add_monomial(4.0, y, x).unwrap();
+    builder.add_monomial(2.0, x, x).unwrap();
+    builder.add_linear(0.0, y).unwrap();
+
+    for coefficient in [0.0, 1.0] {
+        assert_eq!(
+            builder.add_linear(coefficient, foreign).unwrap_err(),
+            QuadraticBuildError::ForeignArena
+        );
+        for (first, second) in [(foreign, x), (x, foreign), (foreign, foreign)] {
+            assert_eq!(
+                builder.add_monomial(coefficient, first, second).unwrap_err(),
+                QuadraticBuildError::ForeignArena
+            );
+        }
+    }
+    assert_eq!(model.arena().len(), before, "adding coefficients must allocate no nodes");
+
+    let expression = builder.build();
+    let terms = extract_quadratic(&model.arena(), expression.id()).unwrap();
+    assert_eq!(
+        evaluate(&model.arena(), expression.id(), &&[2.0, 3.0][..]).unwrap().to_bits(),
+        45.0_f64.to_bits()
+    );
+
+    let x_id = x.var_id().unwrap();
+    let y_id = y.var_id().unwrap();
+    builder.add_constant(7.0).unwrap();
+    builder.add_linear_raw(3.0, x_id).unwrap();
+    builder.add_monomial_raw(4.0, x_id, y_id).unwrap();
+    builder.add_monomial_raw(2.0, x_id, x_id).unwrap();
+    let raw = builder.build_terms();
+    assert_eq!(raw.linear(), terms.linear());
+    assert_eq!(raw.quadratic(), terms.quadratic());
+    assert_eq!(raw.constant().to_bits(), terms.constant().to_bits());
+}
+
+#[test]
+fn checked_variable_coefficients_reject_nonfinite_input_and_overflow_atomically() {
+    let model = Model::new("coefficient validation");
+    variable!(model, x);
+    let mut builder = model.quadratic_builder();
+    builder.add_linear(f64::MAX, x).unwrap();
+    builder.add_monomial(f64::MAX, x, x).unwrap();
+
+    for coefficient in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(
+            builder.add_linear(coefficient, x).unwrap_err(),
+            QuadraticBuildError::NonFiniteInput
+        );
+        assert_eq!(
+            builder.add_monomial(coefficient, x, x).unwrap_err(),
+            QuadraticBuildError::NonFiniteInput
+        );
+    }
+    assert_eq!(
+        builder.add_linear(f64::MAX, x).unwrap_err(),
+        QuadraticBuildError::AccumulationOverflow
+    );
+    assert_eq!(
+        builder.add_monomial(f64::MAX, x, x).unwrap_err(),
+        QuadraticBuildError::AccumulationOverflow
+    );
+
+    let terms = builder.build_terms();
+    let id = x.var_id().unwrap();
+    assert_eq!(terms.linear(), [(id, f64::MAX)]);
+    assert_eq!(terms.quadratic(), [(id, id, f64::MAX)]);
 }
 
 #[test]
@@ -266,7 +463,7 @@ fn builders_ingest_hessians_and_check_dynamic_affine_inputs_without_nodes() {
     let dynamic = (2.0 * x + 1.0).as_dynamic();
     let before = m.arena().len();
     let mut builder = m.quadratic_builder();
-    builder.add_quadratic(1.0, &seed).unwrap().add_expr(2.0, &dynamic).unwrap();
+    builder.add_quadratic_raw(1.0, &seed).unwrap().add_expr(2.0, &dynamic).unwrap();
     let terms = builder.build_terms();
     assert_eq!(m.arena().len(), before);
     assert_eq!(terms.quadratic()[0].2.to_bits(), 1);
@@ -280,11 +477,11 @@ fn builders_ingest_hessians_and_check_dynamic_affine_inputs_without_nodes() {
         builder.add_expr(0.0, (p * x).as_dynamic()).unwrap_err(),
         QuadraticBuildError::ParameterizedInput
     );
-    builder.add_quadratic(1.0, &terms).unwrap();
+    builder.add_quadratic_raw(1.0, &terms).unwrap();
     let huge =
         oximo_expr::QuadraticTerms::from_hessian(Vec::new(), vec![(v, f64::MAX)], 0.0).unwrap();
     assert_eq!(
-        builder.add_quadratic(2.0, &huge).unwrap_err(),
+        builder.add_quadratic_raw(2.0, &huge).unwrap_err(),
         QuadraticBuildError::ProductOverflow
     );
     let result = builder.build_terms();
