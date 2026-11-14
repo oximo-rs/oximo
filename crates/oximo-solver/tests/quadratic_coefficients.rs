@@ -61,7 +61,7 @@ fn parameterized_parent_snapshots_preserve_the_smallest_hessian_diagonal() {
     )
     .unwrap();
     let mut builder = model.quadratic_builder();
-    builder.add_quadratic(1.0, &terms).unwrap();
+    builder.add_quadratic_raw(1.0, &terms).unwrap();
     let child = builder.build();
     let root = (p * &child).id();
     let old = PreparedExpressions::new(model.arena().clone());

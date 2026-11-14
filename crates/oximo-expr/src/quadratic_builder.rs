@@ -6,7 +6,10 @@ use thiserror::Error;
 use crate::arena::ArenaAccess;
 use crate::degree::AddDegree;
 use crate::linear::as_linear;
-use crate::{Affine, Expr, ExprArenaCell, ExprInput, ExprNode, Quadratic, QuadraticTerms, VarId};
+use crate::{
+    Affine, Expr, ExprArenaCell, ExprInput, ExprNode, Quadratic, QuadraticTerms, VarId,
+    VariableHandle,
+};
 
 /// A numeric quadratic could not be constructed.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -16,6 +19,8 @@ pub enum QuadraticBuildError {
     ForeignArena,
     #[error("quadratic input must be affine")]
     NotAffine,
+    #[error("quadratic input must be polynomial of degree at most two")]
+    NotQuadratic,
     #[error("parameter-dependent coefficients are unsupported")]
     ParameterizedInput,
     #[error("input coefficients must be finite")]
@@ -24,6 +29,8 @@ pub enum QuadraticBuildError {
     ProductOverflow,
     #[error("an accumulated coefficient overflowed")]
     AccumulationOverflow,
+    #[error("input cannot be expanded into finite quadratic coefficients")]
+    ExpansionFailed,
 }
 
 /// Reusable numeric quadratic accumulator using ordinary, uncompensated summation.
@@ -39,9 +46,10 @@ pub enum QuadraticBuildError {
 /// let x = Expr::from_var(&arena, VarId(0));
 ///
 /// let mut builder = QuadraticBuilder::new(&arena);
-/// builder.add_product(3.0, x, x)?; // stores the coefficient 3 for x*x
+/// builder.add_monomial(3.0, x, x)?; // stores the coefficient 3 for x*x
 /// let first = builder.build();
-/// builder.add_linear(2.0, VarId(0))?;
+/// builder.add_quadratic(2.0, &first)?; // retains the source's arena identity
+/// builder.add_linear(2.0, x)?;
 /// let second = builder.build(); // reset after each build
 /// # Ok(())
 /// # }
@@ -198,11 +206,52 @@ impl<'a> QuadraticBuilder<'a> {
         Ok(self)
     }
 
-    /// Add a linear coefficient using an arena-local variable ID.
+    /// Add a linear coefficient using a checked variable handle.
+    /// Zero weights still validate the variable's arena.
+    ///
+    /// # Errors
+    /// Rejects foreign variables, nonfinite input or accumulation overflow atomically.
+    #[inline]
+    pub fn add_linear(
+        &mut self,
+        c: f64,
+        variable: VariableHandle<'a>,
+    ) -> Result<&mut Self, QuadraticBuildError> {
+        finite(c)?;
+        if !std::ptr::eq(self.arena, variable.arena()) {
+            return Err(QuadraticBuildError::ForeignArena);
+        }
+        self.add_linear_raw(c, variable.known_var_id())
+    }
+
+    /// Add the coefficient of `first * second`, with no diagonal scaling.
+    /// Zero weights still validate both variable handles' arenas.
+    ///
+    /// # Errors
+    /// Rejects foreign variables, nonfinite input or accumulation overflow atomically.
+    #[inline]
+    pub fn add_monomial(
+        &mut self,
+        c: f64,
+        first: VariableHandle<'a>,
+        second: VariableHandle<'a>,
+    ) -> Result<&mut Self, QuadraticBuildError> {
+        finite(c)?;
+        if !std::ptr::eq(self.arena, first.arena()) || !std::ptr::eq(self.arena, second.arena()) {
+            return Err(QuadraticBuildError::ForeignArena);
+        }
+        self.add_monomial_raw(c, first.known_var_id(), second.known_var_id())
+    }
+
+    /// Add a linear coefficient using a raw, arena-local variable ID.
+    /// The caller must ensure the ID belongs to this builder's arena. Raw IDs
+    /// carry no model identity, so foreign IDs cannot be detected.
+    /// Prefer [`Self::add_linear`] for checked variable handles.
     ///
     /// # Errors
     /// Rejects nonfinite input or accumulation overflow atomically.
-    pub fn add_linear(
+    #[inline]
+    pub fn add_linear_raw(
         &mut self,
         c: f64,
         variable: VarId,
@@ -211,12 +260,17 @@ impl<'a> QuadraticBuilder<'a> {
         Ok(self)
     }
 
-    /// Add the coefficient of `first * second`, with no diagonal scaling.
-    /// Variable IDs must belong to this builder's arena.
+    /// Add the coefficient of `first * second` using raw variable IDs, with no
+    /// diagonal scaling. The caller must ensure both IDs belong to this builder's
+    /// arena.
+    ///
+    /// Raw IDs carry no model identity, so foreign IDs cannot be detected.
+    /// Prefer [`Self::add_monomial`] for checked variable handles.
     ///
     /// # Errors
     /// Rejects nonfinite input or accumulation overflow atomically.
-    pub fn add_monomial(
+    #[inline]
+    pub fn add_monomial_raw(
         &mut self,
         c: f64,
         first: VarId,
@@ -240,8 +294,8 @@ impl<'a> QuadraticBuilder<'a> {
     }
 
     /// Runtime-checked counterpart of [`Self::add_term`], accepting dynamic handles.
-    /// Input must be numeric affine; use [`Self::add_quadratic`] for coefficient
-    /// quadratics. Zero weights still validate the arena and expression class.
+    /// Input must be numeric affine; use [`Self::add_quadratic`] for quadratic
+    /// handles. Zero weights still validate the arena and expression class.
     ///
     /// # Errors
     /// Rejects foreign, parameter-dependent, non-affine or nonfinite inputs and overflow atomically.
@@ -254,6 +308,10 @@ impl<'a> QuadraticBuilder<'a> {
         let expression = expression.as_expression();
         if !std::ptr::eq(self.arena, expression.arena()) {
             return Err(QuadraticBuildError::ForeignArena);
+        }
+        if let Some(variable) = expression.cached_var_id() {
+            self.coefficients.add_linear(variable, c)?;
+            return Ok(self);
         }
 
         self.arena.with_ref(|arena| {
@@ -272,12 +330,67 @@ impl<'a> QuadraticBuilder<'a> {
         Ok(self)
     }
 
+    /// Add a weighted numeric polynomial of degree at most two from a checked handle.
+    /// Accepts owned or borrowed handles, including dynamic expressions.
+    /// Parameters are rejected rather than frozen at their current values.
+    /// Zero scales still validate the arena, input structure and coefficients.
+    /// Copies coefficients without publishing the source or allocating arena nodes.
+    ///
+    /// # Errors
+    /// Rejects foreign, parameter-dependent, nonpolynomial or nonfinite inputs,
+    /// unrepresentable expansions, nonfinite scales, and coefficient overflow atomically.
+    pub fn add_quadratic<E: ExprInput<'a>>(
+        &mut self,
+        scale: f64,
+        expression: E,
+    ) -> Result<&mut Self, QuadraticBuildError> {
+        finite(scale)?;
+        let expression = expression.as_expression();
+        if !std::ptr::eq(self.arena, expression.arena()) {
+            return Err(QuadraticBuildError::ForeignArena);
+        }
+        if let Some(variable) = expression.cached_var_id() {
+            self.coefficients.add_linear(variable, scale)?;
+            return Ok(self);
+        }
+        self.arena.with_ref(|arena| {
+            self.scratch.clear();
+            if let Some(leaf) = numeric_leaf(arena.get(expression.id)) {
+                self.scratch.add_leaf(leaf, scale)?;
+            } else {
+                crate::fold::validate_numeric_inputs(arena, expression.id, false).map_err(
+                    |error| match error {
+                        crate::fold::NumericInputError::Parameterized => {
+                            QuadraticBuildError::ParameterizedInput
+                        }
+                        crate::fold::NumericInputError::NonFinite => {
+                            QuadraticBuildError::NonFiniteInput
+                        }
+                    },
+                )?;
+                if crate::classify::classify_access(arena, expression.id)
+                    > crate::ExprClass::Quadratic
+                {
+                    return Err(QuadraticBuildError::NotQuadratic);
+                }
+                let terms = crate::quadratic::extract_quadratic_access(arena, expression.id)
+                    .ok_or(QuadraticBuildError::ExpansionFailed)?;
+                self.scratch.add_leaf(NumericLeaf::Quadratic(&terms), scale)?;
+            }
+            self.coefficients.merge(&self.scratch)
+        })?;
+        Ok(self)
+    }
+
     /// Add existing polynomial, linear and constant coefficients directly.
-    /// Variable IDs are local to this arena.
+    /// The caller must ensure all raw variable IDs in `terms` belong to this
+    /// builder's arena. Coefficient data carries no model identity, so foreign
+    /// IDs cannot be detected.
+    /// Use [`Self::add_quadratic`] when the source is an expression handle.
     ///
     /// # Errors
     /// Rejects nonfinite scale, product overflow or accumulation overflow atomically.
-    pub fn add_quadratic(
+    pub fn add_quadratic_raw(
         &mut self,
         scale: f64,
         terms: &QuadraticTerms,
@@ -295,6 +408,7 @@ impl<'a> QuadraticBuilder<'a> {
     ///
     /// # Errors
     /// Rejects foreign, parameter-dependent, non-affine or nonfinite inputs and overflow atomically.
+    #[inline]
     pub fn add_product<L, R>(
         &mut self,
         c: f64,
@@ -311,6 +425,10 @@ impl<'a> QuadraticBuilder<'a> {
         let (lhs, rhs) = (lhs.as_expression(), rhs.as_expression());
         if !std::ptr::eq(self.arena, lhs.arena()) || !std::ptr::eq(self.arena, rhs.arena()) {
             return Err(QuadraticBuildError::ForeignArena);
+        }
+        if let (Some(first), Some(second)) = (lhs.cached_var_id(), rhs.cached_var_id()) {
+            self.coefficients.add_quadratic(first, second, c)?;
+            return Ok(self);
         }
 
         self.arena.with_ref(|arena| {
@@ -752,12 +870,87 @@ mod tests {
     use crate::{ExprArena, evaluate};
 
     #[test]
+    fn checked_variable_insertions_need_no_arena_reads() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(42));
+        let y = Expr::from_var(&arena, VarId(99));
+        arena.reset_access_count();
+        let dynamic = x.as_dynamic();
+        let affine = y.into_affine().unwrap();
+        let narrowed = dynamic.as_affine().unwrap();
+        let mut builder = QuadraticBuilder::new(&arena);
+        builder.add_linear(2.0, x).unwrap();
+        builder.add_monomial(3.0, x, y).unwrap();
+        builder.add_expr(4.0, &dynamic).unwrap();
+        builder.add_term(5.0, &affine).unwrap();
+        builder.add_product(6.0, &narrowed, &affine).unwrap();
+        assert_eq!(arena.access_count(), 0);
+        let terms = builder.build_terms();
+        assert_eq!(terms.linear(), [(VarId(42), 6.0), (VarId(99), 5.0)]);
+        assert_eq!(terms.quadratic(), [(VarId(99), VarId(42), 9.0)]);
+    }
+
+    #[test]
+    fn compacted_variables_remain_available_without_arena_reads() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(42));
+        let y = Expr::from_var(&arena, VarId(99));
+        arena.reset_access_count();
+        let compacted_x = x.compact();
+        let compacted_y = y.as_dynamic().into_affine().unwrap().compact();
+        assert_eq!(compacted_x.id(), x.id());
+        assert_eq!(compacted_y.id(), y.id());
+
+        let mut builder = QuadraticBuilder::new(&arena);
+        assert_eq!(compacted_x.var_id(), Some(VarId(42)));
+        assert_eq!(compacted_y.var_id(), Some(VarId(99)));
+        builder.add_term(2.0, &compacted_x).unwrap();
+        builder.add_expr(3.0, &compacted_y).unwrap();
+        builder.add_product(4.0, &compacted_x, &compacted_y).unwrap();
+        assert_eq!(arena.access_count(), 0);
+
+        let terms = builder.build_terms();
+        assert_eq!(terms.linear(), [(VarId(42), 2.0), (VarId(99), 3.0)]);
+        assert_eq!(terms.quadratic(), [(VarId(99), VarId(42), 4.0)]);
+    }
+
+    #[test]
+    fn checked_quadratic_copies_do_not_publish_the_source() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let source = x * x;
+        let root = source.id();
+        let mut builder = QuadraticBuilder::new(&arena);
+        arena.reset_access_count();
+        builder.add_quadratic(2.0, &source).unwrap();
+        assert_eq!(arena.access_count(), 1);
+
+        let copied = builder.build_terms();
+        let grown = source + x;
+        assert_eq!(grown.id(), root);
+        assert_eq!(copied.linear(), []);
+        assert_eq!(copied.quadratic(), [(VarId(0), VarId(0), 2.0)]);
+    }
+
+    #[test]
+    fn checked_quadratic_variable_inputs_need_no_arena_reads() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(42));
+        let mut builder = QuadraticBuilder::new(&arena);
+        arena.reset_access_count();
+        builder.add_quadratic(2.0, x).unwrap();
+        builder.add_quadratic(3.0, x.as_dynamic()).unwrap();
+        assert_eq!(arena.access_count(), 0);
+        assert_eq!(builder.build_terms().linear(), [(VarId(42), 5.0)]);
+    }
+
+    #[test]
     fn right_growing_sums_retain_the_larger_unique_destination() {
         let arena = ExprArenaCell::new(ExprArena::new());
         let x = Expr::from_var(&arena, VarId(0));
         let mut builder = QuadraticBuilder::new(&arena);
         for i in 0..64 {
-            builder.add_monomial(1.0, VarId(i), VarId(i)).unwrap();
+            builder.add_monomial_raw(1.0, VarId(i), VarId(i)).unwrap();
         }
         let mut q = builder.build();
         let root = q.id;
@@ -861,13 +1054,13 @@ mod tests {
         let x = Expr::from_var(&arena, VarId(0));
         let y = Expr::from_var(&arena, VarId(1));
         let mut builder = QuadraticBuilder::new(&arena);
-        builder.add_constant(7.0).unwrap().add_linear(3.0, VarId(0)).unwrap();
+        builder.add_constant(7.0).unwrap().add_linear(3.0, x).unwrap();
         assert_eq!(
             builder.add_product(f64::MAX, 2.0 * x, 0.5 * y).unwrap_err(),
             QuadraticBuildError::ProductOverflow
         );
 
-        builder.add_linear(f64::MAX, VarId(1)).unwrap();
+        builder.add_linear(f64::MAX, y).unwrap();
         assert_eq!(
             builder.add_term(f64::MAX, x + y + 1.0).unwrap_err(),
             QuadraticBuildError::AccumulationOverflow
@@ -1088,6 +1281,26 @@ mod tests {
         let root = remaps[0].apply(forks[0].value);
         drop(batch);
         assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), -42.0);
+    }
+
+    #[test]
+    fn checked_factored_quadratic_ingestion_works_inside_a_fork() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let mut batch = arena.__begin_batch();
+        let snapshot = batch.snapshot();
+        let mut forks = vec![arena.__with_fork(snapshot.clone(), || {
+            let source = (x + 1.0).square();
+            let mut builder = QuadraticBuilder::new(&arena);
+            builder.add_quadratic(2.0, &source).unwrap();
+            builder.add_quadratic(1.0, x).unwrap();
+            builder.build().into_id()
+        })];
+        drop(snapshot);
+        let remaps = batch.merge(&mut forks);
+        let root = remaps[0].apply(forks[0].value);
+        drop(batch);
+        assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 35.0);
     }
 
     #[test]

@@ -910,7 +910,7 @@ impl russcip::Eventhdlr for Prices {
                             }
                         }
                     }
-                    for i in 0..map.constraints.len() {
+                    for (i, _) in map.constraints.iter().enumerate() {
                         let id = crate::translate::id(i);
                         if map.linear[i]
                             && let Some(v) = ctx
