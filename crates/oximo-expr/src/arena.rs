@@ -2244,16 +2244,18 @@ mod tests {
     #[test]
     fn oversized_affine_cache_stays_bounded_and_keeps_the_latest_root() {
         let mut ownership = RootOwnership::default();
-        for index in 0..MAX_OVERSIZED_AFFINE_ROOTS as u32 {
+        let cache_capacity =
+            u32::try_from(MAX_OVERSIZED_AFFINE_ROOTS).expect("cache capacity fits ExprId");
+        for index in 0..cache_capacity {
             ownership.mark_oversized_affine(ExprId(index));
         }
         assert_eq!(ownership.oversized_affine.len(), MAX_OVERSIZED_AFFINE_ROOTS);
         assert!(ownership.oversized_affine.contains(&ExprId(0)));
 
-        ownership.mark_oversized_affine(ExprId(MAX_OVERSIZED_AFFINE_ROOTS as u32));
+        ownership.mark_oversized_affine(ExprId(cache_capacity));
         assert_eq!(ownership.oversized_affine.len(), 1);
         assert!(!ownership.oversized_affine.contains(&ExprId(0)));
-        assert!(ownership.oversized_affine.contains(&ExprId(MAX_OVERSIZED_AFFINE_ROOTS as u32)));
+        assert!(ownership.oversized_affine.contains(&ExprId(cache_capacity)));
 
         for index in 1..10_000 {
             ownership.mark_oversized_affine(ExprId(index));
@@ -3215,7 +3217,7 @@ mod tests {
         let x = Expr::from_var(&cell, VarId(0));
         let mut result = None;
         for _ in 0..10_000 {
-            result = Some((x.clone() + x.clone()) * 2.0);
+            result = Some((x + x) * 2.0);
         }
 
         let arena = cell.inner.lock();
@@ -3236,7 +3238,7 @@ mod tests {
         let y = Expr::from_var(&cell, VarId(1));
         let mut result = None;
         for index in 0..10_000 {
-            let terms = [(x.clone() + y.clone()).into_dynamic(), x.square().into_dynamic()];
+            let terms = [(x + y).into_dynamic(), x.square().into_dynamic()];
             result = Some(match index % 3 {
                 0 => {
                     let sum: Expr<'_, Dynamic> = terms.into_iter().sum();

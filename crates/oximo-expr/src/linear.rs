@@ -1522,7 +1522,9 @@ mod tests {
                     let mut arena =
                         CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
                     let wide = arena.arena.linear(
-                        (0..=MAX_EAGER_COEFFICIENTS).map(|v| (VarId(v as u32), 1.0)).collect(),
+                        (0..=MAX_EAGER_COEFFICIENTS)
+                            .map(|v| (VarId(u32::try_from(v).expect("bounded test variable")), 1.0))
+                            .collect(),
                         -0.0,
                     );
                     let x = arena.var(VarId(100));
@@ -1560,8 +1562,11 @@ mod tests {
 
     #[test]
     fn oversized_terminal_proof_is_bounded_and_conservative() {
-        let distinct =
-            || (0..=MAX_EAGER_COEFFICIENTS).map(|v| (VarId(v as u32), 0.0)).collect::<Vec<_>>();
+        let distinct = || {
+            (0..=MAX_EAGER_COEFFICIENTS)
+                .map(|v| (VarId(u32::try_from(v).expect("bounded test variable")), 0.0))
+                .collect::<Vec<_>>()
+        };
         let node = |coeffs| ExprNode::Linear { coeffs, constant: -0.0 };
         let mut coeffs = distinct();
 
@@ -1639,9 +1644,12 @@ mod tests {
     #[test]
     fn growing_large_additions_without_a_terminal_proof_keep_bounded_reads() {
         let mut arena = CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
-        let mut root = arena
-            .arena
-            .linear((0..=MAX_EAGER_COEFFICIENTS).map(|v| (VarId(v as u32), 1.0)).collect(), 0.0);
+        let mut root = arena.arena.linear(
+            (0..=MAX_EAGER_COEFFICIENTS)
+                .map(|v| (VarId(u32::try_from(v).expect("bounded test variable")), 1.0))
+                .collect(),
+            0.0,
+        );
 
         let x = arena.var(VarId(100));
         arena.reads.set(0);
