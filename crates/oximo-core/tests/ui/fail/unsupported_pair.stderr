@@ -28,7 +28,7 @@ note: required by a bound in `oximo_core::Constraint::<F, S>::new`
    |         ^^^^^^^^^^^^^^^^ required by this bound in `Constraint::<F, S>::new`
 ...
    |     pub fn new(function: F, set: S) -> Self {
-   |
+   |            --- required by a bound in this associated function
 
 error[E0277]: the trait bound `CustomFunction: FunctionInSet<CustomSet>` is not satisfied
   --> tests/ui/fail/unsupported_pair.rs:11:13

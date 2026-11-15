@@ -19,7 +19,5 @@ error[E0277]: the trait bound `oximo_core::ParamId: IntoBound<'_>` is not satisf
 note: required by a bound in `VarBuilder::<'a>::ub`
  --> src/var.rs
   |
-  | impl<'a> VarBuilder<'a> {
-...
   |     pub fn ub(mut self, v: impl IntoBound<'a>) -> Self {
   |                                 ^^^^^^^^^^^^^ required by this bound in `VarBuilder::<'a>::ub`

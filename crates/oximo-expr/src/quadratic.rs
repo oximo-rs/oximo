@@ -815,8 +815,11 @@ pub(crate) fn extract_quadratic_access(
         .filter(QuadraticTerms::is_canonical)
 }
 
-/// Share compact coefficients without copying their vectors, permanently
-/// publishing the source root before returning a shared view.
+/// Share compact coefficients without copying their vectors.
+///
+/// A compact quadratic root is published before sharing so later consuming
+/// arithmetic cannot change it in place. Other representations return newly
+/// extracted coefficients without publishing the root.
 pub fn extract_quadratic_shared(
     arena: &ExprArena,
     id: ExprId,

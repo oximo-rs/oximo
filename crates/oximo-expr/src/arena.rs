@@ -142,6 +142,19 @@ impl ExprId {
     }
 }
 
+/// Result of building a node while holding the arena's construction lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConstructionResult {
+    pub(crate) id: ExprId,
+    pub(crate) reusable: bool,
+}
+
+impl ConstructionResult {
+    pub(crate) fn from_arena(arena: &mut (impl ArenaAccess + ?Sized), id: ExprId) -> Self {
+        Self { id, reusable: arena.reusable_root(id) }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct VarId(pub u32);
 
@@ -302,14 +315,106 @@ pub enum ExprNode {
     Quadratic(Arc<crate::QuadraticTerms>),
 }
 
+#[derive(Debug)]
+enum AffineOwnedIds {
+    Inline(SmallVec<[ExprId; 4]>),
+    Hashed(FxHashSet<ExprId>),
+}
+
+impl Default for AffineOwnedIds {
+    fn default() -> Self {
+        Self::Inline(SmallVec::new())
+    }
+}
+
+impl AffineOwnedIds {
+    fn contains(&self, id: ExprId) -> bool {
+        match self {
+            Self::Inline(ids) => ids.contains(&id),
+            Self::Hashed(ids) => ids.contains(&id),
+        }
+    }
+
+    fn insert(&mut self, id: ExprId) -> bool {
+        match self {
+            Self::Inline(ids) => {
+                if ids.contains(&id) {
+                    return false;
+                }
+                if ids.len() < ids.inline_size() {
+                    ids.push(id);
+                    return true;
+                }
+
+                let mut hashed =
+                    FxHashSet::with_capacity_and_hasher(ids.len() + 1, rustc_hash::FxBuildHasher);
+                hashed.extend(ids.iter().copied());
+                hashed.insert(id);
+                *self = Self::Hashed(hashed);
+                true
+            }
+
+            Self::Hashed(ids) => ids.insert(id),
+        }
+    }
+
+    fn remove(&mut self, id: ExprId) -> bool {
+        match self {
+            Self::Inline(ids) => {
+                let Some(index) = ids.iter().position(|owned| *owned == id) else {
+                    return false;
+                };
+                ids.swap_remove(index);
+                true
+            }
+            Self::Hashed(ids) => ids.remove(&id),
+        }
+    }
+
+    fn clear(&mut self) {
+        // Publication resets the common case and releases any hash-table allocation.
+        *self = Self::default();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(ids) => ids.len(),
+            Self::Hashed(ids) => ids.len(),
+        }
+    }
+
+    #[cfg(test)]
+    fn spilled(&self) -> bool {
+        match self {
+            Self::Inline(ids) => ids.spilled(),
+            Self::Hashed(_) => true,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
-struct QuadraticOwnership {
+struct RootOwnership {
+    affine_owned: AffineOwnedIds,
+    quadratic_pending: bool,
+    oversized_affine: FxHashSet<ExprId>,
+    #[cfg(test)]
+    child_inspections: usize,
     prefix: usize,
     sealed: FxHashSet<ExprId>,
     slots: FxHashMap<ExprId, crate::quadratic_builder::QuadraticSlots>,
 }
 
-impl QuadraticOwnership {
+const MAX_OVERSIZED_AFFINE_ROOTS: usize = 64;
+
+impl RootOwnership {
+    fn needs_child_sealing(&self) -> bool {
+        self.quadratic_pending || !self.affine_owned.is_empty()
+    }
+
     fn seal(&mut self, id: ExprId) {
         if !self.contains(id) {
             self.sealed.insert(id);
@@ -325,7 +430,36 @@ impl QuadraticOwnership {
         self.slots.entry(id).or_default()
     }
 
+    fn mark_oversized_affine(&mut self, id: ExprId) {
+        if self.oversized_affine.contains(&id) {
+            return;
+        }
+        if self.oversized_affine.len() == MAX_OVERSIZED_AFFINE_ROOTS {
+            self.oversized_affine.clear();
+        }
+        self.oversized_affine.insert(id);
+    }
+
+    fn finish_affine_merge(&mut self, lhs: ExprId, rhs: ExprId, destination: ExprId, linear: bool) {
+        // Non-destination inputs have been consumed, or were already sealed by
+        // a borrowed operand.
+        if lhs != destination {
+            self.affine_owned.remove(lhs);
+        }
+
+        if rhs != destination {
+            self.affine_owned.remove(rhs);
+        }
+
+        if !linear {
+            self.affine_owned.remove(destination);
+        }
+    }
+
     fn seal_all(&mut self, prefix: usize) {
+        self.affine_owned.clear();
+        self.quadratic_pending = false;
+        self.oversized_affine.clear();
         self.prefix = prefix;
         self.sealed.clear();
         self.slots.clear();
@@ -335,7 +469,7 @@ impl QuadraticOwnership {
 #[derive(Debug, Default)]
 pub struct ExprArena {
     nodes: Arc<Vec<ExprNode>>,
-    ownership: OnceLock<Box<Mutex<QuadraticOwnership>>>,
+    ownership: OnceLock<Box<Mutex<RootOwnership>>>,
     param_values: Arc<Vec<f64>>,
     parameter_revision: u64,
     locked_parameters: Arc<FxHashSet<ParamId>>,
@@ -442,7 +576,10 @@ impl ExprArena {
     }
 
     /// Permanently publish every node currently in the arena.
-    /// Raw appends through [`Self::push`] publish quadratic roots immediately.
+    /// A raw [`Self::push`] publishes each quadratic root immediately, while a
+    /// raw linear root is simply left untracked and therefore not reusable.
+    /// Internal builder paths may retain ownership of fresh quadratic roots via
+    /// [`ArenaAccess::push`] and affine roots via `push_owned_linear`.
     pub fn seal_all(&self) {
         if let Some(ownership) = self.ownership.get() {
             ownership.lock().seal_all(self.len());
@@ -548,15 +685,16 @@ impl ExprArena {
         self.nodes.is_empty()
     }
 
-    /// Append a raw node, publishing a quadratic root immediately.
-    /// Internal builders use `ArenaAccess::push` instead to retain ownership
-    /// of fresh quadratic roots for consuming arithmetic.
+    /// Append a raw node. A raw quadratic root is immediately published and
+    /// cannot be reused. Internal arithmetic uses `ArenaAccess::push` for fresh
+    /// quadratic roots whose builders retain ownership, and
+    /// `ArenaAccess::push_owned_linear` for fresh affine roots.
     ///
     /// # Panics
     ///
     /// Panics if the number of expressions exceeds `u32::MAX` (expression arena overflow).
     pub fn push(&mut self, node: ExprNode) -> ExprId {
-        let id = self.push_internal(node);
+        let id = self.push_internal(node, false);
         if let Some(ownership) = self.ownership.get_mut()
             && matches!(self.nodes[id.index()], ExprNode::Quadratic(_))
         {
@@ -565,21 +703,60 @@ impl ExprArena {
         id
     }
 
-    fn push_internal(&mut self, node: ExprNode) -> ExprId {
-        if self.ownership.get_mut().is_some() {
+    fn push_internal(&mut self, node: ExprNode, owned_linear: bool) -> ExprId {
+        if self.ownership.get_mut().is_none()
+            && !owned_linear
+            && !matches!(node, ExprNode::Quadratic(_))
+        {
+            let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
+            Arc::make_mut(&mut self.nodes).push(node);
+            return id;
+        }
+        let needs_child_sealing = self
+            .ownership
+            .get_mut()
+            .is_some_and(|ownership| ownership.get_mut().needs_child_sealing());
+        if needs_child_sealing {
             seal_children(&node, |id| {
-                if matches!(self.nodes[id.index()], ExprNode::Quadratic(_)) {
-                    self.ownership.get_mut().expect("quadratic ownership").get_mut().seal(id);
+                #[cfg(test)]
+                {
+                    self.ownership
+                        .get_mut()
+                        .expect("root ownership")
+                        .get_mut()
+                        .child_inspections += 1;
+                }
+                match self.nodes[id.index()] {
+                    ExprNode::Linear { .. } => {
+                        self.ownership
+                            .get_mut()
+                            .expect("root ownership")
+                            .get_mut()
+                            .affine_owned
+                            .remove(id);
+                    }
+                    ExprNode::Quadratic(_) => {
+                        self.ownership.get_mut().expect("root ownership").get_mut().seal(id);
+                    }
+                    _ => {}
                 }
             });
         }
-        if matches!(node, ExprNode::Quadratic(_)) {
+        let owned_linear = owned_linear && matches!(node, ExprNode::Linear { .. });
+        let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
+        if matches!(node, ExprNode::Quadratic(_)) || owned_linear {
             let prefix = ArenaAccess::len(self);
             self.ownership.get_or_init(|| {
-                Box::new(Mutex::new(QuadraticOwnership { prefix, ..QuadraticOwnership::default() }))
+                Box::new(Mutex::new(RootOwnership { prefix, ..RootOwnership::default() }))
             });
+            let ownership = self.ownership.get_mut().expect("root ownership").get_mut();
+            if owned_linear {
+                ownership.affine_owned.insert(id);
+            }
+            if matches!(node, ExprNode::Quadratic(_)) {
+                ownership.quadratic_pending = true;
+            }
         }
-        let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
         Arc::make_mut(&mut self.nodes).push(node);
         id
     }
@@ -591,7 +768,7 @@ impl ExprArena {
         self.node(id)
     }
 
-    /// Permanently protect a node identity from in-place quadratic updates.
+    /// Permanently protect a node identity from in-place affine/quadratic updates.
     ///
     /// # Panics
     /// Panics if `id` is not a valid node in this arena.
@@ -850,6 +1027,32 @@ pub(crate) trait ArenaAccess {
     fn len(&self) -> usize;
     fn get(&self, id: ExprId) -> &ExprNode;
     fn quadratic_root(&mut self, id: ExprId) -> bool;
+    fn linear_root(&mut self, _id: ExprId) -> bool {
+        false
+    }
+    fn reusable_root(&mut self, id: ExprId) -> bool {
+        self.linear_root(id) || self.quadratic_root(id)
+    }
+    fn accumulate_linear(
+        &mut self,
+        _lhs: ExprId,
+        _rhs: ExprId,
+        _destination: ExprId,
+    ) -> Option<ExprId> {
+        None
+    }
+    /// Opt a normalized, small numeric Linear node into consuming addition reuse.
+    fn push_owned_linear(&mut self, node: ExprNode) -> ExprId {
+        self.push(node)
+    }
+    /// Whether this Add root already failed the bounded affine probe.
+    fn oversized_affine(&self, _id: ExprId) -> bool {
+        false
+    }
+    /// Record an immutable Add root that can never become a small affine root.
+    fn mark_oversized_affine(&mut self, _id: ExprId) {}
+    /// Retire a consumed affine root copied into a fresh result.
+    fn retire_affine_root(&mut self, _id: ExprId) {}
     fn seal(&self, id: ExprId);
     fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId>;
     fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId>;
@@ -874,6 +1077,73 @@ pub(crate) trait ArenaAccess {
 }
 
 impl ArenaAccess for ExprArena {
+    fn reusable_root(&mut self, id: ExprId) -> bool {
+        let Some(ownership) = self.ownership.get_mut() else {
+            return false;
+        };
+        let ownership = ownership.get_mut();
+        match self.nodes[id.index()] {
+            ExprNode::Linear { .. } => ownership.affine_owned.contains(id),
+            ExprNode::Quadratic(_) => !ownership.contains(id),
+            _ => false,
+        }
+    }
+
+    fn linear_root(&mut self, id: ExprId) -> bool {
+        // Membership is authoritative.
+        self.ownership.get_mut().is_some_and(|o| o.get_mut().affine_owned.contains(id))
+    }
+
+    fn accumulate_linear(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        destination: ExprId,
+    ) -> Option<ExprId> {
+        if (destination != lhs && destination != rhs) || !self.linear_root(destination) {
+            return None;
+        }
+
+        let nodes = Arc::get_mut(&mut self.nodes)?;
+        let result = crate::linear::accumulate_linear_nodes(
+            &nodes[lhs.index()],
+            &nodes[rhs.index()],
+            destination == lhs,
+        )?;
+
+        result.write_into(&mut nodes[destination.index()]);
+        let linear = matches!(nodes[destination.index()], ExprNode::Linear { .. });
+        self.ownership.get_mut()?.get_mut().finish_affine_merge(lhs, rhs, destination, linear);
+        *self.classifications.get_mut() = None;
+        self.analysis.take();
+
+        Some(destination)
+    }
+
+    fn push_owned_linear(&mut self, node: ExprNode) -> ExprId {
+        self.push_internal(node, true)
+    }
+
+    fn oversized_affine(&self, id: ExprId) -> bool {
+        let Some(ownership) = self.ownership.get() else { return false };
+        let ownership = ownership.lock();
+        !ownership.oversized_affine.is_empty() && ownership.oversized_affine.contains(&id)
+    }
+
+    fn mark_oversized_affine(&mut self, id: ExprId) {
+        let prefix = ArenaAccess::len(self);
+        self.ownership.get_or_init(|| {
+            Box::new(Mutex::new(RootOwnership { prefix, ..RootOwnership::default() }))
+        });
+        self.ownership.get_mut().expect("root ownership").get_mut().mark_oversized_affine(id);
+    }
+
+    fn retire_affine_root(&mut self, id: ExprId) {
+        if let Some(ownership) = self.ownership.get_mut() {
+            ownership.get_mut().affine_owned.remove(id);
+        }
+    }
+
     fn quadratic_root(&mut self, id: ExprId) -> bool {
         self.ownership.get_mut().is_some_and(|o| !o.get_mut().contains(id))
             && matches!(self.node(id), ExprNode::Quadratic(_))
@@ -916,10 +1186,14 @@ impl ArenaAccess for ExprArena {
     }
 
     fn seal(&self, id: ExprId) {
-        if let Some(ownership) = self.ownership.get()
-            && matches!(self.nodes[id.index()], ExprNode::Quadratic(_))
-        {
-            ownership.lock().seal(id);
+        if let Some(ownership) = self.ownership.get() {
+            match self.nodes[id.index()] {
+                ExprNode::Linear { .. } => {
+                    ownership.lock().affine_owned.remove(id);
+                }
+                ExprNode::Quadratic(_) => ownership.lock().seal(id),
+                _ => {}
+            }
         }
     }
     fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId> {
@@ -964,11 +1238,26 @@ impl ArenaAccess for ExprArena {
     }
 
     fn push(&mut self, node: ExprNode) -> ExprId {
-        self.push_internal(node)
+        self.push_internal(node, false)
     }
 
     fn push_immutable(&mut self, node: ExprNode) -> ExprId {
         debug_assert!(!matches!(node, ExprNode::Quadratic(_)));
+        let needs_child_sealing = self
+            .ownership
+            .get_mut()
+            .is_some_and(|ownership| ownership.get_mut().needs_child_sealing());
+        if !needs_child_sealing {
+            let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
+            Arc::make_mut(&mut self.nodes).push(node);
+            return id;
+        }
+        if !matches!(
+            node,
+            ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. }
+        ) {
+            return self.push_internal(node, false);
+        }
         let id = ExprId(u32::try_from(self.nodes.len()).expect("expression arena overflow"));
         Arc::make_mut(&mut self.nodes).push(node);
         id
@@ -991,7 +1280,7 @@ impl FrozenExprArena {
 
 #[derive(Debug)]
 struct ForkedExprArena {
-    ownership: OnceLock<Box<Mutex<QuadraticOwnership>>>,
+    ownership: OnceLock<Box<Mutex<RootOwnership>>>,
     base: FrozenExprArena,
     nodes: Vec<ExprNode>,
     classifications: RefCell<ExprClassCache>,
@@ -1002,14 +1291,148 @@ impl ForkedExprArena {
         let classifications = RefCell::new(base.classifications.clone());
         Self { ownership: OnceLock::new(), base, nodes: Vec::new(), classifications }
     }
-}
 
-impl ArenaAccess for ForkedExprArena {
-    fn push_immutable(&mut self, node: ExprNode) -> ExprId {
-        debug_assert!(!matches!(node, ExprNode::Quadratic(_)));
+    fn push_internal(&mut self, node: ExprNode, owned_linear: bool) -> ExprId {
+        let needs_child_sealing = self
+            .ownership
+            .get_mut()
+            .is_some_and(|ownership| ownership.get_mut().needs_child_sealing());
+        if needs_child_sealing {
+            seal_children(&node, |id| {
+                #[cfg(test)]
+                {
+                    self.ownership
+                        .get_mut()
+                        .expect("root ownership")
+                        .get_mut()
+                        .child_inspections += 1;
+                }
+                match self.get(id) {
+                    ExprNode::Linear { .. } => {
+                        self.ownership
+                            .get_mut()
+                            .expect("root ownership")
+                            .get_mut()
+                            .affine_owned
+                            .remove(id);
+                    }
+                    ExprNode::Quadratic(_) => {
+                        self.ownership.get_mut().expect("root ownership").get_mut().seal(id);
+                    }
+                    _ => {}
+                }
+            });
+        }
+
+        let owned_linear = owned_linear && matches!(node, ExprNode::Linear { .. });
         let index =
             self.base.len().checked_add(self.nodes.len()).expect("expression arena overflow");
         let id = ExprId(u32::try_from(index).expect("expression arena overflow"));
+        if matches!(node, ExprNode::Quadratic(_)) || owned_linear {
+            let prefix = ArenaAccess::len(self);
+            self.ownership.get_or_init(|| {
+                Box::new(Mutex::new(RootOwnership { prefix, ..RootOwnership::default() }))
+            });
+            let ownership = self.ownership.get_mut().expect("root ownership").get_mut();
+            if owned_linear {
+                ownership.affine_owned.insert(id);
+            }
+            if matches!(node, ExprNode::Quadratic(_)) {
+                ownership.quadratic_pending = true;
+            }
+        }
+
+        self.nodes.push(node);
+        id
+    }
+}
+
+impl ArenaAccess for ForkedExprArena {
+    fn reusable_root(&mut self, id: ExprId) -> bool {
+        let Some(ownership) = self.ownership.get_mut() else {
+            return false;
+        };
+        let Some(index) = id.index().checked_sub(self.base.len()) else {
+            return false;
+        };
+        let ownership = ownership.get_mut();
+        match self.nodes[index] {
+            ExprNode::Linear { .. } => ownership.affine_owned.contains(id),
+            ExprNode::Quadratic(_) => !ownership.contains(id),
+            _ => false,
+        }
+    }
+
+    fn linear_root(&mut self, id: ExprId) -> bool {
+        // See `ExprArena::linear_root`.
+        // Ownership membership already implies a live `Linear` node,
+        // so no structural re-check is needed.
+        id.index() >= self.base.len()
+            && self.ownership.get_mut().is_some_and(|o| o.get_mut().affine_owned.contains(id))
+    }
+
+    fn accumulate_linear(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        destination: ExprId,
+    ) -> Option<ExprId> {
+        let index = destination.index().checked_sub(self.base.len())?;
+        if (destination != lhs && destination != rhs) || !self.linear_root(destination) {
+            return None;
+        }
+        let result = crate::linear::accumulate_linear_nodes(
+            self.get(lhs),
+            self.get(rhs),
+            destination == lhs,
+        )?;
+
+        result.write_into(&mut self.nodes[index]);
+        let linear = matches!(self.nodes[index], ExprNode::Linear { .. });
+        self.ownership.get_mut()?.get_mut().finish_affine_merge(lhs, rhs, destination, linear);
+        *self.classifications.get_mut() = ExprClassCache::default();
+
+        Some(destination)
+    }
+
+    fn push_owned_linear(&mut self, node: ExprNode) -> ExprId {
+        self.push_internal(node, true)
+    }
+
+    fn oversized_affine(&self, id: ExprId) -> bool {
+        let Some(ownership) = self.ownership.get() else { return false };
+        let ownership = ownership.lock();
+
+        !ownership.oversized_affine.is_empty() && ownership.oversized_affine.contains(&id)
+    }
+
+    fn mark_oversized_affine(&mut self, id: ExprId) {
+        let prefix = ArenaAccess::len(self);
+        self.ownership.get_or_init(|| {
+            Box::new(Mutex::new(RootOwnership { prefix, ..RootOwnership::default() }))
+        });
+        self.ownership.get_mut().expect("root ownership").get_mut().mark_oversized_affine(id);
+    }
+
+    fn retire_affine_root(&mut self, id: ExprId) {
+        if let Some(ownership) = self.ownership.get_mut() {
+            ownership.get_mut().affine_owned.remove(id);
+        }
+    }
+
+    fn push_immutable(&mut self, node: ExprNode) -> ExprId {
+        debug_assert!(!matches!(node, ExprNode::Quadratic(_)));
+        if !matches!(
+            node,
+            ExprNode::Const(_) | ExprNode::Var(_) | ExprNode::Param(_) | ExprNode::Linear { .. }
+        ) {
+            return self.push_internal(node, false);
+        }
+
+        let index =
+            self.base.len().checked_add(self.nodes.len()).expect("expression arena overflow");
+        let id = ExprId(u32::try_from(index).expect("expression arena overflow"));
+
         self.nodes.push(node);
         id
     }
@@ -1018,10 +1441,14 @@ impl ArenaAccess for ForkedExprArena {
             && matches!(self.get(id), ExprNode::Quadratic(_))
     }
     fn seal(&self, id: ExprId) {
-        if let Some(ownership) = self.ownership.get()
-            && matches!(self.get(id), ExprNode::Quadratic(_))
-        {
-            ownership.lock().seal(id);
+        if let Some(ownership) = self.ownership.get() {
+            match self.get(id) {
+                ExprNode::Linear { .. } => {
+                    ownership.lock().affine_owned.remove(id);
+                }
+                ExprNode::Quadratic(_) => ownership.lock().seal(id),
+                _ => {}
+            }
         }
     }
     fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId> {
@@ -1097,24 +1524,7 @@ impl ArenaAccess for ForkedExprArena {
     }
 
     fn push(&mut self, node: ExprNode) -> ExprId {
-        if self.ownership.get_mut().is_some() {
-            seal_children(&node, |id| {
-                if matches!(self.get(id), ExprNode::Quadratic(_)) {
-                    self.ownership.get_mut().expect("quadratic ownership").get_mut().seal(id);
-                }
-            });
-        }
-        if matches!(node, ExprNode::Quadratic(_)) {
-            let prefix = ArenaAccess::len(self);
-            self.ownership.get_or_init(|| {
-                Box::new(Mutex::new(QuadraticOwnership { prefix, ..QuadraticOwnership::default() }))
-            });
-        }
-        let index =
-            self.base.nodes.len().checked_add(self.nodes.len()).expect("expression arena overflow");
-        let id = ExprId(u32::try_from(index).expect("expression arena overflow"));
-        self.nodes.push(node);
-        id
+        self.push_internal(node, false)
     }
 }
 
@@ -1165,6 +1575,10 @@ impl Drop for InstalledWriteGuard {
 /// Ordinary construction writes the canonical arena. Indexed batch builders
 /// temporarily route expression operations to worker-local forks and merge the
 /// resulting nodes in deterministic index order.
+///
+/// Raw-ID consumers publish through `cell.borrow_mut().seal(id)` or
+/// `cell.borrow_mut().seal_all()`. With an existing write guard, call these
+/// methods on the guard instead.
 #[derive(Debug)]
 pub struct ExprArenaCell {
     model_id: ModelId,
@@ -1207,7 +1621,7 @@ impl ExprArenaCell {
     /// Later writes are isolated by copy-on-write and are not
     /// visible through this snapshot.
     /// Taking the snapshot publishes every current canonical node, permanently
-    /// disabling in-place quadratic reuse for those nodes.
+    /// disabling in-place affine/quadratic reuse for those nodes.
     ///
     /// # Panics
     ///
@@ -1296,9 +1710,8 @@ impl ExprArenaCell {
     #[inline]
     pub(crate) fn build_expr(
         &self,
-        may_be_quadratic: bool,
         construct: impl FnOnce(&mut dyn ArenaAccess) -> ExprId,
-    ) -> (ExprId, bool) {
+    ) -> ConstructionResult {
         let state = self.state.load(Ordering::Acquire);
         if state & BATCH_ACTIVE == 0 {
             self.assert_no_write_reentry(state);
@@ -1306,11 +1719,11 @@ impl ExprArenaCell {
             self.access_count.fetch_add(1, Ordering::Relaxed);
             let mut arena = self.inner.lock();
             let id = construct(&mut *arena);
-            return (id, may_be_quadratic && arena.quadratic_root(id));
+            return ConstructionResult::from_arena(&mut *arena, id);
         }
         self.with_mut(|arena| {
             let id = construct(arena);
-            (id, may_be_quadratic && arena.quadratic_root(id))
+            ConstructionResult::from_arena(arena, id)
         })
     }
 
@@ -1629,6 +2042,7 @@ impl std::fmt::Debug for ExprArenaBatchGuard<'_> {
 }
 
 impl ExprArenaBatchGuard<'_> {
+    /// Freeze current nodes, permanently publishing affine/quadratic roots.
     pub fn snapshot(&self) -> FrozenExprArena {
         self.arena.seal_all();
         FrozenExprArena {
@@ -1645,6 +2059,7 @@ impl ExprArenaBatchGuard<'_> {
     }
 
     /// Append worker-fork nodes in slice order and return each fork's ID map.
+    /// Merged affine/quadratic roots are permanently published.
     ///
     /// # Panics
     ///
@@ -1775,7 +2190,683 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use super::*;
-    use crate::{Expr, evaluate, extract_linear};
+    use crate::{Dynamic, Expr, evaluate, extract_linear};
+
+    fn linear_node(coefficient: f64, constant: f64) -> ExprNode {
+        ExprNode::Linear { coeffs: vec![(VarId(0), coefficient)], constant }
+    }
+
+    #[test]
+    fn affine_owned_ids_inline_capacity_dedup_remove_and_clear() {
+        let mut ids = AffineOwnedIds::default();
+        assert!(ids.is_empty());
+        assert!(!ids.spilled());
+        assert!(!ids.contains(ExprId(0)));
+        assert!(!ids.remove(ExprId(0)));
+
+        for i in 0..4 {
+            assert!(ids.insert(ExprId(i)));
+            assert!(!ids.insert(ExprId(i)));
+            assert_eq!(ids.len(), i as usize + 1);
+            assert!(!ids.spilled());
+        }
+
+        assert!(!ids.insert(ExprId(0)));
+        assert!(!ids.spilled());
+        assert!(ids.remove(ExprId(1)));
+        assert!(!ids.remove(ExprId(1)));
+        assert!(!ids.contains(ExprId(1)));
+        for i in [0, 2, 3] {
+            assert!(ids.contains(ExprId(i)));
+        }
+
+        assert!(ids.insert(ExprId(4)));
+        assert_eq!(ids.len(), 4);
+        assert!(!ids.spilled());
+
+        ids.clear();
+        assert!(ids.is_empty());
+        assert!(!ids.spilled());
+        for i in 0..4 {
+            assert!(!ids.contains(ExprId(i)));
+            assert!(ids.insert(ExprId(i)));
+            assert!(!ids.spilled());
+        }
+
+        for i in 0..4 {
+            assert!(ids.remove(ExprId(i)));
+        }
+
+        assert!(ids.is_empty());
+        assert!(!ids.spilled());
+    }
+
+    #[test]
+    fn oversized_affine_cache_stays_bounded_and_keeps_the_latest_root() {
+        let mut ownership = RootOwnership::default();
+        for index in 0..MAX_OVERSIZED_AFFINE_ROOTS as u32 {
+            ownership.mark_oversized_affine(ExprId(index));
+        }
+        assert_eq!(ownership.oversized_affine.len(), MAX_OVERSIZED_AFFINE_ROOTS);
+        assert!(ownership.oversized_affine.contains(&ExprId(0)));
+
+        ownership.mark_oversized_affine(ExprId(MAX_OVERSIZED_AFFINE_ROOTS as u32));
+        assert_eq!(ownership.oversized_affine.len(), 1);
+        assert!(!ownership.oversized_affine.contains(&ExprId(0)));
+        assert!(ownership.oversized_affine.contains(&ExprId(MAX_OVERSIZED_AFFINE_ROOTS as u32)));
+
+        for index in 1..10_000 {
+            ownership.mark_oversized_affine(ExprId(index));
+            assert!(ownership.oversized_affine.len() <= MAX_OVERSIZED_AFFINE_ROOTS);
+            assert!(ownership.oversized_affine.contains(&ExprId(index)));
+        }
+    }
+
+    #[test]
+    fn affine_owned_ids_spill_preserves_set_semantics_and_clear_resets_inline() {
+        let mut ids = AffineOwnedIds::default();
+        for i in 0..256 {
+            assert!(ids.insert(ExprId(i)));
+            assert_eq!(ids.len(), i as usize + 1);
+            assert_eq!(ids.spilled(), i >= 4);
+        }
+
+        for i in 0..256 {
+            assert!(ids.contains(ExprId(i)));
+            assert!(!ids.insert(ExprId(i)));
+        }
+
+        assert_eq!(ids.len(), 256);
+        for i in (0..256).step_by(2) {
+            assert!(ids.remove(ExprId(i)));
+            assert!(!ids.remove(ExprId(i)));
+        }
+
+        assert_eq!(ids.len(), 128);
+        for i in 0..256 {
+            assert_eq!(ids.contains(ExprId(i)), i % 2 != 0);
+        }
+
+        ids.clear();
+        assert!(ids.is_empty());
+        assert!(!ids.spilled());
+        for i in 0..256 {
+            assert!(!ids.contains(ExprId(i)));
+            assert!(!ids.remove(ExprId(i)));
+        }
+
+        for i in 0..5 {
+            assert!(ids.insert(ExprId(i)));
+        }
+
+        for i in 0..5 {
+            assert!(ids.remove(ExprId(i)));
+        }
+        assert!(ids.is_empty());
+        assert!(ids.spilled(), "removal retains hash storage until clear");
+
+        ids.clear();
+        assert!(!ids.spilled());
+        assert!(ids.insert(ExprId(0)));
+        assert!(!ids.spilled());
+    }
+
+    fn check_linear_ownership(arena: &mut dyn ArenaAccess) {
+        let before = arena.push(linear_node(1.0, 0.0));
+        let owned = arena.push_owned_linear(linear_node(2.0, 1.0));
+        let raw = arena.push(linear_node(3.0, 0.0));
+        let immutable = arena.push_immutable(linear_node(4.0, 0.0));
+        for sealed in [before, raw, immutable] {
+            assert!(!arena.linear_root(sealed));
+            assert_eq!(arena.accumulate_linear(sealed, owned, sealed), None);
+        }
+
+        assert!(arena.linear_root(owned));
+        assert_eq!(arena.accumulate_linear(owned, immutable, owned), Some(owned));
+        let ExprNode::Linear { coeffs, constant } = arena.get(owned) else {
+            panic!("linear root");
+        };
+        assert_eq!(coeffs, &[(VarId(0), 6.0)]);
+        assert_eq!(*constant, 1.0);
+
+        for immutable_parent in [false, true] {
+            let child = arena.push_owned_linear(linear_node(1.0, 0.0));
+            let parent = ExprNode::Unary(UnaryOp::Sin, child);
+            if immutable_parent {
+                arena.push_immutable(parent);
+            } else {
+                arena.push(parent);
+            }
+            assert!(!arena.linear_root(child));
+            assert_eq!(arena.accumulate_linear(child, raw, child), None);
+        }
+
+        arena.seal(owned);
+        assert!(!arena.linear_root(owned));
+    }
+
+    #[test]
+    fn linear_ownership_requires_explicit_owned_push_in_canonical_and_fork_arenas() {
+        check_linear_ownership(&mut ExprArena::new());
+        check_linear_ownership(&mut ForkedExprArena::new(FrozenExprArena::default()));
+
+        let mut arena = ExprArena::new();
+        let owned = ArenaAccess::push_owned_linear(&mut arena, linear_node(1.0, 0.0));
+        let raw = arena.push(linear_node(2.0, 0.0));
+        let builder = arena.linear(vec![(VarId(0), 3.0)], 0.0);
+        for sealed in [raw, builder] {
+            assert!(!ArenaAccess::linear_root(&mut arena, sealed));
+            assert_eq!(ArenaAccess::accumulate_linear(&mut arena, owned, sealed, sealed), None);
+        }
+
+        arena.push(ExprNode::Unary(UnaryOp::Sin, owned));
+        assert!(!ArenaAccess::linear_root(&mut arena, owned));
+    }
+
+    #[test]
+    fn immutable_linear_appends_do_not_grow_ownership_bookkeeping() {
+        let mut arena = ExprArena::new();
+        arena.push(linear_node(1.0, 0.0));
+        ArenaAccess::push_immutable(&mut arena, linear_node(1.0, 0.0));
+        assert!(arena.ownership.get().is_none());=
+
+        let owned = ArenaAccess::push_owned_linear(&mut arena, linear_node(1.0, 0.0));
+        for _ in 0..64 {
+            arena.push(linear_node(2.0, 0.0));
+            ArenaAccess::push(&mut arena, linear_node(3.0, 0.0));
+            ArenaAccess::push_immutable(&mut arena, linear_node(4.0, 0.0));
+        }
+
+        let ownership = arena.ownership.get_mut().unwrap().get_mut();
+        assert_eq!(ownership.affine_owned.len(), 1);
+        assert!(!ownership.affine_owned.spilled());
+        assert!(ownership.affine_owned.contains(owned));
+        assert!(ownership.sealed.is_empty());
+        assert!(ownership.slots.is_empty());
+
+        arena.seal(owned);
+        let ownership = arena.ownership.get_mut().unwrap().get_mut();
+        assert!(ownership.affine_owned.is_empty());
+        assert!(ownership.sealed.is_empty());
+
+        let mut fork = ForkedExprArena::new(FrozenExprArena::default());
+        fork.push(linear_node(1.0, 0.0));
+        fork.push_immutable(linear_node(1.0, 0.0));
+        assert!(fork.ownership.get().is_none());
+
+        let owned = fork.push_owned_linear(linear_node(1.0, 0.0));
+        for _ in 0..64 {
+            fork.push(linear_node(2.0, 0.0));
+            fork.push_immutable(linear_node(3.0, 0.0));
+        }
+
+        let ownership = fork.ownership.get_mut().unwrap().get_mut();
+        assert_eq!(ownership.affine_owned.len(), 1);
+        assert!(!ownership.affine_owned.spilled());
+        assert!(ownership.affine_owned.contains(owned));
+        assert!(ownership.sealed.is_empty());
+        assert!(ownership.slots.is_empty());
+
+        fork.seal(owned);
+        let ownership = fork.ownership.get_mut().unwrap().get_mut();
+        assert!(ownership.affine_owned.is_empty());
+        assert!(ownership.sealed.is_empty());
+    }
+
+    fn canonical_ownership(arena: &mut ExprArena) -> &mut RootOwnership {
+        arena.ownership.get_mut().unwrap().get_mut()
+    }
+
+    fn fork_ownership(arena: &mut ForkedExprArena) -> &mut RootOwnership {
+        arena.ownership.get_mut().unwrap().get_mut()
+    }
+
+    fn check_many_affine_roots<A: ArenaAccess>(
+        arena: &mut A,
+        ownership: fn(&mut A) -> &mut RootOwnership,
+    ) {
+        let roots: Vec<_> =
+            (0..256).map(|_| arena.push_owned_linear(linear_node(1.0, 0.0))).collect();
+        assert_eq!(ownership(arena).affine_owned.len(), roots.len());
+        assert!(ownership(arena).affine_owned.spilled());
+
+        for pair in roots.as_chunks::<2>().0 {
+            assert!(arena.linear_root(pair[0]));
+            assert!(arena.linear_root(pair[1]));
+            assert_eq!(arena.accumulate_linear(pair[0], pair[1], pair[0]), Some(pair[0]));
+            assert!(!arena.linear_root(pair[1]));
+            assert!(arena.linear_root(pair[0]));
+        }
+        assert_eq!(ownership(arena).affine_owned.len(), roots.len() / 2);
+
+        for pair in roots.as_chunks::<2>().0 {
+            arena.push_immutable(ExprNode::Unary(UnaryOp::Sin, pair[0]));
+            assert!(!arena.linear_root(pair[0]));
+        }
+        assert!(ownership(arena).affine_owned.is_empty());
+        assert!(!ownership(arena).needs_child_sealing());
+
+        let fresh = arena.push_owned_linear(linear_node(3.0, 0.0));
+        assert!(arena.linear_root(fresh));
+
+        let prefix = arena.len();
+        ownership(arena).seal_all(prefix);
+        assert!(!arena.linear_root(fresh));
+        assert!(!ownership(arena).affine_owned.spilled());
+
+        let fresh = arena.push_owned_linear(linear_node(4.0, 0.0));
+        assert!(arena.linear_root(fresh));
+        assert_eq!(ownership(arena).affine_owned.len(), 1);
+        assert!(!ownership(arena).affine_owned.spilled());
+    }
+
+    #[test]
+    fn many_concurrent_affine_roots_work_in_canonical_and_fork_arenas() {
+        check_many_affine_roots(&mut ExprArena::new(), canonical_ownership);
+        let base = FrozenExprArena {
+            nodes: Arc::new(vec![linear_node(2.0, 1.0)]),
+            ..FrozenExprArena::default()
+        };
+
+        let mut fork = ForkedExprArena::new(base);
+        check_many_affine_roots(&mut fork, fork_ownership);
+        assert!(!fork.linear_root(ExprId(0)));
+        assert!(matches!(fork.get(ExprId(0)), ExprNode::Linear { constant: 1.0, .. }));
+    }
+
+    #[test]
+    fn snapshot_resets_spilled_affine_ownership_and_forks_track_ids_independently() {
+        let mut arena = ExprArena::new();
+        let roots: Vec<_> = (0..16)
+            .map(|_| ArenaAccess::push_owned_linear(&mut arena, linear_node(1.0, 0.0)))
+            .collect();
+        assert!(canonical_ownership(&mut arena).affine_owned.spilled());
+
+        let cell = ExprArenaCell::new(arena);
+        let mut batch = cell.__begin_batch();
+        let snapshot = batch.snapshot();
+        assert!(canonical_ownership(&mut batch.arena).affine_owned.is_empty());
+        assert!(!canonical_ownership(&mut batch.arena).affine_owned.spilled());
+
+        for &root in &roots {
+            assert!(!ArenaAccess::linear_root(&mut *batch.arena, root));
+        }
+
+        let mut first = ForkedExprArena::new(snapshot.clone());
+        let mut second = ForkedExprArena::new(snapshot);
+        let mut first_roots = Vec::new();
+        for i in 0..16 {
+            let left = first.push_owned_linear(linear_node(2.0, 0.0));
+            let right = second.push_owned_linear(linear_node(3.0, 0.0));
+            assert_eq!(left, right);
+            assert_eq!(fork_ownership(&mut first).affine_owned.spilled(), i >= 4);
+            assert_eq!(fork_ownership(&mut second).affine_owned.spilled(), i >= 4);
+
+            first_roots.push(left);
+        }
+
+        for &root in &roots {
+            assert!(!first.linear_root(root));
+            assert!(!second.linear_root(root));
+        }
+
+        for root in first_roots {
+            first.seal(root);
+            assert!(!first.linear_root(root));
+            assert!(second.linear_root(root));
+        }
+        assert!(fork_ownership(&mut first).affine_owned.is_empty());
+        assert_eq!(fork_ownership(&mut second).affine_owned.len(), 16);
+
+        drop(first);
+        drop(second);
+        let fresh = ArenaAccess::push_owned_linear(&mut *batch.arena, linear_node(4.0, 0.0));
+        assert!(ArenaAccess::linear_root(&mut *batch.arena, fresh));
+        assert!(!canonical_ownership(&mut batch.arena).affine_owned.spilled());
+    }
+
+    fn check_affine_child_scan_gating<A: ArenaAccess>(
+        arena: &mut A,
+        ownership: fn(&mut A) -> &mut RootOwnership,
+    ) {
+        let prefix = arena.push_owned_linear(ExprNode::Linear {
+            coeffs: (0..32).map(|i| (VarId(i), 1.0)).collect(),
+            constant: 0.0,
+        });
+        let extra = arena.var(VarId(32));
+        assert_eq!(arena.accumulate_linear(prefix, extra, prefix), None);
+
+        let mut result = crate::linear::add_with_ownership(arena, prefix, extra, false);
+        assert!(!result.reusable);
+        let mut sum = result.id;
+        assert!(!arena.linear_root(prefix));
+        assert!(ownership(arena).affine_owned.is_empty());
+        assert!(!ownership(arena).needs_child_sealing());
+        assert_eq!(ownership(arena).child_inspections, 2);
+
+        for i in 33..4096 {
+            let term = arena.var(VarId(i));
+            result = crate::linear::add_with_ownership(arena, sum, term, i % 2 == 0);
+            sum = result.id;
+        }
+        assert_eq!(ownership(arena).child_inspections, 2);
+
+        let first = arena.push_owned_linear(linear_node(1.0, 0.0));
+        let second = arena.push_owned_linear(linear_node(2.0, 0.0));
+        assert!(ownership(arena).needs_child_sealing());
+
+        arena.push_immutable(ExprNode::Unary(UnaryOp::Sin, first));
+        assert!(!arena.linear_root(first));
+        assert_eq!(arena.accumulate_linear(first, extra, first), None);
+        assert!(arena.linear_root(second));
+        assert!(ownership(arena).needs_child_sealing());
+        assert_eq!(ownership(arena).child_inspections, 3);
+
+        arena.push(ExprNode::Unary(UnaryOp::Sin, second));
+        assert!(!arena.linear_root(second));
+        assert_eq!(arena.accumulate_linear(second, extra, second), None);
+        assert!(!ownership(arena).needs_child_sealing());
+        assert_eq!(ownership(arena).child_inspections, 4);
+
+        arena.push_immutable(ExprNode::Add(smallvec::smallvec![sum, extra]));
+        assert_eq!(ownership(arena).child_inspections, 4);
+    }
+
+    #[test]
+    fn canonical_affine_fallback_scans_only_the_first_parent_and_reactivates() {
+        check_affine_child_scan_gating(&mut ExprArena::new(), canonical_ownership);
+    }
+
+    #[test]
+    fn fork_affine_fallback_scans_only_the_first_parent_and_reactivates() {
+        check_affine_child_scan_gating(
+            &mut ForkedExprArena::new(FrozenExprArena::default()),
+            fork_ownership,
+        );
+    }
+
+    fn quadratic_node() -> ExprNode {
+        ExprNode::Quadratic(Arc::new(
+            crate::QuadraticTerms::from_coefficients(
+                vec![(VarId(0), VarId(0), 1.0)],
+                Vec::new(),
+                0.0,
+            )
+            .unwrap(),
+        ))
+    }
+
+    fn check_quadratic_child_scan_gating<A: ArenaAccess>(
+        arena: &mut A,
+        ownership: fn(&mut A) -> &mut RootOwnership,
+        quadratic_first: bool,
+    ) {
+        let first = if quadratic_first { Some(arena.push(quadratic_node())) } else { None };
+        let affine = arena.push_owned_linear(linear_node(1.0, 0.0));
+        arena.seal(affine);
+        assert_eq!(ownership(arena).quadratic_pending, quadratic_first);
+
+        let first = first.unwrap_or_else(|| arena.push(quadratic_node()));
+        let second = arena.push(quadratic_node());
+        let variable = arena.var(VarId(0));
+        assert!(ownership(arena).affine_owned.is_empty());
+        assert!(ownership(arena).quadratic_pending);
+        assert_eq!(arena.accumulate_quadratic(first, variable, 1.0), Some(first));
+
+        arena.push_immutable(ExprNode::Unary(UnaryOp::Sin, first));
+        assert_eq!(arena.accumulate_quadratic(first, variable, 1.0), None);
+        assert!(ownership(arena).quadratic_pending, "another quadratic is still live");
+        assert!(arena.quadratic_root(second));
+
+        arena.push(ExprNode::Unary(UnaryOp::Sin, second));
+        assert_eq!(arena.accumulate_quadratic(second, variable, 1.0), None);
+        assert_eq!(ownership(arena).child_inspections, 2);
+        assert!(ownership(arena).quadratic_pending, "individual seals remain conservative");
+
+        let unpublished = arena.push(quadratic_node());
+        let prefix = arena.len();
+        ownership(arena).seal_all(prefix);
+        assert!(!ownership(arena).quadratic_pending);
+        assert!(!ownership(arena).needs_child_sealing());
+        assert_eq!(arena.accumulate_quadratic(unpublished, variable, 1.0), None);
+
+        arena.push_immutable(ExprNode::Unary(UnaryOp::Sin, unpublished));
+        assert_eq!(ownership(arena).child_inspections, 2);
+
+        let fresh = arena.push(quadratic_node());
+        assert!(ownership(arena).quadratic_pending);
+        assert!(arena.quadratic_root(fresh));
+
+        arena.push_immutable(ExprNode::Unary(UnaryOp::Sin, fresh));
+        assert_eq!(ownership(arena).child_inspections, 3);
+        assert_eq!(arena.accumulate_quadratic(fresh, variable, 1.0), None);
+    }
+
+    #[test]
+    fn canonical_quadratics_keep_child_sealing_active_until_seal_all() {
+        for quadratic_first in [false, true] {
+            check_quadratic_child_scan_gating(
+                &mut ExprArena::new(),
+                canonical_ownership,
+                quadratic_first,
+            );
+        }
+    }
+
+    #[test]
+    fn fork_quadratics_keep_child_sealing_active_until_seal_all() {
+        for quadratic_first in [false, true] {
+            check_quadratic_child_scan_gating(
+                &mut ForkedExprArena::new(FrozenExprArena::default()),
+                fork_ownership,
+                quadratic_first,
+            );
+        }
+    }
+
+    #[test]
+    fn child_scan_gating_keeps_frozen_base_roots_read_only() {
+        let base = FrozenExprArena {
+            nodes: Arc::new(vec![linear_node(2.0, 1.0), quadratic_node()]),
+            ..FrozenExprArena::default()
+        };
+        let mut fork = ForkedExprArena::new(base.clone());
+        let affine = ExprId(0);
+        let quadratic = ExprId(1);
+        fork.push_immutable(ExprNode::Add(smallvec::smallvec![affine, quadratic]));
+        assert!(fork.ownership.get().is_none());
+
+        let local = fork.push_owned_linear(linear_node(3.0, 2.0));
+        assert!(!fork.linear_root(affine));
+        assert!(!fork.quadratic_root(quadratic));
+        assert_eq!(fork.accumulate_linear(affine, local, affine), None);
+        assert_eq!(fork.accumulate_quadratic(quadratic, local, 1.0), None);
+
+        fork.push_immutable(ExprNode::Add(smallvec::smallvec![affine, quadratic, local]));
+        assert!(!fork.linear_root(local));
+        assert_eq!(fork_ownership(&mut fork).child_inspections, 3);
+        assert!(!fork_ownership(&mut fork).needs_child_sealing());
+
+        fork.push(ExprNode::Add(smallvec::smallvec![quadratic, affine]));
+        assert_eq!(fork_ownership(&mut fork).child_inspections, 3);
+        assert!(Arc::ptr_eq(&base.nodes, &fork.base.nodes));
+
+        let ExprNode::Linear { coeffs, constant } = fork.get(affine) else {
+            panic!("frozen affine root");
+        };
+        assert_eq!(coeffs, &[(VarId(0), 2.0)]);
+        assert_eq!(*constant, 1.0);
+
+        let ExprNode::Quadratic(terms) = fork.get(quadratic) else {
+            panic!("frozen quadratic root");
+        };
+        assert_eq!(terms.quadratic, vec![(VarId(0), VarId(0), 1.0)]);
+        assert_eq!(terms.linear, []);
+        assert_eq!(terms.constant, 0.0);
+    }
+
+    #[test]
+    fn reusable_root_without_ownership_does_not_inspect_nodes() {
+        let mut arena = ExprArena::new();
+        let mut fork = ForkedExprArena::new(FrozenExprArena::default());
+        assert!(!ArenaAccess::reusable_root(&mut arena, ExprId(u32::MAX)));
+        assert!(!fork.reusable_root(ExprId(u32::MAX)));
+    }
+
+    #[test]
+    fn reusable_roots_keep_affine_and_quadratic_ownership_separate() {
+        fn check(arena: &mut dyn ArenaAccess) {
+            let affine = arena.push_owned_linear(linear_node(1.0, 0.0));
+            let quadratic = arena.push(ExprNode::Quadratic(Arc::new(
+                crate::QuadraticTerms::from_coefficients(
+                    vec![(VarId(0), VarId(0), 1.0)],
+                    Vec::new(),
+                    0.0,
+                )
+                .unwrap(),
+            )));
+            let immutable = arena.push_immutable(linear_node(2.0, 0.0));
+            assert!(arena.reusable_root(affine));
+            assert!(arena.reusable_root(quadratic));
+            assert!(!arena.reusable_root(immutable));
+
+            arena.seal(affine);
+            assert!(!arena.reusable_root(affine));
+            assert!(arena.reusable_root(quadratic));
+
+            arena.seal(quadratic);
+            assert!(!arena.reusable_root(quadratic));
+        }
+        check(&mut ExprArena::new());
+        check(&mut ForkedExprArena::new(FrozenExprArena::default()));
+    }
+
+    #[test]
+    fn linear_publication_and_snapshots_permanently_seal_roots() {
+        for publication in 0..5 {
+            let mut arena = ExprArena::new();
+            let root = ArenaAccess::push_owned_linear(&mut arena, linear_node(1.0, 0.0));
+            match publication {
+                0 => arena.seal(root),
+                1 => arena.seal_all(),
+                2 => drop(arena.clone()),
+                3 => drop(arena.__clone_with_additional_capacity(1)),
+                _ => arena.__append_nodes(vec![linear_node(2.0, 0.0)]),
+            }
+            assert!(!ArenaAccess::linear_root(&mut arena, root));
+            assert_eq!(ArenaAccess::accumulate_linear(&mut arena, root, root, root), None);
+
+            let fresh = ArenaAccess::push_owned_linear(&mut arena, linear_node(2.0, 0.0));
+            assert!(ArenaAccess::linear_root(&mut arena, fresh));
+            assert!(!ArenaAccess::linear_root(&mut arena, root));
+        }
+    }
+
+    fn check_linear_accumulation(arena: &mut dyn ArenaAccess) {
+        let left = arena.push_owned_linear(linear_node(1.0, 2.0));
+        let right = arena.push_owned_linear(linear_node(-1.0, 3.0));
+        let unrelated = arena.push_owned_linear(linear_node(9.0, 8.0));
+        assert_eq!(arena.accumulate_linear(left, right, unrelated), None);
+        assert!(arena.linear_root(unrelated));
+
+        arena.cache_degree(right, Degree::One);
+        assert_eq!(arena.accumulate_linear(left, right, right), Some(right));
+        assert!(matches!(arena.get(right), ExprNode::Const(5.0)));
+        assert!(!arena.linear_root(right));
+        assert_eq!(arena.cached_degree(right), None);
+        assert_eq!(arena.accumulate_linear(left, left, right), None);
+        assert!(!arena.linear_root(left), "the consumed source must lose its ownership record");
+
+        let left = arena.push_owned_linear(linear_node(1.0, 2.0));
+        assert_eq!(arena.accumulate_linear(left, left, left), Some(left));
+
+        let ExprNode::Linear { coeffs, constant } = arena.get(left) else {
+            panic!("linear root");
+        };
+        assert_eq!(coeffs, &[(VarId(0), 2.0)]);
+        assert_eq!(*constant, 4.0);
+
+        let full = arena.push_owned_linear(ExprNode::Linear {
+            coeffs: (0..32).map(|i| (VarId(i), 1.0)).collect(),
+            constant: 7.0,
+        });
+        let extra = arena.var(VarId(32));
+        arena.cache_degree(full, Degree::One);
+        assert_eq!(arena.accumulate_linear(full, extra, full), None);
+
+        let ExprNode::Linear { coeffs, constant } = arena.get(full) else {
+            panic!("unchanged linear root");
+        };
+        assert_eq!(coeffs, &(0..32).map(|i| (VarId(i), 1.0)).collect::<Vec<_>>());
+        assert_eq!(*constant, 7.0);
+        assert!(arena.linear_root(full));
+        assert_eq!(arena.cached_degree(full), Some(Degree::One));
+
+        let unsupported = arena.push_immutable(ExprNode::Unary(UnaryOp::Sin, extra));
+        assert_eq!(arena.accumulate_linear(full, unsupported, full), None);
+        assert_eq!(arena.cached_degree(full), Some(Degree::One));
+    }
+
+    #[test]
+    fn linear_accumulation_is_transactional_and_invalidates_classifications() {
+        check_linear_accumulation(&mut ExprArena::new());
+        check_linear_accumulation(&mut ForkedExprArena::new(FrozenExprArena::default()));
+    }
+
+    #[test]
+    fn linear_accumulation_requires_unique_storage_and_invalidates_analysis() {
+        let mut arena = ExprArena::new();
+        let root = ArenaAccess::push_owned_linear(&mut arena, linear_node(1.0, 2.0));
+        let shared = Arc::clone(&arena.nodes);
+        assert_eq!(ArenaAccess::accumulate_linear(&mut arena, root, root, root), None);
+        assert!(matches!(&shared[root.index()], ExprNode::Linear { constant: 2.0, .. }));
+        assert!(ArenaAccess::linear_root(&mut arena, root));
+
+        drop(shared);
+        arena.__enable_preparation_classifications();
+        ArenaAccess::cache_degree(&arena, root, Degree::One);
+        assert!(arena.analysis.get().is_some());
+        assert_eq!(ArenaAccess::accumulate_linear(&mut arena, root, root, root), Some(root));
+        assert!(arena.analysis.get().is_none());
+        assert_eq!(ArenaAccess::cached_degree(&arena, root), None);
+    }
+
+    #[test]
+    fn fork_linear_accumulation_reads_base_but_only_mutates_local_destinations() {
+        let mut canonical = ExprArena::new();
+        let base_root = ArenaAccess::push_owned_linear(&mut canonical, linear_node(2.0, 1.0));
+        let cell = ExprArenaCell::new(canonical);
+        let mut batch = cell.__begin_batch();
+        let snapshot = batch.snapshot();
+        assert!(!ArenaAccess::linear_root(&mut *batch.arena, base_root));
+
+        let mut fork = ForkedExprArena::new(snapshot);
+        let local = fork.push_owned_linear(linear_node(3.0, 2.0));
+        assert!(!fork.linear_root(base_root));
+        assert_eq!(fork.accumulate_linear(local, base_root, base_root), None);
+        assert_eq!(fork.accumulate_linear(base_root, local, local), Some(local));
+
+        let ExprNode::Linear { coeffs, constant } = fork.get(local) else {
+            panic!("local linear root");
+        };
+        assert_eq!(coeffs, &[(VarId(0), 5.0)]);
+        assert_eq!(*constant, 3.0);
+
+        let ExprNode::Linear { coeffs, constant } = fork.get(base_root) else {
+            panic!("immutable base root");
+        };
+        assert_eq!(coeffs, &[(VarId(0), 2.0)]);
+        assert_eq!(*constant, 1.0);
+
+        let mut outputs = [ForkOutput { value: local, base: fork.base, nodes: fork.nodes }];
+        let remaps = batch.merge(&mut outputs);
+        let merged = remaps[0].apply(local);
+        assert!(!ArenaAccess::linear_root(&mut *batch.arena, merged));
+        assert_eq!(
+            ArenaAccess::accumulate_linear(&mut *batch.arena, merged, base_root, merged),
+            None
+        );
+    }
 
     #[test]
     fn read_queries_preserve_unique_quadratic_roots() {
@@ -2116,6 +3207,55 @@ mod tests {
         assert!(matches!(terms.coeffs, std::borrow::Cow::Borrowed(_)));
         assert_eq!(terms.coeffs.as_ref(), &[(VarId(0), 3.0)]);
         assert!((terms.constant - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn consuming_affine_transform_retires_copied_source_roots() {
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&cell, VarId(0));
+        let mut result = None;
+        for _ in 0..10_000 {
+            result = Some((x.clone() + x.clone()) * 2.0);
+        }
+
+        let arena = cell.inner.lock();
+        let ownership = arena.ownership.get().unwrap().lock();
+        assert!(ownership.affine_owned.is_empty());
+        assert!(!ownership.needs_child_sealing());
+
+        drop(ownership);
+        drop(arena);
+        let expression = result.unwrap();
+        assert_eq!(evaluate(&cell.borrow(), expression.id(), &&[3.0][..]).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn consuming_sums_retire_copied_affine_roots() {
+        let cell = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&cell, VarId(0));
+        let y = Expr::from_var(&cell, VarId(1));
+        let mut result = None;
+        for index in 0..10_000 {
+            let terms = [(x.clone() + y.clone()).into_dynamic(), x.square().into_dynamic()];
+            result = Some(match index % 3 {
+                0 => {
+                    let sum: Expr<'_, Dynamic> = terms.into_iter().sum();
+                    sum
+                }
+                1 => Expr::<Dynamic>::__sum_terms(terms.into_iter()).unwrap(),
+                _ => Expr::<Dynamic>::__sum_terms_in(&cell, terms.into_iter()),
+            });
+        }
+
+        let arena = cell.inner.lock();
+        let ownership = arena.ownership.get().unwrap().lock();
+        assert!(ownership.affine_owned.is_empty());
+        assert!(!ownership.affine_owned.spilled());
+
+        drop(ownership);
+        drop(arena);
+        let expression = result.unwrap();
+        assert_eq!(evaluate(&cell.borrow(), expression.id(), &&[3.0, 2.0][..]).unwrap(), 14.0);
     }
 
     #[test]

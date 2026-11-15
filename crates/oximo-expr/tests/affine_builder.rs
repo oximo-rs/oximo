@@ -152,14 +152,16 @@ fn deep_left_and_right_sums_store_linear_space_and_extract_in_order() {
             vars.iter().cloned().reduce(|a, b| a + b).unwrap()
         };
         let snapshot = arena.borrow();
-        assert_eq!(snapshot.len(), vars.len() * 2 - 1);
+        let reused_nodes = 30;
+        assert_eq!(snapshot.len(), vars.len() * 2 - 1 - reused_nodes);
         let stored: usize = (0..snapshot.len())
             .map(|i| match snapshot.get(oximo_expr::ExprId(u32::try_from(i).unwrap())) {
                 ExprNode::Linear { coeffs, .. } => coeffs.len(),
                 _ => 0,
             })
             .sum();
-        assert_eq!(stored, (2..=32).sum::<usize>(), "large prefixes are not copied");
+        let expected_storage = 32;
+        assert_eq!(stored, expected_storage, "large prefixes are not copied");
         let terms = extract_linear(&snapshot, expr.id()).unwrap();
         let expected: Vec<_> = (0..20_000).map(|i| (VarId(i), 1.0)).collect();
         assert_eq!(terms.coeffs.as_ref(), expected);

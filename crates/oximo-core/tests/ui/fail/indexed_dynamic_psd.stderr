@@ -21,9 +21,8 @@ help: the following other types implement trait `IntoAffineMatrixEntry<'a>`
 note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_psd_constraints_over`
  --> src/model/indexed.rs
   |
-  | impl Model {
-...
   |     pub fn __add_psd_constraints_over<'a, K, M, F>(&'a self, prefix: &str, set: &Set<K>, rule: F)
+  |            -------------------------- required by a bound in this associated function
 ...
   |         M: IntoSymmetricAffineFunction<'a>,
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_psd_constraints_over`

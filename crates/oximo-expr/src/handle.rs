@@ -127,14 +127,17 @@ impl<'a, D: Degree> Expr<'a, D> {
         arena: &'a ExprArenaCell,
         construct: impl FnOnce(&mut dyn crate::arena::ArenaAccess) -> ExprId,
     ) -> Self {
-        let (id, owned) = arena.build_expr(crate::degree::may_be_quadratic::<D>(), construct);
-        Self::from_construction(id, owned, arena)
+        let construction = arena.build_expr(construct);
+        Self::from_construction(construction, arena)
     }
 
-    pub(crate) fn from_construction(id: ExprId, owned: bool, arena: &'a ExprArenaCell) -> Self {
-        let mut result = Self::from_id(id, arena);
-        result.owned = owned;
-        result.publication = D::Publication::new(!owned);
+    pub(crate) fn from_construction(
+        construction: crate::arena::ConstructionResult,
+        arena: &'a ExprArenaCell,
+    ) -> Self {
+        let mut result = Self::from_id(construction.id, arena);
+        result.owned = construction.reusable;
+        result.publication = D::Publication::new(!construction.reusable);
         result
     }
 
@@ -216,8 +219,8 @@ impl<'a, D: Degree> Expr<'a, D> {
     }
 
     /// Borrow a classified view without copying nodes or extracting coefficients.
-    /// Sharing permanently seals an owned quadratic. Use [`Self::into_classified`]
-    /// when consuming a handle.
+    /// Sharing permanently seals an owned affine or quadratic root. Use
+    /// [`Self::into_classified`] when consuming a handle.
     pub fn as_classified(&self) -> ClassifiedExpr<'a> {
         match self.__class() {
             ExprClass::Linear => ClassifiedExpr::Affine(self.clone().into_degree()),
@@ -238,19 +241,24 @@ impl<'a, D: Degree> Expr<'a, D> {
         self.clone().into_degree()
     }
 
-    /// Read the current node identity without publishing or sealing it.
-    /// The node can change during later consuming arithmetic on an owned handle.
-    /// Use [`Self::publish_id`] or [`Self::into_id`] before retaining an identity
-    /// independently of the handle.
+    /// Return a stable node identity, publishing the root before returning it.
+    /// Publication permanently disables in-place reuse of this root.
     #[inline]
     pub fn id(&self) -> ExprId {
+        self.publish_id()
+    }
+
+    /// Read the current transient node identity without publishing it.
+    /// The ID may stop naming this expression after consuming arithmetic.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn transient_id(&self) -> ExprId {
         self.id
     }
 
     /// Publish a stable node identity, permanently disabling in-place reuse.
     ///
-    /// After the first publication completes, repeated publication through this
-    /// handle does not reacquire the arena lock.
+    /// Concurrent calls are safe; publication is idempotent.
     #[inline]
     pub fn publish_id(&self) -> ExprId {
         self.seal();
@@ -665,23 +673,29 @@ mod tests {
     use crate::{Dynamic, ExprClass, Nonlinear, Quadratic, evaluate};
 
     #[test]
-    fn identity_reads_do_not_lock_or_disable_in_place_accumulation() {
+    fn transient_identity_is_unpublished_and_public_identity_is_stable() {
         let arena = ExprArenaCell::new(ExprArena::new());
         let x = Expr::from_var(&arena, VarId(0));
         let expression = x * x;
-        let root = expression.id();
+        let root = expression.transient_id();
         arena.reset_access_count();
         for _ in 0..100 {
-            assert_eq!(expression.id(), root);
+            assert_eq!(expression.transient_id(), root);
         }
+        assert_eq!(arena.access_count(), 0);
+
+        assert_eq!(expression.id(), root);
+        assert_eq!(arena.access_count(), 1);
+        arena.reset_access_count();
+        assert_eq!(expression.id(), root);
         assert_eq!(arena.access_count(), 0);
 
         arena.with_ref(|arena| {
             let _ = arena.get(root);
         });
         let result = expression + x;
-        assert_eq!(result.id(), root);
-        assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 12.0);
+        assert_ne!(result.id(), root);
+        assert_eq!(evaluate(&arena.borrow(), root, &&[3.0][..]).unwrap(), 9.0);
     }
 
     #[test]
@@ -689,7 +703,7 @@ mod tests {
         let arena = ExprArenaCell::new(ExprArena::new());
         let x = Expr::from_var(&arena, VarId(0));
         let expression = x * x;
-        let root = expression.id();
+        let root = expression.transient_id();
         let terms = {
             let guard = arena.borrow_mut();
             crate::extract_quadratic(&guard, root).unwrap()
@@ -783,7 +797,7 @@ mod tests {
         let arena = ExprArenaCell::new(ExprArena::new());
         let x = Expr::from_var(&arena, VarId(0));
         let expression = x * x;
-        let root = expression.id();
+        let root = expression.transient_id();
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {

@@ -21,9 +21,8 @@ help: the trait `ImmutableSemanticFunction` is not implemented for `MutableFunct
 note: required by a bound in `TranslationContext::bind`
   --> src/translation.rs
    |
-   | impl TranslationContext {
-...
    |     pub fn bind<'ctx, F, S>(
+   |            ---- required by a bound in this associated function
 ...
    |         F: ImmutableSemanticFunction + oximo_core::FunctionInSet<S>,
    |            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TranslationContext::bind`

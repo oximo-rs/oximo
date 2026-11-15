@@ -26,9 +26,8 @@ help: the following other types implement trait `IntoAffineFunction<'a>`
 note: required by a bound in `model::indexed::<impl oximo_core::Model>::__add_indicator_ranges_over`
  --> src/model/indexed.rs
   |
-  | impl Model {
-...
   |     pub fn __add_indicator_ranges_over<
+  |            --------------------------- required by a bound in this associated function
 ...
   |         E: IntoAffineFunction<'a>,
   |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `model::indexed::<impl Model>::__add_indicator_ranges_over`

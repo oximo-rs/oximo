@@ -2,6 +2,7 @@
 mod sealed {
     pub trait Sealed {
         const MAY_BE_QUADRATIC: bool = true;
+        const MAY_BE_AFFINE: bool = true;
         type Publication: PublicationState;
     }
 
@@ -49,6 +50,11 @@ pub(crate) fn may_be_quadratic<D: Degree>() -> bool {
     D::MAY_BE_QUADRATIC
 }
 
+/// Whether an expression of this static degree can be a small affine root.
+pub(crate) fn may_be_affine<D: Degree>() -> bool {
+    D::MAY_BE_AFFINE
+}
+
 /// A sealed upper bound on polynomial degree.
 pub trait Degree: sealed::Sealed + Copy + std::fmt::Debug + Send + Sync + 'static {
     /// Degree of a computed expression, without a reusable leaf identity.
@@ -83,6 +89,7 @@ pub trait DivDegree<R: Degree>: Degree {
 pub struct Constant;
 impl sealed::Sealed for Constant {
     const MAY_BE_QUADRATIC: bool = false;
+    const MAY_BE_AFFINE: bool = false;
     type Publication = sealed::ComputedPublication;
 }
 impl Degree for Constant {
@@ -95,6 +102,7 @@ impl ExpressionDegree for Constant {}
 pub struct Affine;
 impl sealed::Sealed for Affine {
     const MAY_BE_QUADRATIC: bool = false;
+    const MAY_BE_AFFINE: bool = true;
     type Publication = sealed::ComputedPublication;
 }
 impl Degree for Affine {
@@ -106,6 +114,7 @@ impl ExpressionDegree for Affine {}
 #[derive(Copy, Clone, Debug)]
 pub struct Quadratic;
 impl sealed::Sealed for Quadratic {
+    const MAY_BE_AFFINE: bool = false;
     type Publication = sealed::ComputedPublication;
 }
 impl Degree for Quadratic {
@@ -117,6 +126,7 @@ impl ExpressionDegree for Quadratic {}
 #[derive(Copy, Clone, Debug)]
 pub struct Nonlinear;
 impl sealed::Sealed for Nonlinear {
+    const MAY_BE_AFFINE: bool = false;
     type Publication = sealed::ComputedPublication;
 }
 impl Degree for Nonlinear {

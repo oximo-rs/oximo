@@ -919,7 +919,7 @@ mod tests {
         let arena = ExprArenaCell::new(ExprArena::new());
         let x = Expr::from_var(&arena, VarId(0));
         let source = x * x;
-        let root = source.id();
+        let root = source.transient_id();
         let mut builder = QuadraticBuilder::new(&arena);
         arena.reset_access_count();
         builder.add_quadratic(2.0, &source).unwrap();
@@ -1174,10 +1174,7 @@ mod tests {
         for mode in 0..6 {
             let before = arena.with_ref(|a| a.len());
             let q = match mode {
-                0 => {
-                    let q = x.square();
-                    Expr::from_construction(q.id, q.owned, &arena)
-                }
+                0 => x.square().into_dynamic(),
                 1 => x.powi(2),
                 2 => x.powf(2.0),
                 3 => std::iter::once(x.powi(2)).sum(),

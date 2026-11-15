@@ -19,7 +19,5 @@ help: the trait `TypedConstraintTranslator<ScalarFunctionData<oximo_core::Quadra
 note: required by a bound in `PreparedConstraint::<'_, F, S>::translate`
   --> src/translation.rs
    |
-   | impl<F, S> PreparedConstraint<'_, F, S>
-...
    |     pub fn translate<T: TypedConstraintTranslator<F, S>>(
    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `PreparedConstraint::<'_, F, S>::translate`

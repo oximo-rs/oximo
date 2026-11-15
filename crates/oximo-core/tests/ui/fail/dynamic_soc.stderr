@@ -9,7 +9,5 @@ error[E0271]: type mismatch resolving `<[ScalarDynamicFunction<'_>; 1] as IntoIt
 note: required by a bound in `oximo_core::VectorAffineFunction::<'a>::new`
  --> src/function_set.rs
   |
-  | impl<'a> VectorAffineFunction<'a> {
-...
   |     pub fn new(components: impl IntoIterator<Item = ScalarAffineFunction<'a>>) -> Self {
   |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `VectorAffineFunction::<'a>::new`

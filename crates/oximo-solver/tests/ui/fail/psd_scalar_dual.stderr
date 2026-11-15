@@ -24,9 +24,8 @@ help: the following other types implement trait `ScalarDualQuery`
 note: required by a bound in `SolverResult::dual_of`
   --> src/result.rs
    |
-   | impl SolverResult {
-...
    |     pub fn dual_of(
+   |            ------- required by a bound in this associated function
    |         &self,
    |         constraint: impl oximo_core::ScalarDualQuery,
    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SolverResult::dual_of`

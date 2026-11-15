@@ -27,6 +27,7 @@ note: required by a bound in `oximo_core::Constraint::<F, S>::new`
   |         ^^^^^^^^^^^^^^^^ required by this bound in `Constraint::<F, S>::new`
 ...
   |     pub fn new(function: F, set: S) -> Self {
+  |            --- required by a bound in this associated function
   = note: this error originates in the macro `scalar_pairs` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `oximo_core::ScalarAffineFunction<'_>: FunctionInSet<oximo_core::SecondOrderCone>` is not satisfied
