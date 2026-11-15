@@ -2368,7 +2368,7 @@ mod tests {
         let mut arena = ExprArena::new();
         arena.push(linear_node(1.0, 0.0));
         ArenaAccess::push_immutable(&mut arena, linear_node(1.0, 0.0));
-        assert!(arena.ownership.get().is_none());=
+        assert!(arena.ownership.get().is_none());
 
         let owned = ArenaAccess::push_owned_linear(&mut arena, linear_node(1.0, 0.0));
         for _ in 0..64 {
