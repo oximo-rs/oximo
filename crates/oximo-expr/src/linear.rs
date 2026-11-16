@@ -972,6 +972,16 @@ fn multiply_into(
 ) -> ExprId {
     let left = arena.get(lhs);
     let right = arena.get(rhs);
+    if let (ExprNode::Var(var), ExprNode::Const(scalar))
+    | (ExprNode::Const(scalar), ExprNode::Var(var)) = (left, right)
+    {
+        // A variable already has the affine coefficients [(var, 1)] and a zero
+        // constant.
+        // We keep the same arithmetic, without probing or extracting that single
+        // leaf through the general folder.
+        let terms = LinearTerms::owned(vec![(*var, 1.0 * scalar)], 0.0 * scalar);
+        return push_linear(arena, terms);
+    }
     let quadratic_candidate = expand_quadratic
         && matches!(
             (left, right),
