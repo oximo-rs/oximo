@@ -300,7 +300,7 @@ impl<'a, D: Degree> Expr<'a, D> {
         }) {
             return self.clone().into_degree();
         }
-        let mut builder = crate::AffineBuilder::new(self.arena);
+        let mut builder = crate::AffineBuilder::with_capacities(self.arena, 1, 0);
         builder.add_term(1.0, self);
         builder.build()
     }
