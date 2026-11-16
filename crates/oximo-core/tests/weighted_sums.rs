@@ -405,9 +405,9 @@ fn typed_weighted_terms_make_generic_rounding_explicit() {
     {
         sum!(m, weights[i] * x for i in 0..weights.len())
     }
-    fn typed<'a, E: ExprInput<'a, Degree = Affine>>(
+    fn typed<'a, W: Copy + Into<f64>, E: ExprInput<'a, Degree = Affine>>(
         m: &'a Model,
-        weights: &[f64],
+        weights: &[W],
         input: E,
     ) -> Expr<'a, Affine> {
         sum!(m, weighted_term(weights[i], &input) for i in 0..weights.len())
@@ -426,6 +426,10 @@ fn typed_weighted_terms_make_generic_rounding_explicit() {
 
     let explicit_unfused = sum!(m, unfused: weighted_term(weights[i], x) for i in 0..2);
     assert_eq!(value(&explicit_unfused, &[10.0]).to_bits(), value(&concrete, &[10.0]).to_bits());
+    let integers = typed(&m, &[2, 3], x + 1.0);
+    assert_eq!(value(&integers, &[10.0]), 55.0);
+    let extremes = typed(&m, &[i32::MAX, i32::MIN, 2], x + 1.0);
+    assert_eq!(value(&extremes, &[10.0]), 11.0);
 }
 
 #[test]

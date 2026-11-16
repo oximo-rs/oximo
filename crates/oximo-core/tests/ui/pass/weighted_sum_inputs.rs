@@ -26,4 +26,7 @@ fn main() {
     let _: Expr<'_, Affine> = sum!(m, std::convert::identity(&(x + 1.0)) * 2.0 for _i in 0..2);
     let _: Expr<'_, Constant> = sum!(m, weighted_term(2.0, p) for _i in 0..2);
     let _: Expr<'_, Affine> = sum!(m, weighted_term(2.0, &affine) for _i in 0..2);
+    let _: Expr<'_, Affine> = sum!(m, weighted_term(2, x) for _i in 0..2);
+    let _: Expr<'_, Affine> = sum!(m, weighted_term(2, &affine) for _i in 0..2);
+    let _: Expr<'_, Constant> = sum!(m, weighted_term(2, p) for _i in 0..2);
 }

@@ -120,15 +120,18 @@ pub struct WeightedTerm<'a, D: Degree> {
 /// ```
 /// use oximo_expr::{Affine, ExprInput, WeightedTerm, weighted_term};
 /// fn term<'a, E: ExprInput<'a, Degree = Affine>>(input: E) -> WeightedTerm<'a, Affine> {
-///     weighted_term(2.0, input)
+///     weighted_term(2, input)
 /// }
 /// ```
-pub fn weighted_term<'a, E>(coefficient: f64, expression: E) -> WeightedTerm<'a, E::Degree>
+pub fn weighted_term<'a, E>(
+    coefficient: impl Into<f64>,
+    expression: E,
+) -> WeightedTerm<'a, E::Degree>
 where
     E: ExprInput<'a>,
     E::Degree: AddDegree<Affine, Output = Affine>,
 {
-    WeightedTerm { coefficient, expression: expression.into_expression() }
+    WeightedTerm { coefficient: coefficient.into(), expression: expression.into_expression() }
 }
 
 #[derive(Debug)]
@@ -298,3 +301,32 @@ macro_rules! numeric_products {
 
 numeric_products!(f64);
 numeric_products!(i32);
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+    use crate::{ExprArena, VarId, evaluate};
+
+    #[test]
+    fn weighted_term_consumes_noncopy_weights_and_converts_once() {
+        struct Weight<'a>(&'a Cell<usize>);
+        impl From<Weight<'_>> for f64 {
+            fn from(weight: Weight<'_>) -> Self {
+                weight.0.set(weight.0.get() + 1);
+                2.0
+            }
+        }
+
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let conversions = Cell::new(0);
+        let term = weighted_term(Weight(&conversions), x);
+        assert_eq!(conversions.get(), 1);
+
+        let expression = WeightedTerm::sum_terms(std::iter::once(term), Some(&arena)).unwrap();
+        assert_eq!(evaluate(&arena.borrow(), expression.id(), &&[3.0][..]).unwrap(), 6.0);
+        assert_eq!(conversions.get(), 1);
+    }
+}
