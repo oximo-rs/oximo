@@ -1026,6 +1026,7 @@ impl<'a, D: Degree> From<&Expr<'a, D>> for Expr<'a> {
 }
 
 /// Borrow an expression without copying its arena handle.
+/// Implement this trait to pass custom expression wrappers to builders and sums.
 pub trait ExprInput<'a> {
     type Degree: Degree;
     fn as_expression(&self) -> &Expr<'a, Self::Degree>;

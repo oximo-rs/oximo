@@ -6,8 +6,22 @@ use std::ops::Mul;
 use crate::degree::AddDegree;
 use crate::{Affine, AffineBuilder, Degree, Expr, ExprArenaCell, ExprInput, ExpressionDegree};
 
+mod sealed {
+    use super::{AddDegree, Affine, Degree, ExprInput, Mul, ProductTag, WeightedTerm};
+
+    pub trait Term<'a> {}
+
+    impl<'a, E: ExprInput<'a>> Term<'a> for E {}
+
+    impl<'a, D> Term<'a> for WeightedTerm<'a, D> where D: Degree + AddDegree<Affine, Output = Affine> {}
+
+    pub trait Product<L, R> {}
+
+    impl<L: Mul<R>, R> Product<L, R> for &ProductTag<L, R> {}
+}
+
 /// A term in an indexed sum, defining how it is evaluated and accumulated.
-pub trait SumTerm<'a>: Sized {
+pub trait SumTerm<'a>: Sized + sealed::Term<'a> {
     type Degree: ExpressionDegree;
     type Buffer;
     type Evaluated: SumTerm<'a, Degree = Self::Degree>;
@@ -218,7 +232,8 @@ pub fn product_tag<L, R>(_: &(L, R)) -> ProductTag<L, R> {
     ProductTag(PhantomData)
 }
 
-pub trait SumProduct<L, R> {
+/// Sealed dispatch for weighted products and ordinary multiplication.
+pub trait SumProduct<L, R>: sealed::Product<L, R> {
     type Output;
     fn sum_product(self, operands: (L, R)) -> Self::Output;
 }
@@ -233,6 +248,11 @@ impl<L: Mul<R>, R> SumProduct<L, R> for &ProductTag<L, R> {
 
 macro_rules! numeric_products {
     ($scalar:ty) => {
+        impl<'a, D> sealed::Product<$scalar, Expr<'a, D>> for &&ProductTag<$scalar, Expr<'a, D>> where
+            D: Degree + AddDegree<Affine, Output = Affine>
+        {
+        }
+
         impl<'a, D> SumProduct<$scalar, Expr<'a, D>> for &&ProductTag<$scalar, Expr<'a, D>>
         where
             D: Degree + AddDegree<Affine, Output = Affine>,
@@ -247,6 +267,11 @@ macro_rules! numeric_products {
             }
         }
 
+        impl<'a, D> sealed::Product<Expr<'a, D>, $scalar> for &&ProductTag<Expr<'a, D>, $scalar> where
+            D: Degree + AddDegree<Affine, Output = Affine>
+        {
+        }
+
         impl<'a, D> SumProduct<Expr<'a, D>, $scalar> for &&ProductTag<Expr<'a, D>, $scalar>
         where
             D: Degree + AddDegree<Affine, Output = Affine>,
@@ -259,6 +284,13 @@ macro_rules! numeric_products {
             ) -> Self::Output {
                 WeightedTerm { coefficient: f64::from(coefficient), expression }
             }
+        }
+
+        impl<'a, 'b, D> sealed::Product<$scalar, &'b Expr<'a, D>>
+            for &&ProductTag<$scalar, &'b Expr<'a, D>>
+        where
+            D: Degree + AddDegree<Affine, Output = Affine>,
+        {
         }
 
         impl<'a, 'b, D> SumProduct<$scalar, &'b Expr<'a, D>>
@@ -277,6 +309,13 @@ macro_rules! numeric_products {
                     expression: expression.into_expression(),
                 }
             }
+        }
+
+        impl<'a, 'b, D> sealed::Product<&'b Expr<'a, D>, $scalar>
+            for &&ProductTag<&'b Expr<'a, D>, $scalar>
+        where
+            D: Degree + AddDegree<Affine, Output = Affine>,
+        {
         }
 
         impl<'a, 'b, D> SumProduct<&'b Expr<'a, D>, $scalar>

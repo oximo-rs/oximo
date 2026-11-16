@@ -1,0 +1,29 @@
+error[E0277]: the trait bound `CustomTerm: oximo_expr::sum_support::sealed::Term<'a>` is not satisfied
+ --> tests/ui/fail/sum_term_is_sealed.rs:6:26
+  |
+6 | impl<'a> SumTerm<'a> for CustomTerm {
+  |                          ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `ExprInput<'_>` is not implemented for `CustomTerm`
+ --> tests/ui/fail/sum_term_is_sealed.rs:4:1
+  |
+4 | struct CustomTerm;
+  | ^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `ExprInput<'a>`
+ --> $WORKSPACE/crates/oximo-expr/src/handle.rs
+  |
+  | impl<'a, D: Degree> ExprInput<'a> for Expr<'a, D> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Expr<'a, D>`
+...
+  | impl<'a, T: ExprInput<'a> + ?Sized> ExprInput<'a> for &T {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&T`
+  = note: required for `CustomTerm` to implement `oximo_expr::sum_support::sealed::Term<'a>`
+note: required by a bound in `oximo_expr::sum_support::SumTerm`
+ --> $WORKSPACE/crates/oximo-expr/src/sum_support.rs
+  |
+  | pub trait SumTerm<'a>: Sized + sealed::Term<'a> {
+  |                                ^^^^^^^^^^^^^^^^ required by this bound in `SumTerm`
+  = note: `SumTerm` is a "sealed trait", because to implement it you also need to implement `oximo_expr::sum_support::sealed::Term`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            E
+            oximo_expr::WeightedTerm<'a, D>
