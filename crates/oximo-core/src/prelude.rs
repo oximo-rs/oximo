@@ -47,9 +47,9 @@ pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMem
 pub use crate::sum::SumDomain;
 pub use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
 pub use oximo_expr::{
-    AffineBuilder, CapturedExpr, Children, Expr, ExprId, ModelId, ModelMismatchError, ParamId,
-    ParameterHandle, ParameterSnapshot, QuadraticBuildError, QuadraticBuilder, UnaryOp, VarId,
-    VariableHandle, dot,
+    AffineBuilder, CapturedExpr, Children, Expr, ExprId, ExprInput, ModelId, ModelMismatchError,
+    ParamId, ParameterHandle, ParameterSnapshot, QuadraticBuildError, QuadraticBuilder, UnaryOp,
+    VarId, VariableHandle, WeightedTerm, dot, weighted_term,
 };
 #[cfg(feature = "gdp")]
 pub use oximo_macros::{

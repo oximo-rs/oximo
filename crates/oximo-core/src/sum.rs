@@ -90,15 +90,15 @@ impl SumDomain<i32> for std::ops::Range<i32> {
 /// Macro-facing entry point backing the `sum!` macro. Not part of the stable
 /// public API.
 #[doc(hidden)]
-pub fn __sum_over<'a, E: oximo_expr::ExprInput<'a>, K, D, F>(
+pub fn __sum_over<'a, E: oximo_expr::sum_support::SumTerm<'a>, K, D, F>(
     domain: &D,
     f: F,
-) -> Expr<'a, <E::Degree as oximo_expr::Degree>::Computed>
+) -> Expr<'a, E::Degree>
 where
     D: SumDomain<K> + ?Sized,
     F: FnMut(K) -> E,
 {
-    Expr::__sum_terms(domain.keys().map(f)).expect("sum_over on empty domain")
+    E::sum_terms(domain.keys().map(f), None).expect("sum_over on empty domain")
 }
 
 #[cfg(test)]

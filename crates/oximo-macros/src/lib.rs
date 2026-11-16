@@ -145,11 +145,16 @@ pub fn objective(input: TokenStream) -> TokenStream {
 }
 
 /// `sum!(body for pat in domain[, pat in domain ...])`, algebraic summation,
-/// lowered to nested `sum_over` folds. To allow an empty domain (or an empty
+/// feeding one accumulator by default. To allow an empty domain (or an empty
 /// filter), anchor the sum to its model: `sum!(model, body for pat in domain)`.
 /// Sums written inside `constraint!`, `soc_constraint!`, `objective!`, or an
 /// anchored sum inherit its expression context automatically. Selected terms
 /// must belong to that model. Standalone unanchored sums require a first term.
+///
+/// Outermost products of `f64`/`i32` weights and statically affine oximo handles
+/// accumulate through `AffineBuilder`. This can change floating-point rounding. Use
+/// `sum!(model, unfused: body for pat in domain)` to disable the rewrite and retain
+/// nested index summation, including in nested sums.
 #[proc_macro]
 pub fn sum(input: TokenStream) -> TokenStream {
     sum::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()

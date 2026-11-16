@@ -14,40 +14,49 @@ pub use crate::set::{FromIndexKey, FromIndexKeyRef, IndexKeyRef, KeyCat, Set};
 pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
 pub use oximo_expr::ExtremaBuilder;
+pub use oximo_expr::sum_support::{
+    SumCollector, SumProduct, SumTerm, evaluate_sum_term, product_tag,
+};
+
+/// Own the index key through the callback, then convert its returned input.
+pub fn evaluate_sum_callback<'a, K, E: SumTerm<'a>>(
+    key: K,
+    callback: impl FnOnce(K) -> E,
+) -> E::Evaluated {
+    evaluate_sum_term(callback(key))
+}
 
 /// Sum over a domain while retaining a model-owned additive identity for an
 /// empty domain. This is the implementation behind the anchored
 /// `sum!(model, body for ...)` form.
 #[must_use]
-pub fn sum_over_in<'a, E: oximo_expr::ExprInput<'a>, K, D, F>(
+pub fn sum_over_in<'a, E: SumTerm<'a>, K, D, F>(
     arena: &'a oximo_expr::ExprArenaCell,
     domain: &D,
     f: F,
-) -> oximo_expr::Expr<'a, <E::Degree as oximo_expr::Degree>::Computed>
+) -> oximo_expr::Expr<'a, E::Degree>
 where
     D: SumDomain<K> + ?Sized,
     F: FnMut(K) -> E,
 {
-    oximo_expr::Expr::__sum_terms_in(arena, domain.keys().map(f))
+    E::sum_terms(domain.keys().map(f), Some(arena)).expect("anchored sum has an identity")
 }
 
-/// Flatten already-collected `sum!` terms into one expression (a single n-ary
-/// `Add`).
+/// Combine collected `sum!` terms. Ordinary inputs retain flat sum construction;
+/// weighted inputs use affine accumulation.
 #[must_use]
-pub fn sum_terms<'a, E: oximo_expr::ExprInput<'a>>(
-    terms: Vec<E>,
-) -> oximo_expr::Expr<'a, <E::Degree as oximo_expr::Degree>::Computed> {
-    oximo_expr::Expr::__sum_terms(terms.into_iter()).expect("Expr::sum on empty iterator")
+pub fn sum_terms<'a, E: SumTerm<'a>>(terms: Vec<E>) -> oximo_expr::Expr<'a, E::Degree> {
+    E::sum_terms(terms.into_iter(), None).expect("Expr::sum on empty iterator")
 }
 
-/// Flatten collected terms, returning a model-owned zero when the collection
+/// Combine collected terms, returning a model-owned zero when the collection
 /// is empty. This is used by the filtered anchored `sum!` form.
 #[must_use]
-pub fn sum_terms_in<'a, E: oximo_expr::ExprInput<'a>>(
+pub fn sum_terms_in<'a, E: SumTerm<'a>>(
     arena: &'a oximo_expr::ExprArenaCell,
     terms: Vec<E>,
-) -> oximo_expr::Expr<'a, <E::Degree as oximo_expr::Degree>::Computed> {
-    oximo_expr::Expr::__sum_terms_in(arena, terms.into_iter())
+) -> oximo_expr::Expr<'a, E::Degree> {
+    E::sum_terms(terms.into_iter(), Some(arena)).expect("anchored sum has an identity")
 }
 
 /// Filter a [`Set`] by a typed predicate over its decoded keys. Backs the
