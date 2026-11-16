@@ -22,8 +22,9 @@ help: the following other types implement trait `ScalarDualQuery`
 note: required by a bound in `ConstraintHandle::<F, S>::row_id`
  --> src/constraint.rs
   |
+  | impl<F, S> ConstraintHandle<F, S> {
+...
   |     pub const fn row_id(self) -> ConstraintId
-  |                  ------ required by a bound in this associated function
   |     where
   |         Self: ScalarDualQuery,
   |               ^^^^^^^^^^^^^^^ required by this bound in `ConstraintHandle::<F, S>::row_id`
