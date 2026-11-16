@@ -68,7 +68,8 @@ fn build_binary<'a, D: Degree>(
     Expr::build(lhs.arena, |arena| {
         lhs.seal_in(arena);
         rhs.seal_in(arena);
-        construct(arena, &lhs, &rhs)
+        let id = construct(arena, &lhs, &rhs);
+        finish_binary(arena, id, &lhs, &rhs)
     })
 }
 
@@ -79,8 +80,32 @@ fn build_unary<'a, D: Degree>(
 ) -> Expr<'a, D> {
     Expr::build(input.arena, |arena| {
         input.seal_in(arena);
-        construct(arena, &input)
+        let id = construct(arena, &input);
+        finish_unary(arena, id, &input)
     })
+}
+
+#[inline]
+fn finish_unary(
+    arena: &mut dyn crate::arena::ArenaAccess,
+    result: ExprId,
+    input: &Operand<'_, '_>,
+) -> ExprId {
+    if input.owned && input.id != result {
+        arena.retire_affine_root(input.id);
+    }
+    result
+}
+
+#[inline]
+fn finish_binary(
+    arena: &mut dyn crate::arena::ArenaAccess,
+    result: ExprId,
+    lhs: &Operand<'_, '_>,
+    rhs: &Operand<'_, '_>,
+) -> ExprId {
+    finish_unary(arena, result, lhs);
+    finish_unary(arena, result, rhs)
 }
 
 #[inline]
@@ -100,58 +125,70 @@ fn prefer_right_destination(
 #[inline]
 fn add_expr<'a, D: Degree>(lhs: Operand<'a, '_>, rhs: Operand<'a, '_>) -> Expr<'a, D> {
     lhs.assert_same_arena(&rhs);
+    let may_be_affine = crate::degree::may_be_affine::<D>();
 
-    // Addition can retain an already-owned root even after a checked narrowing
-    // to Affine. We preserve its ownership result and we don't reclassify it.
-    let (id, owned) = lhs.arena.with_mut(|arena| {
+    // Preserve ownership across consuming additions and checked degree changes.
+    Expr::build(lhs.arena, |arena| {
         lhs.seal_in(arena);
         rhs.seal_in(arena);
+
+        // `accumulate_linear` only succeeds for an owned linear root.
+        if may_be_affine && (lhs.owned || rhs.owned) {
+            if lhs.owned
+                && let Some(id) = arena.accumulate_linear(lhs.id, rhs.id, lhs.id)
+            {
+                return finish_binary(arena, id, &lhs, &rhs);
+            }
+            if rhs.owned
+                && let Some(id) = arena.accumulate_linear(lhs.id, rhs.id, rhs.id)
+            {
+                return finish_binary(arena, id, &lhs, &rhs);
+            }
+        }
         let prefer_right = prefer_right_destination(arena, &lhs, &rhs);
         if prefer_right && let Some(id) = arena.accumulate_quadratic(rhs.id, lhs.id, 1.0) {
-            return (id, true);
+            return finish_binary(arena, id, &lhs, &rhs);
         }
         if lhs.owned
             && let Some(id) = arena.accumulate_quadratic(lhs.id, rhs.id, 1.0)
         {
-            return (id, true);
+            return finish_binary(arena, id, &lhs, &rhs);
         }
         if rhs.owned
             && !prefer_right
             && let Some(id) = arena.accumulate_quadratic(rhs.id, lhs.id, 1.0)
         {
-            return (id, true);
+            return finish_binary(arena, id, &lhs, &rhs);
         }
-        add_with_ownership(arena, lhs.id, rhs.id, !lhs.owned && !rhs.owned)
-    });
-
-    Expr::from_construction(id, owned, lhs.arena)
+        let id = add_with_ownership(arena, lhs.id, rhs.id, !lhs.owned && !rhs.owned).id;
+        finish_binary(arena, id, &lhs, &rhs)
+    })
 }
 
 #[inline]
 fn sub_expr<'a, D: Degree>(lhs: Operand<'a, '_>, rhs: Operand<'a, '_>) -> Expr<'a, D> {
     lhs.assert_same_arena(&rhs);
-    let (id, owned) = lhs.arena.with_mut(|arena| {
+    Expr::build(lhs.arena, |arena| {
         lhs.seal_in(arena);
         rhs.seal_in(arena);
         let prefer_right = prefer_right_destination(arena, &lhs, &rhs);
         if prefer_right && let Some(id) = subtract_into_right(arena, lhs.id, rhs.id) {
-            return (id, true);
+            return finish_binary(arena, id, &lhs, &rhs);
         }
         if lhs.owned
             && let Some(id) = arena.accumulate_quadratic(lhs.id, rhs.id, -1.0)
         {
-            return (id, true);
+            return finish_binary(arena, id, &lhs, &rhs);
         }
         if rhs.owned
             && !prefer_right
             && let Some(id) = subtract_into_right(arena, lhs.id, rhs.id)
         {
-            return (id, true);
+            return finish_binary(arena, id, &lhs, &rhs);
         }
         let id = sub_into(arena, lhs.id, rhs.id);
-        (id, crate::degree::may_be_quadratic::<D>() && arena.quadratic_root(id))
-    });
-    Expr::from_construction(id, owned, lhs.arena)
+        finish_binary(arena, id, &lhs, &rhs)
+    })
 }
 
 /// Store `lhs - rhs` in the uniquely owned right operand.
@@ -267,14 +304,21 @@ macro_rules! impl_scalar_ops {
         impl<'a, D: Degree> Add<$scalar> for Expr<'a, D> {
             type Output = Expr<'a, D::Computed>;
             fn add(self, rhs: $scalar) -> Self::Output {
-                Expr::build(self.arena, |arena| {
+                let may_be_affine = crate::degree::may_be_affine::<D>();
+                build_unary(Operand::owned(self), |arena, input| {
                     let rhs_id = arena.constant($to_f64(rhs));
-                    if self.owned
-                        && let Some(id) = arena.accumulate_quadratic(self.id, rhs_id, 1.0)
+                    if may_be_affine
+                        && input.owned
+                        && let Some(id) = arena.accumulate_linear(input.id, rhs_id, input.id)
                     {
                         return id;
                     }
-                    add_into(arena, self.id, rhs_id)
+                    if input.owned
+                        && let Some(id) = arena.accumulate_quadratic(input.id, rhs_id, 1.0)
+                    {
+                        return id;
+                    }
+                    add_into(arena, input.id, rhs_id)
                 })
             }
         }
@@ -289,14 +333,14 @@ macro_rules! impl_scalar_ops {
         impl<'a, D: Degree> Sub<$scalar> for Expr<'a, D> {
             type Output = Expr<'a, D::Computed>;
             fn sub(self, rhs: $scalar) -> Self::Output {
-                Expr::build(self.arena, |arena| {
+                build_unary(Operand::owned(self), |arena, input| {
                     let rhs_id = arena.constant($to_f64(rhs));
-                    if self.owned
-                        && let Some(id) = arena.accumulate_quadratic(self.id, rhs_id, -1.0)
+                    if input.owned
+                        && let Some(id) = arena.accumulate_quadratic(input.id, rhs_id, -1.0)
                     {
                         return id;
                     }
-                    sub_into(arena, self.id, rhs_id)
+                    sub_into(arena, input.id, rhs_id)
                 })
             }
         }
@@ -304,37 +348,33 @@ macro_rules! impl_scalar_ops {
         impl<'a, D: Degree> Sub<Expr<'a, D>> for $scalar {
             type Output = Expr<'a, D::Computed>;
             fn sub(self, rhs: Expr<'a, D>) -> Expr<'a, D::Computed> {
-                let (id, owned) = rhs.arena.build_expr(
-                    crate::degree::may_be_quadratic::<D::Computed>() || rhs.owned,
-                    |arena| {
-                        let lhs_id = arena.constant($to_f64(self));
-                        if rhs.owned
-                            && let Some(id) = subtract_into_right(arena, lhs_id, rhs.id)
-                        {
-                            return id;
-                        }
-                        sub_into(arena, lhs_id, rhs.id)
-                    },
-                );
-                Expr::from_construction(id, owned, rhs.arena)
+                build_unary(Operand::owned(rhs), |arena, input| {
+                    let lhs_id = arena.constant($to_f64(self));
+                    if input.owned
+                        && let Some(id) = subtract_into_right(arena, lhs_id, input.id)
+                    {
+                        return id;
+                    }
+                    sub_into(arena, lhs_id, input.id)
+                })
             }
         }
 
         impl<'a, D: Degree> Mul<$scalar> for Expr<'a, D> {
             type Output = Expr<'a, D::Computed>;
             fn mul(self, rhs: $scalar) -> Self::Output {
-                Expr::build(self.arena, |arena| {
+                build_unary(Operand::owned(self), |arena, input| {
                     if crate::degree::may_be_quadratic::<D>()
-                        && self.owned
-                        && let Some(id) = arena.scale_quadratic(self.id, $to_f64(rhs))
+                        && input.owned
+                        && let Some(id) = arena.scale_quadratic(input.id, $to_f64(rhs))
                     {
                         return id;
                     }
                     let rhs_id = arena.constant($to_f64(rhs));
                     if crate::degree::may_be_quadratic::<D>() {
-                        mul_into(arena, self.id, rhs_id)
+                        mul_into(arena, input.id, rhs_id)
                     } else {
-                        mul_affine_into(arena, self.id, rhs_id)
+                        mul_affine_into(arena, input.id, rhs_id)
                     }
                 })
             }
@@ -351,9 +391,9 @@ macro_rules! impl_scalar_ops {
             type Output = Expr<'a, D::Computed>;
             fn div(self, rhs: $scalar) -> Self::Output {
                 assert!($to_f64(rhs) != 0.0, "expression division by zero");
-                Expr::build(self.arena, |arena| {
+                build_unary(Operand::owned(self), |arena, input| {
                     let rhs_id = arena.constant($to_f64(rhs));
-                    div_into(arena, self.id, rhs_id)
+                    div_into(arena, input.id, rhs_id)
                 })
             }
         }
@@ -361,9 +401,9 @@ macro_rules! impl_scalar_ops {
         impl<'a, D: Degree> Div<Expr<'a, D>> for $scalar {
             type Output = Expr<'a, Nonlinear>;
             fn div(self, rhs: Expr<'a, D>) -> Expr<'a, Nonlinear> {
-                Expr::build(rhs.arena, |arena| {
+                build_unary(Operand::owned(rhs), |arena, input| {
                     let lhs_id = arena.constant($to_f64(self));
-                    div_into(arena, lhs_id, rhs.id)
+                    div_into(arena, lhs_id, input.id)
                 })
             }
         }
@@ -485,8 +525,7 @@ impl<'a, D: ExpressionDegree> std::iter::Sum for Expr<'a, D> {
         if ids.len() == 1 {
             return first;
         }
-        let (id, owned) = first.arena.with_mut(|arena| add_n(arena, ids));
-        Expr::from_construction(id, owned, first.arena)
+        Expr::build(first.arena, |arena| add_n(arena, ids, true).id)
     }
 }
 
@@ -512,8 +551,7 @@ impl<'a, D: Degree> Expr<'a, D> {
         if ids.len() == 1 {
             return Some(first.into_degree());
         }
-        let (id, owned) = first.arena.with_mut(|arena| add_n(arena, ids));
-        Some(Expr::from_construction(id, owned, first.arena))
+        Some(Expr::build(first.arena, |arena| add_n(arena, ids, true).id))
     }
 
     /// Model-anchored summation. Validate all term owners before emitting the
@@ -539,8 +577,7 @@ impl<'a, D: Degree> Expr<'a, D> {
         if ids.len() == 1 {
             return first.into_degree();
         }
-        let (id, owned) = arena.with_mut(|arena| add_n(arena, ids));
-        Expr::from_construction(id, owned, arena)
+        Expr::build(arena, |arena| add_n(arena, ids, true).id)
     }
 }
 

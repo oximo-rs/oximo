@@ -137,7 +137,7 @@ impl<'a> AffineBuilder<'a> {
                 return match self.children.as_slice() {
                     [] => arena.constant(0.0),
                     [one] => *one,
-                    _ => add_n(arena, self.children.iter().copied().collect()).0,
+                    _ => add_n(arena, self.children.iter().copied().collect(), false).id,
                 };
             }
             let mut constant = self.constant;
@@ -165,7 +165,7 @@ impl<'a> AffineBuilder<'a> {
             match self.children.as_slice() {
                 [] => arena.constant(constant),
                 [one] => *one,
-                _ => add_n(arena, self.children.iter().copied().collect()).0,
+                _ => add_n(arena, self.children.iter().copied().collect(), false).id,
             }
         });
         self.clear();

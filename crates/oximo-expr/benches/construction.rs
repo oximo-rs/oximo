@@ -120,7 +120,7 @@ fn main() {
         if filter.as_deref().is_some_and(|value| value != workload) {
             continue;
         }
-        for n in [32, 256, 1024, 4096] {
+        for n in [3, 8, 16, 31, 32, 33, 64, 256, 1024, 4096] {
             if size_filter.as_deref().is_some_and(|value| value != n.to_string()) {
                 continue;
             }

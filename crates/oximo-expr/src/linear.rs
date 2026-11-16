@@ -3,14 +3,16 @@ use std::borrow::Cow;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};
 
-use crate::arena::{ArenaAccess, Children, ExprArena, ExprId, ExprNode, UnaryOp, VarId};
+use crate::arena::{
+    ArenaAccess, Children, ConstructionResult, ExprArena, ExprId, ExprNode, UnaryOp, VarId,
+};
 
 const MAX_EAGER_COEFFICIENTS: usize = 32;
 const MAX_EAGER_NODES: usize = 64;
 
 /// Stack-backed merging avoids a hash table and per-variable vectors for the
 /// small numeric expressions that dominate scalar model construction.
-struct SmallLinear {
+pub(crate) struct SmallLinear {
     coeffs: SmallVec<[(VarId, f64); MAX_EAGER_COEFFICIENTS]>,
     constant: f64,
 }
@@ -82,9 +84,80 @@ impl SmallLinear {
         }
     }
 
-    fn push(self, arena: &mut (impl ArenaAccess + ?Sized)) -> ExprId {
-        push_linear(arena, LinearTerms::owned(self.coeffs.into_vec(), self.constant))
+    fn push(self, arena: &mut (impl ArenaAccess + ?Sized)) -> ConstructionResult {
+        let mut coeffs = self.coeffs.into_vec();
+        coeffs.retain(|(_, coefficient)| *coefficient != 0.0);
+        if coeffs.is_empty() {
+            let id = arena.constant(self.constant);
+            return ConstructionResult::from_arena(arena, id);
+        }
+        let id = arena.push_owned_linear(ExprNode::Linear { coeffs, constant: self.constant });
+        ConstructionResult::from_arena(arena, id)
     }
+
+    pub(crate) fn write_into(self, node: &mut ExprNode) {
+        let ExprNode::Linear { coeffs, constant } = node else {
+            unreachable!("affine accumulation requires a Linear destination");
+        };
+        coeffs.clear();
+        coeffs.extend(self.coeffs.into_iter().filter(|(_, coefficient)| *coefficient != 0.0));
+        *constant = self.constant;
+        if coeffs.is_empty() {
+            *node = ExprNode::Const(self.constant);
+        }
+    }
+}
+
+/// Stage the bounded merge before mutating either operand.
+pub(crate) fn accumulate_linear_nodes(
+    left: &ExprNode,
+    right: &ExprNode,
+    destination_is_left: bool,
+) -> Option<SmallLinear> {
+    let mut result = SmallLinear::new();
+    if destination_is_left {
+        let ExprNode::Linear { coeffs, constant } = left else { return None };
+        if coeffs.len() > MAX_EAGER_COEFFICIENTS {
+            return None;
+        }
+
+        // Owned roots were normalized when emitted.
+        result.coeffs.extend_from_slice(coeffs);
+        result.constant = *constant;
+    } else {
+        if !result.terminal(left) {
+            return None;
+        }
+
+        result.constant = match left {
+            ExprNode::Const(value) | ExprNode::Linear { constant: value, .. } => *value,
+            _ => result.constant,
+        };
+    }
+    if destination_is_left {
+        return result.terminal(right).then_some(result);
+    }
+
+    let ExprNode::Linear { coeffs, constant } = right else { return None };
+    let prefix = result.coeffs.len();
+
+    // The owned right root has no duplicate variables.
+    // Only the original left prefix can overlap.
+    for &(variable, coefficient) in coeffs {
+        if let Some((_, value)) =
+            result.coeffs[..prefix].iter_mut().find(|(var, _)| *var == variable)
+        {
+            *value += coefficient;
+        } else {
+            if result.coeffs.len() == MAX_EAGER_COEFFICIENTS {
+                return None;
+            }
+            result.coeffs.push((variable, coefficient));
+        }
+    }
+
+    result.constant += constant;
+    Some(result)
 }
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
@@ -686,7 +759,35 @@ pub(crate) fn add_into(
     lhs: ExprId,
     rhs: ExprId,
 ) -> ExprId {
-    add_with_ownership(arena, lhs, rhs, false).0
+    add_with_ownership(arena, lhs, rhs, false).id
+}
+
+fn oversized_distinct_linear_prefix(node: &ExprNode) -> bool {
+    let ExprNode::Linear { coeffs, .. } = node else { return false };
+    let Some(prefix) = coeffs.get(..=MAX_EAGER_COEFFICIENTS) else { return false };
+
+    // Raw length alone is insufficient since direct merges normalize duplicates.
+    // We inspect max. 33 entries.
+    prefix
+        .iter()
+        .enumerate()
+        .all(|(i, (var, _))| prefix[..i].iter().all(|(previous, _)| previous != var))
+}
+
+/// Cheap check for the common case where two direct affine leaves already
+/// exceed the eager coefficient limit.
+fn affine_add_exceeds_limit(left: &ExprNode, right: &ExprNode) -> bool {
+    let entries = |node: &ExprNode| match node {
+        ExprNode::Linear { coeffs, .. } => Some(coeffs.len()),
+        ExprNode::Var(_) => Some(1),
+        ExprNode::Const(_) => Some(0),
+        _ => None,
+    };
+
+    match (entries(left), entries(right)) {
+        (Some(left), Some(right)) => left.saturating_add(right) > MAX_EAGER_COEFFICIENTS,
+        _ => false,
+    }
 }
 
 /// Propagate mutable-quadratic eligibility directly for common immutable results.
@@ -695,7 +796,7 @@ pub(crate) fn add_with_ownership(
     lhs: ExprId,
     rhs: ExprId,
     children_shared: bool,
-) -> (ExprId, bool) {
+) -> ConstructionResult {
     let left_node = arena.get(lhs);
     let right_node = arena.get(rhs);
     if let (
@@ -706,7 +807,7 @@ pub(crate) fn add_with_ownership(
     {
         let mut left = SmallLinear::new();
         if left.operand(arena, left_node) && left.terminal(right_node) {
-            return (left.push(arena), false);
+            return left.push(arena);
         }
     }
 
@@ -717,15 +818,38 @@ pub(crate) fn add_with_ownership(
     };
 
     if rejects_eager_affine(left_node) || rejects_eager_affine(right_node) {
-        return (push_sum(arena, lhs, rhs, children_shared), false);
+        let id = push_sum(arena, lhs, rhs, children_shared);
+        return ConstructionResult::from_arena(arena, id);
     }
     if matches!(left_node, ExprNode::Quadratic(_)) || matches!(right_node, ExprNode::Quadratic(_)) {
         return if let Some(id) = crate::quadratic_builder::add_small(arena, lhs, rhs, 1.0) {
-            (id, arena.quadratic_root(id))
+            ConstructionResult::from_arena(arena, id)
         } else {
-            (push_sum(arena, lhs, rhs, children_shared), false)
+            let id = push_sum(arena, lhs, rhs, children_shared);
+            ConstructionResult::from_arena(arena, id)
         };
     }
+
+    if oversized_distinct_linear_prefix(left_node) || oversized_distinct_linear_prefix(right_node) {
+        // Neither eager path can succeed.
+        let id = push_sum(arena, lhs, rhs, children_shared);
+        arena.mark_oversized_affine(id);
+
+        return ConstructionResult::from_arena(arena, id);
+    }
+
+    // A previously rejected Add root is immutable and can never become a small
+    // affine root.
+    // We skip the bounded walk for chains that already exceeded the eager limit.
+    let left_add = matches!(left_node, ExprNode::Add(_));
+    let right_add = matches!(right_node, ExprNode::Add(_));
+    if (left_add && arena.oversized_affine(lhs)) || (right_add && arena.oversized_affine(rhs)) {
+        let id = push_sum(arena, lhs, rhs, children_shared);
+        arena.mark_oversized_affine(id);
+        return ConstructionResult::from_arena(arena, id);
+    }
+
+    let mark_oversized = !left_add && !right_add && affine_add_exceeds_limit(left_node, right_node);
 
     let mut left = SmallLinear::new();
     if left.operand(arena, left_node) {
@@ -741,7 +865,7 @@ pub(crate) fn add_with_ownership(
             left.terminal(right_node)
         };
         if merged {
-            return (left.push(arena), false);
+            return left.push(arena);
         }
     }
     if small_affine(arena, &[lhs, rhs])
@@ -754,9 +878,20 @@ pub(crate) fn add_with_ownership(
         let coeffs = acc.into_coeffs();
         drop(lt);
         drop(rt);
-        return (push_linear(arena, LinearTerms { coeffs: Cow::Owned(coeffs), constant }), false);
+        let mut coeffs = coeffs;
+        coeffs.retain(|(_, coefficient)| *coefficient != 0.0);
+        if coeffs.is_empty() {
+            let id = arena.constant(constant);
+            return ConstructionResult::from_arena(arena, id);
+        }
+        let id = arena.push_owned_linear(ExprNode::Linear { coeffs, constant });
+        return ConstructionResult::from_arena(arena, id);
     }
-    (push_sum(arena, lhs, rhs, children_shared), false)
+    let id = push_sum(arena, lhs, rhs, children_shared);
+    if mark_oversized {
+        arena.mark_oversized_affine(id);
+    }
+    ConstructionResult::from_arena(arena, id)
 }
 
 fn push_sum(
@@ -775,16 +910,28 @@ fn push_sum(
 ///
 /// # Panics
 /// Panics if `ids` is empty (callers supply at least one term).
-pub(crate) fn add_n(arena: &mut (impl ArenaAccess + ?Sized), ids: Children) -> (ExprId, bool) {
+/// When `consuming_inputs` is true, copied affine roots are retired after a
+/// numeric fold succeeds; otherwise the IDs remain owned by their callers.
+pub(crate) fn add_n(
+    arena: &mut (impl ArenaAccess + ?Sized),
+    ids: Children,
+    consuming_inputs: bool,
+) -> ConstructionResult {
     match ids.as_slice() {
         [] => panic!("add_n on an empty term list"),
-        [one] => return (*one, false),
+        [one] => return ConstructionResult::from_arena(arena, *one),
         _ => {}
     }
     if let Some(id) = crate::quadratic_builder::sum_numeric(arena, &ids) {
-        return (id, arena.quadratic_root(id));
+        if consuming_inputs {
+            for &input in ids.iter().filter(|&&input| input != id) {
+                arena.retire_affine_root(input);
+            }
+        }
+        return ConstructionResult::from_arena(arena, id);
     }
-    (arena.push(ExprNode::Add(ids)), false)
+    let id = arena.push(ExprNode::Add(ids));
+    ConstructionResult::from_arena(arena, id)
 }
 
 /// Build `lhs - rhs`. Same linear fast-path as `add_into`.
@@ -1217,7 +1364,8 @@ fn additive_affinity(arena: &ExprArena, root: ExprId) -> FxHashMap<ExprId, bool>
 ///
 /// As with [`extract_linear`], call [`LinearTerms::into_owned`] before retaining
 /// the linear terms independently of `arena`.
-/// Residual IDs are published to protect them from later in-place updates.
+/// Residual IDs are published so later consuming arithmetic cannot change
+/// eligible roots in place.
 ///
 /// # Panics
 /// Panics if `id` or a reachable child is not a valid ID in `arena`.
@@ -1270,8 +1418,8 @@ pub fn split_linear<'a>(arena: &'a ExprArena, id: ExprId) -> (LinearTerms<'a>, V
 /// Render the first nonlinear summand of `id` as a short infix string, resolving
 /// each [`VarId`] to a display name via `resolve`. Returns `None` when `id` is
 /// fully affine (no nonlinear residual).
-/// Like [`split_linear`], this publishes residual IDs, permanently disabling their
-/// in-place quadratic accumulation when called on a live arena or write guard.
+/// Like [`split_linear`], rendering may publish residual roots, preventing
+/// later consuming arithmetic from changing eligible roots in place.
 pub fn describe_nonlinear_term(
     arena: &ExprArena,
     id: ExprId,
@@ -1292,53 +1440,271 @@ pub fn describe_nonlinear_term(
 mod tests {
     use super::*;
 
+    use crate::arena::ParamId;
+
+    struct CountedArena {
+        arena: ExprArena,
+        reads: std::cell::Cell<usize>,
+    }
+    impl ArenaAccess for CountedArena {
+        fn quadratic_root(&mut self, id: ExprId) -> bool {
+            ArenaAccess::quadratic_root(&mut self.arena, id)
+        }
+
+        fn seal(&self, id: ExprId) {
+            ArenaAccess::seal(&self.arena, id);
+        }
+
+        fn accumulate_quadratic(&mut self, lhs: ExprId, rhs: ExprId, scale: f64) -> Option<ExprId> {
+            ArenaAccess::accumulate_quadratic(&mut self.arena, lhs, rhs, scale)
+        }
+
+        fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId> {
+            ArenaAccess::scale_quadratic(&mut self.arena, id, scale)
+        }
+
+        fn linear_root(&mut self, id: ExprId) -> bool {
+            ArenaAccess::linear_root(&mut self.arena, id)
+        }
+
+        fn accumulate_linear(
+            &mut self,
+            lhs: ExprId,
+            rhs: ExprId,
+            destination: ExprId,
+        ) -> Option<ExprId> {
+            ArenaAccess::accumulate_linear(&mut self.arena, lhs, rhs, destination)
+        }
+
+        fn push_owned_linear(&mut self, node: ExprNode) -> ExprId {
+            ArenaAccess::push_owned_linear(&mut self.arena, node)
+        }
+
+        fn oversized_affine(&self, id: ExprId) -> bool {
+            ArenaAccess::oversized_affine(&self.arena, id)
+        }
+
+        fn mark_oversized_affine(&mut self, id: ExprId) {
+            ArenaAccess::mark_oversized_affine(&mut self.arena, id);
+        }
+
+        fn len(&self) -> usize {
+            self.arena.len()
+        }
+
+        fn get(&self, id: ExprId) -> &ExprNode {
+            self.reads.set(self.reads.get() + 1);
+            self.arena.get(id)
+        }
+
+        fn param_value(&self, id: ParamId) -> f64 {
+            self.arena.param_value(id)
+        }
+
+        fn push(&mut self, node: ExprNode) -> ExprId {
+            self.arena.push(node)
+        }
+
+        fn cached_degree(&self, id: ExprId) -> Option<crate::classify::Degree> {
+            self.arena.cached_degree(id)
+        }
+
+        fn cache_degree(&self, id: ExprId, degree: crate::classify::Degree) {
+            self.arena.cache_degree(id, degree);
+        }
+    }
+
+    #[test]
+    fn large_additions_reject_distinct_terminal_prefixes_with_bounded_reads() {
+        for nested in [false, true] {
+            for wide_on_left in [false, true] {
+                for children_shared in [false, true] {
+                    let mut arena =
+                        CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
+                    let wide = arena.arena.linear(
+                        (0..=MAX_EAGER_COEFFICIENTS)
+                            .map(|v| (VarId(u32::try_from(v).expect("bounded test variable")), 1.0))
+                            .collect(),
+                        -0.0,
+                    );
+                    let x = arena.var(VarId(100));
+                    let mut root = arena.push(ExprNode::Add(smallvec![x, x]));
+                    if !nested {
+                        root = arena.push(ExprNode::Add(smallvec![x; MAX_EAGER_COEFFICIENTS + 1]));
+                    }
+
+                    arena.reads.set(0);
+                    for _ in 0..128 {
+                        let (lhs, rhs) = if wide_on_left { (wide, root) } else { (root, wide) };
+                        let result = add_with_ownership(&mut arena, lhs, rhs, children_shared);
+                        let id = result.id;
+                        assert!(!result.reusable);
+                        let ExprNode::Add(children) = arena.arena.get(id) else {
+                            panic!("large addition must retain its binary Add");
+                        };
+                        assert_eq!(children.as_slice(), &[lhs, rhs]);
+
+                        if nested {
+                            root = id;
+                        }
+                    }
+
+                    let reads = arena.reads.get();
+                    let expected = 256;
+                    assert_eq!(reads, expected);
+                    eprintln!(
+                        "large additions: nested={nested}, wide_on_left={wide_on_left}, shared={children_shared}: {reads} reads"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_terminal_proof_is_bounded_and_conservative() {
+        let distinct = || {
+            (0..=MAX_EAGER_COEFFICIENTS)
+                .map(|v| (VarId(u32::try_from(v).expect("bounded test variable")), 0.0))
+                .collect::<Vec<_>>()
+        };
+        let node = |coeffs| ExprNode::Linear { coeffs, constant: -0.0 };
+        let mut coeffs = distinct();
+
+        // Zero coefficients still occupy SmallLinear slots.
+        coeffs.extend(distinct().into_iter().map(|(v, _)| (v, -0.0)));
+        assert!(oversized_distinct_linear_prefix(&node(coeffs)));
+
+        let mut coeffs = distinct();
+        coeffs.insert(0, coeffs[0]);
+        assert!(!oversized_distinct_linear_prefix(&node(coeffs)));
+        assert!(!oversized_distinct_linear_prefix(&node(
+            distinct().into_iter().take(MAX_EAGER_COEFFICIENTS).collect()
+        )));
+        assert!(!oversized_distinct_linear_prefix(&ExprNode::Const(0.0)));
+    }
+
+    #[test]
+    fn oversized_affine_roots_are_marked_and_skip_later_bounded_walks() {
+        let mut arena = CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
+        let wide = arena.arena.linear(
+            (0..=MAX_EAGER_COEFFICIENTS).map(|v| (VarId(u32::try_from(v).unwrap()), 1.0)).collect(),
+            -0.0,
+        );
+        let x = arena.var(VarId(100));
+        assert!(!arena.oversized_affine(wide));
+
+        let result = add_with_ownership(&mut arena, wide, x, false);
+        let root = result.id;
+        assert!(!result.reusable);
+        assert!(matches!(arena.arena.get(root), ExprNode::Add(_)));
+        assert!(arena.oversized_affine(root));
+        assert!(!arena.oversized_affine(wide));
+
+        arena.reads.set(0);
+        let result = add_with_ownership(&mut arena, root, x, false);
+        let next = result.id;
+        assert!(!result.reusable);
+        assert!(matches!(arena.arena.get(next), ExprNode::Add(_)));
+        assert_eq!(arena.reads.get(), 2, "cached oversized roots must not be walked again");
+        assert!(arena.oversized_affine(next));
+    }
+
+    #[test]
+    fn linear_root_uses_ownership_membership_without_node_reads() {
+        let mut arena = CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
+        let owned = arena
+            .push_owned_linear(ExprNode::Linear { coeffs: vec![(VarId(0), 1.0)], constant: 0.0 });
+        let raw = arena.push(ExprNode::Linear { coeffs: vec![(VarId(1), 1.0)], constant: 0.0 });
+        arena.reads.set(0);
+        assert!(arena.linear_root(owned));
+        assert!(!arena.linear_root(raw));
+        assert_eq!(arena.reads.get(), 0, "ownership membership must not inspect the node");
+    }
+
+    #[test]
+    fn nested_small_sums_use_the_owned_affine_fallback() {
+        let mut arena = ExprArena::new();
+        let x = arena.var(VarId(0));
+        let y = arena.var(VarId(1));
+        let z = arena.var(VarId(2));
+        let xy = arena.push(ExprNode::Add(smallvec![x, y]));
+        let nested = arena.push(ExprNode::Add(smallvec![xy, z]));
+
+        let result = add_with_ownership(&mut arena, nested, z, false);
+        let id = result.id;
+        assert!(result.reusable);
+        assert!(arena.linear_root(id));
+
+        let ExprNode::Linear { coeffs, .. } = arena.get(id) else {
+            panic!("small affine fallback must publish a Linear node");
+        };
+        assert_eq!(coeffs.as_slice(), &[(VarId(0), 1.0), (VarId(1), 1.0), (VarId(2), 2.0)]);
+    }
+
+    #[test]
+    fn growing_large_additions_without_a_terminal_proof_keep_bounded_reads() {
+        let mut arena = CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };
+        let mut root = arena.arena.linear(
+            (0..=MAX_EAGER_COEFFICIENTS)
+                .map(|v| (VarId(u32::try_from(v).expect("bounded test variable")), 1.0))
+                .collect(),
+            0.0,
+        );
+
+        let x = arena.var(VarId(100));
+        arena.reads.set(0);
+        for _ in 0..128 {
+            let previous = root;
+            root = add_into(&mut arena, previous, x);
+            let ExprNode::Add(children) = arena.arena.get(root) else {
+                panic!("large addition must retain its binary Add");
+            };
+            assert_eq!(children.as_slice(), &[previous, x]);
+        }
+        let expected = 256;
+        assert_eq!(arena.reads.get(), expected);
+        eprintln!("growing scalar additions without a terminal proof: {} reads", arena.reads.get());
+    }
+
+    #[test]
+    fn oversized_duplicate_terminals_still_merge_and_preserve_ieee_grouping() {
+        let bits = |terms: LinearTerms<'_>| {
+            (
+                terms.coeffs.iter().map(|&(v, c)| (v, c.to_bits())).collect::<Vec<_>>(),
+                terms.constant.to_bits(),
+            )
+        };
+        for value in [-0.0, 1.0, 1e16, f64::INFINITY, f64::NAN] {
+            for wide_on_left in [false, true] {
+                let mut arena = ExprArena::new();
+                let v = VarId(0);
+                let mut coeffs = vec![(v, value); MAX_EAGER_COEFFICIENTS + 1];
+                coeffs.extend([(v, 1e16), (v, -1e16), (v, 1.0)]);
+
+                let wide = arena.linear(coeffs, -0.0);
+                let x = arena.var(v);
+                let flat = arena.push(ExprNode::Add(smallvec![x, x]));
+                let (lhs, rhs) = if wide_on_left { (wide, flat) } else { (flat, wide) };
+                let expected = {
+                    let lt = recursive_linear(&arena, lhs, false).unwrap();
+                    let rt = recursive_linear(&arena, rhs, false).unwrap();
+                    let mut acc = CoeffAccum::with_capacity(lt.coeffs.len() + rt.coeffs.len());
+                    acc.extend_from_slice(&lt.coeffs);
+                    acc.extend_from_slice(&rt.coeffs);
+                    let mut coeffs = acc.into_coeffs();
+                    coeffs.retain(|(_, c)| *c != 0.0);
+                    bits(LinearTerms::owned(coeffs, lt.constant + rt.constant))
+                };
+
+                let result = add_into(&mut arena, lhs, rhs);
+                assert!(matches!(arena.get(result), ExprNode::Linear { .. } | ExprNode::Const(_)));
+                assert_eq!(bits(as_linear(&arena, result, false).unwrap()), expected);
+            }
+        }
+    }
+
     #[test]
     fn growing_nonlinear_products_and_powers_use_bounded_work_per_step() {
-        use crate::arena::ParamId;
-        struct CountedArena {
-            arena: ExprArena,
-            reads: std::cell::Cell<usize>,
-        }
-        impl ArenaAccess for CountedArena {
-            fn quadratic_root(&mut self, id: ExprId) -> bool {
-                ArenaAccess::quadratic_root(&mut self.arena, id)
-            }
-            fn seal(&self, id: ExprId) {
-                ArenaAccess::seal(&self.arena, id);
-            }
-            fn accumulate_quadratic(
-                &mut self,
-                lhs: ExprId,
-                rhs: ExprId,
-                scale: f64,
-            ) -> Option<ExprId> {
-                ArenaAccess::accumulate_quadratic(&mut self.arena, lhs, rhs, scale)
-            }
-            fn scale_quadratic(&mut self, id: ExprId, scale: f64) -> Option<ExprId> {
-                ArenaAccess::scale_quadratic(&mut self.arena, id, scale)
-            }
-
-            fn len(&self) -> usize {
-                self.arena.len()
-            }
-
-            fn get(&self, id: ExprId) -> &ExprNode {
-                self.reads.set(self.reads.get() + 1);
-                self.arena.get(id)
-            }
-            fn param_value(&self, id: ParamId) -> f64 {
-                self.arena.param_value(id)
-            }
-            fn push(&mut self, node: ExprNode) -> ExprId {
-                self.arena.push(node)
-            }
-            fn cached_degree(&self, id: ExprId) -> Option<crate::classify::Degree> {
-                self.arena.cached_degree(id)
-            }
-            fn cache_degree(&self, id: ExprId, degree: crate::classify::Degree) {
-                self.arena.cache_degree(id, degree);
-            }
-        }
         for powers in [false, true] {
             let mut arena =
                 CountedArena { arena: ExprArena::new(), reads: std::cell::Cell::new(0) };

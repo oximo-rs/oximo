@@ -31,7 +31,8 @@ impl AffineResidual {
 
 /// Split an expression into affine terms and signed nonlinear summands.
 ///
-/// Returned residual IDs are published to protect them from in-place updates.
+/// Eligible residual roots are published so later consuming arithmetic cannot
+/// change them in place.
 /// Constants and repeated coefficients across additive summands use Neumaier
 /// compensated summation. Parameters are resolved at their current arena values.
 /// Nonfinite results use ordinary IEEE arithmetic.

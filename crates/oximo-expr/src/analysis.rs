@@ -261,7 +261,8 @@ impl ExpressionAnalysis {
 
     /// Compute all structural facts together, retaining shared descendants.
     /// Use an analysis with one immutable arena, or append-only versions of it.
-    /// The root is published so retained facts survive later owned arithmetic.
+    /// The root is published so later consuming arithmetic cannot change it in
+    /// place.
     ///
     /// # Panics
     ///

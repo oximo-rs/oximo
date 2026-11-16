@@ -75,14 +75,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sin: Vec<Vec<f64>> = {
         let pi = std::f64::consts::PI;
         let tau = TAU as f64;
-        let mut sin = vec![vec![0.0f64; TAU]; N];
-        for p in 0..TAU {
-            let t = (p + 1) as f64;
-            let ti = p + 1;
-            sin[0][p] = 1.0 + (4.0 * pi * t / tau).sin();
-            sin[1][p] = 0.0;
-            sin[2][p] = if ti > TAU / 4 && ti <= 3 * TAU / 4 { 0.5 } else { 0.0 };
-            sin[3][p] = 1.0 + (4.0 * pi * t / tau).cos();
+        let mut sin = (0..N).map(|_| Vec::with_capacity(TAU)).collect::<Vec<_>>();
+        for ti in 1..=TAU {
+            let t = ti as f64;
+            let values = [
+                1.0 + (4.0 * pi * t / tau).sin(),
+                0.0,
+                if ti > TAU / 4 && ti <= 3 * TAU / 4 { 0.5 } else { 0.0 },
+                1.0 + (4.0 * pi * t / tau).cos(),
+            ];
+            for (row, value) in sin.iter_mut().zip(values) {
+                row.push(value);
+            }
         }
         sin
     };
