@@ -201,9 +201,9 @@ where
         );
 
         let target = buffer.arena?;
-        let mut builder = buffer.builder.unwrap_or_else(|| AffineBuilder::new(target));
+        let builder = buffer.builder.unwrap_or_else(|| AffineBuilder::new(target));
 
-        Some(builder.build().into_degree())
+        Some(builder.finish().into_degree())
     }
 }
 

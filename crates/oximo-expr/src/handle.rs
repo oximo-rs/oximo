@@ -302,7 +302,7 @@ impl<'a, D: Degree> Expr<'a, D> {
         }
         let mut builder = crate::AffineBuilder::with_capacities(self.arena, 1, 0);
         builder.add_term(1.0, self);
-        builder.build()
+        builder.finish()
     }
 
     /// Square with a statically determined degree.

@@ -10,6 +10,108 @@ fn variables(arena: &ExprArenaCell, n: u32) -> Vec<Expr<'_, Affine>> {
 }
 
 #[test]
+fn finish_matches_build_for_empty_constant_and_nonfinite_numeric_inputs() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let vars = variables(&arena, 2);
+
+    let cases: &[(f64, &[f64])] = &[
+        (0.0, &[]),
+        (-0.0, &[]),
+        (7.0, &[]),
+        (f64::INFINITY, &[]),
+        (0.0, &[0.0, -0.0, 2.0, -2.0]),
+        (3.0, &[1e16, 1.0, -1e16]),
+        (0.0, &[f64::MAX, f64::MAX, -f64::MAX]),
+        (0.0, &[f64::INFINITY, f64::NEG_INFINITY]),
+        (0.0, &[f64::NAN]),
+    ];
+
+    for compensated in [false, true] {
+        for &(constant, weights) in cases {
+            let make = || {
+                if compensated {
+                    AffineBuilder::with_capacities_compensated(&arena, weights.len(), 2)
+                } else {
+                    AffineBuilder::with_capacities(&arena, weights.len(), 2)
+                }
+            };
+            let mut reusable = make();
+            let mut consuming = make();
+            reusable.add_constant(constant);
+            consuming.add_constant(constant);
+            for (i, &weight) in weights.iter().enumerate() {
+                reusable.add_term(weight, &vars[i % 2]);
+                consuming.add_term(weight, &vars[i % 2]);
+            }
+
+            let built = reusable.build();
+            let finished = consuming.finish();
+            let snapshot = arena.borrow();
+            let before = extract_linear(&snapshot, built.id()).unwrap();
+            let after = extract_linear(&snapshot, finished.id()).unwrap();
+            assert_eq!(before.constant.to_bits(), after.constant.to_bits());
+
+            let bits = |terms: &oximo_expr::LinearTerms<'_>| {
+                terms.coeffs.iter().map(|&(var, value)| (var, value.to_bits())).collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&before), bits(&after));
+            assert_eq!(
+                evaluate(&snapshot, built.id(), &&[2.0, -3.0][..]).unwrap().to_bits(),
+                evaluate(&snapshot, finished.id(), &&[2.0, -3.0][..]).unwrap().to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn finish_preserves_symbolic_segments_compensation_and_shared_inputs() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let vars = variables(&arena, 2);
+    let parameter = arena.borrow_mut().new_param(2.0);
+    let p = Expr::from_param(&arena, parameter);
+    let symbolic = p * &vars[0];
+    for compensated in [false, true] {
+        let make = || {
+            if compensated {
+                AffineBuilder::new_compensated(&arena)
+            } else {
+                AffineBuilder::new(&arena)
+            }
+        };
+        let mut reusable = make();
+        let mut consuming = make();
+        for builder in [&mut reusable, &mut consuming] {
+            builder.add_constant(10.0);
+            for weight in [1e16, 1.0, -1e16] {
+                builder.add_term(weight, &vars[1]);
+            }
+            builder.add_term(4.0, &symbolic);
+            builder.add_term(2.0, &vars[1]);
+            builder.add_term(-2.0, p);
+            builder.add_term(5.0, &vars[0]);
+        }
+        let built = reusable.build();
+        let finished = consuming.finish();
+        for value in [2.0, -3.0, 0.0] {
+            p.set_param_value(value).unwrap();
+            let snapshot = arena.borrow();
+            let before = extract_linear(&snapshot, built.id()).unwrap();
+            let after = extract_linear(&snapshot, finished.id()).unwrap();
+            assert_eq!(before.coeffs, after.coeffs);
+            assert_eq!(before.constant.to_bits(), after.constant.to_bits());
+            let expected = if compensated { 29.0 } else { 26.0 } + 6.0 * value;
+            for expression in [&built, &finished] {
+                assert_eq!(
+                    evaluate(&snapshot, expression.id(), &&[2.0, 3.0][..]).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(evaluate(&snapshot, symbolic.id(), &&[2.0, 3.0][..]).unwrap(), 2.0 * value);
+        }
+    }
+}
+
+#[test]
 fn builder_merges_numeric_terms_and_reuses_without_mutating_outputs() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let vars = variables(&arena, 3);

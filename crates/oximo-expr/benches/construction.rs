@@ -75,7 +75,7 @@ fn build<'a>(
             for term in terms {
                 builder.add_term(1.0, term);
             }
-            builder.build()
+            builder.finish()
         }
         Method::Shared => {
             let middle = terms.len() / 2;

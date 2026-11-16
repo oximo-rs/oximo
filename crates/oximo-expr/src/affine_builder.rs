@@ -12,7 +12,7 @@ use crate::{Affine, Expr, ExprArenaCell};
 /// Reusable accumulator for incremental affine construction.
 ///
 /// Unlike repeated binary `+`, adding terms writes no arena nodes.
-/// Numeric terms are merged at [`Self::build`] while parameter-dependent
+/// Numeric terms are merged at [`Self::build`] or [`Self::finish`] while parameter-dependent
 /// terms stay symbolic. Construction is linear in the number of supplied
 /// coefficient entries for unshared additive inputs.
 /// Shared subexpressions use the usual extraction memoization.
@@ -135,9 +135,22 @@ impl<'a> AffineBuilder<'a> {
     /// Emit an expression and reset the builder, retaining scratch capacity.
     /// Numeric input emits one `Linear` node (or a constant), while symbolic
     /// input preserves ordered numeric segments under a flat sum.
-    #[expect(clippy::float_cmp, reason = "only an exact unit weight can omit multiplication")]
     pub fn build(&mut self) -> Expr<'a, Affine> {
-        let id = self.arena.with_mut(|arena| {
+        let id = self.emit::<false>();
+        self.clear();
+        Expr::from_id(id, self.arena)
+    }
+
+    /// Emit an expression and consume the builder, reusing its final numeric
+    /// coefficient storage where possible. Use [`Self::build`] to reuse the builder.
+    pub fn finish(mut self) -> Expr<'a, Affine> {
+        let id = self.emit::<true>();
+        Expr::from_id(id, self.arena)
+    }
+
+    #[expect(clippy::float_cmp, reason = "only an exact unit weight can omit multiplication")]
+    fn emit<const CONSUMING: bool>(&mut self) -> ExprId {
+        self.arena.with_mut(|arena| {
             if let Some(acc) = &mut self.compensated {
                 for &(id, scalar) in &self.terms {
                     if let ExprNode::Var(var) = arena.get(id) {
@@ -187,15 +200,24 @@ impl<'a> AffineBuilder<'a> {
                     self.children.push(child);
                 }
             }
-            flush_segment(arena, &mut self.scratch, &mut constant, &mut self.children);
+            if CONSUMING {
+                let mut coeffs = std::mem::take(&mut self.scratch.coeffs);
+                coeffs.shrink_to_fit();
+                if self.children.is_empty() {
+                    return push_linear(arena, LinearTerms::owned(coeffs, constant));
+                }
+                if !coeffs.is_empty() || constant != 0.0 {
+                    self.children.push(push_linear(arena, LinearTerms::owned(coeffs, constant)));
+                }
+            } else {
+                flush_segment(arena, &mut self.scratch, &mut constant, &mut self.children);
+            }
             match self.children.as_slice() {
                 [] => arena.constant(constant),
                 [one] => *one,
                 _ => add_n(arena, self.children.iter().copied().collect(), false).id,
             }
-        });
-        self.clear();
-        Expr::from_id(id, self.arena)
+        })
     }
 }
 
@@ -301,6 +323,40 @@ mod tests {
         } else {
             builder.scratch.coeffs.capacity()
         }
+    }
+
+    #[test]
+    fn finish_transfers_exact_sized_coefficient_storage() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let mut builder = AffineBuilder::with_capacities(&arena, 16, 16);
+        let coefficients = builder.scratch.coeffs.as_ptr();
+        for i in 0..16 {
+            builder.add_term(2.0, Expr::from_var(&arena, VarId(i)));
+        }
+        let expression = builder.finish();
+        let snapshot = arena.borrow();
+        let ExprNode::Linear { coeffs, .. } = snapshot.get(expression.id()) else {
+            panic!("numeric finish must produce a Linear node");
+        };
+        assert_eq!(coeffs.len(), 16);
+        assert_eq!(coeffs.as_ptr(), coefficients, "finish must transfer the allocation");
+    }
+
+    #[test]
+    fn finish_does_not_retain_contribution_sized_coefficient_storage() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let mut builder = AffineBuilder::with_capacities(&arena, 4096, 4096);
+        for _ in 0..4096 {
+            builder.add_term(2.0, x);
+        }
+        let expression = builder.finish();
+        let snapshot = arena.borrow();
+        let ExprNode::Linear { coeffs, .. } = snapshot.get(expression.id()) else {
+            panic!("numeric finish must produce a Linear node");
+        };
+        assert_eq!(coeffs.as_slice(), [(VarId(0), 8192.0)]);
+        assert_eq!(coeffs.capacity(), 1);
     }
 
     #[test]
