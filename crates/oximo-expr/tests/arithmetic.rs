@@ -91,6 +91,54 @@ fn dot_computes_weighted_sum() {
 }
 
 #[test]
+#[expect(clippy::op_ref, reason = "exercise owned and borrowed scalar operator implementations")]
+fn scalar_variable_products_match_general_affine_scaling() {
+    fn bits(arena: &ExprArena, root: oximo_expr::ExprId) -> (Vec<(VarId, u64)>, u64) {
+        match arena.get(root) {
+            ExprNode::Const(constant) => (Vec::new(), constant.to_bits()),
+            ExprNode::Linear { coeffs, constant } => (
+                coeffs.iter().map(|&(var, coefficient)| (var, coefficient.to_bits())).collect(),
+                constant.to_bits(),
+            ),
+            node => panic!("expected scalar or linear result, got {node:?}"),
+        }
+    }
+
+    for scalar in [
+        0.0,
+        -0.0,
+        1.0,
+        -2.0,
+        f64::from_bits(1),
+        -f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ] {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let unit = arena.borrow_mut().linear(vec![(VarId(0), 1.0)], 0.0);
+        let unit = Expr::new(unit, &arena).into_affine().unwrap();
+        let direct = [scalar * x, x * scalar, scalar * &x, &x * scalar];
+        let general = scalar * unit;
+        let snapshot = arena.borrow();
+        let expected = bits(&snapshot, general.id());
+        for expression in direct {
+            assert_eq!(bits(&snapshot, expression.id()), expected);
+            for value in [0.0, -0.0, 2.0, f64::INFINITY, f64::NEG_INFINITY] {
+                let actual = evaluate(&snapshot, expression.id(), &&[value][..]).unwrap();
+                let expected = evaluate(&snapshot, general.id(), &&[value][..]).unwrap();
+                assert!(
+                    actual.to_bits() == expected.to_bits() || actual.is_nan() && expected.is_nan()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 #[should_panic(expected = "dot: length mismatch")]
 fn dot_panics_on_length_mismatch() {
     let arena = ExprArenaCell::new(ExprArena::new());

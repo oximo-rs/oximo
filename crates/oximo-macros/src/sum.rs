@@ -11,6 +11,7 @@ use crate::{IndexBind, oximo_root};
 
 struct SumInput {
     model: Option<Expr>,
+    unfused: bool,
     body: Expr,
     binds: Vec<IndexBind>,
     cond: Option<Expr>,
@@ -18,10 +19,12 @@ struct SumInput {
 
 impl Parse for SumInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let first = input.parse::<Expr>()?;
-        let (model, body) = if input.peek(Token![,]) {
+        let (mut unfused, first) = parse_body(input)?;
+        let (model, body) = if !unfused && input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
-            (Some(first), input.parse::<Expr>()?)
+            let parsed = parse_body(input)?;
+            unfused = parsed.0;
+            (Some(first), parsed.1)
         } else {
             (None, first)
         };
@@ -36,8 +39,20 @@ impl Parse for SumInput {
         if !input.is_empty() {
             return Err(input.error("unexpected tokens after `sum!` clauses"));
         }
-        Ok(Self { model, body, binds: binds.into_iter().collect(), cond })
+        Ok(Self { model, unfused, body, binds: binds.into_iter().collect(), cond })
     }
+}
+
+fn parse_body(input: ParseStream) -> syn::Result<(bool, Expr)> {
+    let fork = input.fork();
+    let unfused = fork.parse::<Ident>().is_ok_and(|ident| ident == "unfused")
+        && fork.peek(Token![:])
+        && !fork.peek(Token![::]);
+    if unfused {
+        input.parse::<Ident>()?;
+        input.parse::<Token![:]>()?;
+    }
+    Ok((unfused, input.parse()?))
 }
 
 #[derive(Clone)]
@@ -103,6 +118,7 @@ impl ModelSums {
 #[derive(Default)]
 struct Captures {
     hoist: bool,
+    unfused: bool,
     bindings: Vec<(Ident, Expr)>,
     blocked: Vec<String>,
 }
@@ -284,7 +300,7 @@ fn expand_in(
     captures: &mut Captures,
 ) -> syn::Result<TokenStream2> {
     let input = crate::index::rewrite_index_subscripts(input)?;
-    let SumInput { model, body, binds, cond } = syn::parse2(input)?;
+    let SumInput { model, unfused, body, mut binds, cond } = syn::parse2(input)?;
     let root = oximo_root();
     let mut anchor = TokenStream2::new();
     let context = match model {
@@ -310,15 +326,26 @@ fn expand_in(
         None => inherited.cloned(),
     };
     let scope = captures.blocked.len();
-    for bind in &binds {
+    let previous_unfused = captures.unfused;
+    captures.unfused |= unfused;
+    let unfused = captures.unfused;
+    for bind in &mut binds {
+        if captures.unfused {
+            bind.domain = rewrite(bind.domain.clone(), None, captures)?;
+        }
         captures.block_pattern(&bind.pat);
     }
     let body = rewrite(body, context.as_ref(), captures)?;
-    let body = quote!(#body);
+    let body = if captures.unfused { quote!(#body) } else { fuse_product(&body, &root) };
     let cond = cond.map(|cond| rewrite(cond, context.as_ref(), captures)).transpose()?;
+    captures.unfused = previous_unfused;
     captures.blocked.truncate(scope);
 
-    let Some(cond) = cond else {
+    if cond.is_none()
+        && (unfused
+            || binds.len() == 1
+            || binds.iter().skip(1).any(|bind| has_control_flow(&bind.domain)))
+    {
         let mut expr = body;
         for b in binds.iter().rev() {
             let param = b.closure_param();
@@ -334,15 +361,37 @@ fn expand_in(
             };
         }
         return Ok(quote! {{ #anchor #expr }});
-    };
+    }
 
+    Ok(expand_loops(anchor, body, &binds, cond, context.as_ref(), &root))
+}
+
+fn expand_loops(
+    anchor: TokenStream2,
+    body: TokenStream2,
+    binds: &[IndexBind],
+    cond: Option<Expr>,
+    context: Option<&Context>,
+    root: &TokenStream2,
+) -> TokenStream2 {
     let terms = Ident::new("__terms", Span::mixed_site());
-    let mut inner = quote! {
-        if #cond {
-            #terms.push(#body);
-        }
+    let filtered = cond.is_some();
+    // Only literal inner ranges have an iteration count independent of outer
+    // bindings and body side effects.
+    let inner_count = if filtered {
+        None
+    } else {
+        binds
+            .iter()
+            .skip(1)
+            .try_fold(1_usize, |count, bind| count.checked_mul(literal_range_len(&bind.domain)?))
     };
-    for b in binds.iter().rev() {
+    let mut inner = if let Some(cond) = cond {
+        quote! { if #cond { #terms.push(#body); } }
+    } else {
+        TokenStream2::new()
+    };
+    for (index, b) in binds.iter().rev().enumerate() {
         let pat = &b.pat;
         let used = crate::bind::mark_bindings_used(std::slice::from_ref(b));
         let domain = &b.domain;
@@ -351,29 +400,134 @@ fn expand_in(
         } else {
             quote!(#root::__macro_support::keys_of(&(#domain)))
         };
-        inner = quote! {
-            for #pat in #keys {
-                #used
-                #inner
+        let count = (index + 1 == binds.len()).then_some(inner_count).flatten();
+        let iter = Ident::new("__oximo_sum_keys", Span::mixed_site());
+        let loop_keys = if count.is_some() { quote!(#iter) } else { keys.clone() };
+        let loop_body = if !filtered && index == 0 {
+            let key = Ident::new("__oximo_sum_key", Span::mixed_site());
+            let param = b.closure_param();
+
+            // Match the iterator callback's ownership.
+            quote! {
+                for #key in #loop_keys {
+                    #terms.push(#root::__macro_support::evaluate_sum_callback(
+                        #key, |#param| { #used #body }
+                    ));
+                }
+            }
+        } else {
+            quote! {
+                for #pat in #loop_keys {
+                    #used
+                    #inner
+                }
             }
         };
+        inner = if let Some(count) = count {
+            let count = count as u128;
+            let length = Ident::new("__oximo_sum_count", Span::mixed_site());
+            quote! {
+                match #keys {
+                    #iter => {
+                        #terms.reserve(
+                            <::core::primitive::usize as ::core::convert::TryFrom<
+                                ::core::primitive::u128
+                            >>::try_from(#count).ok().and_then(|#length| {
+                                ::core::iter::Iterator::size_hint(&#iter).0.checked_mul(#length)
+                            }).unwrap_or(0)
+                        );
+                        #loop_body
+                    }
+                }
+            }
+        } else {
+            loop_body
+        };
     }
-    let result = if let Some(context) = &context {
+    let arena = if let Some(context) = &context {
         let arena = &context.arena;
-        quote!(#root::__macro_support::sum_terms_in(#arena, #terms))
+        quote!(::core::option::Option::Some(#arena))
     } else {
-        quote! {
-            ::core::assert!(
-                !#terms.is_empty(),
-                "sum! with an `if` filter produced no terms; use sum!(model, ...)"
-            );
-            #root::__macro_support::sum_terms(#terms)
-        }
+        quote!(::core::option::Option::None)
     };
-    Ok(quote! {{
+    let empty_message = if filtered {
+        "sum! with an `if` filter produced no terms; use sum!(model, ...)"
+    } else {
+        "sum_over on empty domain"
+    };
+    quote! {{
         #anchor
-        let mut #terms = ::std::vec::Vec::new();
+        let mut #terms = #root::__macro_support::SumCollector::new(#arena);
         #inner
-        #result
-    }})
+        #terms.finish().expect(#empty_message)
+    }}
+}
+
+fn literal_range_len(domain: &Expr) -> Option<usize> {
+    let range = match domain {
+        Expr::Range(range) if range.attrs.is_empty() => range,
+        Expr::Paren(paren) if paren.attrs.is_empty() => return literal_range_len(&paren.expr),
+        _ => return None,
+    };
+    let integer = |bound: &Option<Box<Expr>>| {
+        let Expr::Lit(literal) = bound.as_deref()? else { return None };
+        let syn::Lit::Int(integer) = &literal.lit else { return None };
+        if !literal.attrs.is_empty() {
+            return None;
+        }
+        integer.base10_parse::<usize>().ok()
+    };
+    let start = integer(&range.start)?;
+    let end = integer(&range.end)?;
+    match range.limits {
+        syn::RangeLimits::HalfOpen(_) => Some(end.saturating_sub(start)),
+        syn::RangeLimits::Closed(_) if start <= end => end.checked_sub(start)?.checked_add(1),
+        syn::RangeLimits::Closed(_) => Some(0),
+    }
+}
+
+fn has_control_flow(body: &Expr) -> bool {
+    struct ControlFlow(bool);
+    impl VisitMut for ControlFlow {
+        fn visit_expr_mut(&mut self, expression: &mut Expr) {
+            if matches!(
+                expression,
+                Expr::Return(_) | Expr::Try(_) | Expr::Yield(_) | Expr::Macro(_)
+            ) {
+                self.0 = true;
+            } else {
+                visit_mut::visit_expr_mut(self, expression);
+            }
+        }
+    }
+    let mut control_flow = ControlFlow(false);
+    control_flow.visit_expr_mut(&mut body.clone());
+    control_flow.0
+}
+
+fn fuse_product(body: &Expr, root: &TokenStream2) -> TokenStream2 {
+    if has_control_flow(body) {
+        return quote!(#body);
+    }
+    let product = match body {
+        Expr::Paren(expr) if expr.attrs.is_empty() => return fuse_product(&expr.expr, root),
+        Expr::Group(expr) if expr.attrs.is_empty() => return fuse_product(&expr.expr, root),
+        Expr::Binary(expr) if matches!(expr.op, syn::BinOp::Mul(_)) && expr.attrs.is_empty() => {
+            expr
+        }
+        _ => return quote!(#body),
+    };
+    let left = &product.left;
+    let right = &product.right;
+    let operands = Ident::new("__oximo_product_operands", Span::mixed_site());
+    let tag = Ident::new("__oximo_product_tag", Span::mixed_site());
+    quote! {{
+        use #root::__macro_support::SumProduct as _;
+        match (#left, #right) {
+            #operands => {
+                let #tag = #root::__macro_support::product_tag(&#operands);
+                (&&#tag).sum_product(#operands)
+            }
+        }
+    }}
 }

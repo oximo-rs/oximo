@@ -1,7 +1,7 @@
 //! Incremental affine construction and compensated coefficient accumulation.
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 
 use crate::arena::{ArenaAccess, ExprId, ExprNode, VarId};
 use crate::compensated_sum::CompensatedSum;
@@ -39,16 +39,27 @@ pub struct AffineBuilder<'a> {
 
 impl<'a> AffineBuilder<'a> {
     pub fn new(arena: &'a ExprArenaCell) -> Self {
-        Self::with_capacity(arena, 0)
+        Self::with_capacities(arena, 0, 0)
     }
 
     /// Reserve space for `capacity` terms and distinct numeric coefficients.
+    /// Use [`Self::with_capacities`] when these counts differ or the number of
+    /// numeric coefficients is unknown.
     pub fn with_capacity(arena: &'a ExprArenaCell, capacity: usize) -> Self {
+        Self::with_capacities(arena, capacity, capacity)
+    }
+
+    /// Reserve terms independently from distinct numeric coefficients.
+    pub fn with_capacities(
+        arena: &'a ExprArenaCell,
+        term_capacity: usize,
+        coefficient_capacity: usize,
+    ) -> Self {
         Self {
             arena,
-            terms: Vec::with_capacity(capacity),
+            terms: Vec::with_capacity(term_capacity),
             constant: 0.0,
-            scratch: CoeffAccum::with_capacity(capacity),
+            scratch: CoeffAccum::with_capacity(coefficient_capacity),
             children: Vec::new(),
             compensated: None,
         }
@@ -56,14 +67,25 @@ impl<'a> AffineBuilder<'a> {
 
     /// Accumulate original numeric terms using Neumaier compensated summation.
     pub fn new_compensated(arena: &'a ExprArenaCell) -> Self {
-        Self::with_capacity_compensated(arena, 0)
+        Self::with_capacities_compensated(arena, 0, 0)
     }
 
     /// Reserve a compensated builder for `capacity` terms/distinct variables.
+    /// Use [`Self::with_capacities_compensated`] for independent hints.
     pub fn with_capacity_compensated(arena: &'a ExprArenaCell, capacity: usize) -> Self {
+        Self::with_capacities_compensated(arena, capacity, capacity)
+    }
+
+    /// Reserve compensated terms independently from distinct numeric coefficients.
+    /// See [`Self::with_capacities`] for the meaning of each hint.
+    pub fn with_capacities_compensated(
+        arena: &'a ExprArenaCell,
+        term_capacity: usize,
+        coefficient_capacity: usize,
+    ) -> Self {
         let mut builder = Self::new(arena);
-        builder.terms.reserve(capacity);
-        builder.compensated = Some(Box::new(CompensatedAccum::with_capacity(capacity)));
+        builder.terms.reserve(term_capacity);
+        builder.compensated = Some(Box::new(CompensatedAccum::with_capacity(coefficient_capacity)));
         builder
     }
 
@@ -95,6 +117,10 @@ impl<'a> AffineBuilder<'a> {
         self
     }
 
+    pub(crate) fn reserve_terms(&mut self, additional: usize) {
+        self.terms.reserve(additional);
+    }
+
     /// Discard pending terms while retaining allocated scratch capacity.
     pub fn clear(&mut self) {
         self.terms.clear();
@@ -117,7 +143,7 @@ impl<'a> AffineBuilder<'a> {
                     if let ExprNode::Var(var) = arena.get(id) {
                         acc.add(*var, scalar);
                         acc.constant.add(0.0 * scalar);
-                    } else if let Some(terms) = as_linear(arena, id, false) {
+                    } else if let Some(terms) = numeric_terms(arena, id) {
                         for &(var, coefficient) in terms.coeffs.iter() {
                             acc.add(var, coefficient * scalar);
                         }
@@ -145,7 +171,7 @@ impl<'a> AffineBuilder<'a> {
                 if let ExprNode::Var(var) = arena.get(id) {
                     self.scratch.add(*var, scalar);
                     constant += 0.0 * scalar;
-                } else if let Some(terms) = as_linear(arena, id, false) {
+                } else if let Some(terms) = numeric_terms(arena, id) {
                     for &(var, coefficient) in terms.coeffs.iter() {
                         self.scratch.add(var, coefficient * scalar);
                     }
@@ -171,6 +197,44 @@ impl<'a> AffineBuilder<'a> {
         self.clear();
         Expr::from_id(id, self.arena)
     }
+}
+
+/// Extracts numeric affine coefficients and the constant term without resolving parameters.
+/// Returns `None` if the expression cannot be represented in that form.
+fn numeric_terms<'a>(
+    arena: &'a (impl ArenaAccess + ?Sized),
+    id: ExprId,
+) -> Option<LinearTerms<'a>> {
+    match arena.get(id) {
+        ExprNode::Const(value) => return Some(LinearTerms::borrowed(&[], *value)),
+        ExprNode::Linear { coeffs, constant } => {
+            return Some(LinearTerms::borrowed(coeffs, *constant));
+        }
+        ExprNode::Param(_) => return None,
+        _ => {}
+    }
+    let mut pending = SmallVec::<[ExprId; 16]>::from_slice(&[id]);
+    let mut remaining = 64;
+    while let Some(next) = pending.pop() {
+        if remaining == 0 {
+            break;
+        }
+        remaining -= 1;
+        match arena.get(next) {
+            ExprNode::Param(_) => return None,
+            ExprNode::Add(children) | ExprNode::Mul(children) => {
+                if pending.len() + children.len() > pending.inline_size() {
+                    break;
+                }
+                pending.extend_from_slice(children);
+            }
+            ExprNode::Unary(crate::UnaryOp::Neg, child) => pending.push(*child),
+            // Other operations can ignore their inputs (e.g. p^0). Do not
+            // infer dependency through them; let the extractor decide.
+            _ => {}
+        }
+    }
+    as_linear(arena, id, false)
 }
 
 fn flush_segment(
@@ -223,5 +287,91 @@ impl CompensatedAccum {
             children.push(push_linear(arena, LinearTerms::owned(coeffs, constant)));
         }
         self.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExprArena, extract_linear};
+
+    fn coefficient_capacity(builder: &AffineBuilder<'_>) -> usize {
+        if let Some(acc) = &builder.compensated {
+            acc.coeffs.capacity()
+        } else {
+            builder.scratch.coeffs.capacity()
+        }
+    }
+
+    #[test]
+    fn repeated_contributions_reuse_small_coefficient_reservation() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0));
+        let y = Expr::from_var(&arena, VarId(1));
+        for compensated in [false, true] {
+            let mut builder = if compensated {
+                AffineBuilder::with_capacities_compensated(&arena, 4096, 2)
+            } else {
+                AffineBuilder::with_capacities(&arena, 4096, 2)
+            };
+            assert!(builder.terms.capacity() >= 4096);
+
+            let reserved = coefficient_capacity(&builder);
+            assert_eq!(reserved, 2);
+            for _ in 0..2048 {
+                builder.add_term(2.0, x).add_term(3.0, y);
+            }
+            let first = builder.build();
+            let terms = extract_linear(&arena.borrow(), first.id()).unwrap().into_owned();
+            assert_eq!(terms.coeffs.as_ref(), [(VarId(0), 4096.0), (VarId(1), 6144.0)]);
+            assert_eq!(coefficient_capacity(&builder), reserved);
+
+            builder.add_term(4.0, y);
+            let second = builder.build();
+            assert_eq!(
+                extract_linear(&arena.borrow(), second.id()).unwrap().coeffs.as_ref(),
+                [(VarId(1), 4.0)]
+            );
+            assert_eq!(coefficient_capacity(&builder), reserved);
+        }
+    }
+
+    #[test]
+    fn symbolic_contributions_leave_numeric_storage_unallocated_until_needed() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let parameter = arena.borrow_mut().new_param(2.0);
+        let p = Expr::from_param(&arena, parameter);
+        let x = Expr::from_var(&arena, VarId(0));
+        for compensated in [false, true] {
+            let mut builder = if compensated {
+                AffineBuilder::with_capacities_compensated(&arena, 4096, 0)
+            } else {
+                AffineBuilder::with_capacities(&arena, 4096, 0)
+            };
+            for _ in 0..4096 {
+                builder.add_term(2.0, p);
+            }
+            let symbolic = builder.build();
+            assert_eq!(coefficient_capacity(&builder), 0);
+            assert_eq!(builder.scratch.coeffs.capacity(), 0);
+
+            if let Some(acc) = &builder.compensated {
+                assert_eq!(acc.slot.capacity(), 0);
+            }
+
+            p.set_param_value(3.0).unwrap();
+            assert_eq!(
+                extract_linear(&arena.borrow(), symbolic.id()).unwrap().constant.to_bits(),
+                (4096.0_f64 * 6.0).to_bits()
+            );
+
+            builder.add_term(5.0, x);
+            let numeric = builder.build();
+            assert_eq!(
+                extract_linear(&arena.borrow(), numeric.id()).unwrap().coeffs.as_ref(),
+                [(VarId(0), 5.0)]
+            );
+            assert!(coefficient_capacity(&builder) > 0);
+        }
     }
 }

@@ -20,6 +20,8 @@ mod quadratic;
 mod quadratic_builder;
 mod render;
 mod simplify;
+#[doc(hidden)]
+pub mod sum_support;
 mod visit;
 
 pub use affine_builder::AffineBuilder;
@@ -55,4 +57,5 @@ pub use quadratic::{QuadraticTerms, extract_quadratic, extract_quadratic_shared}
 pub use quadratic_builder::{QuadraticBuildError, QuadraticBuilder};
 pub use render::{render_expr, render_linear_terms};
 pub use simplify::simplify;
+pub use sum_support::{WeightedTerm, weighted_term};
 pub use visit::{Visitor, walk, walk_shared};

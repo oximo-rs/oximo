@@ -71,6 +71,44 @@ fn builder_keeps_symbolic_coefficients_constants_and_first_seen_order() {
 }
 
 #[test]
+fn symbolic_probe_does_not_retain_parameters_under_zero_powers() {
+    let arena = ExprArenaCell::new(ExprArena::new());
+    let x = Expr::from_var(&arena, VarId(0));
+    let parameter = arena.borrow_mut().new_param(2.0);
+    let p = Expr::from_param(&arena, parameter);
+    let root = {
+        let mut writer = arena.borrow_mut();
+        let zero = writer.constant(0.0);
+        let power = writer.push(ExprNode::Pow(p.id(), zero));
+        writer.push(ExprNode::Add(vec![power, x.id()].into()))
+    };
+    let input = Expr::new(root, &arena).into_affine().unwrap();
+    for compensated in [false, true] {
+        let mut builder = if compensated {
+            AffineBuilder::new_compensated(&arena)
+        } else {
+            AffineBuilder::new(&arena)
+        };
+
+        builder.add_term(2.0, &input);
+        let result = builder.build();
+        assert!(matches!(arena.borrow().get(result.id()), ExprNode::Linear { .. }));
+
+        for value in [2.0, -7.0] {
+            p.set_param_value(value).unwrap();
+            let snapshot = arena.borrow();
+            let terms = extract_linear(&snapshot, result.id()).unwrap();
+            assert_eq!(terms.coeffs.as_ref(), [(VarId(0), 2.0)]);
+            assert_eq!(terms.constant.to_bits(), 2.0_f64.to_bits());
+            assert_eq!(
+                evaluate(&snapshot, result.id(), &&[3.0][..]).unwrap().to_bits(),
+                8.0_f64.to_bits()
+            );
+        }
+    }
+}
+
+#[test]
 fn foreign_term_panics_before_changing_builder_or_arenas() {
     let arena = ExprArenaCell::new(ExprArena::new());
     let foreign = ExprArenaCell::new(ExprArena::new());
