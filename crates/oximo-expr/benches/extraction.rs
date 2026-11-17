@@ -11,6 +11,7 @@ static ALLOC: support::CountingAllocator = support::CountingAllocator;
 
 fn main() {
     println!("case,nanoseconds,allocations,requested_bytes,peak_live_bytes");
+    compact_quadratic_cases();
     split_affine_cases();
     let mut arena = ExprArena::new();
     let vars: Vec<_> = (0..2048).map(|i| arena.var(VarId(i))).collect();
@@ -96,6 +97,45 @@ fn main() {
     support::measure("quadratic_hidden_overflow/64", || {
         extract_quadratic(&snapshot, overflow.id()).unwrap()
     });
+}
+
+fn compact_quadratic_cases() {
+    for (kind, count, variables) in [
+        ("compact", 32, 50),
+        ("compact", 650, 50),
+        ("compact", 650, 65),
+        ("expanded", 650, 50),
+        ("rich", 32, 50),
+    ] {
+        let mut arena = ExprArena::new();
+        let children = (0..count)
+            .map(|i| {
+                let a = VarId(i % variables);
+                let b = VarId((i * 7 + 1) % variables);
+                let coefficient = f64::from(i % 7 + 1) / 8.0;
+                if kind == "expanded" {
+                    let c = arena.constant(coefficient);
+                    let a = arena.var(a);
+                    let b = arena.var(b);
+                    arena.push(ExprNode::Mul(smallvec![c, a, b]))
+                } else {
+                    let linear = if kind == "rich" { vec![(a, -2.0)] } else { vec![] };
+                    let constant = if kind == "rich" { 3.0 } else { 0.0 };
+                    let q = QuadraticTerms::from_coefficients(
+                        vec![(a, b, coefficient)],
+                        linear,
+                        constant,
+                    )
+                    .unwrap();
+                    arena.push(ExprNode::Quadratic(std::sync::Arc::new(q)))
+                }
+            })
+            .collect();
+        let root = arena.push(ExprNode::Add(children));
+        support::measure(&format!("quadratic_leaves/{kind}/{count}/{variables}"), || {
+            extract_quadratic(&arena, root).unwrap()
+        });
+    }
 }
 
 fn measure_split(name: &str, arena: &ExprArena, root: oximo_expr::ExprId) {

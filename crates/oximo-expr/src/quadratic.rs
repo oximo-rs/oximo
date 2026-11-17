@@ -674,6 +674,30 @@ impl<'a, A: ArenaAccess + ?Sized> crate::fold::Folder for PolyFolder<'a, A> {
                         crate::fold::record_sum_magnitude(self.sum_magnitude, value);
                         continue;
                     }
+                    ExprNode::Quadratic(q) => {
+                        // We borrow the stored coefficients since converting each leaf
+                        // to Poly would allocate maps only to merge and discard them.
+                        let sign = q.coefficient_sign();
+                        acc.constant += q.constant;
+                        let mut magnitude = 0.0;
+                        for &(v, c) in &q.linear {
+                            let c = sign * c;
+                            *acc.linear.entry(v).or_insert(0.0) += c;
+                            magnitude += c.abs();
+                        }
+                        for &(a, b, c) in &q.quadratic {
+                            let c = sign * c;
+                            *acc.quad.entry(pair(a, b)).or_insert(0.0) += c;
+                            magnitude += c.abs();
+                        }
+
+                        crate::fold::record_sum_magnitude(
+                            self.sum_magnitude,
+                            q.constant.abs() + magnitude,
+                        );
+
+                        continue;
+                    }
                     _ => {}
                 }
 
@@ -840,8 +864,28 @@ fn canonicalize(poly: Poly) -> QuadraticTerms {
     QuadraticTerms::from_canonical_parts(quadratic, linear, poly.constant)
 }
 
-/// Extract canonical quadratic coefficients from a wide sum of quadratic
-/// monomials, optionally combined with a leading affine node.
+/// Recognize compact quadratic monomials without treating them as expanded
+/// products, whose Poly representation also includes zero linear entries.
+fn dense_monomial(arena: &(impl ArenaAccess + ?Sized), id: ExprId) -> Option<Monomial> {
+    if let ExprNode::Quadratic(q) = arena.get(id) {
+        let &[(a, b, c)] = q.quadratic.as_slice() else { return None };
+        if !q.linear.is_empty() || q.constant != 0.0 {
+            return None;
+        }
+
+        let coefficient = q.coefficient_sign() * c;
+        return coefficient.is_finite().then_some(Monomial {
+            variables: [a, b],
+            degree: 2,
+            coefficient,
+        });
+    }
+
+    monomial(arena, id)
+}
+
+/// Extract canonical quadratic coefficients from a wide sum of expanded or
+/// compact quadratic monomials, optionally combined with a leading affine node.
 ///
 /// Accumulate duplicate terms in a dense triangular buffer for variable IDs
 /// `0..64`, remove exact zeros, and emit canonical polynomial pairs, linear
@@ -877,7 +921,7 @@ fn dense_expanded_quadratic(
 
     // Reject common large-variable sums before allocating dense scratch.
     for &endpoint in [terms.first()?, terms.last()?] {
-        let term = monomial(arena, endpoint)?;
+        let term = dense_monomial(arena, endpoint)?;
         if term.degree != 2 || term.variables.iter().any(|v| v.index() >= VARIABLES) {
             return None;
         }
@@ -902,7 +946,7 @@ fn dense_expanded_quadratic(
     let mut quadratic = vec![0.0_f64; TRIANGLE];
     let mut magnitude = 0.0_f64;
     for &id in terms {
-        let term = monomial(arena, id)?;
+        let term = dense_monomial(arena, id)?;
         if term.degree != 2 {
             return None;
         }
@@ -1218,6 +1262,171 @@ mod tests {
 
         for (v, &c) in &expected.quad {
             assert!(same(actual.quad[v], c), "quadratic {v:?}: {} != {c}", actual.quad[v]);
+        }
+    }
+
+    #[test]
+    fn dense_compact_monomials_match_recursive_extraction_and_preserve_views() {
+        for count in [127, 128, 129] {
+            let cell = crate::ExprArenaCell::new(ExprArena::new());
+            let x = crate::Expr::from_var(&cell, VarId(0));
+            let y = crate::Expr::from_var(&cell, VarId(63));
+            let mut children = smallvec::SmallVec::new();
+            for i in 0..count {
+                let coefficient = [1.0, -1.0, f64::from_bits(1), 1e300, -1e300][i % 5];
+                let term = coefficient * x * y;
+                assert!(matches!(cell.borrow().get(term.id()), ExprNode::Quadratic(_)));
+                children.push(term.id());
+            }
+
+            let mut arena = cell.borrow_mut();
+            let sum = arena.push(ExprNode::Add(children.clone()));
+            let affine = arena.push(ExprNode::Linear {
+                coeffs: vec![(VarId(0), 1.0), (VarId(63), -3.0)],
+                constant: -0.0,
+            });
+            let nested = arena.push(ExprNode::Add(smallvec![affine, sum]));
+            children.insert(0, affine);
+
+            let flat = arena.push(ExprNode::Add(children));
+            for (root, eligible) in [(sum, count >= 128), (nested, count >= 128), (flat, true)] {
+                let expected = canonicalize(recursive_poly(&arena, root).unwrap());
+                assert_same_terms(&extract_quadratic(&arena, root).unwrap(), &expected);
+                let dense = dense_expanded_quadratic(&*arena, root);
+                assert_eq!(dense.is_some(), eligible);
+                if let Some(actual) = dense {
+                    assert_same_terms(&actual, &expected);
+                }
+            }
+
+            let mut negated =
+                QuadraticTerms::from_canonical_parts(vec![(VarId(63), VarId(0), 2.0)], vec![], 0.0);
+            negated.negate();
+            let compact = arena.push(ExprNode::Quadratic(std::sync::Arc::new(negated)));
+            let a = arena.var(VarId(0));
+            let b = arena.var(VarId(63));
+            let expanded = arena.push(ExprNode::Mul(smallvec![a, b]));
+            let mixed = arena.push(ExprNode::Add(
+                (0..128).map(|i| if i % 2 == 0 { compact } else { expanded }).collect(),
+            ));
+            assert_same_terms(
+                &dense_expanded_quadratic(&*arena, mixed).unwrap(),
+                &canonicalize(recursive_poly(&arena, mixed).unwrap()),
+            );
+
+            for node in arena.nodes() {
+                if let ExprNode::Quadratic(q) = node {
+                    assert!(q.canonical.get().is_none(), "extraction must borrow raw storage");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_sum_leaves_preserve_general_arithmetic_and_lazy_views() {
+        let mut arena = ExprArena::new();
+        let mut q = QuadraticTerms::from_canonical_parts(
+            vec![(VarId(64), VarId(1), 2.0), (VarId(0), VarId(0), f64::from_bits(3))],
+            vec![(VarId(64), -4.0), (VarId(1), f64::from_bits(1))],
+            -0.0,
+        );
+        q.invalidate_order();
+        q.negate();
+
+        let q = std::sync::Arc::new(q);
+        let child = arena.push(ExprNode::Quadratic(std::sync::Arc::clone(&q)));
+        let parameter = arena.new_param(1.0);
+        let p = arena.param(parameter);
+        let scaled = arena.push(ExprNode::Mul(smallvec![p, child]));
+        let nested = arena.push(ExprNode::Add(smallvec![child, scaled]));
+        let root = arena.push(ExprNode::Add(smallvec![nested, child, nested]));
+        for value in [1.0, -1.0, 0.0, -0.0] {
+            arena.set_param_value(parameter, value).unwrap();
+            let expected = recursive_poly(&arena, root).unwrap();
+            assert_same_poly(&as_poly(&arena, root).unwrap(), &expected);
+            let expected = canonicalize(expected);
+            let actual = extract_quadratic(&arena, root);
+            assert_eq!(actual.is_some(), expected.is_canonical());
+
+            if let Some(actual) = actual {
+                assert_same_terms(&actual, &expected);
+            }
+        }
+
+        for value in [f64::INFINITY, f64::NAN] {
+            let factor = arena.push(ExprNode::Const(value));
+            let scaled = arena.push(ExprNode::Mul(smallvec![child, factor]));
+            let root = arena.push(ExprNode::Add(smallvec![child, scaled]));
+            assert_same_poly(
+                &as_poly(&arena, root).unwrap(),
+                &recursive_poly(&arena, root).unwrap(),
+            );
+            assert!(extract_quadratic(&arena, root).is_none());
+        }
+        assert!(q.canonical.get().is_none());
+    }
+
+    #[test]
+    fn compact_dense_fallbacks_and_grouped_overflow_match_recursive_extraction() {
+        let mut arena = ExprArena::new();
+        let compact = |arena: &mut ExprArena, quadratic, linear, constant| {
+            arena.push(ExprNode::Quadratic(std::sync::Arc::new(
+                QuadraticTerms::from_canonical_parts(quadratic, linear, constant),
+            )))
+        };
+        let ordinary = compact(&mut arena, vec![(VarId(0), VarId(0), 1.0)], vec![], 0.0);
+        let sparse = compact(&mut arena, vec![(VarId(64), VarId(0), 1.0)], vec![], 0.0);
+        let rich = compact(&mut arena, vec![(VarId(0), VarId(0), 2.0)], vec![(VarId(0), 3.0)], 4.0);
+        let multiple = compact(
+            &mut arena,
+            vec![(VarId(0), VarId(0), 1.0), (VarId(1), VarId(0), 2.0)],
+            vec![],
+            0.0,
+        );
+        let empty = compact(&mut arena, vec![], vec![], -0.0);
+        let huge = compact(&mut arena, vec![(VarId(0), VarId(0), 1e308)], vec![], 0.0);
+        let nonfinite = compact(&mut arena, vec![(VarId(0), VarId(0), f64::INFINITY)], vec![], 0.0);
+        let x = arena.var(VarId(0));
+        let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, x));
+        for special in [sparse, rich, multiple, empty, huge, nonfinite, nonlinear] {
+            for position in [0, 64, 129] {
+                let mut children = vec![ordinary; 130];
+                children[position] = special;
+                if special == huge {
+                    children[65] = huge;
+                }
+                let root = arena.push(ExprNode::Add(children.into()));
+                assert!(dense_expanded_quadratic(&arena, root).is_none());
+
+                let expected = recursive_poly(&arena, root)
+                    .map(canonicalize)
+                    .filter(QuadraticTerms::is_canonical);
+                let actual = extract_quadratic(&arena, root);
+                assert_eq!(actual.is_some(), expected.is_some());
+
+                if let (Some(actual), Some(expected)) = (actual, expected) {
+                    assert_same_terms(&actual, &expected);
+                }
+            }
+        }
+        for constant_only in [false, true] {
+            let (quadratic, constant) = if constant_only {
+                (vec![], 1e308)
+            } else {
+                (vec![(VarId(0), VarId(0), 1e308)], 0.0)
+            };
+
+            let positive = compact(&mut arena, quadratic.clone(), vec![], constant);
+            let negative = compact(
+                &mut arena,
+                quadratic.into_iter().map(|(a, b, c)| (a, b, -c)).collect(),
+                vec![],
+                -constant,
+            );
+            let inner = arena.push(ExprNode::Add(smallvec![positive, positive]));
+            let root = arena.push(ExprNode::Add(smallvec![negative, inner]));
+            assert!(!canonicalize(recursive_poly(&arena, root).unwrap()).is_canonical());
+            assert!(extract_quadratic(&arena, root).is_none(), "preserve grouped overflow");
         }
     }
 
