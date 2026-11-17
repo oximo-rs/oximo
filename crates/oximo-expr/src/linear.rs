@@ -9,6 +9,7 @@ use crate::arena::{
 
 const MAX_EAGER_COEFFICIENTS: usize = 32;
 const MAX_EAGER_NODES: usize = 64;
+const MAX_DIRECT_AFFINE_CONTRIBUTIONS: usize = 2;
 
 /// Stack-backed merging avoids a hash table and per-variable vectors for the
 /// small numeric expressions that dominate scalar model construction.
@@ -95,69 +96,249 @@ impl SmallLinear {
         ConstructionResult::from_arena(arena, id)
     }
 
-    pub(crate) fn write_into(self, node: &mut ExprNode) {
-        let ExprNode::Linear { coeffs, constant } = node else {
-            unreachable!("affine accumulation requires a Linear destination");
-        };
+    fn write_into(self, destination: NormalizedLinearMut<'_>) {
+        let ExprNode::Linear { coeffs, constant } = destination.node else { unreachable!() };
         coeffs.clear();
-        coeffs.extend(self.coeffs.into_iter().filter(|(_, coefficient)| *coefficient != 0.0));
+        coeffs.extend(self.coeffs.into_iter().filter(|(_, value)| *value != 0.0));
         *constant = self.constant;
         if coeffs.is_empty() {
-            *node = ExprNode::Const(self.constant);
+            *destination.node = ExprNode::Const(self.constant);
         }
     }
 }
 
-/// Stage the bounded merge before mutating either operand.
-pub(crate) fn accumulate_linear_nodes(
-    left: &ExprNode,
-    right: &ExprNode,
+/// Mutable view of a bounded affine root with unique coefficient variables.
+/// Its private fields keep raw, potentially duplicate-bearing `Linear` nodes
+/// out of the specialized merge methods.
+pub(crate) struct NormalizedLinearMut<'a> {
+    node: &'a mut ExprNode,
+}
+
+impl<'a> NormalizedLinearMut<'a> {
+    /// The arena must establish root ownership before creating this view.
+    pub(crate) fn from_owned_root(node: &'a mut ExprNode) -> Option<Self> {
+        let ExprNode::Linear { coeffs, .. } = node else { return None };
+        if coeffs.len() > MAX_EAGER_COEFFICIENTS {
+            return None;
+        }
+        debug_assert!(
+            coeffs
+                .iter()
+                .enumerate()
+                .all(|(i, (var, _))| { coeffs[..i].iter().all(|(previous, _)| previous != var) }),
+            "owned affine roots must have unique variables"
+        );
+        Some(Self { node })
+    }
+
+    /// Directly update small sources, while stage larger merges on the stack.
+    pub(crate) fn accumulate(self, source: &ExprNode, destination_is_left: bool) -> Option<()> {
+        let destination = self.node;
+        let variable;
+        let (source_coeffs, source_constant) = match source {
+            ExprNode::Const(value) => (&[][..], *value),
+            ExprNode::Var(var) => {
+                variable = [(*var, 1.0)];
+                (&variable[..], 0.0)
+            }
+            ExprNode::Linear { coeffs, constant } => (&coeffs[..], *constant),
+            _ => return None,
+        };
+        let ExprNode::Linear { coeffs, constant } = destination else { return None };
+        if source_coeffs.len() > MAX_DIRECT_AFFINE_CONTRIBUTIONS {
+            let staged = stage_linear_merge(coeffs, *constant, source, destination_is_left)?;
+            staged.write_into(Self { node: destination });
+            return Some(());
+        }
+
+        if destination_is_left {
+            if coeffs.len() + source_coeffs.len() <= MAX_EAGER_COEFFICIENTS {
+                for &(var, coefficient) in source_coeffs {
+                    if let Some((_, value)) =
+                        coeffs.iter_mut().find(|(existing, _)| *existing == var)
+                    {
+                        *value += coefficient;
+                    } else {
+                        coeffs.push((var, coefficient));
+                    }
+                }
+            } else {
+                // Retain destination slots from preflight.
+                let original_len = coeffs.len();
+                let mut slots = [0; MAX_DIRECT_AFFINE_CONTRIBUTIONS];
+                let mut added = SmallVec::<[VarId; MAX_DIRECT_AFFINE_CONTRIBUTIONS]>::new();
+                for (index, &(var, _)) in source_coeffs.iter().enumerate() {
+                    slots[index] = if let Some(slot) =
+                        coeffs.iter().position(|(existing, _)| *existing == var)
+                    {
+                        slot
+                    } else if let Some(slot) = added.iter().position(|existing| *existing == var) {
+                        original_len + slot
+                    } else {
+                        if original_len + added.len() == MAX_EAGER_COEFFICIENTS {
+                            return None;
+                        }
+                        added.push(var);
+                        original_len + added.len() - 1
+                    };
+                }
+
+                coeffs.reserve(added.len());
+                for (index, &(var, coefficient)) in source_coeffs.iter().enumerate() {
+                    if slots[index] < coeffs.len() {
+                        coeffs[slots[index]].1 += coefficient;
+                    } else {
+                        coeffs.push((var, coefficient));
+                    }
+                }
+            }
+            *constant += source_constant;
+        } else {
+            accumulate_small_right(coeffs, constant, source_coeffs, source_constant)?;
+        }
+        finish_linear_accumulation(destination);
+
+        Some(())
+    }
+
+    /// The arena handles this case separately so all other merges use disjoint borrows.
+    pub(crate) fn double(self) -> Option<()> {
+        let destination = self.node;
+        let ExprNode::Linear { coeffs, constant } = destination else { return None };
+        for (_, value) in coeffs {
+            *value += *value;
+        }
+
+        *constant += *constant;
+        finish_linear_accumulation(destination);
+
+        Some(())
+    }
+}
+
+/// Merge a small left operand while preserving the right buffer's allocation.
+#[inline]
+fn accumulate_small_right(
+    coeffs: &mut Vec<(VarId, f64)>,
+    constant: &mut f64,
+    source_coeffs: &[(VarId, f64)],
+    source_constant: f64,
+) -> Option<()> {
+    // Record source and destination slots and update these slots as entries move.
+    let mut prefix = SmallVec::<[(usize, Option<usize>); MAX_DIRECT_AFFINE_CONTRIBUTIONS]>::new();
+    let mut added = 0;
+    for (index, &(var, _)) in source_coeffs.iter().enumerate() {
+        if prefix.iter().any(|&(previous, _)| source_coeffs[previous].0 == var) {
+            continue;
+        }
+
+        let slot = coeffs.iter().position(|(existing, _)| *existing == var);
+        if slot.is_none() {
+            added += 1;
+        }
+        if coeffs.len() + added > MAX_EAGER_COEFFICIENTS {
+            return None;
+        }
+        prefix.push((index, slot));
+    }
+
+    coeffs.reserve(added);
+    for output in 0..prefix.len() {
+        let (first, slot) = prefix[output];
+        let (var, value) = source_coeffs[first];
+        let original_right = if let Some(original) = slot {
+            let original_value = coeffs[original].1;
+            coeffs[output..=original].rotate_right(1);
+            coeffs[output].1 = value;
+            for (_, remaining) in &mut prefix[output + 1..] {
+                if let Some(index) = remaining
+                    && *index < original
+                {
+                    *index += 1;
+                }
+            }
+
+            Some(original_value)
+        } else {
+            coeffs.insert(output, (var, value));
+            for (_, remaining) in &mut prefix[output + 1..] {
+                if let Some(index) = remaining {
+                    *index += 1;
+                }
+            }
+
+            None
+        };
+
+        // Normalize the left operand before adding the original right
+        // coefficient.
+        for &(duplicate, coefficient) in &source_coeffs[first + 1..] {
+            if duplicate == var {
+                coeffs[output].1 += coefficient;
+            }
+        }
+        if let Some(value) = original_right {
+            coeffs[output].1 += value;
+        }
+    }
+
+    let original_constant = *constant;
+    *constant = source_constant;
+    *constant += original_constant;
+
+    // LLVM may commute the scalar addition when both operands are NaNs.
+    if source_constant.is_nan() && original_constant.is_nan() {
+        *constant = original_constant + 0.0;
+    }
+
+    Some(())
+}
+
+/// The original bounded staging path preserves normalization order.
+fn stage_linear_merge(
+    destination: &[(VarId, f64)],
+    constant: f64,
+    source: &ExprNode,
     destination_is_left: bool,
 ) -> Option<SmallLinear> {
     let mut result = SmallLinear::new();
     if destination_is_left {
-        let ExprNode::Linear { coeffs, constant } = left else { return None };
-        if coeffs.len() > MAX_EAGER_COEFFICIENTS {
-            return None;
-        }
-
-        // Owned roots were normalized when emitted.
-        result.coeffs.extend_from_slice(coeffs);
-        result.constant = *constant;
-    } else {
-        if !result.terminal(left) {
-            return None;
-        }
-
-        result.constant = match left {
-            ExprNode::Const(value) | ExprNode::Linear { constant: value, .. } => *value,
-            _ => result.constant,
-        };
+        result.coeffs.extend_from_slice(destination);
+        result.constant = constant;
+        return result.terminal(source).then_some(result);
     }
-    if destination_is_left {
-        return result.terminal(right).then_some(result);
+    if !result.terminal(source) {
+        return None;
     }
 
-    let ExprNode::Linear { coeffs, constant } = right else { return None };
+    result.constant = match source {
+        ExprNode::Const(value) | ExprNode::Linear { constant: value, .. } => *value,
+        _ => result.constant,
+    };
     let prefix = result.coeffs.len();
-
-    // The owned right root has no duplicate variables.
-    // Only the original left prefix can overlap.
-    for &(variable, coefficient) in coeffs {
+    for &(var, coefficient) in destination {
         if let Some((_, value)) =
-            result.coeffs[..prefix].iter_mut().find(|(var, _)| *var == variable)
+            result.coeffs[..prefix].iter_mut().find(|(existing, _)| *existing == var)
         {
             *value += coefficient;
         } else {
             if result.coeffs.len() == MAX_EAGER_COEFFICIENTS {
                 return None;
             }
-            result.coeffs.push((variable, coefficient));
+            result.coeffs.push((var, coefficient));
         }
     }
-
     result.constant += constant;
+
     Some(result)
+}
+
+fn finish_linear_accumulation(destination: &mut ExprNode) {
+    let ExprNode::Linear { coeffs, constant } = destination else { unreachable!() };
+    coeffs.retain(|(_, coefficient)| *coefficient != 0.0);
+    if coeffs.is_empty() {
+        *destination = ExprNode::Const(*constant);
+    }
 }
 
 /// Coefficients of a linear expression: `sum(coeff * var) + constant`.
@@ -1451,6 +1632,226 @@ mod tests {
     use super::*;
 
     use crate::arena::ParamId;
+
+    fn merge_for_test(destination: &mut ExprNode, source: &ExprNode, left: bool) -> Option<()> {
+        NormalizedLinearMut::from_owned_root(destination)?.accumulate(source, left)
+    }
+
+    // Frozen staged algorithm.
+    fn staged_accumulation(
+        destination: &ExprNode,
+        source: &ExprNode,
+        destination_is_left: bool,
+    ) -> Option<ExprNode> {
+        let ExprNode::Linear { coeffs, constant } = destination else { return None };
+        let mut result = SmallLinear::new();
+        if destination_is_left {
+            if coeffs.len() > MAX_EAGER_COEFFICIENTS {
+                return None;
+            }
+            result.coeffs.extend_from_slice(coeffs);
+            result.constant = *constant;
+            if !result.terminal(source) {
+                return None;
+            }
+        } else {
+            if !result.terminal(source) {
+                return None;
+            }
+
+            result.constant = match source {
+                ExprNode::Const(value) | ExprNode::Linear { constant: value, .. } => *value,
+                _ => result.constant,
+            };
+            let prefix = result.coeffs.len();
+            for &(var, coefficient) in coeffs {
+                if let Some((_, value)) =
+                    result.coeffs[..prefix].iter_mut().find(|(existing, _)| *existing == var)
+                {
+                    *value += coefficient;
+                } else {
+                    if result.coeffs.len() == MAX_EAGER_COEFFICIENTS {
+                        return None;
+                    }
+                    result.coeffs.push((var, coefficient));
+                }
+            }
+            result.constant += constant;
+        }
+
+        let mut coeffs = result.coeffs.into_vec();
+        coeffs.retain(|(_, coefficient)| *coefficient != 0.0);
+
+        Some(if coeffs.is_empty() {
+            ExprNode::Const(result.constant)
+        } else {
+            ExprNode::Linear { coeffs, constant: result.constant }
+        })
+    }
+
+    fn node_bits(node: &ExprNode) -> (Vec<(VarId, u64)>, u64) {
+        match node {
+            ExprNode::Const(value) => (Vec::new(), value.to_bits()),
+            ExprNode::Linear { coeffs, constant } => (
+                coeffs.iter().map(|&(var, value)| (var, value.to_bits())).collect(),
+                constant.to_bits(),
+            ),
+            _ => panic!("expected numeric affine node"),
+        }
+    }
+
+    #[test]
+    fn direct_affine_merges_match_staged_bits_and_rejections() {
+        let values = [1.0, -1.0, 1e16, -1e16, f64::from_bits(1), f64::MAX, -f64::MAX];
+        let mut state = 3_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            usize::try_from(state >> 32).unwrap()
+        };
+        for case in 0..512 {
+            let destination = ExprNode::Linear {
+                coeffs: (0..case % 33)
+                    .map(|i| (VarId(u32::try_from(i).unwrap()), values[next() % values.len()]))
+                    .collect(),
+                constant: values[next() % values.len()],
+            };
+
+            let source = match case % 8 {
+                0 => ExprNode::Const(-0.0),
+                1 => ExprNode::Var(VarId(u32::try_from(next() % 34).unwrap())),
+                _ => ExprNode::Linear {
+                    coeffs: (0..next() % 80)
+                        .map(|_| {
+                            (
+                                VarId(u32::try_from(next() % 34).unwrap()),
+                                values[next() % values.len()],
+                            )
+                        })
+                        .collect(),
+                    constant: -0.0,
+                },
+            };
+
+            for destination_is_left in [true, false] {
+                let mut actual = destination.clone();
+                let expected = staged_accumulation(&destination, &source, destination_is_left);
+                let accepted = merge_for_test(&mut actual, &source, destination_is_left).is_some();
+                assert_eq!(accepted, expected.is_some(), "case={case}, left={destination_is_left}");
+                assert_eq!(
+                    node_bits(&actual),
+                    node_bits(expected.as_ref().unwrap_or(&destination)),
+                    "case={case}, left={destination_is_left}, source={source:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_affine_merges_reuse_reserved_storage_in_both_directions() {
+        for destination_is_left in [true, false] {
+            let mut coeffs = Vec::with_capacity(32);
+            coeffs.extend([(VarId(0), 2.0), (VarId(1), 3.0), (VarId(2), 4.0)]);
+            let pointer = coeffs.as_ptr();
+            let capacity = coeffs.capacity();
+            let mut destination = ExprNode::Linear { coeffs, constant: -0.0 };
+            let source = ExprNode::Linear {
+                coeffs: vec![(VarId(2), 1e16), (VarId(3), 5.0), (VarId(2), -1e16)],
+                constant: 2.0,
+            };
+
+            let expected = staged_accumulation(&destination, &source, destination_is_left).unwrap();
+            assert_eq!(merge_for_test(&mut destination, &source, destination_is_left), Some(()));
+            assert_eq!(node_bits(&destination), node_bits(&expected));
+
+            let ExprNode::Linear { coeffs, .. } = &destination else { panic!("linear result") };
+            assert_eq!(coeffs.as_ptr(), pointer);
+            assert_eq!(coeffs.capacity(), capacity);
+        }
+    }
+
+    #[test]
+    fn hybrid_affine_merges_preserve_dense_and_duplicate_source_semantics_and_storage() {
+        for (variables, contributions) in
+            [(2_u32, 2_u32), (3, 3), (16, 16), (32, 2), (32, 32), (16, 1024)]
+        {
+            for reverse in [false, true] {
+                for destination_is_left in [true, false] {
+                    let mut coeffs = Vec::with_capacity(MAX_EAGER_COEFFICIENTS);
+                    coeffs.extend((0..variables).map(|i| (VarId(i), 1.0)));
+                    let pointer = coeffs.as_ptr();
+                    let mut destination = ExprNode::Linear { coeffs, constant: -0.0 };
+                    let source = ExprNode::Linear {
+                        coeffs: (0..contributions)
+                            .map(|i| {
+                                let var = i % variables;
+                                let coefficient = match i % 3 {
+                                    0 => 1e16,
+                                    1 => 1.0,
+                                    _ => -1e16,
+                                };
+                                (
+                                    VarId(if reverse { variables - 1 - var } else { var }),
+                                    coefficient,
+                                )
+                            })
+                            .collect(),
+                        constant: 0.0,
+                    };
+
+                    let source_bits = node_bits(&source);
+                    let expected =
+                        staged_accumulation(&destination, &source, destination_is_left).unwrap();
+                    assert_eq!(
+                        merge_for_test(&mut destination, &source, destination_is_left),
+                        Some(())
+                    );
+                    assert_eq!(node_bits(&destination), node_bits(&expected));
+                    assert_eq!(node_bits(&source), source_bits);
+
+                    let ExprNode::Linear { coeffs, .. } = &destination else {
+                        panic!("nonzero affine result");
+                    };
+                    assert_eq!(coeffs.as_ptr(), pointer);
+                    assert_eq!(coeffs.capacity(), MAX_EAGER_COEFFICIENTS);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_affine_merges_preserve_nonfinite_and_signed_zero_bits() {
+        let values = [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            f64::from_bits(0xfff8_0000_0000_5678),
+        ];
+        for left in values {
+            for right in values {
+                let destination = ExprNode::Linear {
+                    coeffs: vec![(VarId(0), left), (VarId(1), right), (VarId(2), left)],
+                    constant: right,
+                };
+                let source = ExprNode::Linear {
+                    coeffs: vec![(VarId(2), left), (VarId(0), right), (VarId(2), right)],
+                    constant: left,
+                };
+                for destination_is_left in [true, false] {
+                    let expected =
+                        staged_accumulation(&destination, &source, destination_is_left).unwrap();
+                    let mut actual = destination.clone();
+                    assert_eq!(merge_for_test(&mut actual, &source, destination_is_left), Some(()),);
+                    assert_eq!(
+                        node_bits(&actual),
+                        node_bits(&expected),
+                        "left={left:?}, right={right:?}, destination_is_left={destination_is_left}",
+                    );
+                }
+            }
+        }
+    }
 
     struct CountedArena {
         arena: ExprArena,

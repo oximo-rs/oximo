@@ -1076,6 +1076,28 @@ pub(crate) trait ArenaAccess {
     }
 }
 
+/// Borrow a local destination and its source without cloning either node.
+fn accumulate_local_linear(
+    nodes: &mut [ExprNode],
+    destination: usize,
+    source: usize,
+    destination_is_left: bool,
+) -> Option<()> {
+    if destination == source {
+        return crate::linear::NormalizedLinearMut::from_owned_root(&mut nodes[destination])?
+            .double();
+    }
+    let (destination, source) = if destination < source {
+        let (before, after) = nodes.split_at_mut(source);
+        (&mut before[destination], &after[0])
+    } else {
+        let (before, after) = nodes.split_at_mut(destination);
+        (&mut after[0], &before[source])
+    };
+    crate::linear::NormalizedLinearMut::from_owned_root(destination)?
+        .accumulate(source, destination_is_left)
+}
+
 impl ArenaAccess for ExprArena {
     fn reusable_root(&mut self, id: ExprId) -> bool {
         let Some(ownership) = self.ownership.get_mut() else {
@@ -1105,13 +1127,8 @@ impl ArenaAccess for ExprArena {
         }
 
         let nodes = Arc::get_mut(&mut self.nodes)?;
-        let result = crate::linear::accumulate_linear_nodes(
-            &nodes[lhs.index()],
-            &nodes[rhs.index()],
-            destination == lhs,
-        )?;
-
-        result.write_into(&mut nodes[destination.index()]);
+        let source = if destination == lhs { rhs } else { lhs };
+        accumulate_local_linear(nodes, destination.index(), source.index(), destination == lhs)?;
         let linear = matches!(nodes[destination.index()], ExprNode::Linear { .. });
         self.ownership.get_mut()?.get_mut().finish_affine_merge(lhs, rhs, destination, linear);
         *self.classifications.get_mut() = None;
@@ -1381,13 +1398,13 @@ impl ArenaAccess for ForkedExprArena {
         if (destination != lhs && destination != rhs) || !self.linear_root(destination) {
             return None;
         }
-        let result = crate::linear::accumulate_linear_nodes(
-            self.get(lhs),
-            self.get(rhs),
-            destination == lhs,
-        )?;
-
-        result.write_into(&mut self.nodes[index]);
+        let source = if destination == lhs { rhs } else { lhs };
+        if let Some(source_index) = source.index().checked_sub(self.base.len()) {
+            accumulate_local_linear(&mut self.nodes, index, source_index, destination == lhs)?;
+        } else {
+            crate::linear::NormalizedLinearMut::from_owned_root(&mut self.nodes[index])?
+                .accumulate(&self.base.nodes[source.index()], destination == lhs)?;
+        }
         let linear = matches!(self.nodes[index], ExprNode::Linear { .. });
         self.ownership.get_mut()?.get_mut().finish_affine_merge(lhs, rhs, destination, linear);
         *self.classifications.get_mut() = ExprClassCache::default();
@@ -2831,6 +2848,64 @@ mod tests {
         assert_eq!(ArenaAccess::accumulate_linear(&mut arena, root, root, root), Some(root));
         assert!(arena.analysis.get().is_none());
         assert_eq!(ArenaAccess::cached_degree(&arena, root), None);
+    }
+
+    fn check_linear_storage_reuse(arena: &mut dyn ArenaAccess) {
+        for destination_is_left in [true, false] {
+            for source_first in [true, false] {
+                let mut coefficients = Vec::with_capacity(32);
+                coefficients.extend([(VarId(0), 2.0), (VarId(1), 3.0), (VarId(2), 4.0)]);
+                let pointer = coefficients.as_ptr();
+                let destination = ExprNode::Linear { coeffs: coefficients, constant: 2.0 };
+                let source = ExprNode::Linear {
+                    coeffs: vec![(VarId(2), 3.0), (VarId(0), -4.0)],
+                    constant: 5.0,
+                };
+
+                let (destination, source) = if source_first {
+                    let source = arena.push_owned_linear(source);
+                    (arena.push_owned_linear(destination), source)
+                } else {
+                    (arena.push_owned_linear(destination), arena.push_owned_linear(source))
+                };
+
+                let nodes = arena.len();
+                arena.cache_degree(destination, Degree::One);
+                let (lhs, rhs) =
+                    if destination_is_left { (destination, source) } else { (source, destination) };
+                assert_eq!(arena.accumulate_linear(lhs, rhs, destination), Some(destination));
+                assert_eq!(arena.len(), nodes);
+                assert!(arena.linear_root(destination));
+                assert!(!arena.linear_root(source), "copied source ownership must be retired");
+                assert_eq!(arena.cached_degree(destination), None);
+
+                let ExprNode::Linear { coeffs, constant } = arena.get(destination) else {
+                    panic!("linear destination");
+                };
+                assert_eq!(coeffs.as_ptr(), pointer);
+                assert_eq!(coeffs.capacity(), 32);
+                assert_eq!(*constant, 7.0);
+
+                let expected = if destination_is_left {
+                    [(VarId(0), -2.0), (VarId(1), 3.0), (VarId(2), 7.0)]
+                } else {
+                    [(VarId(2), 7.0), (VarId(0), -2.0), (VarId(1), 3.0)]
+                };
+                assert_eq!(coeffs.as_slice(), expected);
+
+                let ExprNode::Linear { coeffs, constant } = arena.get(source) else {
+                    panic!("unchanged source");
+                };
+                assert_eq!(coeffs.as_slice(), [(VarId(2), 3.0), (VarId(0), -4.0)]);
+                assert_eq!(*constant, 5.0);
+            }
+        }
+    }
+
+    #[test]
+    fn direct_linear_storage_reuse_preserves_sources_and_retires_ownership() {
+        check_linear_storage_reuse(&mut ExprArena::new());
+        check_linear_storage_reuse(&mut ForkedExprArena::new(FrozenExprArena::default()));
     }
 
     #[test]
