@@ -59,6 +59,7 @@ pub struct QuadraticBuilder<'a> {
     arena: &'a ExprArenaCell,
     coefficients: Accumulator,
     scratch: Accumulator,
+    square_scratch: Vec<f64>,
 }
 
 /// Coefficients are accumulated in polynomial units, including subnormal diagonals.
@@ -80,6 +81,16 @@ fn product(a: f64, b: f64) -> Result<f64, QuadraticBuildError> {
 }
 fn sum(a: f64, b: f64) -> Result<f64, QuadraticBuildError> {
     checked(a + b, QuadraticBuildError::AccumulationOverflow)
+}
+
+/// A cheap uniqueness certificate that does not reorder raw affine inputs.
+fn monotonic_variables(coeffs: &[(VarId, f64)]) -> bool {
+    coeffs.windows(2).all(|w| w[0].0.0 < w[1].0.0) || coeffs.windows(2).all(|w| w[0].0.0 > w[1].0.0)
+}
+
+fn triangular_len(n: usize) -> Option<usize> {
+    let next = n.checked_add(1)?;
+    if n.is_multiple_of(2) { (n / 2).checked_mul(next) } else { n.checked_mul(next / 2) }
 }
 
 impl Accumulator {
@@ -125,22 +136,42 @@ impl Accumulator {
         Ok(())
     }
 
-    /// Check every destination before changing any entry. Keep scratch capacity.
-    fn merge(&mut self, other: &Self) -> Result<(), QuadraticBuildError> {
+    /// Check every destination before changing any entry.
+    fn merge(&mut self, other: &mut Self) -> Result<(), QuadraticBuildError> {
         let constant = sum(self.constant, other.constant)?;
-        for (&v, &c) in &other.linear {
-            sum(self.linear.get(&v).copied().unwrap_or(0.0), c)?;
+        let mut new_linear = 0;
+        if !self.linear.is_empty() {
+            for (&v, &c) in &other.linear {
+                let current = self.linear.get(&v);
+                sum(current.copied().unwrap_or(0.0), c)?;
+                new_linear += usize::from(current.is_none());
+            }
         }
-        for (&pair, &c) in &other.quadratic {
-            sum(self.quadratic.get(&pair).copied().unwrap_or(0.0), c)?;
+        let mut new_quadratic = 0;
+        if !self.quadratic.is_empty() {
+            for (&pair, &c) in &other.quadratic {
+                let current = self.quadratic.get(&pair);
+                sum(current.copied().unwrap_or(0.0), c)?;
+                new_quadratic += usize::from(current.is_none());
+            }
         }
 
+        self.linear.reserve(new_linear);
+        self.quadratic.reserve(new_quadratic);
         self.constant = constant;
-        for (&v, &c) in &other.linear {
-            *self.linear.entry(v).or_default() += c;
+        if self.linear.is_empty() && !other.linear.is_empty() {
+            std::mem::swap(&mut self.linear, &mut other.linear);
+        } else {
+            for (&v, &c) in &other.linear {
+                *self.linear.entry(v).or_default() += c;
+            }
         }
-        for (&pair, &c) in &other.quadratic {
-            *self.quadratic.entry(pair).or_default() += c;
+        if self.quadratic.is_empty() && !other.quadratic.is_empty() {
+            std::mem::swap(&mut self.quadratic, &mut other.quadratic);
+        } else {
+            for (&pair, &c) in &other.quadratic {
+                *self.quadratic.entry(pair).or_default() += c;
+            }
         }
 
         Ok(())
@@ -194,7 +225,7 @@ impl<'a> QuadraticBuilder<'a> {
         let mut coefficients = Accumulator::default();
         coefficients.linear.reserve(linear);
         coefficients.quadratic.reserve(quadratic);
-        Self { arena, coefficients, scratch: Accumulator::default() }
+        Self { arena, coefficients, scratch: Accumulator::default(), square_scratch: Vec::new() }
     }
 
     /// Add a finite constant.
@@ -324,7 +355,7 @@ impl<'a> QuadraticBuilder<'a> {
             for &(v, a) in terms.coeffs.iter() {
                 self.scratch.add_linear(v, product(c, finite(a)?)?)?;
             }
-            self.coefficients.merge(&self.scratch)
+            self.coefficients.merge(&mut self.scratch)
         })?;
 
         Ok(self)
@@ -377,7 +408,7 @@ impl<'a> QuadraticBuilder<'a> {
                     .ok_or(QuadraticBuildError::ExpansionFailed)?;
                 self.scratch.add_leaf(NumericLeaf::Quadratic(&terms), scale)?;
             }
-            self.coefficients.merge(&self.scratch)
+            self.coefficients.merge(&mut self.scratch)
         })?;
         Ok(self)
     }
@@ -398,7 +429,7 @@ impl<'a> QuadraticBuilder<'a> {
         finite(scale)?;
         self.scratch.clear();
         self.scratch.add_leaf(NumericLeaf::Quadratic(terms), scale)?;
-        self.coefficients.merge(&self.scratch)?;
+        self.coefficients.merge(&mut self.scratch)?;
 
         Ok(self)
     }
@@ -438,22 +469,92 @@ impl<'a> QuadraticBuilder<'a> {
             self.scratch.clear();
             let left = numeric_affine(arena, lhs.id)?;
             let right = numeric_affine(arena, rhs.id)?;
+            let left_unique = monotonic_variables(&left.coeffs);
+            let right_unique =
+                if lhs.id == rhs.id { left_unique } else { monotonic_variables(&right.coeffs) };
+            if c != 0.0
+                && (left.constant != 0.0 || right.constant != 0.0)
+                && left_unique
+                && right_unique
+                && let Some(n) = left.coeffs.len().checked_add(right.coeffs.len())
+            {
+                self.scratch.linear.reserve(n);
+            }
             let offset = product(c, finite(left.constant)?)?;
             self.scratch.constant = product(offset, finite(right.constant)?)?;
+            let mut min_scaled = f64::INFINITY;
+            let mut min_right = f64::INFINITY;
             for &(v, a) in left.coeffs.iter() {
-                self.scratch
-                    .add_linear(v, product(product(c, finite(a)?)?, finite(right.constant)?)?)?;
+                let scaled = product(c, finite(a)?)?;
+                self.scratch.add_linear(v, product(scaled, finite(right.constant)?)?)?;
+                min_scaled = min_scaled.min(scaled.abs());
             }
             for &(v, b) in right.coeffs.iter() {
-                self.scratch.add_linear(v, product(offset, finite(b)?)?)?;
+                let value = finite(b)?;
+                self.scratch.add_linear(v, product(offset, value)?)?;
+                min_right = min_right.min(value.abs());
             }
-            for &(a, x) in left.coeffs.iter() {
-                let scaled = product(c, finite(x)?)?;
-                for &(b, y) in right.coeffs.iter() {
-                    self.scratch.add_quadratic(a, b, product(scaled, finite(y)?)?)?;
+
+            // Uniqueness alone does not imply dense output since products can be
+            // zero or underflow.
+            let smallest = min_scaled * min_right;
+            let dense = left_unique && right_unique && smallest != 0.0 && smallest.is_finite();
+            if dense {
+                let pairs = if lhs.id == rhs.id {
+                    triangular_len(left.coeffs.len())
+                } else {
+                    left.coeffs.len().checked_mul(right.coeffs.len())
+                };
+
+                if let Some(n) = pairs {
+                    self.scratch.quadratic.reserve(n);
                 }
             }
-            self.coefficients.merge(&self.scratch)
+
+            if dense
+                && lhs.id == rhs.id
+                && left.coeffs.len() >= 32
+                && let Some(n) = triangular_len(left.coeffs.len())
+            {
+                self.square_scratch.clear();
+                self.square_scratch.resize(n, 0.0);
+
+                // Keep every ordered multiplication and addition
+                // Only replace hash lookups by positional indices.
+                let mut row = 0;
+                for (i, &(_, x)) in left.coeffs.iter().enumerate() {
+                    let scaled = product(c, finite(x)?)?;
+                    let mut column = 0;
+                    for (j, &(_, y)) in right.coeffs.iter().enumerate() {
+                        let value = product(scaled, finite(y)?)?;
+                        if value != 0.0 {
+                            let slot = if j <= i { row + j } else { column + i };
+                            self.square_scratch[slot] = sum(self.square_scratch[slot], value)?;
+                        }
+                        column += j + 1;
+                    }
+                    row += i + 1;
+                }
+
+                let mut slot = 0;
+                for (i, &(a, _)) in left.coeffs.iter().enumerate() {
+                    for &(b, _) in &left.coeffs[..=i] {
+                        self.scratch.add_quadratic(a, b, self.square_scratch[slot])?;
+                        slot += 1;
+                    }
+                }
+            } else {
+                for &(a, x) in left.coeffs.iter() {
+                    let scaled = product(c, finite(x)?)?;
+                    for &(b, y) in right.coeffs.iter() {
+                        let value = product(scaled, finite(y)?)?;
+                        if value != 0.0 {
+                            self.scratch.add_quadratic(a, b, value)?;
+                        }
+                    }
+                }
+            }
+            self.coefficients.merge(&mut self.scratch)
         })?;
 
         Ok(self)
@@ -868,6 +969,310 @@ pub(crate) fn sum_numeric(
 mod tests {
     use super::*;
     use crate::{ExprArena, evaluate};
+
+    /// Frozen ordered expansion and merge from before scratch optimizations.
+    fn ordered_product_reference(
+        destination: &mut Accumulator,
+        c: f64,
+        left: &crate::LinearTerms<'_>,
+        right: &crate::LinearTerms<'_>,
+    ) -> Result<(), QuadraticBuildError> {
+        finite(c)?;
+        let mut scratch = Accumulator::default();
+        let offset = product(c, finite(left.constant)?)?;
+        scratch.constant = product(offset, finite(right.constant)?)?;
+
+        for &(v, a) in left.coeffs.iter() {
+            scratch.add_linear(v, product(product(c, finite(a)?)?, finite(right.constant)?)?)?;
+        }
+        for &(v, b) in right.coeffs.iter() {
+            scratch.add_linear(v, product(offset, finite(b)?)?)?;
+        }
+        for &(a, x) in left.coeffs.iter() {
+            let scaled = product(c, finite(x)?)?;
+            for &(b, y) in right.coeffs.iter() {
+                scratch.add_quadratic(a, b, product(scaled, finite(y)?)?)?;
+            }
+        }
+
+        let constant = sum(destination.constant, scratch.constant)?;
+        for (&v, &value) in &scratch.linear {
+            sum(destination.linear.get(&v).copied().unwrap_or(0.0), value)?;
+        }
+        for (&pair, &value) in &scratch.quadratic {
+            sum(destination.quadratic.get(&pair).copied().unwrap_or(0.0), value)?;
+        }
+
+        destination.constant = constant;
+        for (&v, &value) in &scratch.linear {
+            *destination.linear.entry(v).or_default() += value;
+        }
+        for (&pair, &value) in &scratch.quadratic {
+            *destination.quadratic.entry(pair).or_default() += value;
+        }
+
+        Ok(())
+    }
+
+    fn assert_accumulator_bits(actual: &Accumulator, expected: &Accumulator) {
+        assert_eq!(actual.constant.to_bits(), expected.constant.to_bits());
+        assert_eq!(actual.linear.len(), expected.linear.len());
+        assert_eq!(actual.quadratic.len(), expected.quadratic.len());
+        for (key, value) in &expected.linear {
+            assert_eq!(actual.linear.get(key).map(|v| v.to_bits()), Some(value.to_bits()));
+        }
+        for (key, value) in &expected.quadratic {
+            assert_eq!(actual.quadratic.get(key).map(|v| v.to_bits()), Some(value.to_bits()));
+        }
+    }
+
+    #[test]
+    fn product_scratch_matches_original_order_and_atomic_errors() {
+        let mut random = 0x1234_5678_9abc_def0_u64;
+        let values = [0.0, -0.0, 0.1, 0.3, -0.7, 1.1, f64::from_bits(1), 1e-200, 1e150];
+        for n in [8_u32, 32, 33, 64, 256] {
+            for layout in 0..4 {
+                let coeffs: Vec<_> = (0..n)
+                    .map(|i| {
+                        random = random.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                        let variable = match layout {
+                            0 => i,
+                            1 => n - i - 1,
+                            2 => i % 16,
+                            _ => (i * 17) % n,
+                        };
+                        (VarId(variable), values[(random >> 32) as usize % values.len()])
+                    })
+                    .collect();
+
+                for (weight, offset) in [(0.1, 0.3), (-0.7, -0.0), (0.0, 1.0), (1e200, 0.0)] {
+                    let mut raw = ExprArena::new();
+                    let id = raw.linear(coeffs.clone(), offset);
+                    let separate = raw.linear(coeffs.clone(), offset);
+                    let arena = ExprArenaCell::new(raw);
+                    let left = Expr::new(id, &arena).into_affine().unwrap();
+                    for right_id in [id, separate] {
+                        let right = Expr::new(right_id, &arena).into_affine().unwrap();
+                        let terms = crate::LinearTerms::borrowed(&coeffs, offset);
+                        let mut builder = QuadraticBuilder::with_capacity(&arena, 16, 64);
+                        let mut expected = Accumulator::default();
+                        for _ in 0..3 {
+                            let reference =
+                                ordered_product_reference(&mut expected, weight, &terms, &terms);
+                            let actual = builder.add_product(weight, &left, &right).map(|_| ());
+                            assert_eq!(actual, reference, "n={n}, layout={layout}, c={weight}");
+                            assert_accumulator_bits(&builder.coefficients, &expected);
+                        }
+
+                        builder.build_terms();
+                        expected.clear();
+                        let reference =
+                            ordered_product_reference(&mut expected, 0.1, &terms, &terms);
+                        assert_eq!(builder.add_product(0.1, &left, &right).map(|_| ()), reference);
+
+                        assert_accumulator_bits(&builder.coefficients, &expected);
+                        builder.clear();
+                        assert_accumulator_bits(&builder.coefficients, &Accumulator::default());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn square_failures_leave_pending_coefficients_and_allow_reuse() {
+        for (weight, large, error) in [
+            (2.0, f64::MAX, QuadraticBuildError::ProductOverflow),
+            (1.0, 1e200, QuadraticBuildError::ProductOverflow),
+            (1.0, 1e154, QuadraticBuildError::AccumulationOverflow),
+            (0.0, f64::NAN, QuadraticBuildError::NonFiniteInput),
+            (0.0, f64::INFINITY, QuadraticBuildError::NonFiniteInput),
+        ] {
+            let mut raw = ExprArena::new();
+            let bad = raw.linear((0..32).map(|i| (VarId(i), large)).collect(), 0.0);
+            let good = raw.linear((0..32).map(|i| (VarId(i), 0.3)).collect(), -0.0);
+            let arena = ExprArenaCell::new(raw);
+            let bad = Expr::new(bad, &arena).into_affine().unwrap();
+            let good = Expr::new(good, &arena).into_affine().unwrap();
+
+            let mut builder = QuadraticBuilder::new(&arena);
+            builder.add_constant(7.0).unwrap();
+            builder.add_linear_raw(3.0, VarId(0)).unwrap();
+            assert_eq!(builder.add_product(weight, &bad, &bad).unwrap_err(), error);
+
+            let mut expected = Accumulator { constant: 7.0, ..Accumulator::default() };
+            expected.add_linear(VarId(0), 3.0).unwrap();
+            assert_accumulator_bits(&builder.coefficients, &expected);
+
+            let coeffs: Vec<_> = (0..32).map(|i| (VarId(i), 0.3)).collect();
+            let terms = crate::LinearTerms::borrowed(&coeffs, -0.0);
+            ordered_product_reference(&mut expected, 0.1, &terms, &terms).unwrap();
+            builder.add_product(0.1, &good, &good).unwrap();
+            assert_accumulator_bits(&builder.coefficients, &expected);
+        }
+    }
+
+    #[test]
+    fn empty_map_transfers_wait_for_all_merge_validation() {
+        let mut destination = Accumulator::default();
+        destination.quadratic.insert((VarId(0), VarId(0)), f64::MAX);
+        let mut scratch = Accumulator::default();
+        scratch.linear.insert(VarId(1), 2.0);
+        scratch.quadratic.insert((VarId(0), VarId(0)), f64::MAX);
+        assert_eq!(destination.merge(&mut scratch), Err(QuadraticBuildError::AccumulationOverflow));
+        assert!(destination.linear.is_empty());
+        assert_eq!(scratch.linear.len(), 1, "failed merge must not transfer a map");
+        assert_eq!(destination.quadratic[&(VarId(0), VarId(0))], f64::MAX);
+
+        destination.clear();
+        scratch.constant = -0.0;
+        destination.merge(&mut scratch).unwrap();
+        assert_eq!(destination.constant.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(destination.linear[&VarId(1)], 2.0);
+        assert!(scratch.linear.is_empty());
+        assert!(scratch.quadratic.is_empty());
+    }
+
+    #[test]
+    fn square_cross_products_are_not_doubled() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let coeffs: Vec<_> = (0..32).map(|i| (VarId(i), if i == 0 { 0.1 } else { 0.3 })).collect();
+        let expression: Expr<'_, Affine> =
+            Expr::build(&arena, |a| a.push(ExprNode::Linear { coeffs, constant: 0.0 }));
+        let mut builder = QuadraticBuilder::new(&arena);
+        builder.add_product(0.1, &expression, &expression).unwrap();
+        let first = (0.1_f64 * 0.1) * 0.3;
+        let second = (0.1_f64 * 0.3) * 0.1;
+        assert_ne!((first + second).to_bits(), (2.0 * first).to_bits());
+        assert_eq!(
+            builder.coefficients.quadratic[&(VarId(1), VarId(0))].to_bits(),
+            (first + second).to_bits()
+        );
+    }
+
+    #[test]
+    fn duplicate_products_do_not_reserve_the_contribution_cartesian_product() {
+        let mut raw = ExprArena::new();
+        let id = raw.linear((0..256).map(|i| (VarId(i % 16), 1.0)).collect(), 0.0);
+        let arena = ExprArenaCell::new(raw);
+        let expression = Expr::new(id, &arena).into_affine().unwrap();
+        let mut builder = QuadraticBuilder::with_capacity(&arena, 128, 256);
+        let reserved_linear = builder.coefficients.linear.capacity();
+        builder.add_product(1.0, &expression, &expression).unwrap();
+        assert_eq!(builder.coefficients.linear.capacity(), reserved_linear);
+        assert_eq!(builder.coefficients.quadratic.len(), 136);
+        assert!(builder.coefficients.quadratic.capacity() < 1024);
+        assert!(builder.scratch.quadratic.capacity() < 1024);
+        assert_eq!(builder.square_scratch, [] as [f64; 0]);
+        assert_eq!(triangular_len(0), Some(0));
+        assert_eq!(triangular_len(256), Some(32_896));
+        assert_eq!(triangular_len(usize::MAX), None);
+    }
+
+    #[test]
+    fn empty_and_sparse_products_allocate_by_output_support() {
+        for (weight, coefficient, first, count) in [
+            (0.0, 1.0, 1.0, 0),
+            (-0.0, 1.0, 1.0, 0),
+            (1.0, 1e-200, 1e-200, 0),
+            (1e-200, 1e-200, 1e-200, 0),
+            (1.0, 0.0, 0.0, 0),
+            (1.0, 1e-200, 1e-160, 1),
+            (1.0, 0.0, 2.0, 1),
+        ] {
+            let coeffs: Vec<_> =
+                (0..1024).map(|i| (VarId(i), if i == 0 { first } else { coefficient })).collect();
+            let mut raw = ExprArena::new();
+            let left = raw.linear(coeffs.clone(), 0.0);
+            let separate = raw.linear(coeffs.clone(), 0.0);
+            let arena = ExprArenaCell::new(raw);
+            let left = Expr::new(left, &arena).into_affine().unwrap();
+
+            for right_id in [left.id, separate] {
+                let right = Expr::new(right_id, &arena).into_affine().unwrap();
+                let mut builder = QuadraticBuilder::new(&arena);
+                builder.add_product(weight, &left, &right).unwrap();
+                let terms = crate::LinearTerms::borrowed(&coeffs, 0.0);
+                let mut expected = Accumulator::default();
+                ordered_product_reference(&mut expected, weight, &terms, &terms).unwrap();
+                assert_accumulator_bits(&builder.coefficients, &expected);
+                assert_eq!(builder.coefficients.quadratic.len(), count);
+                assert_eq!(builder.coefficients.linear.capacity(), 0);
+                assert_eq!(builder.scratch.linear.capacity(), 0);
+                assert_eq!(builder.square_scratch.capacity(), 0);
+                assert_eq!(builder.scratch.quadratic.capacity(), 0);
+                if count == 0 {
+                    assert_eq!(builder.coefficients.quadratic.capacity(), 0);
+                } else {
+                    assert!(builder.coefficients.quadratic.capacity() <= 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_product_fallback_preserves_validation_and_atomic_errors() {
+        for (weight, large, invalid) in [
+            (0.0, 1.0, Some(f64::NAN)),
+            (0.0, 1.0, Some(f64::INFINITY)),
+            (1.0, 1e200, Some(f64::NAN)),
+            (1.0, 1e200, None),
+            (1.0, 1e154, None),
+        ] {
+            let mut coeffs: Vec<_> =
+                (0..1024).map(|i| (VarId(i), if i < 2 { large } else { 1e-200 })).collect();
+            if let Some(value) = invalid {
+                coeffs.last_mut().unwrap().1 = value;
+            }
+
+            let mut raw = ExprArena::new();
+            let id = raw.linear(coeffs.clone(), 0.0);
+            let arena = ExprArenaCell::new(raw);
+            let expression = Expr::new(id, &arena).into_affine().unwrap();
+            let mut builder = QuadraticBuilder::new(&arena);
+            builder.add_constant(7.0).unwrap();
+            builder.add_linear_raw(3.0, VarId(0)).unwrap();
+
+            let mut expected = Accumulator { constant: 7.0, ..Accumulator::default() };
+            expected.add_linear(VarId(0), 3.0).unwrap();
+            let terms = crate::LinearTerms::borrowed(&coeffs, 0.0);
+            let reference = ordered_product_reference(&mut expected, weight, &terms, &terms);
+            assert!(reference.is_err());
+            assert_eq!(
+                builder.add_product(weight, &expression, &expression).map(|_| ()),
+                reference
+            );
+
+            assert_accumulator_bits(&builder.coefficients, &expected);
+            let good = Expr::from_var(&arena, VarId(0)) + 2.0;
+            builder.add_product(0.0, &good, &good).unwrap();
+            assert_accumulator_bits(&builder.coefficients, &expected);
+        }
+    }
+
+    #[test]
+    fn square_destination_overflow_is_atomic_after_successful_expansion() {
+        let mut raw = ExprArena::new();
+        let id = raw
+            .linear((0..32).map(|i| (VarId(i), if i == 0 { 1e154 } else { 0.0 })).collect(), 0.0);
+        let arena = ExprArenaCell::new(raw);
+        let expression = Expr::new(id, &arena).into_affine().unwrap();
+
+        let mut builder = QuadraticBuilder::new(&arena);
+        builder.add_monomial_raw(f64::MAX, VarId(0), VarId(0)).unwrap();
+        builder.add_constant(9.0).unwrap();
+        assert_eq!(
+            builder.add_product(1.0, &expression, &expression).unwrap_err(),
+            QuadraticBuildError::AccumulationOverflow
+        );
+
+        let terms = builder.build_terms();
+        assert_eq!(terms.constant(), 9.0);
+        assert_eq!(terms.quadratic(), [(VarId(0), VarId(0), f64::MAX)]);
+
+        builder.add_product(0.0, &expression, &expression).unwrap();
+        assert_eq!(builder.build_terms().quadratic(), []);
+    }
 
     #[test]
     fn checked_variable_insertions_need_no_arena_reads() {
