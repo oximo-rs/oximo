@@ -263,8 +263,11 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
 
         self.left.arena().with_ref(|arena| {
             let terms = |input: &Expr<'_, Affine>| crate::linear::as_linear(arena, input.id, false);
-            match (terms(&self.left), terms(&self.right)) {
-                (Some(left), Some(right))
+            let Some(left) = terms(&self.left) else {
+                return Expansion::Factored;
+            };
+            match terms(&self.right) {
+                Some(right)
                     if !coefficient_pairs_fit_budget(left.coeffs.len(), right.coeffs.len()) =>
                 {
                     if self.weight.is_finite() {
@@ -275,7 +278,7 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
                 }
 
                 // add_product expands (weight * left) * right.
-                (Some(left), Some(right))
+                Some(right)
                     if matches!(self.order, Order::Plain | Order::WeightLeft)
                         && !self.shared_non_monomial_square(arena, Some((&left, &right))) =>
                 {
