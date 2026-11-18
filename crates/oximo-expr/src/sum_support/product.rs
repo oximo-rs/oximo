@@ -393,17 +393,15 @@ fn normalized_factor<'a>(
 
 impl<'a, D: ExpressionDegree> QuadraticProduct<'a, D> {
     fn materialize_oversized(self, normalized: &mut FxHashMap<ExprId, ExprId>) -> Expr<'a, D> {
-        let mut left = normalized_factor(self.left, normalized);
-        let mut right = normalized_factor(self.right, normalized);
+        let mut left = self.left;
+        let mut right = self.right;
         match self.order {
-            Order::WeightLeft => {
-                left = Expr::constant(left.arena(), self.weight).mul_factored(&left);
-            }
-            Order::WeightRight => {
-                right = Expr::constant(right.arena(), self.weight).mul_factored(&right);
-            }
+            Order::WeightLeft => left = left * self.weight,
+            Order::WeightRight => right = right * self.weight,
             Order::Plain | Order::WeightProduct => {}
         }
+        let left = normalized_factor(left, normalized);
+        let right = normalized_factor(right, normalized);
 
         let product = left.mul_factored(right);
         match self.order {

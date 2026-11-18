@@ -281,7 +281,56 @@ fn normalized_squares_preserve_weight_placement() {
 }
 
 #[test]
-fn oversized_products_reuse_shared_affine_factors_without_scaling_their_coefficients() {
+fn oversized_weighted_factors_keep_ordinary_scalar_overflow_and_underflow() {
+    for (coefficients, weight, point) in [
+        (
+            [f64::MAX, -f64::MAX, 1.0, 1.0, 1.0, 1.0],
+            2.0,
+            [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ),
+        ([f64::from_bits(1); 6], 0.5, [2.0; 12]),
+    ] {
+        let m = Model::new("oversized scalar multiplication order");
+        variable!(m, x[i in 0..12]);
+        let factor = sum!(m, unfused: coefficients[i] * x[i] for i in 0..6);
+        let other = sum!(m, x[i] for i in 6..12);
+        for (actual, reference) in [
+            (
+                sum!(m, weight * &factor * &other for _i in 0..1),
+                sum!(m, unfused: weight * &factor * &other for _i in 0..1),
+            ),
+            (
+                sum!(m, &factor * weight * &other for _i in 0..1),
+                sum!(m, unfused: &factor * weight * &other for _i in 0..1),
+            ),
+            (
+                sum!(m, &other * (weight * &factor) for _i in 0..1),
+                sum!(m, unfused: &other * (weight * &factor) for _i in 0..1),
+            ),
+            (
+                sum!(m, &other * (&factor * weight) for _i in 0..1),
+                sum!(m, unfused: &other * (&factor * weight) for _i in 0..1),
+            ),
+        ] {
+            let expected = value(&reference, &point);
+            let actual_value = value(&actual, &point);
+            if weight > 1.0 {
+                assert!(expected.is_nan());
+            } else {
+                assert_eq!(expected, 0.0);
+            }
+            assert!(
+                actual_value.to_bits() == expected.to_bits()
+                    || actual_value.is_nan() && expected.is_nan(),
+                "expected {expected}, got {actual_value}"
+            );
+            assert!(matches!(m.arena().get(actual.id()), ExprNode::Mul(_)));
+        }
+    }
+}
+
+#[test]
+fn oversized_products_reuse_normalized_unweighted_affine_factors() {
     for mode in 0..3 {
         let m = Model::new("oversized shared factors");
         variable!(m, x[i in 0..13]);
@@ -309,11 +358,12 @@ fn oversized_products_reuse_shared_affine_factors_without_scaling_their_coeffici
                 5 => sum!(weights[i] * &left * &right for i in 0..weights.len()),
                 _ => sum!(m, &left * &right for _i in 0..weights.len()),
             };
-            assert_eq!(
-                linear_nodes(),
-                before + normalized_roots,
-                "normalize each root once per sum"
-            );
+            let new_linear_nodes = if matches!(spelling, 0 | 1 | 4 | 5) {
+                weights.len() + usize::from(mode != 1)
+            } else {
+                normalized_roots
+            };
+            assert_eq!(linear_nodes(), before + new_linear_nodes);
 
             let expected = if spelling == 6 { expected / 152.0 * 16.0 } else { expected };
             assert_eq!(value(&expression, &[1.0; 13]), expected);
