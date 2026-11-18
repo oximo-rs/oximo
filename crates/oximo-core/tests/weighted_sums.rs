@@ -591,6 +591,45 @@ fn custom_noncopy_products_and_generic_products_keep_mul() {
 }
 
 #[test]
+fn ordinary_inner_products_keep_array_to_slice_rhs_coercions() {
+    struct Scale<'a>(VariableHandle<'a>);
+    impl<'a> Mul<&[f64]> for Scale<'a> {
+        type Output = Expr<'a, Affine>;
+        fn mul(self, weights: &[f64]) -> Self::Output {
+            weights.iter().sum::<f64>() * self.0
+        }
+    }
+
+    let m = Model::new("coercing product operands");
+    variable!(m, x);
+    let weights = [2.0, 3.0];
+    let reference = sum!(m, unfused: Scale(x) * &weights * x for _i in 0..2);
+    assert_eq!(value(&reference, &[3.0]), 90.0);
+
+    let array = sum!(m, Scale(x) * &weights * x for _i in 0..2);
+    assert_eq!(value(&array, &[3.0]), 90.0);
+
+    let temporary = sum!(m, Scale(x) * &[2.0, 3.0] * x for _i in 0..2);
+    assert_eq!(value(&temporary, &[3.0]), 90.0);
+
+    let direct = sum!(m, Scale(x) * &weights for _i in 0..2);
+    assert_eq!(value(&direct, &[3.0]), 30.0);
+
+    let filtered = sum!(m, Scale(x) * &weights * x for _i in 0..2, _j in 0..2 if true);
+    assert_eq!(value(&filtered, &[3.0]), 180.0);
+
+    fn generic<'a, S>(m: &'a Model, scale: S, x: VariableHandle<'a>) -> Expr<'a, Quadratic>
+    where
+        S: for<'b> Mul<&'b [f64], Output = Expr<'a, Affine>>,
+    {
+        let mut scale = Some(scale);
+        sum!(m, scale.take().unwrap() * &[2.0, 3.0] * x for _i in 0..1)
+    }
+
+    assert_eq!(value(&generic(&m, Scale(x), x), &[3.0]), 45.0);
+}
+
+#[test]
 fn non_affine_and_dynamic_products_remain_ordinary_expressions() {
     let m = Model::new("fallback");
 

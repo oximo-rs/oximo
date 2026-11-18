@@ -15,8 +15,8 @@ pub use crate::sum::__sum_over as sum_over;
 pub use crate::sum::SumDomain;
 pub use oximo_expr::ExtremaBuilder;
 pub use oximo_expr::sum_support::{
-    ProductValue, SumCollector, SumProduct, SumTerm, evaluate_sum_term, finish_product,
-    product_left_tag, product_right_type, product_tag,
+    ProductResult, ProductValue, SumCollector, SumProduct, SumTerm, evaluate_sum_term,
+    finish_product, product_left_tag, product_right_type, product_tag,
 };
 
 /// Own the index key through the callback, then convert its returned input.

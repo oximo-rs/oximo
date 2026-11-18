@@ -1,7 +1,6 @@
 //! Staged multiplication where only known oximo operations may remain deferred.
 
 use std::marker::PhantomData;
-use std::ops::Mul;
 
 use rustc_hash::FxHashMap;
 
@@ -106,16 +105,10 @@ pub trait SumProduct<L, R>: sealed::Product<L, R> {
     fn sum_product(self, operands: (L, R)) -> Self::Output;
 }
 
-impl<L: ProductOperand, R: ProductOperand> sealed::Product<L, R> for &ProductTag<L, R> where
-    L::Original: Mul<R::Original>
-{
-}
+impl<L: ProductOperand, R: ProductOperand> sealed::Product<L, R> for &ProductTag<L, R> {}
 
-impl<L: ProductOperand, R: ProductOperand> SumProduct<L, R> for &ProductTag<L, R>
-where
-    L::Original: Mul<R::Original>,
-{
-    type Output = ProductValue<<L::Original as Mul<R::Original>>::Output>;
+impl<L: ProductOperand, R: ProductOperand> SumProduct<L, R> for &ProductTag<L, R> {
+    type Output = UnfusedProduct<L, R>;
     type PreparedLeft = ProductValue<L::Original>;
 
     fn prepare_left(self, left: L) -> Self::PreparedLeft {
@@ -123,7 +116,49 @@ where
     }
 
     fn sum_product(self, (left, right): (L, R)) -> Self::Output {
-        ProductValue(left.materialize() * right.materialize())
+        UnfusedProduct { left, right }
+    }
+}
+
+/// Complete ordinary multiplication at the macro's concrete operator site,
+/// where Rust can apply RHS coercions. Fused products bypass that operator.
+pub trait ProductResult: Sized {
+    type Left;
+    type Right;
+    type Output<O>;
+
+    fn finish_product<O>(
+        self,
+        multiply: impl FnOnce(Self::Left, Self::Right) -> O,
+    ) -> Self::Output<O>;
+}
+
+#[derive(Debug)]
+pub struct UnfusedProduct<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L: ProductOperand, R: ProductOperand> ProductResult for UnfusedProduct<L, R> {
+    type Left = L::Original;
+    type Right = R::Original;
+    type Output<O> = ProductValue<O>;
+
+    fn finish_product<O>(
+        self,
+        multiply: impl FnOnce(Self::Left, Self::Right) -> O,
+    ) -> Self::Output<O> {
+        ProductValue(multiply(self.left.materialize(), self.right.materialize()))
+    }
+}
+
+impl<'a, D: Degree> ProductResult for WeightedTerm<'a, D> {
+    type Left = f64;
+    type Right = Expr<'a, D>;
+    type Output<O> = Self;
+
+    fn finish_product<O>(self, _: impl FnOnce(Self::Left, Self::Right) -> O) -> Self {
+        self
     }
 }
 
@@ -225,6 +260,16 @@ pub struct QuadraticProduct<'a, D: ExpressionDegree> {
     weight: f64,
     order: Order,
     degree: PhantomData<D>,
+}
+
+impl<'a, D: ExpressionDegree> ProductResult for QuadraticProduct<'a, D> {
+    type Left = Expr<'a, Affine>;
+    type Right = Expr<'a, Affine>;
+    type Output<O> = Self;
+
+    fn finish_product<O>(self, _: impl FnOnce(Self::Left, Self::Right) -> O) -> Self {
+        self
+    }
 }
 
 fn coefficient_pairs_fit_budget(left: usize, right: usize) -> bool {

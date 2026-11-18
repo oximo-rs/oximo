@@ -19,8 +19,8 @@ mod sealed {
 
 mod product;
 pub use product::{
-    ProductTag, ProductValue, SumProduct, finish_product, product_left_tag, product_right_type,
-    product_tag,
+    ProductResult, ProductTag, ProductValue, SumProduct, finish_product, product_left_tag,
+    product_right_type, product_tag,
 };
 
 /// A term in an indexed sum, defining how it is evaluated and accumulated.

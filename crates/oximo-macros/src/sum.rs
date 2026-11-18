@@ -524,6 +524,7 @@ fn fuse_product(body: &Expr, root: &TokenStream2) -> TokenStream2 {
     let expanded = lower_product(body, root, recursive, &std::cell::Cell::new(0), &|term| term);
     quote! {{
         use #root::__macro_support::SumProduct as _;
+        use #root::__macro_support::ProductResult as _;
         #expanded
     }}
 }
@@ -569,13 +570,16 @@ fn lower_product(
         let operands = fresh("operands");
         let tag = fresh("tag");
         let result = fresh("result");
+        let native_left = Ident::new("__oximo_native_left", Span::mixed_site());
+        let native_right = Ident::new("__oximo_native_right", Span::mixed_site());
         let dispatch = |left, right| {
             let next = continuation(quote!(#result));
             quote! {
                 match (#left, #right) {
                     #operands => {
                         let #tag = #root::__macro_support::product_tag(&#operands);
-                        let #result = (&&#tag).sum_product(#operands);
+                        let #result = (&&#tag).sum_product(#operands)
+                            .finish_product(|#native_left, #native_right| #native_left * #native_right);
                         #next
                     }
                 }
