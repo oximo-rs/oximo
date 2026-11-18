@@ -3,12 +3,14 @@
 use std::marker::PhantomData;
 use std::ops::Mul;
 
+use rustc_hash::FxHashMap;
+
 use super::{SumTerm, WeightedTerm, sealed};
 use crate::degree::{AddDegree, MulDegree};
 use crate::quadratic_builder::MAX_EAGER_COEFFICIENTS;
 use crate::{
-    Affine, Degree, Expr, ExprArenaCell, ExprInput, ExprNode, ExpressionDegree, QuadraticBuilder,
-    QuadraticTerms,
+    Affine, Degree, Expr, ExprArenaCell, ExprId, ExprInput, ExprNode, ExpressionDegree,
+    QuadraticBuilder, QuadraticTerms,
 };
 
 /// An ordinary operand or operator result, retaining its original Rust type.
@@ -208,6 +210,13 @@ enum Order {
     WeightProduct,
 }
 
+#[derive(Debug)]
+enum Expansion {
+    Numeric,
+    Factored,
+    Oversized,
+}
+
 /// Two affine factors, with the source grouping retained for symbolic fallback.
 #[derive(Debug)]
 pub struct QuadraticProduct<'a, D: ExpressionDegree> {
@@ -243,15 +252,12 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
         }
     }
 
-    fn can_expand(&self) -> bool {
+    fn expansion(&self) -> Expansion {
         if self.left.cached_var_id().is_some() && self.right.cached_var_id().is_some() {
-            return true;
+            return Expansion::Numeric;
         }
 
         self.left.arena().with_ref(|arena| {
-            if self.shared_non_monomial_square(arena) {
-                return false;
-            }
             let count = |input: &Expr<'_, Affine>| {
                 let id = input.id;
                 match arena.get(id) {
@@ -262,10 +268,67 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
                 }
             };
             match (count(&self.left), count(&self.right)) {
-                (Some(left), Some(right)) => coefficient_pairs_fit_budget(left, right),
-                _ => false,
+                (Some(left), Some(right)) if !coefficient_pairs_fit_budget(left, right) => {
+                    if self.weight.is_finite() { Expansion::Oversized } else { Expansion::Factored }
+                }
+                (Some(_), Some(_)) if !self.shared_non_monomial_square(arena) => Expansion::Numeric,
+                _ => Expansion::Factored,
             }
         })
+    }
+}
+
+/// Normalize numeric compound roots once for this sum, without copying leaves.
+fn normalized_factor<'a>(
+    input: Expr<'a, Affine>,
+    normalized: &mut FxHashMap<ExprId, ExprId>,
+) -> Expr<'a, Affine> {
+    let root = input.publish_id();
+    let arena = input.arena();
+    let id = *normalized.entry(root).or_insert_with(|| {
+        arena.with_mut(|arena| {
+            if matches!(
+                arena.get(root),
+                ExprNode::Var(_) | ExprNode::Const(_) | ExprNode::Linear { .. }
+            ) {
+                return root;
+            }
+            let Some(terms) = crate::linear::as_linear(arena, root, false) else {
+                return root;
+            };
+            if !terms.constant.is_finite() || terms.coeffs.iter().any(|(_, c)| !c.is_finite()) {
+                return root;
+            }
+            let constant = terms.constant;
+            let coeffs = terms.coeffs.into_owned();
+            crate::linear::push_linear(arena, crate::LinearTerms::owned(coeffs, constant))
+        })
+    });
+
+    Expr::from_id(id, arena)
+}
+
+impl<'a, D: ExpressionDegree> QuadraticProduct<'a, D> {
+    fn materialize_oversized(self, normalized: &mut FxHashMap<ExprId, ExprId>) -> Expr<'a, D> {
+        let mut left = normalized_factor(self.left, normalized);
+        let mut right = normalized_factor(self.right, normalized);
+        match self.order {
+            Order::WeightLeft => {
+                left = Expr::constant(left.arena(), self.weight).mul_factored(&left);
+            }
+            Order::WeightRight => {
+                right = Expr::constant(right.arena(), self.weight).mul_factored(&right);
+            }
+            Order::Plain | Order::WeightProduct => {}
+        }
+
+        let product = left.mul_factored(right);
+        match self.order {
+            Order::WeightProduct => {
+                product.mul_factored(Expr::constant(product.arena(), self.weight)).into_degree()
+            }
+            _ => product.into_degree(),
+        }
     }
 }
 
@@ -529,6 +592,7 @@ scale_products!(i32);
 enum Segment<'a, D: ExpressionDegree> {
     Numeric(QuadraticTerms),
     Symbolic(QuadraticProduct<'a, D>),
+    Oversized(QuadraticProduct<'a, D>),
 }
 
 /// Buffer so numeric terms stream into a builder.
@@ -582,7 +646,8 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
 
         // Keep compound squares factored and bound ordered coefficient pairs
         // before the builder can allocate expansion scratch or output storage.
-        if term.can_expand()
+        let expansion = term.expansion();
+        if matches!(expansion, Expansion::Numeric)
             && buffer
                 .builder
                 .get_or_insert_with(|| QuadraticBuilder::new(arena))
@@ -593,7 +658,11 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
         } else {
             // Builder errors are atomic.
             buffer.flush();
-            buffer.segments.push(Segment::Symbolic(term));
+            buffer.segments.push(if matches!(expansion, Expansion::Oversized) {
+                Segment::Oversized(term)
+            } else {
+                Segment::Symbolic(term)
+            });
         }
     }
 
@@ -618,6 +687,7 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             );
         }
         buffer.flush();
+        let mut normalized = FxHashMap::default();
 
         Some(
             Expr::__sum_terms_in(
@@ -627,6 +697,7 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
                         crate::quadratic_builder::push_quadratic(arena, terms)
                     }),
                     Segment::Symbolic(term) => term.materialize(),
+                    Segment::Oversized(term) => term.materialize_oversized(&mut normalized),
                 }),
             )
             .into_degree(),
@@ -674,7 +745,7 @@ mod tests {
                 "oversized products must not reserve builder storage"
             );
             assert!(!buffer.pending);
-            assert!(matches!(buffer.segments.as_slice(), [Segment::Symbolic(_)]));
+            assert!(matches!(buffer.segments.as_slice(), [Segment::Oversized(_)]));
             assert_eq!(arena.borrow().len(), before);
             let result = QuadraticProduct::finish(buffer).unwrap();
             let snapshot = arena.borrow();
@@ -732,7 +803,7 @@ mod tests {
         let mut buffer = QuadraticProduct::buffer(Some(&arena), 3);
         QuadraticProduct::push(&mut buffer, product(small.clone(), small.clone()));
         QuadraticProduct::push(&mut buffer, product(left, right));
-        assert!(matches!(buffer.segments.as_slice(), [Segment::Numeric(_), Segment::Symbolic(_)]));
+        assert!(matches!(buffer.segments.as_slice(), [Segment::Numeric(_), Segment::Oversized(_)]));
         let mut last = product(small.clone(), small);
         last.weight = 3.0;
         QuadraticProduct::push(&mut buffer, last);

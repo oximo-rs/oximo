@@ -149,6 +149,64 @@ fn shared_non_monomial_squares_retain_their_factors() {
 }
 
 #[test]
+fn oversized_products_reuse_shared_affine_factors_without_scaling_their_coefficients() {
+    for mode in 0..3 {
+        let m = Model::new("oversized shared factors");
+        variable!(m, x[i in 0..13]);
+        let (left, right, normalized_roots, expected) = match mode {
+            0 => (sum!(m, x[i] for i in 0..8), sum!(m, x[i] for i in 8..13), 2, 6080.0),
+            1 => (sum!(m, 1.0 * x[i] for i in 0..8), sum!(m, 1.0 * x[i] for i in 8..13), 0, 6080.0),
+            _ => {
+                let factor = sum!(m, x[i] for i in 0..6);
+                (factor.clone(), factor, 1, 5472.0)
+            }
+        };
+        let weights: Vec<_> = (2..18).map(f64::from).collect();
+        let linear_nodes = || {
+            m.arena().nodes().iter().filter(|node| matches!(node, ExprNode::Linear { .. })).count()
+        };
+
+        for spelling in 0..7 {
+            let before = linear_nodes();
+            let expression = match spelling {
+                0 => sum!(m, weights[i] * &left * &right for i in 0..weights.len()),
+                1 => sum!(m, &left * weights[i] * &right for i in 0..weights.len()),
+                2 => sum!(m, &left * &right * weights[i] for i in 0..weights.len()),
+                3 => sum!(m, weights[i] * (&left * &right) for i in 0..weights.len()),
+                4 => sum!(m, &left * (weights[i] * &right) for i in 0..weights.len()),
+                5 => sum!(weights[i] * &left * &right for i in 0..weights.len()),
+                _ => sum!(m, &left * &right for _i in 0..weights.len()),
+            };
+            assert_eq!(
+                linear_nodes(),
+                before + normalized_roots,
+                "normalize each root once per sum"
+            );
+
+            let expected = if spelling == 6 { expected / 152.0 * 16.0 } else { expected };
+            assert_eq!(value(&expression, &[1.0; 13]), expected);
+            assert!(!m.arena().nodes().iter().any(|node| matches!(node, ExprNode::Quadratic(_))));
+        }
+    }
+}
+
+#[test]
+fn oversized_nonfinite_weights_keep_the_existing_symbolic_fallback() {
+    let m = Model::new("oversized nonfinite fallback");
+    variable!(m, x[i in 0..13]);
+    let left = sum!(m, x[i] for i in 0..8);
+    let right = sum!(m, x[i] for i in 8..13);
+
+    for weight in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let ordinary = sum!(m, unfused: weight * &left * &right for _i in 0..2);
+        let fused = sum!(m, weight * &left * &right for _i in 0..2);
+        let expected = value(&ordinary, &[1.0; 13]);
+        let actual = value(&fused, &[1.0; 13]);
+        assert!(actual.to_bits() == expected.to_bits() || actual.is_nan() && expected.is_nan());
+    }
+}
+
+#[test]
 fn domains_empty_sums_and_enclosing_macros_keep_their_behavior() {
     let m = Model::new("domains");
     variable!(m, x[i in 0..4]);
