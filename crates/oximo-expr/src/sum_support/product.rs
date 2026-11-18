@@ -223,12 +223,35 @@ fn coefficient_pairs_fit_budget(left: usize, right: usize) -> bool {
 }
 
 impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
-    fn within_pair_budget(&self) -> bool {
+    fn shared_non_monomial_square(&self, arena: &dyn crate::arena::ArenaAccess) -> bool {
+        match (arena.get(self.left.id), arena.get(self.right.id)) {
+            (
+                ExprNode::Linear { coeffs: left, constant: left_constant },
+                ExprNode::Linear { coeffs: right, constant: right_constant },
+            ) => {
+                (left.len() > 1 || *left_constant != 0.0)
+                    && (self.left.id == self.right.id
+                        || (left_constant.to_bits() == right_constant.to_bits()
+                            && left.len() == right.len()
+                            && left
+                                .iter()
+                                .zip(right)
+                                .all(|(&(a, x), &(b, y))| a == b && x.to_bits() == y.to_bits())))
+            }
+            (ExprNode::Var(_) | ExprNode::Const(_), _) => false,
+            _ => self.left.id == self.right.id,
+        }
+    }
+
+    fn can_expand(&self) -> bool {
         if self.left.cached_var_id().is_some() && self.right.cached_var_id().is_some() {
             return true;
         }
 
         self.left.arena().with_ref(|arena| {
+            if self.shared_non_monomial_square(arena) {
+                return false;
+            }
             let count = |input: &Expr<'_, Affine>| {
                 let id = input.id;
                 match arena.get(id) {
@@ -250,6 +273,8 @@ impl<'a, D: ExpressionDegree> ProductOperand for QuadraticProduct<'a, D> {
     type Original = Expr<'a, D>;
 
     fn materialize(self) -> Self::Original {
+        let factored = std::ptr::eq(self.left.arena(), self.right.arena())
+            && self.left.arena().with_ref(|arena| self.shared_non_monomial_square(arena));
         let mut left = self.left;
         let mut right = self.right;
         match self.order {
@@ -257,7 +282,7 @@ impl<'a, D: ExpressionDegree> ProductOperand for QuadraticProduct<'a, D> {
             Order::WeightRight => right = right * self.weight,
             Order::Plain | Order::WeightProduct => {}
         }
-        let product = left * right;
+        let product = if factored { left.mul_factored(&right) } else { left * right };
         match self.order {
             Order::WeightProduct => (product * self.weight).into_degree(),
             _ => product.into_degree(),
@@ -555,9 +580,9 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             return;
         }
 
-        // Bound the ordered coefficient pairs before the builder can allocate
-        // expansion scratch or output storage, including for repeated factors.
-        if term.within_pair_budget()
+        // Keep compound squares factored and bound ordered coefficient pairs
+        // before the builder can allocate expansion scratch or output storage.
+        if term.can_expand()
             && buffer
                 .builder
                 .get_or_insert_with(|| QuadraticBuilder::new(arena))

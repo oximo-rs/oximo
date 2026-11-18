@@ -103,6 +103,52 @@ fn pair_orientation_diagonals_and_cancellation_match_numeric_builder() {
 }
 
 #[test]
+fn shared_non_monomial_squares_retain_their_factors() {
+    let m = Model::new("shared affine squares");
+    variable!(m, x);
+    variable!(m, y);
+
+    let point = [100_000_001.0, -100_000_000.0];
+    for (factor, equal) in [(x - 100_000_000.0, x - 100_000_000.0), (x + y, x + y)] {
+        let reference = &factor * &factor;
+        assert_eq!(value(&reference, &point), 1.0);
+
+        let square = sum!(m, &factor * &factor for _i in 0..1);
+        assert_eq!(value(&square, &point), 1.0);
+        assert_eq!(value(&square.ln(), &point), 0.0);
+        assert!(matches!(m.arena().get(square.id()), ExprNode::Mul(_)));
+
+        let repeated = sum!(m, &factor * &factor for _i in 0..3);
+        assert_eq!(value(&repeated, &point), 3.0);
+
+        let unit = 0.0 * x + 1.0;
+        let mixed = [unit.clone(), factor.clone(), unit];
+        let surrounded = sum!(m, &mixed[i] * &mixed[i] for i in 0..3);
+        assert_eq!(value(&surrounded, &point), 3.0);
+
+        for weighted in [
+            sum!(m, 2.0 * &factor * &factor for _i in 0..1),
+            sum!(m, &factor * 2.0 * &factor for _i in 0..1),
+            sum!(m, &factor * &factor * 2.0 for _i in 0..1),
+            sum!(m, 2.0 * (&factor * &factor) for _i in 0..1),
+            sum!(m, &factor * (2.0 * &factor) for _i in 0..1),
+        ] {
+            assert_eq!(value(&weighted, &point), 2.0);
+        }
+
+        let equivalent = sum!(m, &factor * &equal for _i in 0..1);
+        assert_eq!(value(&equivalent, &point), 1.0);
+    }
+
+    let simple = one_node(&m, || sum!(m, x * x for _i in 0..3));
+    assert_eq!(value(&simple, &[3.0]), 27.0);
+
+    let scaled = 2.0 * x;
+    let monomial = one_node(&m, || sum!(m, &scaled * &scaled for _i in 0..3));
+    assert_eq!(value(&monomial, &[3.0]), 108.0);
+}
+
+#[test]
 fn domains_empty_sums_and_enclosing_macros_keep_their_behavior() {
     let m = Model::new("domains");
     variable!(m, x[i in 0..4]);
