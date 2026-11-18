@@ -5,8 +5,9 @@ use std::ops::Mul;
 
 use super::{SumTerm, WeightedTerm, sealed};
 use crate::degree::{AddDegree, MulDegree};
+use crate::quadratic_builder::MAX_EAGER_COEFFICIENTS;
 use crate::{
-    Affine, Degree, Expr, ExprArenaCell, ExprInput, ExpressionDegree, QuadraticBuilder,
+    Affine, Degree, Expr, ExprArenaCell, ExprInput, ExprNode, ExpressionDegree, QuadraticBuilder,
     QuadraticTerms,
 };
 
@@ -215,6 +216,34 @@ pub struct QuadraticProduct<'a, D: ExpressionDegree> {
     weight: f64,
     order: Order,
     degree: PhantomData<D>,
+}
+
+fn coefficient_pairs_fit_budget(left: usize, right: usize) -> bool {
+    left.checked_mul(right).is_some_and(|pairs| pairs <= MAX_EAGER_COEFFICIENTS)
+}
+
+impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
+    fn within_pair_budget(&self) -> bool {
+        if self.left.cached_var_id().is_some() && self.right.cached_var_id().is_some() {
+            return true;
+        }
+
+        self.left.arena().with_ref(|arena| {
+            let count = |input: &Expr<'_, Affine>| {
+                let id = input.id;
+                match arena.get(id) {
+                    ExprNode::Var(_) => Some(1),
+                    ExprNode::Const(_) => Some(0),
+                    ExprNode::Linear { coeffs, .. } => Some(coeffs.len()),
+                    _ => crate::linear::as_linear(arena, id, false).map(|terms| terms.coeffs.len()),
+                }
+            };
+            match (count(&self.left), count(&self.right)) {
+                (Some(left), Some(right)) => coefficient_pairs_fit_budget(left, right),
+                _ => false,
+            }
+        })
+    }
 }
 
 impl<'a, D: ExpressionDegree> ProductOperand for QuadraticProduct<'a, D> {
@@ -526,8 +555,15 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             return;
         }
 
-        let builder = buffer.builder.get_or_insert_with(|| QuadraticBuilder::new(arena));
-        if builder.add_product(term.weight, &term.left, &term.right).is_ok() {
+        // Bound the ordered coefficient pairs before the builder can allocate
+        // expansion scratch or output storage, including for repeated factors.
+        if term.within_pair_budget()
+            && buffer
+                .builder
+                .get_or_insert_with(|| QuadraticBuilder::new(arena))
+                .add_product(term.weight, &term.left, &term.right)
+                .is_ok()
+        {
             buffer.pending = true;
         } else {
             // Builder errors are atomic.
@@ -570,5 +606,122 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             )
             .into_degree(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExprArena, ExprNode, Quadratic, VarId, evaluate};
+
+    fn factor(arena: &ExprArenaCell, start: u32, count: u32) -> Expr<'_, Affine> {
+        let id = arena
+            .borrow_mut()
+            .linear((start..start + count).map(|i| (VarId(i), 1.0)).collect(), 0.0);
+        Expr::new(id, arena).into_affine().unwrap()
+    }
+
+    fn product<'a>(
+        left: Expr<'a, Affine>,
+        right: Expr<'a, Affine>,
+    ) -> QuadraticProduct<'a, Quadratic> {
+        QuadraticProduct { left, right, weight: 1.0, order: Order::Plain, degree: PhantomData }
+    }
+
+    #[test]
+    fn oversized_products_bypass_the_builder_before_it_is_created() {
+        for (n, m, square) in [
+            (8, 5, false),
+            (33, 1, false),
+            (1, 33, false),
+            (128, 128, false),
+            (6, 6, true),
+            (128, 128, true),
+        ] {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let left = factor(&arena, 0, n);
+            let right = if square { left.clone() } else { factor(&arena, n, m) };
+            let before = arena.borrow().len();
+            let mut buffer = QuadraticProduct::buffer(Some(&arena), 1);
+            QuadraticProduct::push(&mut buffer, product(left, right));
+            assert!(
+                buffer.builder.is_none(),
+                "oversized products must not reserve builder storage"
+            );
+            assert!(!buffer.pending);
+            assert!(matches!(buffer.segments.as_slice(), [Segment::Symbolic(_)]));
+            assert_eq!(arena.borrow().len(), before);
+            let result = QuadraticProduct::finish(buffer).unwrap();
+            let snapshot = arena.borrow();
+            assert!(matches!(snapshot.get(result.id()), ExprNode::Mul(_)));
+            let point = vec![1.0; usize::try_from(n + m).unwrap()];
+            assert_eq!(evaluate(&snapshot, result.id(), &&point[..]).unwrap(), f64::from(n * m));
+        }
+    }
+
+    #[test]
+    fn products_at_the_pair_budget_still_accumulate_into_one_node() {
+        for (n, m) in [(8, 4), (32, 1), (1, 32), (5, 5)] {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let left = factor(&arena, 0, n);
+            let right = factor(&arena, n, m);
+            let mut buffer = QuadraticProduct::buffer(Some(&arena), 2);
+            QuadraticProduct::push(&mut buffer, product(left.clone(), right.clone()));
+            QuadraticProduct::push(&mut buffer, product(left, right));
+            assert!(buffer.pending);
+            assert!(buffer.segments.is_empty());
+            let before = arena.borrow().len();
+            let result = QuadraticProduct::finish(buffer).unwrap();
+            let snapshot = arena.borrow();
+            assert_eq!(snapshot.len(), before + 1);
+            let ExprNode::Quadratic(terms) = snapshot.get(result.id()) else {
+                panic!("within-budget products must use the builder");
+            };
+            assert_eq!(terms.quadratic().len(), usize::try_from(n * m).unwrap());
+            assert!(terms.quadratic().iter().all(|&(_, _, c)| c.to_bits() == 2.0_f64.to_bits()));
+        }
+    }
+
+    #[test]
+    fn pair_budget_counts_compound_affine_inputs() {
+        for count in [4, 5] {
+            let arena = ExprArenaCell::new(ExprArena::new());
+            let a = factor(&arena, 0, 4);
+            let b = factor(&arena, 4, 4);
+            let root = arena.borrow_mut().push(ExprNode::Add(vec![a.id(), b.id()].into()));
+            let left = Expr::new(root, &arena).into_affine().unwrap();
+            let right = factor(&arena, 8, count);
+            let mut buffer = QuadraticProduct::buffer(Some(&arena), 1);
+            QuadraticProduct::push(&mut buffer, product(left, right));
+            assert_eq!(buffer.builder.is_some(), count == 4);
+            assert_eq!(buffer.pending, count == 4);
+        }
+    }
+
+    #[test]
+    fn oversized_products_preserve_surrounding_numeric_segments() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let small = factor(&arena, 0, 1);
+        let left = factor(&arena, 0, 8);
+        let right = factor(&arena, 8, 5);
+        let mut buffer = QuadraticProduct::buffer(Some(&arena), 3);
+        QuadraticProduct::push(&mut buffer, product(small.clone(), small.clone()));
+        QuadraticProduct::push(&mut buffer, product(left, right));
+        assert!(matches!(buffer.segments.as_slice(), [Segment::Numeric(_), Segment::Symbolic(_)]));
+        let mut last = product(small.clone(), small);
+        last.weight = 3.0;
+        QuadraticProduct::push(&mut buffer, last);
+        assert!(buffer.pending);
+        let result = QuadraticProduct::finish(buffer).unwrap();
+        assert_eq!(evaluate(&arena.borrow(), result.id(), &&[1.0; 13][..]).unwrap(), 44.0);
+    }
+
+    #[test]
+    fn coefficient_pair_budget_rejects_overflow() {
+        assert!(coefficient_pairs_fit_budget(MAX_EAGER_COEFFICIENTS, 1));
+        assert!(!coefficient_pairs_fit_budget(MAX_EAGER_COEFFICIENTS + 1, 1));
+        assert!(!coefficient_pairs_fit_budget(usize::MAX, 2));
+        assert!(!coefficient_pairs_fit_budget(2, usize::MAX));
+        assert!(!coefficient_pairs_fit_budget(usize::MAX, usize::MAX));
     }
 }
