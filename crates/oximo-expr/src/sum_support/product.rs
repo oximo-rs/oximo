@@ -10,7 +10,7 @@ use crate::degree::{AddDegree, MulDegree};
 use crate::quadratic_builder::MAX_EAGER_COEFFICIENTS;
 use crate::{
     Affine, Degree, Expr, ExprArenaCell, ExprId, ExprInput, ExprNode, ExpressionDegree,
-    QuadraticBuilder, QuadraticTerms,
+    LinearTerms, QuadraticBuilder, QuadraticTerms,
 };
 
 /// An ordinary operand or operator result, retaining its original Rust type.
@@ -232,24 +232,28 @@ fn coefficient_pairs_fit_budget(left: usize, right: usize) -> bool {
 }
 
 impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
-    fn shared_non_monomial_square(&self, arena: &dyn crate::arena::ArenaAccess) -> bool {
+    fn shared_non_monomial_square(
+        &self,
+        arena: &dyn crate::arena::ArenaAccess,
+        terms: Option<(&LinearTerms<'_>, &LinearTerms<'_>)>,
+    ) -> bool {
         match (arena.get(self.left.id), arena.get(self.right.id)) {
-            (
-                ExprNode::Linear { coeffs: left, constant: left_constant },
-                ExprNode::Linear { coeffs: right, constant: right_constant },
-            ) => {
-                (left.len() > 1 || *left_constant != 0.0)
-                    && (self.left.id == self.right.id
-                        || (left_constant.to_bits() == right_constant.to_bits()
-                            && left.len() == right.len()
-                            && left
-                                .iter()
-                                .zip(right)
-                                .all(|(&(a, x), &(b, y))| a == b && x.to_bits() == y.to_bits())))
-            }
-            (ExprNode::Var(_) | ExprNode::Const(_), _) => false,
-            _ => self.left.id == self.right.id,
+            (ExprNode::Var(_) | ExprNode::Const(_), _)
+            | (_, ExprNode::Var(_) | ExprNode::Const(_)) => return false,
+            (ExprNode::Linear { .. }, ExprNode::Linear { .. }) => {}
+            _ if self.left.id == self.right.id => return true,
+            _ => {}
         }
+        terms.is_some_and(|(left, right)| {
+            (left.coeffs.len() > 1 || left.constant != 0.0)
+                && left.constant.to_bits() == right.constant.to_bits()
+                && left.coeffs.len() == right.coeffs.len()
+                && left
+                    .coeffs
+                    .iter()
+                    .zip(right.coeffs.iter())
+                    .all(|(&(a, x), &(b, y))| a == b && x.to_bits() == y.to_bits())
+        })
     }
 
     fn expansion(&self) -> Expansion {
@@ -258,24 +262,22 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
         }
 
         self.left.arena().with_ref(|arena| {
-            let count = |input: &Expr<'_, Affine>| {
-                let id = input.id;
-                match arena.get(id) {
-                    ExprNode::Var(_) => Some(1),
-                    ExprNode::Const(_) => Some(0),
-                    ExprNode::Linear { coeffs, .. } => Some(coeffs.len()),
-                    _ => crate::linear::as_linear(arena, id, false).map(|terms| terms.coeffs.len()),
-                }
-            };
-            match (count(&self.left), count(&self.right)) {
-                (Some(left), Some(right)) if !coefficient_pairs_fit_budget(left, right) => {
-                    if self.weight.is_finite() { Expansion::Oversized } else { Expansion::Factored }
+            let terms = |input: &Expr<'_, Affine>| crate::linear::as_linear(arena, input.id, false);
+            match (terms(&self.left), terms(&self.right)) {
+                (Some(left), Some(right))
+                    if !coefficient_pairs_fit_budget(left.coeffs.len(), right.coeffs.len()) =>
+                {
+                    if self.weight.is_finite() {
+                        Expansion::Oversized
+                    } else {
+                        Expansion::Factored
+                    }
                 }
 
                 // add_product expands (weight * left) * right.
-                (Some(_), Some(_))
+                (Some(left), Some(right))
                     if matches!(self.order, Order::Plain | Order::WeightLeft)
-                        && !self.shared_non_monomial_square(arena) =>
+                        && !self.shared_non_monomial_square(arena, Some((&left, &right))) =>
                 {
                     Expansion::Numeric
                 }
@@ -343,8 +345,14 @@ impl<'a, D: ExpressionDegree> ProductOperand for QuadraticProduct<'a, D> {
     type Original = Expr<'a, D>;
 
     fn materialize(self) -> Self::Original {
-        let factored = std::ptr::eq(self.left.arena(), self.right.arena())
-            && self.left.arena().with_ref(|arena| self.shared_non_monomial_square(arena));
+        let factored = self.left.cached_var_id().is_none()
+            && self.right.cached_var_id().is_none()
+            && std::ptr::eq(self.left.arena(), self.right.arena())
+            && self.left.arena().with_ref(|arena| {
+                let left = crate::linear::as_linear(arena, self.left.id, false);
+                let right = crate::linear::as_linear(arena, self.right.id, false);
+                self.shared_non_monomial_square(arena, left.as_ref().zip(right.as_ref()))
+            });
         let mut left = self.left;
         let mut right = self.right;
         match self.order {
