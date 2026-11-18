@@ -186,6 +186,43 @@ fn independently_built_add_factors_with_identical_ordered_terms_stay_factored() 
 }
 
 #[test]
+fn square_checks_ignore_zero_coefficients_without_reordering_factors() {
+    let m = Model::new("zero coefficients in square factors");
+    variable!(m, x[i in 0..4]);
+    let indices = [2, 0, 3, 1, 2, 3];
+    let weights = [1.0, 1.0, 1.0, 1.0, -1.0, -1.0];
+    let left = sum!(m, unfused: weights[i] * x[indices[i]] for i in 0..indices.len());
+    let right = left.compact();
+    assert!(matches!(m.arena().get(left.id()), ExprNode::Add(_)));
+
+    let point = [100_000_001.0, -100_000_000.0, 2.0, 3.0];
+    let ordinary = sum!(m, unfused: &left * &right for _i in 0..1);
+    assert_eq!(value(&ordinary, &point), 1.0);
+
+    for (a, b) in [(&left, &right), (&right, &left)] {
+        let fused = sum!(m, a * b for _i in 0..1);
+        assert_eq!(value(&fused, &point), 1.0);
+        assert!(matches!(m.arena().get(fused.id()), ExprNode::Mul(_)));
+        assert_eq!(value(&fused.ln(), &point), 0.0);
+        let weighted = sum!(m, 2.0 * a * b for _i in 0..1);
+        assert_eq!(value(&weighted, &point), 2.0);
+    }
+
+    let reversed = sum!(m, x[1-i] for i in 0..2);
+    let reordered = one_node(&m, || sum!(m, &left * &reversed for _i in 0..1));
+    assert!(matches!(m.arena().get(reordered.id()), ExprNode::Quadratic(_)));
+    assert_eq!(value(&reordered, &[2.0, 3.0, 4.0, 5.0]), 25.0);
+
+    let indices = [1, 0, 1];
+    let weights = [1.0, 1.0, -1.0];
+    let monomial_left = sum!(m, unfused: weights[i] * x[indices[i]] for i in 0..3);
+    let monomial_right = monomial_left.compact();
+    let monomial = one_node(&m, || sum!(m, &monomial_left * &monomial_right for _i in 0..1));
+    assert!(matches!(m.arena().get(monomial.id()), ExprNode::Quadratic(_)));
+    assert_eq!(value(&monomial, &[3.0; 4]), 9.0);
+}
+
+#[test]
 fn oversized_products_reuse_shared_affine_factors_without_scaling_their_coefficients() {
     for mode in 0..3 {
         let m = Model::new("oversized shared factors");

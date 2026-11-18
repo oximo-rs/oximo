@@ -310,14 +310,19 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
             _ => {}
         }
         terms.is_some_and(|(left, right)| {
-            (left.coeffs.len() > 1 || left.constant != 0.0)
+            let left_coeffs = left
+                .coeffs
+                .iter()
+                .filter(|(_, coefficient)| *coefficient != 0.0)
+                .map(|&(var, coefficient)| (var, coefficient.to_bits()));
+            let right_coeffs = right
+                .coeffs
+                .iter()
+                .filter(|(_, coefficient)| *coefficient != 0.0)
+                .map(|&(var, coefficient)| (var, coefficient.to_bits()));
+            (left_coeffs.clone().nth(1).is_some() || left.constant != 0.0)
                 && left.constant.to_bits() == right.constant.to_bits()
-                && left.coeffs.len() == right.coeffs.len()
-                && left
-                    .coeffs
-                    .iter()
-                    .zip(right.coeffs.iter())
-                    .all(|(&(a, x), &(b, y))| a == b && x.to_bits() == y.to_bits())
+                && left_coeffs.eq(right_coeffs)
         })
     }
 
