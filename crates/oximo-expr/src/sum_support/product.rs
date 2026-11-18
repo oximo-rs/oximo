@@ -419,16 +419,26 @@ impl<'a, D: ExpressionDegree> ProductOperand for QuadraticProduct<'a, D> {
     type Original = Expr<'a, D>;
 
     fn materialize(self) -> Self::Original {
+        let mut normalized_square = None;
         let factored = self.left.cached_var_id().is_none()
             && self.right.cached_var_id().is_none()
             && std::ptr::eq(self.left.arena(), self.right.arena())
             && self.left.arena().with_ref(|arena| {
                 let left = crate::linear::as_linear(arena, self.left.id, false);
                 let right = crate::linear::as_linear(arena, self.right.id, false);
-                self.shared_non_monomial_square(arena, left.as_ref().zip(right.as_ref()))
+                let factored =
+                    self.shared_non_monomial_square(arena, left.as_ref().zip(right.as_ref()));
+                if factored {
+                    normalized_square = left.zip(right).map(|(left, _)| left.into_owned());
+                }
+                factored
             });
         let mut left = self.left;
         let mut right = self.right;
+        if let Some(terms) = normalized_square {
+            left = Expr::build(left.arena(), |arena| crate::linear::push_linear(arena, terms));
+            right = left.clone();
+        }
         match self.order {
             Order::WeightLeft => left = left * self.weight,
             Order::WeightRight => right = right * self.weight,

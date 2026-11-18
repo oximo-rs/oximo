@@ -223,6 +223,64 @@ fn square_checks_ignore_zero_coefficients_without_reordering_factors() {
 }
 
 #[test]
+fn matched_squares_evaluate_their_normalized_factors() {
+    let m = Model::new("normalized square factors");
+    variable!(m, x[i in 0..2]);
+    let indices = [0, 0, 0, 1];
+    let weights = [f64::MAX, -f64::MAX, 1.0, 1.0];
+    let left = sum!(m, unfused: weights[i] * x[indices[i]] for i in 0..4);
+    let equal = sum!(m, unfused: weights[i] * x[indices[i]] for i in 0..4);
+    let compact = left.compact();
+    let point = [2.0, 3.0];
+    assert!(value(&left, &point).is_nan(), "the original Add root overflows");
+    assert_eq!(value(&compact, &point), 5.0);
+
+    for (a, b) in [(&left, &left), (&left, &equal), (&left, &compact), (&compact, &left)] {
+        let ordinary = sum!(m, unfused: a * b for _i in 0..1);
+        assert_eq!(value(&ordinary, &point), 25.0);
+        let fused = sum!(m, a * b for _i in 0..1);
+        assert_eq!(value(&fused, &point), 25.0);
+        assert!(matches!(m.arena().get(fused.id()), ExprNode::Mul(_)));
+
+        for weighted in [
+            sum!(m, 2.0 * a * b for _i in 0..1),
+            sum!(m, a * (2.0 * b) for _i in 0..1),
+            sum!(m, a * b * 2.0 for _i in 0..1),
+            sum!(m, 2.0 * (a * b) for _i in 0..1),
+        ] {
+            assert_eq!(value(&weighted, &point), 50.0);
+        }
+    }
+
+    let reversed = sum!(m, x[1-i] for i in 0..2);
+    let unmatched = one_node(&m, || sum!(m, &left * &reversed for _i in 0..1));
+    assert!(matches!(m.arena().get(unmatched.id()), ExprNode::Quadratic(_)));
+    assert_eq!(value(&unmatched, &point), 25.0);
+}
+
+#[test]
+fn normalized_squares_preserve_weight_placement() {
+    let m = Model::new("normalized square weight placement");
+    variable!(m, x[i in 0..2]);
+    let weights = [f64::MAX, -f64::MAX];
+    let factor = sum!(m, unfused: weights[i] * x[i] for i in 0..2);
+    let point = [1.0, 1.0];
+
+    for weighted_factor in [
+        sum!(m, 2.0 * &factor * &factor for _i in 0..1),
+        sum!(m, &factor * (2.0 * &factor) for _i in 0..1),
+    ] {
+        assert!(value(&weighted_factor, &point).is_nan(), "scaling the factor overflows");
+    }
+    for weighted_product in [
+        sum!(m, 2.0 * (&factor * &factor) for _i in 0..1),
+        sum!(m, &factor * &factor * 2.0 for _i in 0..1),
+    ] {
+        assert_eq!(value(&weighted_product, &point), 0.0);
+    }
+}
+
+#[test]
 fn oversized_products_reuse_shared_affine_factors_without_scaling_their_coefficients() {
     for mode in 0..3 {
         let m = Model::new("oversized shared factors");
