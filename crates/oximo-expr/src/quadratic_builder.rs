@@ -614,7 +614,8 @@ pub(crate) fn push_quadratic(
 pub(crate) struct QuadraticSlots {
     linear: FxHashMap<VarId, usize>,
     quadratic: FxHashMap<(VarId, VarId), usize>,
-    initialized: bool,
+    linear_initialized: bool,
+    quadratic_initialized: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -664,12 +665,15 @@ pub(crate) fn merge_unique(
     };
 
     finite(scale).ok()?;
-    if !slots.initialized {
+    if !linear.is_empty() && !slots.linear_initialized {
         slots.linear.extend(left.linear.iter().enumerate().map(|(i, &(v, _))| (v, i)));
+        slots.linear_initialized = true;
+    }
+    if !quadratic.is_empty() && !slots.quadratic_initialized {
         slots
             .quadratic
             .extend(left.quadratic.iter().enumerate().map(|(i, &(a, b, _))| ((a, b), i)));
-        slots.initialized = true;
+        slots.quadratic_initialized = true;
     }
 
     let constant = sum(left.constant, product(finite(offset).ok()?, scale).ok()?).ok()?;
@@ -969,6 +973,105 @@ pub(crate) fn sum_numeric(
 mod tests {
     use super::*;
     use crate::{ExprArena, evaluate};
+
+    #[test]
+    fn unique_merge_initializes_only_the_needed_index() {
+        for quadratic_first in [false, true] {
+            let mut left = QuadraticTerms::from_coefficients(
+                (0..64).map(|i| (VarId(i), VarId(i), 3.0)).collect(),
+                (0..64).map(|i| (VarId(i), 2.0)).collect(),
+                2.0,
+            )
+            .unwrap();
+            let mut slots = QuadraticSlots::default();
+
+            merge_unique(&mut left, &mut slots, NumericLeaf::Affine(&[], 3.0), 1.0).unwrap();
+            assert!(!slots.linear_initialized && !slots.quadratic_initialized);
+            assert_eq!(slots.linear.capacity(), 0);
+            assert_eq!(slots.quadratic.capacity(), 0);
+
+            let first = QuadraticTerms::from_coefficients(
+                if quadratic_first { vec![(VarId(0), VarId(0), 1.0)] } else { vec![] },
+                if quadratic_first { vec![] } else { vec![(VarId(0), 1.0)] },
+                0.0,
+            )
+            .unwrap();
+            let leaf = if quadratic_first {
+                NumericLeaf::Quadratic(&first)
+            } else {
+                NumericLeaf::Affine(first.linear(), 0.0)
+            };
+
+            merge_unique(&mut left, &mut slots, leaf, 1.0).unwrap();
+            assert_eq!(slots.linear_initialized, !quadratic_first);
+            assert_eq!(slots.quadratic_initialized, quadratic_first);
+            if quadratic_first {
+                assert_eq!(slots.linear.capacity(), 0);
+            } else {
+                assert_eq!(slots.quadratic.capacity(), 0);
+            }
+
+            let mixed = QuadraticTerms::from_coefficients(
+                vec![(VarId(1), VarId(1), -3.0), (VarId(64), VarId(64), 5.0)],
+                vec![(VarId(1), -2.0), (VarId(64), 4.0)],
+                0.0,
+            )
+            .unwrap();
+            merge_unique(&mut left, &mut slots, NumericLeaf::Quadratic(&mixed), 1.0).unwrap();
+            merge_unique(&mut left, &mut slots, NumericLeaf::Quadratic(&mixed), 1.0).unwrap();
+            assert!(slots.linear_initialized && slots.quadratic_initialized);
+
+            let mut expected_linear: Vec<_> = (0..64).map(|i| (VarId(i), 2.0)).collect();
+            expected_linear[0].1 += if quadratic_first { 0.0 } else { 1.0 };
+            expected_linear[1].1 = -2.0;
+            expected_linear.push((VarId(64), 8.0));
+            let mut expected_quadratic: Vec<_> =
+                (0..64).map(|i| (VarId(i), VarId(i), 3.0)).collect();
+            expected_quadratic[0].2 += if quadratic_first { 1.0 } else { 0.0 };
+            expected_quadratic[1].2 = -3.0;
+            expected_quadratic.push((VarId(64), VarId(64), 10.0));
+            assert_eq!(left.linear(), expected_linear);
+            assert_eq!(left.quadratic(), expected_quadratic);
+            assert_eq!(left.constant().to_bits(), 5.0_f64.to_bits());
+        }
+    }
+
+    #[test]
+    fn scaling_removals_reset_partially_initialized_indices() {
+        for quadratic_first in [false, true] {
+            let tiny = f64::from_bits(1);
+            let mut left = QuadraticTerms::from_coefficients(
+                vec![(VarId(0), VarId(0), tiny), (VarId(1), VarId(1), 6.0)],
+                vec![(VarId(0), tiny), (VarId(1), 4.0)],
+                0.0,
+            )
+            .unwrap();
+            let mut slots = QuadraticSlots::default();
+            let quadratic =
+                QuadraticTerms::from_coefficients(vec![(VarId(1), VarId(1), 2.0)], vec![], 0.0)
+                    .unwrap();
+            let first = if quadratic_first {
+                NumericLeaf::Quadratic(&quadratic)
+            } else {
+                NumericLeaf::Var(VarId(1))
+            };
+            merge_unique(&mut left, &mut slots, first, 1.0).unwrap();
+            scale_unique(&mut left, &mut slots, 0.5).unwrap();
+            assert!(!slots.linear_initialized && !slots.quadratic_initialized);
+            assert_eq!(slots.linear.capacity(), 0);
+            assert_eq!(slots.quadratic.capacity(), 0);
+
+            merge_unique(&mut left, &mut slots, NumericLeaf::Var(VarId(1)), 1.0).unwrap();
+            assert!(!slots.quadratic_initialized);
+
+            merge_unique(&mut left, &mut slots, NumericLeaf::Quadratic(&quadratic), 1.0).unwrap();
+            assert_eq!(left.linear(), [(VarId(1), if quadratic_first { 3.0 } else { 3.5 })]);
+            assert_eq!(
+                left.quadratic(),
+                [(VarId(1), VarId(1), if quadratic_first { 6.0 } else { 5.0 })]
+            );
+        }
+    }
 
     /// Frozen ordered expansion and merge from before scratch optimizations.
     fn ordered_product_reference(
