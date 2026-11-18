@@ -350,6 +350,43 @@ fn capacity_planning_keeps_dependent_domains_lazy_and_evaluated_once() {
 }
 
 #[test]
+fn local_loop_exits_in_inner_domains_keep_sum_lowering_flat() {
+    let m = Model::new("local loop exits in sum domains");
+    variable!(m, x);
+    let unanchored = sum!(2.0 * x for i in 0..3, _j in {
+        let mut length = 0;
+        loop {
+            if length == i { break 0..length; }
+            length += 1;
+        }
+    });
+    assert_eq!(value(&unanchored, &[3.0]), 18.0);
+
+    let before = m.arena().len();
+    let anchored = sum!(m, 2.0 * x for i in 0..3, _j in {
+        let mut length = 0;
+        loop {
+            if length == i { break 0..length; }
+            length += 1;
+        }
+    });
+    assert_eq!(m.arena().len(), before + 1);
+    assert_eq!(value(&anchored, &[3.0]), 18.0);
+
+    let before = m.arena().len();
+    let continued = sum!(2.0 * x for i in 0..4, _j in {
+        let mut length = 0;
+        for k in 0..i {
+            if k % 2 == 0 { continue; }
+            length += 1;
+        }
+        0..length
+    });
+    assert_eq!(m.arena().len(), before + 1);
+    assert_eq!(value(&continued, &[3.0]), 12.0);
+}
+
+#[test]
 fn multiple_indices_share_one_accumulator_and_skip_empty_inner_domains() {
     let m = Model::new("flat multi-index sum");
 
@@ -588,6 +625,45 @@ fn custom_noncopy_products_and_generic_products_keep_mul() {
     assert_eq!(*calls.borrow(), ["mul", "drop", "mul", "drop"]);
     assert_eq!(value(&total, &[1.0]), 14.0);
     assert_eq!(value(&generic(&m, Weight(&calls), x), &[1.0]), 7.0);
+}
+
+#[test]
+fn ordinary_inner_products_keep_array_to_slice_rhs_coercions() {
+    struct Scale<'a>(VariableHandle<'a>);
+    impl<'a> Mul<&[f64]> for Scale<'a> {
+        type Output = Expr<'a, Affine>;
+        fn mul(self, weights: &[f64]) -> Self::Output {
+            weights.iter().sum::<f64>() * self.0
+        }
+    }
+
+    let m = Model::new("coercing product operands");
+    variable!(m, x);
+    let weights = [2.0, 3.0];
+    let reference = sum!(m, unfused: Scale(x) * &weights * x for _i in 0..2);
+    assert_eq!(value(&reference, &[3.0]), 90.0);
+
+    let array = sum!(m, Scale(x) * &weights * x for _i in 0..2);
+    assert_eq!(value(&array, &[3.0]), 90.0);
+
+    let temporary = sum!(m, Scale(x) * &[2.0, 3.0] * x for _i in 0..2);
+    assert_eq!(value(&temporary, &[3.0]), 90.0);
+
+    let direct = sum!(m, Scale(x) * &weights for _i in 0..2);
+    assert_eq!(value(&direct, &[3.0]), 30.0);
+
+    let filtered = sum!(m, Scale(x) * &weights * x for _i in 0..2, _j in 0..2 if true);
+    assert_eq!(value(&filtered, &[3.0]), 180.0);
+
+    fn generic<'a, S>(m: &'a Model, scale: S, x: VariableHandle<'a>) -> Expr<'a, Quadratic>
+    where
+        S: for<'b> Mul<&'b [f64], Output = Expr<'a, Affine>>,
+    {
+        let mut scale = Some(scale);
+        sum!(m, scale.take().unwrap() * &[2.0, 3.0] * x for _i in 0..1)
+    }
+
+    assert_eq!(value(&generic(&m, Scale(x), x), &[3.0]), 45.0);
 }
 
 #[test]

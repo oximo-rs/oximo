@@ -344,7 +344,7 @@ fn expand_in(
     if cond.is_none()
         && (unfused
             || binds.len() == 1
-            || binds.iter().skip(1).any(|bind| has_control_flow(&bind.domain)))
+            || binds.iter().skip(1).any(|bind| has_control_flow(&bind.domain, false)))
     {
         let mut expr = body;
         for b in binds.iter().rev() {
@@ -486,48 +486,158 @@ fn literal_range_len(domain: &Expr) -> Option<usize> {
     }
 }
 
-fn has_control_flow(body: &Expr) -> bool {
-    struct ControlFlow(bool);
+fn has_control_flow(body: &Expr, include_loop_exits: bool) -> bool {
+    struct ControlFlow {
+        found: bool,
+        include_loop_exits: bool,
+    }
     impl VisitMut for ControlFlow {
         fn visit_expr_mut(&mut self, expression: &mut Expr) {
             if matches!(
                 expression,
                 Expr::Return(_) | Expr::Try(_) | Expr::Yield(_) | Expr::Macro(_)
-            ) {
-                self.0 = true;
+            ) || self.include_loop_exits
+                && matches!(expression, Expr::Break(_) | Expr::Continue(_))
+            {
+                self.found = true;
             } else {
                 visit_mut::visit_expr_mut(self, expression);
             }
         }
     }
-    let mut control_flow = ControlFlow(false);
+    let mut control_flow = ControlFlow { found: false, include_loop_exits };
     control_flow.visit_expr_mut(&mut body.clone());
-    control_flow.0
+    control_flow.found
 }
 
 fn fuse_product(body: &Expr, root: &TokenStream2) -> TokenStream2 {
-    if has_control_flow(body) {
-        return quote!(#body);
-    }
-    let product = match body {
+    match body {
         Expr::Paren(expr) if expr.attrs.is_empty() => return fuse_product(&expr.expr, root),
         Expr::Group(expr) if expr.attrs.is_empty() => return fuse_product(&expr.expr, root),
-        Expr::Binary(expr) if matches!(expr.op, syn::BinOp::Mul(_)) && expr.attrs.is_empty() => {
-            expr
-        }
-        _ => return quote!(#body),
-    };
-    let left = &product.left;
-    let right = &product.right;
-    let operands = Ident::new("__oximo_product_operands", Span::mixed_site());
-    let tag = Ident::new("__oximo_product_tag", Span::mixed_site());
+        _ => {}
+    }
+    if has_control_flow(body, true) || product_parts(body).is_none() {
+        return quote!(#body);
+    }
+
+    let recursive = product_count(body) <= 2;
+    let expanded = lower_product(body, root, recursive, &std::cell::Cell::new(0), &|term| term);
     quote! {{
         use #root::__macro_support::SumProduct as _;
-        match (#left, #right) {
-            #operands => {
-                let #tag = #root::__macro_support::product_tag(&#operands);
-                (&&#tag).sum_product(#operands)
-            }
-        }
+        use #root::__macro_support::ProductResult as _;
+        #expanded
     }}
+}
+
+fn product_parts(body: &Expr) -> Option<(&Expr, &Expr)> {
+    match body {
+        Expr::Paren(expr) if expr.attrs.is_empty() => product_parts(&expr.expr),
+        Expr::Group(expr) if expr.attrs.is_empty() => product_parts(&expr.expr),
+        Expr::Binary(expr) if matches!(expr.op, syn::BinOp::Mul(_)) && expr.attrs.is_empty() => {
+            Some((&expr.left, &expr.right))
+        }
+        _ => None,
+    }
+}
+
+fn product_count(body: &Expr) -> usize {
+    product_parts(body).map_or(0, |(left, right)| 1 + product_count(left) + product_count(right))
+}
+
+fn lower_product(
+    body: &Expr,
+    root: &TokenStream2,
+    recursive: bool,
+    counter: &std::cell::Cell<usize>,
+    continuation: &dyn Fn(TokenStream2) -> TokenStream2,
+) -> TokenStream2 {
+    match body {
+        Expr::Paren(expr) if expr.attrs.is_empty() => {
+            return lower_product(&expr.expr, root, recursive, counter, continuation);
+        }
+        Expr::Group(expr) if expr.attrs.is_empty() => {
+            return lower_product(&expr.expr, root, recursive, counter, continuation);
+        }
+        _ => {}
+    }
+    let fresh = |label: &str| {
+        let index = counter.get();
+        counter.set(index + 1);
+        Ident::new(&format!("__oximo_product_{label}_{index}"), Span::mixed_site())
+    };
+    if let Some((left, right)) = product_parts(body) {
+        let nested_left = product_parts(left).is_some();
+        let operands = fresh("operands");
+        let tag = fresh("tag");
+        let result = fresh("result");
+        let native_left = Ident::new("__oximo_native_left", Span::mixed_site());
+        let native_right = Ident::new("__oximo_native_right", Span::mixed_site());
+        let dispatch = |left, right| {
+            let next = continuation(quote!(#result));
+            quote! {
+                match (#left, #right) {
+                    #operands => {
+                        let #tag = #root::__macro_support::product_tag(&#operands);
+                        let #result = (&&#tag).sum_product(#operands)
+                            .finish_product(|#native_left, #native_right| #native_left * #native_right);
+                        #next
+                    }
+                }
+            }
+        };
+        if recursive {
+            return lower_product(left, root, true, counter, &|left| {
+                if !nested_left {
+                    return lower_product(right, root, true, counter, &|right| {
+                        dispatch(left.clone(), right)
+                    });
+                }
+                let witness = fresh("right_type");
+                let preparation = fresh("preparation");
+                let prepared = fresh("prepared");
+                let pending = fresh("pending");
+                let finish = fresh("finish");
+                let right_operand = fresh("right");
+                let next = lower_product(right, root, true, counter, &|right| {
+                    quote! {
+                        match #right {
+                            #right_operand => {
+                                #root::__macro_support::product_right_type(#witness, &#right_operand);
+                                break #root::__macro_support::finish_product(#finish, #right_operand);
+                            }
+                        }
+                    }
+                });
+                let operation = dispatch(quote!(#prepared), quote!(#right_operand));
+
+                // We type-check the RHS arm first so autoref dispatch knows its
+                // type. At runtime the preparation arm runs first.
+                quote! {
+                    let #witness = ::core::marker::PhantomData;
+                    let mut #pending = ::core::option::Option::Some(#left);
+                    let mut #finish = ::core::option::Option::None;
+                    loop {
+                        if let ::core::option::Option::Some(#finish) = #finish.take() {
+                            #next
+                        } else {
+                            let #preparation = #root::__macro_support::product_left_tag(
+                                #pending.as_ref().unwrap(), #witness
+                            );
+                            let #prepared = (&&#preparation).prepare_left(#pending.take().unwrap());
+                            #finish = ::core::option::Option::Some(
+                                #preparation.bind_finish(move |#right_operand| { #operation })
+                            );
+                        }
+                    }
+                }
+            });
+        }
+        return dispatch(
+            quote!(#root::__macro_support::ProductValue(#left)),
+            quote!(#root::__macro_support::ProductValue(#right)),
+        );
+    }
+    let value = fresh("value");
+    let next = continuation(quote!(#root::__macro_support::ProductValue(#value)));
+    quote! { match #body { #value => { #next } } }
 }

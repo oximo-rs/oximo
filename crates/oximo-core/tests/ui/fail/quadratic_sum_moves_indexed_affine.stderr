@@ -1,0 +1,24 @@
+error[E0507]: cannot move out of value, as `affine` is a captured variable in an `FnMut` closure
+ --> tests/ui/fail/quadratic_sum_moves_indexed_affine.rs:7:27
+  |
+6 |     let affine = [x + 1.0, x + 2.0];
+  |         ------ captured outer variable
+7 |     let _ = sum!(m, 2.0 * affine[i] * x for i in 0..2);
+  |             --------------^^^^^^^^^-------------------
+  |             |
+  |             captured by this `FnMut` closure
+  |             data moved here because `__oximo_product_value_7` has type `Expr<'_, oximo_core::Affine>`, which does not implement the `Copy` trait
+  |
+help: `Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures may consume them only once
+ --> src/macro_support.rs
+  |
+  |     F: FnMut(K) -> E,
+  |        ^^^^^^^^^^^^^
+help: consider borrowing here
+  |
+7 |     let _ = sum!(m, 2.0 * &affine[i] * x for i in 0..2);
+  |                           +
+help: consider cloning the value if the performance cost is acceptable
+  |
+7 |     let _ = sum!(m, 2.0 * affine[i] * x for i in 0..2).clone();
+  |                                                       ++++++++

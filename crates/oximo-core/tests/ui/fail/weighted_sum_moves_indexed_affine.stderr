@@ -2,21 +2,23 @@ error[E0507]: cannot move out of value, as `terms` is a captured variable in an 
  --> tests/ui/fail/weighted_sum_moves_indexed_affine.rs:7:27
   |
 6 |     let terms = [x + 1.0, x + 2.0];
-  |         -----   ------------------ move occurs because value has type `Expr<'_, oximo_core::Affine>`, which does not implement the `Copy` trait
-  |         |
-  |         captured outer variable
+  |         ----- captured outer variable
 7 |     let _ = sum!(m, 2.0 * terms[i] for i in 0..2);
   |             --------------^^^^^^^^---------------
-  |             |             |
-  |             |             value is moved here
+  |             |
   |             captured by this `FnMut` closure
+  |             data moved here because `__oximo_product_value_4` has type `Expr<'_, oximo_core::Affine>`, which does not implement the `Copy` trait
   |
 help: `Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures may consume them only once
  --> src/macro_support.rs
   |
   |     F: FnMut(K) -> E,
   |        ^^^^^^^^^^^^^
+help: consider borrowing here
+  |
+7 |     let _ = sum!(m, 2.0 * &terms[i] for i in 0..2);
+  |                           +
 help: consider cloning the value if the performance cost is acceptable
   |
-7 |     let _ = sum!(m, 2.0 * terms[i].clone() for i in 0..2);
-  |                                   ++++++++
+7 |     let _ = sum!(m, 2.0 * terms[i] for i in 0..2).clone();
+  |                                                  ++++++++

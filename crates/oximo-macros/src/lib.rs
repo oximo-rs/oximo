@@ -155,6 +155,9 @@ pub fn objective(input: TokenStream) -> TokenStream {
 /// accumulate through `AffineBuilder`. This can change floating-point rounding. Use
 /// `sum!(model, unfused: body for pat in domain)` to disable the rewrite and retain
 /// nested index summation, including in nested sums.
+/// Products of two statically affine handles, optionally with one `f64`/`i32`
+/// weight, accumulate through `QuadraticBuilder` without intermediate monomial
+/// nodes.
 #[proc_macro]
 pub fn sum(input: TokenStream) -> TokenStream {
     sum::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()

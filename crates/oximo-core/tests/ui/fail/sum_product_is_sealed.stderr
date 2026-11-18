@@ -5,62 +5,62 @@ error[E0277]: the trait bound `&&oximo_expr::sum_support::ProductTag<Weight, ()>
    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `oximo_expr::sum_support::sealed::Product<Weight, ()>` is not implemented for `&&oximo_expr::sum_support::ProductTag<Weight, ()>`
    |
    = help: the following other types implement trait `oximo_expr::sum_support::sealed::Product<L, R>`:
-             `&&oximo_expr::sum_support::ProductTag<&Expr<'_, D>, f64>` implements `oximo_expr::sum_support::sealed::Product<&Expr<'_, D>, f64>`
-             `&&oximo_expr::sum_support::ProductTag<&Expr<'_, D>, i32>` implements `oximo_expr::sum_support::sealed::Product<&Expr<'_, D>, i32>`
-             `&&oximo_expr::sum_support::ProductTag<Expr<'_, D>, f64>` implements `oximo_expr::sum_support::sealed::Product<Expr<'_, D>, f64>`
-             `&&oximo_expr::sum_support::ProductTag<Expr<'_, D>, i32>` implements `oximo_expr::sum_support::sealed::Product<Expr<'_, D>, i32>`
-             `&&oximo_expr::sum_support::ProductTag<f64, &Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<f64, &Expr<'_, D>>`
-             `&&oximo_expr::sum_support::ProductTag<f64, Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<f64, Expr<'_, D>>`
-             `&&oximo_expr::sum_support::ProductTag<i32, &Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<i32, &Expr<'_, D>>`
-             `&&oximo_expr::sum_support::ProductTag<i32, Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<i32, Expr<'_, D>>`
-             `&oximo_expr::sum_support::ProductTag<L, R>` implements `oximo_expr::sum_support::sealed::Product<L, R>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<f64>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<f64>>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<i32>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<i32>>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<f64>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<f64>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<i32>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<i32>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>`
+           and $N others
 note: required by a bound in `oximo_expr::sum_support::SumProduct`
-  --> $WORKSPACE/crates/oximo-expr/src/sum_support.rs
+  --> $WORKSPACE/crates/oximo-expr/src/sum_support/product.rs
    |
    | pub trait SumProduct<L, R>: sealed::Product<L, R> {
    |                             ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SumProduct`
    = note: `SumProduct` is a "sealed trait", because to implement it you also need to implement `oximo_expr::sum_support::sealed::Product`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
    = help: the following types implement the trait:
              &oximo_expr::sum_support::ProductTag<L, R>
-             &&oximo_expr::sum_support::ProductTag<f64, oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<oximo_expr::Expr<'a, D>, f64>
-             &&oximo_expr::sum_support::ProductTag<f64, &'b oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<&'b oximo_expr::Expr<'a, D>, f64>
-             &&oximo_expr::sum_support::ProductTag<i32, oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<oximo_expr::Expr<'a, D>, i32>
-             &&oximo_expr::sum_support::ProductTag<i32, &'b oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<&'b oximo_expr::Expr<'a, D>, i32>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<f64>, oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>, oximo_expr::sum_support::ProductValue<f64>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<i32>, oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>, oximo_expr::sum_support::ProductValue<i32>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<f64>, oximo_expr::sum_support::ProductValue<&'b oximo_expr::Expr<'a, D>>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&'b oximo_expr::Expr<'a, D>>, oximo_expr::sum_support::ProductValue<f64>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<i32>, oximo_expr::sum_support::ProductValue<&'b oximo_expr::Expr<'a, D>>>
+           and $N others
 
-error[E0277]: the trait bound `&&oximo_expr::sum_support::ProductTag<f64, Expr<'a, oximo_expr::Affine>>: oximo_expr::sum_support::sealed::Product<Weight, ()>` is not satisfied
-  --> tests/ui/fail/sum_product_is_sealed.rs:18:37
+error[E0277]: the trait bound `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<f64>, oximo_expr::sum_support::ProductValue<Expr<'a, oximo_expr::Affine>>>: oximo_expr::sum_support::sealed::Product<Weight, ()>` is not satisfied
+  --> tests/ui/fail/sum_product_is_sealed.rs:23:9
    |
-18 | impl<'a> SumProduct<Weight, ()> for &&ProductTag<f64, Expr<'a, Affine>> {
-   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+23 |     for &&ProductTag<ProductValue<f64>, ProductValue<Expr<'a, Affine>>>
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-   = help: the trait `oximo_expr::sum_support::sealed::Product<Weight, ()>` is not implemented for `&&oximo_expr::sum_support::ProductTag<f64, Expr<'a, oximo_expr::Affine>>`
+   = help: the trait `oximo_expr::sum_support::sealed::Product<Weight, ()>` is not implemented for `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<f64>, oximo_expr::sum_support::ProductValue<Expr<'a, oximo_expr::Affine>>>`
    = help: the following other types implement trait `oximo_expr::sum_support::sealed::Product<L, R>`:
-             `&&oximo_expr::sum_support::ProductTag<&Expr<'_, D>, f64>` implements `oximo_expr::sum_support::sealed::Product<&Expr<'_, D>, f64>`
-             `&&oximo_expr::sum_support::ProductTag<&Expr<'_, D>, i32>` implements `oximo_expr::sum_support::sealed::Product<&Expr<'_, D>, i32>`
-             `&&oximo_expr::sum_support::ProductTag<Expr<'_, D>, f64>` implements `oximo_expr::sum_support::sealed::Product<Expr<'_, D>, f64>`
-             `&&oximo_expr::sum_support::ProductTag<Expr<'_, D>, i32>` implements `oximo_expr::sum_support::sealed::Product<Expr<'_, D>, i32>`
-             `&&oximo_expr::sum_support::ProductTag<f64, &Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<f64, &Expr<'_, D>>`
-             `&&oximo_expr::sum_support::ProductTag<f64, Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<f64, Expr<'_, D>>`
-             `&&oximo_expr::sum_support::ProductTag<i32, &Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<i32, &Expr<'_, D>>`
-             `&&oximo_expr::sum_support::ProductTag<i32, Expr<'_, D>>` implements `oximo_expr::sum_support::sealed::Product<i32, Expr<'_, D>>`
-             `&oximo_expr::sum_support::ProductTag<L, R>` implements `oximo_expr::sum_support::sealed::Product<L, R>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<f64>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<f64>>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<i32>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, D>, oximo_expr::sum_support::ProductValue<i32>>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>`
+             `&&oximo_expr::sum_support::ProductTag<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<WeightedTerm<'_, L>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<f64>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<f64>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<i32>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, D>>, oximo_expr::sum_support::ProductValue<i32>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<&Expr<'_, R>>>`
+             `&&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>` implements `oximo_expr::sum_support::sealed::Product<oximo_expr::sum_support::ProductValue<&Expr<'_, L>>, oximo_expr::sum_support::ProductValue<Expr<'_, R>>>`
+           and $N others
 note: required by a bound in `oximo_expr::sum_support::SumProduct`
-  --> $WORKSPACE/crates/oximo-expr/src/sum_support.rs
+  --> $WORKSPACE/crates/oximo-expr/src/sum_support/product.rs
    |
    | pub trait SumProduct<L, R>: sealed::Product<L, R> {
    |                             ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SumProduct`
    = note: `SumProduct` is a "sealed trait", because to implement it you also need to implement `oximo_expr::sum_support::sealed::Product`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
    = help: the following types implement the trait:
              &oximo_expr::sum_support::ProductTag<L, R>
-             &&oximo_expr::sum_support::ProductTag<f64, oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<oximo_expr::Expr<'a, D>, f64>
-             &&oximo_expr::sum_support::ProductTag<f64, &'b oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<&'b oximo_expr::Expr<'a, D>, f64>
-             &&oximo_expr::sum_support::ProductTag<i32, oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<oximo_expr::Expr<'a, D>, i32>
-             &&oximo_expr::sum_support::ProductTag<i32, &'b oximo_expr::Expr<'a, D>>
-             &&oximo_expr::sum_support::ProductTag<&'b oximo_expr::Expr<'a, D>, i32>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<f64>, oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>, oximo_expr::sum_support::ProductValue<f64>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<i32>, oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<oximo_expr::Expr<'a, D>>, oximo_expr::sum_support::ProductValue<i32>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<f64>, oximo_expr::sum_support::ProductValue<&'b oximo_expr::Expr<'a, D>>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<&'b oximo_expr::Expr<'a, D>>, oximo_expr::sum_support::ProductValue<f64>>
+             &&oximo_expr::sum_support::ProductTag<oximo_expr::sum_support::ProductValue<i32>, oximo_expr::sum_support::ProductValue<&'b oximo_expr::Expr<'a, D>>>
+           and $N others
