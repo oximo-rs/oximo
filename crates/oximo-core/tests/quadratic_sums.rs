@@ -77,7 +77,7 @@ fn affine_offsets_borrows_and_consuming_inputs_expand_without_product_nodes() {
     let fused = one_node(&m, || sum!(m, 2.0 * &left * &right for _i in 0..3));
     same_coefficients(&terms(&fused), &expected);
 
-    let reversed = one_node(&m, || sum!(m, &right * &left * 2 for _i in 0..3));
+    let reversed = sum!(m, &right * &left * 2 for _i in 0..3);
     same_coefficients(&terms(&reversed), &expected);
 
     let temporary = sum!(m,
@@ -279,6 +279,51 @@ fn numeric_rejection_falls_back_without_panics_or_losing_prefixes() {
     let fused = sum!(m, 2.0 * &large * x for _i in 0..2);
     let ordinary = sum!(m, unfused: 2.0 * &large * x for _i in 0..2);
     assert_eq!(value(&fused, &[1.0]), value(&ordinary, &[1.0]));
+}
+
+#[test]
+fn right_weighted_products_preserve_coefficient_overflow_and_underflow() {
+    let m = Model::new("right-weighted coefficient order");
+    variable!(m, x);
+    variable!(m, y);
+
+    for (a, b, weight, expected) in
+        [(0.5, f64::MAX, 2.0, f64::INFINITY), (f64::MAX, f64::from_bits(1), 0.5, 0.0)]
+    {
+        let left = a * x;
+        let right = b * y;
+        let ordinary = sum!(m, unfused: &left * (weight * &right) for _i in 0..1);
+        assert_eq!(value(&ordinary, &[1.0, 1.0]), expected);
+
+        let fused = sum!(m, &left * (weight * &right) for _i in 0..1);
+        assert_eq!(value(&fused, &[1.0, 1.0]), expected);
+    }
+
+    let left = 0.5 * x;
+    let right = f64::MAX * y;
+    let left_weighted = one_node(&m, || sum!(m, 2.0 * &left * &right for _i in 0..1));
+    assert_eq!(value(&left_weighted, &[1.0, 1.0]), f64::MAX);
+}
+
+#[test]
+fn outer_weights_do_not_mask_inner_coefficient_overflow_or_underflow() {
+    let m = Model::new("outer-weighted coefficient order");
+    variable!(m, x);
+    variable!(m, y);
+
+    for (a, b, weight, expected) in
+        [(f64::MAX, 2.0, 0.5, f64::INFINITY), (f64::from_bits(1), 0.5, f64::MAX, 0.0)]
+    {
+        let left = a * x;
+        let right = b * y;
+        let ordinary = sum!(m, unfused: weight * (&left * &right) for _i in 0..1);
+        assert_eq!(value(&ordinary, &[1.0, 1.0]), expected);
+
+        let prefix = sum!(m, weight * (&left * &right) for _i in 0..1);
+        let suffix = sum!(m, &left * &right * weight for _i in 0..1);
+        assert_eq!(value(&prefix, &[1.0, 1.0]), expected);
+        assert_eq!(value(&suffix, &[1.0, 1.0]), expected);
+    }
 }
 
 #[test]

@@ -271,7 +271,14 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
                 (Some(left), Some(right)) if !coefficient_pairs_fit_budget(left, right) => {
                     if self.weight.is_finite() { Expansion::Oversized } else { Expansion::Factored }
                 }
-                (Some(_), Some(_)) if !self.shared_non_monomial_square(arena) => Expansion::Numeric,
+
+                // add_product expands (weight * left) * right.
+                (Some(_), Some(_))
+                    if matches!(self.order, Order::Plain | Order::WeightLeft)
+                        && !self.shared_non_monomial_square(arena) =>
+                {
+                    Expansion::Numeric
+                }
                 _ => Expansion::Factored,
             }
         })
