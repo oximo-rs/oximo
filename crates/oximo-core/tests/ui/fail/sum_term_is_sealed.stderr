@@ -27,3 +27,5 @@ note: required by a bound in `oximo_expr::sum_support::SumTerm`
   = help: the following types implement the trait:
             E
             oximo_expr::WeightedTerm<'a, D>
+            oximo_expr::sum_support::ProductValue<T>
+            oximo_expr::sum_support::product::QuadraticProduct<'a, D>
