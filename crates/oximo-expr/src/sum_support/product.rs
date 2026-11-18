@@ -276,6 +276,26 @@ fn coefficient_pairs_fit_budget(left: usize, right: usize) -> bool {
     left.checked_mul(right).is_some_and(|pairs| pairs <= MAX_EAGER_COEFFICIENTS)
 }
 
+/// Keep freshly extracted terms for the current square check, but cache only
+/// counts for immutable compound roots across terms in the same buffer.
+fn coefficient_count<'a>(
+    arena: &'a dyn crate::arena::ArenaAccess,
+    root: ExprId,
+    counts: &mut FxHashMap<ExprId, Option<usize>>,
+) -> (Option<usize>, Option<LinearTerms<'a>>) {
+    let mut terms = None;
+    let count = match arena.get(root) {
+        ExprNode::Var(_) => Some(1),
+        ExprNode::Const(_) => Some(0),
+        ExprNode::Linear { coeffs, .. } => Some(coeffs.len()),
+        _ => *counts.entry(root).or_insert_with(|| {
+            terms = crate::linear::as_linear(arena, root, false);
+            terms.as_ref().map(|terms| terms.coeffs.len())
+        }),
+    };
+    (count, terms)
+}
+
 impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
     fn shared_non_monomial_square(
         &self,
@@ -301,35 +321,36 @@ impl<D: ExpressionDegree> QuadraticProduct<'_, D> {
         })
     }
 
-    fn expansion(&self) -> Expansion {
+    fn expansion(&self, counts: &mut FxHashMap<ExprId, Option<usize>>) -> Expansion {
         if self.left.cached_var_id().is_some() && self.right.cached_var_id().is_some() {
             return Expansion::Numeric;
         }
 
         self.left.arena().with_ref(|arena| {
-            let terms = |input: &Expr<'_, Affine>| crate::linear::as_linear(arena, input.id, false);
-            let Some(left) = terms(&self.left) else {
+            let (Some(left_count), left) = coefficient_count(arena, self.left.id, counts) else {
                 return Expansion::Factored;
             };
-            match terms(&self.right) {
-                Some(right)
-                    if !coefficient_pairs_fit_budget(left.coeffs.len(), right.coeffs.len()) =>
-                {
-                    if self.weight.is_finite() {
-                        Expansion::Oversized
-                    } else {
-                        Expansion::Factored
-                    }
-                }
+            let (Some(right_count), right) = coefficient_count(arena, self.right.id, counts) else {
+                return Expansion::Factored;
+            };
+            if !coefficient_pairs_fit_budget(left_count, right_count) {
+                return if self.weight.is_finite() {
+                    Expansion::Oversized
+                } else {
+                    Expansion::Factored
+                };
+            }
 
-                // add_product expands (weight * left) * right.
-                Some(right)
-                    if matches!(self.order, Order::Plain | Order::WeightLeft)
-                        && !self.shared_non_monomial_square(arena, Some((&left, &right))) =>
-                {
-                    Expansion::Numeric
-                }
-                _ => Expansion::Factored,
+            // add_product expands (weight * left) * right.
+            if !matches!(self.order, Order::Plain | Order::WeightLeft) {
+                return Expansion::Factored;
+            }
+            let left = left.or_else(|| crate::linear::as_linear(arena, self.left.id, false));
+            let right = right.or_else(|| crate::linear::as_linear(arena, self.right.id, false));
+            if self.shared_non_monomial_square(arena, left.as_ref().zip(right.as_ref())) {
+                Expansion::Factored
+            } else {
+                Expansion::Numeric
             }
         })
     }
@@ -667,6 +688,7 @@ pub struct QuadraticBuffer<'a, D: ExpressionDegree> {
     builder: Option<QuadraticBuilder<'a>>,
     pending: bool,
     segments: Vec<Segment<'a, D>>,
+    coefficient_counts: FxHashMap<ExprId, Option<usize>>,
 }
 
 impl<'a, D: ExpressionDegree> QuadraticBuffer<'a, D> {
@@ -697,6 +719,7 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             builder: None,
             pending: false,
             segments: Vec::new(),
+            coefficient_counts: FxHashMap::default(),
         }
     }
 
@@ -709,7 +732,7 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
 
         // Keep compound squares factored and bound ordered coefficient pairs
         // before the builder can allocate expansion scratch or output storage.
-        let expansion = term.expansion();
+        let expansion = term.expansion(&mut buffer.coefficient_counts);
         if matches!(expansion, Expansion::Numeric)
             && buffer
                 .builder
@@ -855,6 +878,94 @@ mod tests {
             assert_eq!(buffer.builder.is_some(), count == 4);
             assert_eq!(buffer.pending, count == 4);
         }
+    }
+
+    #[test]
+    fn compound_coefficient_counts_reuse_the_first_extraction() {
+        let mut arena = ExprArena::new();
+        let variable = arena.var(VarId(0));
+        let constant = arena.constant(2.0);
+        let linear = arena.linear(vec![(VarId(0), 2.0), (VarId(1), 3.0)], 0.0);
+        let root = arena.push(ExprNode::Add(vec![variable, linear].into()));
+        let mut counts = FxHashMap::default();
+        for (id, expected) in [(variable, 1), (constant, 0), (linear, 2)] {
+            let (count, terms) = coefficient_count(&arena, id, &mut counts);
+            assert_eq!(count, Some(expected));
+            assert!(terms.is_none());
+            assert!(counts.is_empty(), "terminal counts must not use the cache");
+        }
+
+        let (count, terms) = coefficient_count(&arena, root, &mut counts);
+        assert_eq!(count, Some(2), "count merged coefficients, not Add children");
+        assert_eq!(terms.unwrap().coeffs.len(), 2);
+        for _ in 0..3 {
+            let (count, terms) = coefficient_count(&arena, root, &mut counts);
+            assert_eq!(count, Some(2));
+            assert!(terms.is_none(), "a cached count must not extract coefficients again");
+        }
+    }
+
+    #[test]
+    fn cached_compound_counts_keep_per_term_budget_and_square_checks() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let a = factor(&arena, 0, 2);
+        let b = factor(&arena, 2, 2);
+        let compound = || {
+            let root = arena.borrow_mut().push(ExprNode::Add(vec![a.id(), b.id()].into()));
+            Expr::new(root, &arena).into_affine().unwrap()
+        };
+        let left = compound();
+        let equal = compound();
+        assert_ne!(left.id(), equal.id());
+
+        let small = factor(&arena, 4, 1);
+        let large = factor(&arena, 4, 9);
+        let mut buffer = QuadraticProduct::buffer(Some(&arena), 5);
+        for right in [small.clone(), left.clone(), equal.clone(), large, small] {
+            QuadraticProduct::push(&mut buffer, product(left.clone(), right));
+        }
+
+        assert!(buffer.pending);
+        assert!(matches!(
+            buffer.segments.as_slice(),
+            [
+                Segment::Numeric(_),
+                Segment::Symbolic(_),
+                Segment::Symbolic(_),
+                Segment::Oversized(_)
+            ]
+        ));
+        assert_eq!(buffer.coefficient_counts.len(), 2);
+        assert_eq!(buffer.coefficient_counts[&left.id()], Some(4));
+        assert_eq!(buffer.coefficient_counts[&equal.id()], Some(4));
+
+        let result = QuadraticProduct::finish(buffer).unwrap();
+        assert_eq!(evaluate(&arena.borrow(), result.id(), &&[1.0; 13][..]).unwrap(), 76.0);
+    }
+
+    #[test]
+    fn cached_unfusable_left_counts_skip_the_right_factor() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let parameter = {
+            let mut arena = arena.borrow_mut();
+            let id = arena.new_param(2.0);
+            arena.param(id)
+        };
+
+        let left = Expr::new(parameter, &arena).into_affine().unwrap();
+        let a = factor(&arena, 0, 4);
+        let root = arena.borrow_mut().push(ExprNode::Add(vec![a.id(), a.id()].into()));
+        let right = Expr::new(root, &arena).into_affine().unwrap();
+        let mut buffer = QuadraticProduct::buffer(Some(&arena), 2);
+        for _ in 0..2 {
+            QuadraticProduct::push(&mut buffer, product(left.clone(), right.clone()));
+            assert_eq!(buffer.coefficient_counts.len(), 1);
+            assert_eq!(buffer.coefficient_counts[&left.id()], None);
+            assert!(buffer.builder.is_none());
+        }
+
+        let result = QuadraticProduct::finish(buffer).unwrap();
+        assert_eq!(evaluate(&arena.borrow(), result.id(), &&[1.0; 4][..]).unwrap(), 32.0);
     }
 
     #[test]
