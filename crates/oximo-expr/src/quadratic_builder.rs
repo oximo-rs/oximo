@@ -93,6 +93,18 @@ fn triangular_len(n: usize) -> Option<usize> {
     if n.is_multiple_of(2) { (n / 2).checked_mul(next) } else { n.checked_mul(next / 2) }
 }
 
+fn finish_coefficients<K, T>(
+    coefficients: &mut FxHashMap<K, f64>,
+    map_entry: impl FnMut((K, f64)) -> T,
+) -> Vec<T> {
+    if coefficients.len() < coefficients.capacity() / 4 || coefficients.values().any(|&c| c == 0.0)
+    {
+        coefficients.drain().filter(|(_, c)| *c != 0.0).map(map_entry).collect()
+    } else {
+        coefficients.drain().map(map_entry).collect()
+    }
+}
+
 impl Accumulator {
     pub(crate) fn clear(&mut self) {
         self.linear.clear();
@@ -178,13 +190,8 @@ impl Accumulator {
     }
 
     pub(crate) fn finish(&mut self) -> QuadraticTerms {
-        let mut linear: Vec<_> = self.linear.drain().filter(|(_, c)| *c != 0.0).collect();
-        let mut quadratic: Vec<_> = self
-            .quadratic
-            .drain()
-            .filter(|(_, c)| *c != 0.0)
-            .map(|((a, b), h)| (a, b, h))
-            .collect();
+        let mut linear = finish_coefficients(&mut self.linear, std::convert::identity);
+        let mut quadratic = finish_coefficients(&mut self.quadratic, |((a, b), h)| (a, b, h));
         linear.sort_unstable_by_key(|(v, _)| v.0);
         quadratic.sort_unstable_by_key(|(a, b, _)| (b.0, a.0));
 
@@ -973,6 +980,48 @@ pub(crate) fn sum_numeric(
 mod tests {
     use super::*;
     use crate::{ExprArena, evaluate};
+
+    #[test]
+    fn finish_preserves_sparse_and_cancelled_support_and_reuses_capacity() {
+        for capacity in [16, 4096] {
+            for cancelled in [0, 8, 16] {
+                let mut acc = Accumulator::default();
+                acc.linear.reserve(capacity);
+                acc.quadratic.reserve(capacity);
+                let capacities = (acc.linear.capacity(), acc.quadratic.capacity());
+                for i in (0..16).rev() {
+                    let v = VarId(i);
+                    let c = if i == 15 { f64::from_bits(1) } else { 1.0 };
+                    acc.add_linear(v, c).unwrap();
+                    acc.add_quadratic(v, v, c).unwrap();
+                    if i < cancelled {
+                        acc.add_linear(v, -c).unwrap();
+                        acc.add_quadratic(v, v, -c).unwrap();
+                    }
+                }
+                acc.constant = 3.0;
+                let terms = acc.finish();
+                let expected: Vec<_> = (cancelled..16)
+                    .map(|i| (VarId(i), if i == 15 { f64::from_bits(1) } else { 1.0 }))
+                    .collect();
+                assert_eq!(terms.linear(), expected);
+                assert_eq!(
+                    terms.quadratic(),
+                    expected.iter().map(|&(v, c)| (v, v, c)).collect::<Vec<_>>()
+                );
+                assert_eq!(terms.constant(), 3.0);
+                assert_eq!((acc.linear.capacity(), acc.quadratic.capacity()), capacities);
+                assert!(acc.linear.is_empty() && acc.quadratic.is_empty());
+
+                let empty = acc.finish();
+                assert!(empty.linear().is_empty() && empty.quadratic().is_empty());
+                assert_eq!(empty.constant(), 0.0);
+
+                acc.add_linear(VarId(42), 2.0).unwrap();
+                assert_eq!(acc.finish().linear(), [(VarId(42), 2.0)]);
+            }
+        }
+    }
 
     #[test]
     fn unique_merge_initializes_only_the_needed_index() {
