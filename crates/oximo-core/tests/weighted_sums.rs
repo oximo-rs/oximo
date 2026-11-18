@@ -350,6 +350,43 @@ fn capacity_planning_keeps_dependent_domains_lazy_and_evaluated_once() {
 }
 
 #[test]
+fn local_loop_exits_in_inner_domains_keep_sum_lowering_flat() {
+    let m = Model::new("local loop exits in sum domains");
+    variable!(m, x);
+    let unanchored = sum!(2.0 * x for i in 0..3, _j in {
+        let mut length = 0;
+        loop {
+            if length == i { break 0..length; }
+            length += 1;
+        }
+    });
+    assert_eq!(value(&unanchored, &[3.0]), 18.0);
+
+    let before = m.arena().len();
+    let anchored = sum!(m, 2.0 * x for i in 0..3, _j in {
+        let mut length = 0;
+        loop {
+            if length == i { break 0..length; }
+            length += 1;
+        }
+    });
+    assert_eq!(m.arena().len(), before + 1);
+    assert_eq!(value(&anchored, &[3.0]), 18.0);
+
+    let before = m.arena().len();
+    let continued = sum!(2.0 * x for i in 0..4, _j in {
+        let mut length = 0;
+        for k in 0..i {
+            if k % 2 == 0 { continue; }
+            length += 1;
+        }
+        0..length
+    });
+    assert_eq!(m.arena().len(), before + 1);
+    assert_eq!(value(&continued, &[3.0]), 12.0);
+}
+
+#[test]
 fn multiple_indices_share_one_accumulator_and_skip_empty_inner_domains() {
     let m = Model::new("flat multi-index sum");
 

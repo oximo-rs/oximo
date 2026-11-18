@@ -344,7 +344,7 @@ fn expand_in(
     if cond.is_none()
         && (unfused
             || binds.len() == 1
-            || binds.iter().skip(1).any(|bind| has_control_flow(&bind.domain)))
+            || binds.iter().skip(1).any(|bind| has_control_flow(&bind.domain, false)))
     {
         let mut expr = body;
         for b in binds.iter().rev() {
@@ -486,28 +486,28 @@ fn literal_range_len(domain: &Expr) -> Option<usize> {
     }
 }
 
-fn has_control_flow(body: &Expr) -> bool {
-    struct ControlFlow(bool);
+fn has_control_flow(body: &Expr, include_loop_exits: bool) -> bool {
+    struct ControlFlow {
+        found: bool,
+        include_loop_exits: bool,
+    }
     impl VisitMut for ControlFlow {
         fn visit_expr_mut(&mut self, expression: &mut Expr) {
             if matches!(
                 expression,
-                Expr::Return(_)
-                    | Expr::Try(_)
-                    | Expr::Yield(_)
-                    | Expr::Macro(_)
-                    | Expr::Break(_)
-                    | Expr::Continue(_)
-            ) {
-                self.0 = true;
+                Expr::Return(_) | Expr::Try(_) | Expr::Yield(_) | Expr::Macro(_)
+            ) || self.include_loop_exits
+                && matches!(expression, Expr::Break(_) | Expr::Continue(_))
+            {
+                self.found = true;
             } else {
                 visit_mut::visit_expr_mut(self, expression);
             }
         }
     }
-    let mut control_flow = ControlFlow(false);
+    let mut control_flow = ControlFlow { found: false, include_loop_exits };
     control_flow.visit_expr_mut(&mut body.clone());
-    control_flow.0
+    control_flow.found
 }
 
 fn fuse_product(body: &Expr, root: &TokenStream2) -> TokenStream2 {
@@ -516,7 +516,7 @@ fn fuse_product(body: &Expr, root: &TokenStream2) -> TokenStream2 {
         Expr::Group(expr) if expr.attrs.is_empty() => return fuse_product(&expr.expr, root),
         _ => {}
     }
-    if has_control_flow(body) || product_parts(body).is_none() {
+    if has_control_flow(body, true) || product_parts(body).is_none() {
         return quote!(#body);
     }
 
