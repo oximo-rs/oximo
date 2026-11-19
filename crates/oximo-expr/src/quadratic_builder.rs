@@ -93,6 +93,24 @@ fn triangular_len(n: usize) -> Option<usize> {
     if n.is_multiple_of(2) { (n / 2).checked_mul(next) } else { n.checked_mul(next / 2) }
 }
 
+/// Look ahead only after stored support grows to fill a map.
+#[inline]
+fn reserve_sum_coefficients<K: Eq + std::hash::Hash>(
+    coefficients: &mut FxHashMap<K, f64>,
+    previous_len: usize,
+    remaining_hint: usize,
+) {
+    let len = coefficients.len();
+    if len > previous_len && len >= 16 && len == coefficients.capacity() {
+        let additional = remaining_hint.min(len.saturating_mul(3)).min(256);
+
+        // Ordinary geometric growth covers smaller req.
+        if additional > len {
+            coefficients.reserve(additional);
+        }
+    }
+}
+
 fn finish_coefficients<K, T>(
     coefficients: &mut FxHashMap<K, f64>,
     map_entry: impl FnMut((K, f64)) -> T,
@@ -134,6 +152,17 @@ impl Accumulator {
         b: VarId,
         c: f64,
     ) -> Result<(), QuadraticBuildError> {
+        self.add_quadratic_with_hint::<false>(a, b, c, 0)
+    }
+
+    #[inline]
+    fn add_quadratic_with_hint<const LOOKAHEAD: bool>(
+        &mut self,
+        a: VarId,
+        b: VarId,
+        c: f64,
+        remaining_hint: usize,
+    ) -> Result<(), QuadraticBuildError> {
         finite(c)?;
         if c == 0.0 {
             return Ok(());
@@ -142,7 +171,11 @@ impl Accumulator {
         if let Some(current) = self.quadratic.get_mut(&key) {
             *current = sum(*current, c)?;
         } else {
+            let previous_len = self.quadratic.len();
             self.quadratic.insert(key, c);
+            if LOOKAHEAD {
+                reserve_sum_coefficients(&mut self.quadratic, previous_len, remaining_hint);
+            }
         }
 
         Ok(())
@@ -567,6 +600,36 @@ impl<'a> QuadraticBuilder<'a> {
         Ok(self)
     }
 
+    /// Collector-only lookahead after a validated numeric insertion.
+    #[inline]
+    pub(crate) fn add_product_for_sum(
+        &mut self,
+        c: f64,
+        lhs: &Expr<'a, Affine>,
+        rhs: &Expr<'a, Affine>,
+        remaining_hint: usize,
+    ) -> Result<&mut Self, QuadraticBuildError> {
+        if remaining_hint <= 16 {
+            return self.add_product(c, lhs, rhs);
+        }
+
+        // Monomials cannot add linear keys, we check lookahead only on insertion.
+        if let (Some(first), Some(second)) = (lhs.cached_var_id(), rhs.cached_var_id()) {
+            finite(c)?;
+            if !std::ptr::eq(self.arena, lhs.arena()) || !std::ptr::eq(self.arena, rhs.arena()) {
+                return Err(QuadraticBuildError::ForeignArena);
+            }
+            self.coefficients.add_quadratic_with_hint::<true>(first, second, c, remaining_hint)?;
+            return Ok(self);
+        }
+        let linear_len = self.coefficients.linear.len();
+        let quadratic_len = self.coefficients.quadratic.len();
+        self.add_product(c, lhs, rhs)?;
+        reserve_sum_coefficients(&mut self.coefficients.linear, linear_len, remaining_hint);
+        reserve_sum_coefficients(&mut self.coefficients.quadratic, quadratic_len, remaining_hint);
+        Ok(self)
+    }
+
     /// Discard pending coefficients, retaining allocated capacity.
     pub fn clear(&mut self) -> &mut Self {
         self.coefficients.clear();
@@ -984,6 +1047,160 @@ mod tests {
     use super::*;
     use crate::{ExprArena, evaluate};
 
+    #[test]
+    fn sum_hints_follow_stored_support_and_leave_small_outputs_unreserved() {
+        for (weight, left_coefficient, right_coefficient, expected) in [
+            (0.0, 1.0, 1.0, 0),
+            (-0.0, 1.0, 1.0, 0),
+            (1.0, 0.0, 1.0, 0),
+            (1.0, 1e-200, 1e-200, 0),
+            (1e-200, 1e-200, 1.0, 0),
+            (1.0, 1e-160, 1e-160, 1),
+            (1.0, 2.0, 3.0, 1),
+        ] {
+            let mut raw = crate::ExprArena::new();
+            let left = raw.linear(vec![(VarId(0), left_coefficient)], 0.0);
+            let right = raw.linear(vec![(VarId(1), right_coefficient)], 0.0);
+            let arena = ExprArenaCell::new(raw);
+            let left = Expr::new(left, &arena).into_affine().unwrap();
+            let right = Expr::new(right, &arena).into_affine().unwrap();
+            let mut baseline = QuadraticBuilder::new(&arena);
+            let mut hinted = QuadraticBuilder::new(&arena);
+            for _ in 0..1024 {
+                baseline.add_product(weight, &left, &right).unwrap();
+                hinted.add_product_for_sum(weight, &left, &right, usize::MAX).unwrap();
+            }
+            assert_accumulator_bits(&hinted.coefficients, &baseline.coefficients);
+            assert_eq!(hinted.coefficients.quadratic.len(), expected);
+            assert_eq!(hinted.coefficients.linear.capacity(), 0);
+            assert_eq!(
+                hinted.coefficients.quadratic.capacity(),
+                baseline.coefficients.quadratic.capacity()
+            );
+            assert_eq!(hinted.scratch.linear.capacity(), baseline.scratch.linear.capacity());
+            assert_eq!(hinted.scratch.quadratic.capacity(), baseline.scratch.quadratic.capacity());
+            assert_eq!(hinted.square_scratch.capacity(), baseline.square_scratch.capacity());
+        }
+    }
+
+    #[test]
+    fn sum_hint_lookahead_is_bounded_for_duplicates_cancellation_and_segment_reuse() {
+        for distinct in [1, 16, 28, 29, 56, 112, 113, 224, 448, 1024] {
+            for offsets in [false, true] {
+                let arena = ExprArenaCell::new(crate::ExprArena::new());
+                let factors: Vec<_> = (0..distinct)
+                    .map(|i| {
+                        let x = Expr::from_var(&arena, VarId(i));
+                        if offsets { x + 1.0 } else { x.into_affine().unwrap() }
+                    })
+                    .collect();
+
+                let y = Expr::from_var(&arena, VarId(distinct));
+                let right = if offsets { y + 1.0 } else { y.into_affine().unwrap() };
+                let mut baseline = QuadraticBuilder::new(&arena);
+                let mut hinted = QuadraticBuilder::new(&arena);
+
+                for adjacent in [false, true] {
+                    for i in 0..4096 {
+                        let index =
+                            usize::try_from(if adjacent { i / 2 } else { i } % distinct).unwrap();
+                        let negative = if adjacent { i % 2 == 1 } else { i >= 2048 };
+                        let weight = if negative { -1.0 } else { 1.0 };
+                        let before = (
+                            hinted.coefficients.linear.len(),
+                            hinted.coefficients.quadratic.len(),
+                            hinted.coefficients.linear.capacity(),
+                            hinted.coefficients.quadratic.capacity(),
+                        );
+                        baseline.add_product(weight, &factors[index], &right).unwrap();
+                        hinted
+                            .add_product_for_sum(weight, &factors[index], &right, usize::MAX)
+                            .unwrap();
+                        let actual = &hinted.coefficients.linear;
+                        let reference = &baseline.coefficients.linear;
+                        assert!(actual.capacity() <= reference.capacity().saturating_mul(4));
+                        assert!(actual.capacity().saturating_sub(reference.capacity()) <= 1024);
+
+                        if actual.len() == before.0 {
+                            assert_eq!(actual.capacity(), before.2);
+                        }
+                        let actual = &hinted.coefficients.quadratic;
+                        let reference = &baseline.coefficients.quadratic;
+                        assert!(actual.capacity() <= reference.capacity().saturating_mul(4));
+                        assert!(actual.capacity().saturating_sub(reference.capacity()) <= 1024);
+
+                        if actual.len() == before.1 {
+                            assert_eq!(actual.capacity(), before.3);
+                        }
+                    }
+                    assert_accumulator_bits(&hinted.coefficients, &baseline.coefficients);
+
+                    let expected = baseline.build_terms();
+                    let actual = hinted.build_terms();
+                    assert_eq!(actual.linear(), expected.linear());
+                    assert_eq!(actual.quadratic(), expected.quadratic());
+                    assert_eq!(actual.constant().to_bits(), expected.constant().to_bits());
+                    if distinct <= 16 {
+                        assert_eq!(
+                            hinted.coefficients.quadratic.capacity(),
+                            baseline.coefficients.quadratic.capacity()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sum_hint_reservation_requires_growth_fullness_and_useful_lookahead() {
+        let mut coefficients = FxHashMap::default();
+        coefficients.reserve(16);
+        let capacity = coefficients.capacity();
+        for i in 0..capacity {
+            coefficients.insert(i, 1.0);
+        }
+        for (previous_len, hint) in
+            [(capacity, usize::MAX), (capacity - 1, 0), (capacity - 1, capacity)]
+        {
+            reserve_sum_coefficients(&mut coefficients, previous_len, hint);
+            assert_eq!(coefficients.capacity(), capacity);
+        }
+
+        reserve_sum_coefficients(&mut coefficients, capacity - 1, usize::MAX);
+        assert!(coefficients.capacity() > capacity);
+
+        let enlarged = coefficients.capacity();
+        reserve_sum_coefficients(&mut coefficients, capacity - 1, usize::MAX);
+        assert_eq!(coefficients.capacity(), enlarged);
+    }
+
+    #[test]
+    fn rejected_sum_products_do_not_reserve_or_change_pending_coefficients() {
+        let arena = ExprArenaCell::new(crate::ExprArena::new());
+        let x = Expr::from_var(&arena, VarId(0)).into_affine().unwrap();
+        let mut builder = QuadraticBuilder::new(&arena);
+        for i in 0..28 {
+            builder.add_monomial_raw(1.0, VarId(i), VarId(i)).unwrap();
+        }
+
+        let capacity = builder.coefficients.quadratic.capacity();
+        for weight in [f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                builder.add_product_for_sum(weight, &x, &x, usize::MAX).unwrap_err(),
+                QuadraticBuildError::NonFiniteInput
+            );
+            assert_eq!(builder.coefficients.quadratic.len(), 28);
+            assert_eq!(builder.coefficients.quadratic.capacity(), capacity);
+        }
+
+        let other = ExprArenaCell::new(crate::ExprArena::new());
+        let foreign = Expr::from_var(&other, VarId(0)).into_affine().unwrap();
+        assert_eq!(
+            builder.add_product_for_sum(0.0, &x, &foreign, usize::MAX).unwrap_err(),
+            QuadraticBuildError::ForeignArena
+        );
+        assert_eq!(builder.coefficients.quadratic.capacity(), capacity);
+    }
     #[test]
     fn finish_preserves_sparse_and_cancelled_support_and_reuses_capacity() {
         for capacity in [16, 4096] {

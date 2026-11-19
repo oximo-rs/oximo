@@ -30,6 +30,74 @@ fn same_coefficients(left: &QuadraticTerms, right: &QuadraticTerms) {
 }
 
 #[test]
+fn hinted_and_unhinted_streams_match_bits_for_sparse_duplicate_and_cancelled_outputs() {
+    let m = Model::new("conservative quadratic hints");
+    variable!(m, x[i in 0..1024]);
+
+    for (coefficient, weight, distinct, cancel) in [
+        (1.0, 0.0, 1024, false),
+        (1.0, -0.0, 1024, false),
+        (0.0, 1.0, 1024, false),
+        (1e-200, 1.0, 1024, false),
+        (1e-160, 1.0, 1, false),
+        (1.0, 1.0, 16, false),
+        (1.0, 1.0, 113, true),
+        (1.0, 1.0, 1024, true),
+    ] {
+        let left: Vec<_> = x.iter().map(|(_, x)| coefficient * x).collect();
+        let right: Vec<_> = x.iter().map(|(_, x)| coefficient * x).collect();
+        let weights: Vec<_> =
+            (0..2048).map(|i| if cancel && i >= 1024 { -weight } else { weight }).collect();
+
+        let hinted = one_node(&m, || {
+            sum!(m,
+            weights[i] * &left[i % distinct] * &right[i % distinct]
+            for i in 0..2048)
+        });
+        let unhinted = one_node(&m, || {
+            sum!(m,
+            weights[i] * &left[i % distinct] * &right[i % distinct]
+            for i in 0..2048 if true)
+        });
+
+        let bits = |q: QuadraticTerms| {
+            (
+                q.constant().to_bits(),
+                q.linear().iter().map(|&(v, c)| (v, c.to_bits())).collect::<Vec<_>>(),
+                q.quadratic().iter().map(|&(a, b, c)| (a, b, c.to_bits())).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(bits(terms(&hinted)), bits(terms(&unhinted)));
+    }
+}
+
+#[test]
+fn quadratic_hints_keep_temporary_and_dependent_domains_evaluated_once() {
+    let m = Model::new("quadratic hint domains");
+    variable!(m, x);
+    let domains = RefCell::new(Vec::new());
+    let visited = RefCell::new(Vec::new());
+    let flat = sum!(m, {
+        visited.borrow_mut().push((i, j));
+        2.0 * x * x
+    } for i in { domains.borrow_mut().push("outer"); vec![0, 1, 2, 3] }, j in 0..3);
+    assert_eq!(*domains.borrow(), ["outer"]);
+    assert_eq!(visited.borrow().len(), 12);
+    assert_eq!(value(&flat, &[2.0]), 96.0);
+
+    domains.borrow_mut().clear();
+    visited.borrow_mut().clear();
+    let dependent = sum!(m, {
+        visited.borrow_mut().push((i, j));
+        2.0 * x * x
+    } for i in { domains.borrow_mut().push("outer"); 0..4 },
+        j in { domains.borrow_mut().push("inner"); 0..i });
+    assert_eq!(*domains.borrow(), ["outer", "inner", "inner", "inner", "inner"]);
+    assert_eq!(*visited.borrow(), [(1, 0), (2, 0), (2, 1), (3, 0), (3, 1), (3, 2)]);
+    assert_eq!(value(&dependent, &[2.0]), 48.0);
+}
+
+#[test]
 fn common_spellings_emit_one_node_and_match_the_builder() {
     for count in [1_usize, 8, 1024] {
         let m = Model::new("monomial fusion");

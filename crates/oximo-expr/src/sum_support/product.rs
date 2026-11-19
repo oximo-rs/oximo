@@ -702,6 +702,7 @@ pub struct QuadraticBuffer<'a, D: ExpressionDegree> {
     pending: bool,
     segments: Vec<Segment<'a, D>>,
     coefficient_counts: FxHashMap<ExprId, Option<usize>>,
+    remaining_hint: usize,
 }
 
 impl<'a, D: ExpressionDegree> QuadraticBuffer<'a, D> {
@@ -724,7 +725,7 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
         self
     }
 
-    fn buffer(arena: Option<&'a ExprArenaCell>, _capacity: usize) -> Self::Buffer {
+    fn buffer(arena: Option<&'a ExprArenaCell>, capacity: usize) -> Self::Buffer {
         QuadraticBuffer {
             arena,
             anchored: arena.is_some(),
@@ -733,10 +734,16 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             pending: false,
             segments: Vec::new(),
             coefficient_counts: FxHashMap::default(),
+            remaining_hint: capacity,
         }
     }
 
+    fn reserve(buffer: &mut Self::Buffer, additional: usize) {
+        buffer.remaining_hint = buffer.remaining_hint.max(additional);
+    }
+
     fn push(buffer: &mut Self::Buffer, term: Self) {
+        buffer.remaining_hint = buffer.remaining_hint.saturating_sub(1);
         let arena = *buffer.arena.get_or_insert(term.left.arena());
         if !std::ptr::eq(arena, term.left.arena()) || !std::ptr::eq(arena, term.right.arena()) {
             buffer.same_arena = false;
@@ -750,7 +757,7 @@ impl<'a, D: ExpressionDegree> SumTerm<'a> for QuadraticProduct<'a, D> {
             && buffer
                 .builder
                 .get_or_insert_with(|| QuadraticBuilder::new(arena))
-                .add_product(term.weight, &term.left, &term.right)
+                .add_product_for_sum(term.weight, &term.left, &term.right, buffer.remaining_hint)
                 .is_ok()
         {
             buffer.pending = true;
@@ -821,6 +828,50 @@ mod tests {
         right: Expr<'a, Affine>,
     ) -> QuadraticProduct<'a, Quadratic> {
         QuadraticProduct { left, right, weight: 1.0, order: Order::Plain, degree: PhantomData }
+    }
+
+    #[test]
+    fn hints_are_lazy_max_combined_and_consumed_by_every_input() {
+        let arena = ExprArenaCell::new(ExprArena::new());
+        let mut buffer = QuadraticProduct::<Quadratic>::buffer(Some(&arena), usize::MAX);
+        QuadraticProduct::reserve(&mut buffer, 10);
+        assert_eq!(buffer.remaining_hint, usize::MAX);
+        assert!(buffer.builder.is_none());
+        assert_eq!(buffer.segments.capacity(), 0);
+        assert_eq!(buffer.coefficient_counts.capacity(), 0);
+
+        let empty = QuadraticProduct::finish(buffer).unwrap();
+        assert_eq!(evaluate(&arena.borrow(), empty.id(), &&[][..]).unwrap(), 0.0);
+
+        let x = factor(&arena, 0, 1);
+        let mut buffer = QuadraticProduct::buffer(Some(&arena), 2);
+        QuadraticProduct::reserve(&mut buffer, 3);
+        QuadraticProduct::reserve(&mut buffer, 2);
+        assert_eq!(buffer.remaining_hint, 3);
+
+        QuadraticProduct::push(&mut buffer, product(x.clone(), x.clone()));
+        assert_eq!(buffer.remaining_hint, 2);
+
+        QuadraticProduct::reserve(&mut buffer, 3);
+        QuadraticProduct::reserve(&mut buffer, 2);
+        assert_eq!(buffer.remaining_hint, 3, "later reservations also combine by max");
+        assert!(buffer.pending);
+
+        let oversized = factor(&arena, 1, 33);
+        QuadraticProduct::push(&mut buffer, product(x.clone(), oversized));
+        assert_eq!(buffer.remaining_hint, 2);
+
+        let other = ExprArenaCell::new(ExprArena::new());
+        let foreign = factor(&other, 0, 1);
+        QuadraticProduct::push(&mut buffer, product(x.clone(), foreign));
+        assert_eq!(buffer.remaining_hint, 1);
+
+        QuadraticProduct::push(&mut buffer, product(x.clone(), x.clone()));
+        assert_eq!(buffer.remaining_hint, 0);
+
+        QuadraticProduct::push(&mut buffer, product(x.clone(), x));
+        assert_eq!(buffer.remaining_hint, 0);
+        assert!(!buffer.same_arena);
     }
 
     #[test]
