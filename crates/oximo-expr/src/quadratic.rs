@@ -19,7 +19,8 @@ pub struct QuadraticTerms {
     pub(crate) linear: Vec<(VarId, f64)>,
     /// The constant term `f(0)`.
     pub(crate) constant: f64,
-    ordered: bool,
+    linear_ordered: bool,
+    quadratic_ordered: bool,
     // Shared sign of the nonconstant coefficients.
     negated: bool,
     canonical: std::sync::OnceLock<Box<CanonicalCoefficients>>,
@@ -33,9 +34,9 @@ impl Default for QuadraticTerms {
 
 #[derive(Clone, Debug, Default)]
 struct CanonicalCoefficients {
-    linear: Vec<(VarId, f64)>,
-    quadratic: Vec<(VarId, VarId, f64)>,
-    diagonal_magnitudes: Option<(f64, f64)>,
+    linear: std::sync::OnceLock<Vec<(VarId, f64)>>,
+    quadratic: std::sync::OnceLock<Vec<(VarId, VarId, f64)>>,
+    diagonal_magnitudes: std::sync::OnceLock<Option<(f64, f64)>>,
 }
 
 impl QuadraticTerms {
@@ -90,7 +91,8 @@ impl QuadraticTerms {
             quadratic,
             linear,
             constant,
-            ordered: true,
+            linear_ordered: true,
+            quadratic_ordered: true,
             negated: false,
             canonical: std::sync::OnceLock::new(),
         }
@@ -98,18 +100,58 @@ impl QuadraticTerms {
 
     /// Sorted, unique, nonzero linear coefficients.
     pub fn linear(&self) -> &[(VarId, f64)] {
-        if self.ordered && !self.negated { &self.linear } else { &self.canonical().linear }
+        if self.linear_ordered && !self.negated {
+            &self.linear
+        } else {
+            self.canonical().linear.get_or_init(|| {
+                let mut linear = self.linear.clone();
+                if self.negated {
+                    for (_, coefficient) in &mut linear {
+                        *coefficient = -*coefficient;
+                    }
+                }
+                if !self.linear_ordered {
+                    linear.sort_unstable_by_key(|(v, _)| v.0);
+                }
+                linear
+            })
+        }
     }
 
     /// Sorted, unique, nonzero polynomial coefficients, each unordered pair once.
     pub fn quadratic(&self) -> &[(VarId, VarId, f64)] {
-        if self.ordered && !self.negated { &self.quadratic } else { &self.canonical().quadratic }
+        if self.quadratic_ordered && !self.negated {
+            &self.quadratic
+        } else {
+            self.canonical().quadratic.get_or_init(|| {
+                let mut quadratic = self.quadratic.clone();
+                if self.negated {
+                    for (_, _, coefficient) in &mut quadratic {
+                        *coefficient = -*coefficient;
+                    }
+                }
+                if !self.quadratic_ordered {
+                    quadratic.sort_unstable_by_key(|(a, b, _)| (b.0, a.0));
+                }
+                quadratic
+            })
+        }
     }
 
     /// Minimum and maximum absolute diagonal polynomial coefficient, or `None`
     /// when there are no diagonal terms.
     pub fn diagonal_coefficient_magnitude_bounds(&self) -> Option<(f64, f64)> {
-        self.canonical().diagonal_magnitudes
+        *self.canonical().diagonal_magnitudes.get_or_init(|| {
+            let mut minimum = f64::INFINITY;
+            let mut maximum: f64 = 0.0;
+            for &(row, column, coefficient) in &self.quadratic {
+                if row == column {
+                    minimum = minimum.min(coefficient.abs());
+                    maximum = maximum.max(coefficient.abs());
+                }
+            }
+            (maximum != 0.0).then_some((minimum, maximum))
+        })
     }
 
     /// Allocated coefficient storage, including cached views and summaries.
@@ -121,7 +163,10 @@ impl QuadraticTerms {
         bytes(self.linear.capacity(), self.quadratic.capacity())
             + self.canonical.get().map_or(0, |v| {
                 std::mem::size_of::<CanonicalCoefficients>()
-                    + bytes(v.linear.capacity(), v.quadratic.capacity())
+                    + bytes(
+                        v.linear.get().map_or(0, Vec::capacity),
+                        v.quadratic.get().map_or(0, Vec::capacity),
+                    )
             })
     }
 
@@ -139,40 +184,22 @@ impl QuadraticTerms {
     }
 
     fn canonical(&self) -> &CanonicalCoefficients {
-        self.canonical.get_or_init(|| {
-            let mut minimum = f64::INFINITY;
-            let mut maximum: f64 = 0.0;
-            for &(row, column, coefficient) in &self.quadratic {
-                if row == column {
-                    minimum = minimum.min(coefficient.abs());
-                    maximum = maximum.max(coefficient.abs());
-                }
-            }
-            let needs_view = !self.ordered || self.negated;
-            let mut view = Box::new(CanonicalCoefficients {
-                linear: if needs_view { self.linear.clone() } else { Vec::new() },
-                quadratic: if needs_view { self.quadratic.clone() } else { Vec::new() },
-                diagonal_magnitudes: (maximum != 0.0).then_some((minimum, maximum)),
-            });
-            if self.negated {
-                for (_, coefficient) in &mut view.linear {
-                    *coefficient = -*coefficient;
-                }
-                for (_, _, coefficient) in &mut view.quadratic {
-                    *coefficient = -*coefficient;
-                }
-            }
-            if !self.ordered {
-                view.linear.sort_unstable_by_key(|(v, _)| v.0);
-                view.quadratic.sort_unstable_by_key(|(a, b, _)| (b.0, a.0));
-            }
-            view
-        })
+        self.canonical.get_or_init(Box::default)
     }
 
-    pub(crate) fn invalidate_order(&mut self) {
-        self.ordered = false;
-        self.invalidate_view();
+    pub(crate) fn invalidate_linear(&mut self, order_changed: bool) {
+        self.linear_ordered &= !order_changed;
+        if let Some(cache) = self.canonical.get_mut() {
+            cache.linear.take();
+        }
+    }
+
+    pub(crate) fn invalidate_quadratic(&mut self, order_changed: bool) {
+        self.quadratic_ordered &= !order_changed;
+        if let Some(cache) = self.canonical.get_mut() {
+            cache.quadratic.take();
+            cache.diagonal_magnitudes.take();
+        }
     }
 
     pub(crate) fn invalidate_view(&mut self) {
@@ -1330,7 +1357,8 @@ mod tests {
             vec![(VarId(64), -4.0), (VarId(1), f64::from_bits(1))],
             -0.0,
         );
-        q.invalidate_order();
+        q.invalidate_linear(true);
+        q.invalidate_quadratic(true);
         q.negate();
 
         let q = std::sync::Arc::new(q);
@@ -1498,7 +1526,8 @@ mod tests {
         assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((2.0, 4.0)));
 
         let cache = q.canonical.get().unwrap();
-        assert_eq!(cache.linear.capacity() + cache.quadratic.capacity(), 0);
+        assert!(cache.linear.get().is_none());
+        assert!(cache.quadratic.get().is_none());
 
         let mut slots = QuadraticSlots::default();
         scale_unique(&mut q, &mut slots, 0.5).unwrap();
@@ -1530,15 +1559,16 @@ mod tests {
         .unwrap();
         let mut slots = QuadraticSlots::default();
         merge_unique(&mut q, &mut slots, NumericLeaf::Affine(&[], 3.0), 1.0).unwrap();
-        assert!(q.ordered);
+        assert!(q.linear_ordered && q.quadratic_ordered);
         assert!(q.canonical.get().is_none());
 
         merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(0)), 1.0).unwrap();
-        assert!(q.ordered, "existing-key updates retain vector order");
+        assert!(q.linear_ordered, "existing-key updates retain vector order");
         assert_eq!(q.linear(), [(VarId(0), 2.0)]);
 
         merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), 1.0).unwrap();
-        assert!(!q.ordered);
+        assert!(!q.linear_ordered);
+        assert!(q.quadratic_ordered);
 
         let pointer = q.linear().as_ptr();
         merge_unique(&mut q, &mut slots, NumericLeaf::Affine(&[], 4.0), 1.0).unwrap();
@@ -1551,12 +1581,161 @@ mod tests {
         assert_eq!(q.linear().as_ptr(), pointer, "rounded-away changes retain the cached view");
 
         merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), 2.0).unwrap();
-        assert!(q.canonical.get().is_none(), "changed values discard stale cached values");
+        assert!(
+            q.canonical.get().unwrap().linear.get().is_none(),
+            "changed values discard stale cached values"
+        );
         assert_eq!(q.linear(), [(VarId(0), 2.0), (VarId(2), 3.0)]);
 
         merge_unique(&mut q, &mut slots, NumericLeaf::Var(VarId(2)), -3.0).unwrap();
         assert!(q.is_canonical());
         assert_eq!(q.linear(), [(VarId(0), 2.0)]);
+    }
+
+    #[test]
+    fn canonical_views_are_initialized_independently() {
+        for linear_first in [false, true] {
+            let mut q = QuadraticTerms::from_canonical_parts(
+                vec![(VarId(2), VarId(2), 4.0), (VarId(0), VarId(0), -2.0)],
+                vec![(VarId(2), 3.0), (VarId(0), 1.0)],
+                0.0,
+            );
+            q.invalidate_linear(true);
+            q.invalidate_quadratic(true);
+            q.negate();
+            let raw_bytes = q.coefficient_storage_bytes();
+            let cache_bytes = std::mem::size_of::<CanonicalCoefficients>();
+
+            if linear_first {
+                assert_eq!(q.linear(), [(VarId(0), -1.0), (VarId(2), -3.0)]);
+            } else {
+                assert_eq!(q.quadratic(), [(VarId(0), VarId(0), 2.0), (VarId(2), VarId(2), -4.0)]);
+            }
+            let cache = q.canonical.get().unwrap();
+            assert_eq!(cache.linear.get().is_some(), linear_first);
+            assert_eq!(cache.quadratic.get().is_some(), !linear_first);
+            assert!(cache.diagonal_magnitudes.get().is_none());
+            let view_bytes = if linear_first {
+                2 * std::mem::size_of::<(VarId, f64)>()
+            } else {
+                2 * std::mem::size_of::<(VarId, VarId, f64)>()
+            };
+            assert_eq!(q.coefficient_storage_bytes(), raw_bytes + cache_bytes + view_bytes);
+
+            assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((2.0, 4.0)));
+            assert_eq!(q.coefficient_storage_bytes(), raw_bytes + cache_bytes + view_bytes);
+            assert_eq!(cache.linear.get().is_some(), linear_first);
+            assert_eq!(cache.quadratic.get().is_some(), !linear_first);
+            assert!(q.is_canonical());
+        }
+    }
+
+    #[test]
+    fn affine_edits_preserve_quadratic_order_and_cached_views() {
+        use crate::quadratic_builder::{NumericLeaf, QuadraticSlots, merge_unique};
+        for unordered in [false, true] {
+            for negated in [false, true] {
+                let mut q = QuadraticTerms::from_coefficients(
+                    vec![
+                        (VarId(0), VarId(0), -2.0),
+                        (VarId(1), VarId(1), 4.0),
+                        (VarId(3), VarId(3), 3.0),
+                    ],
+                    vec![(VarId(0), 1.0), (VarId(2), 2.0), (VarId(4), 3.0)],
+                    0.0,
+                )
+                .unwrap();
+                let mut slots = QuadraticSlots::default();
+                if unordered {
+                    let delta = QuadraticTerms::from_canonical_parts(
+                        vec![(VarId(2), VarId(2), 5.0)],
+                        vec![],
+                        0.0,
+                    );
+                    merge_unique(&mut q, &mut slots, NumericLeaf::Quadratic(&delta), 1.0).unwrap();
+                }
+                if negated {
+                    q.negate();
+                }
+                let sign = q.coefficient_sign();
+                let expected = q.quadratic().to_vec();
+                let pointer = q.quadratic().as_ptr();
+                let bounds = q.diagonal_coefficient_magnitude_bounds();
+                let cache_pointer = std::ptr::from_ref(q.canonical());
+
+                for (leaf, scale) in [
+                    (NumericLeaf::Var(VarId(1)), sign),
+                    (NumericLeaf::Var(VarId(2)), 2.0 * sign),
+                    (NumericLeaf::Var(VarId(0)), -sign),
+                    (NumericLeaf::Affine(&[], 7.0), 1.0),
+                    (NumericLeaf::Var(VarId(4)), f64::from_bits(1)),
+                    (NumericLeaf::Var(VarId(5)), 0.0),
+                ] {
+                    merge_unique(&mut q, &mut slots, leaf, scale).unwrap();
+                    assert!(q.is_canonical());
+                    assert_eq!(q.quadratic_ordered, !unordered);
+                    assert_eq!(q.quadratic(), expected);
+                    assert_eq!(q.quadratic().as_ptr(), pointer);
+                    assert_eq!(std::ptr::from_ref(q.canonical()), cache_pointer);
+                    let cache = q.canonical.get().unwrap();
+                    assert_eq!(cache.quadratic.get().is_some(), unordered || negated);
+                    assert_eq!(cache.diagonal_magnitudes.get().copied(), Some(bounds));
+                }
+                assert_eq!(
+                    q.linear(),
+                    [(VarId(1), sign), (VarId(2), 4.0 * sign), (VarId(4), 3.0 * sign)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quadratic_edits_preserve_linear_views_and_refresh_diagonal_bounds() {
+        use crate::quadratic_builder::{NumericLeaf, QuadraticSlots, merge_unique, scale_unique};
+        let mut q = QuadraticTerms::from_canonical_parts(
+            vec![(VarId(0), VarId(0), -2.0), (VarId(2), VarId(2), 4.0)],
+            vec![(VarId(2), 3.0), (VarId(0), 1.0)],
+            0.0,
+        );
+        q.invalidate_linear(true);
+        q.negate();
+        let pointer = q.linear().as_ptr();
+        q.quadratic();
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((2.0, 4.0)));
+        let mut slots = QuadraticSlots::default();
+
+        for (variable, coefficient, bounds) in [
+            (VarId(0), 1.0, (3.0, 4.0)),
+            (VarId(1), 5.0, (3.0, 5.0)),
+            (VarId(2), 4.0, (3.0, 5.0)),
+            (VarId(0), -3.0, (5.0, 5.0)),
+        ] {
+            let delta = QuadraticTerms::from_canonical_parts(
+                vec![(variable, variable, coefficient)],
+                vec![],
+                0.0,
+            );
+            merge_unique(&mut q, &mut slots, NumericLeaf::Quadratic(&delta), 1.0).unwrap();
+            let cache = q.canonical.get().unwrap();
+            assert!(cache.linear.get().is_some());
+            assert!(cache.quadratic.get().is_none());
+            assert!(cache.diagonal_magnitudes.get().is_none());
+            assert!(!q.linear_ordered);
+            assert_eq!(q.linear().as_ptr(), pointer);
+            assert_eq!(q.linear(), [(VarId(0), -1.0), (VarId(2), -3.0)]);
+            assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some(bounds));
+            assert!(q.is_canonical());
+        }
+        assert_eq!(q.quadratic(), [(VarId(1), VarId(1), 5.0)]);
+
+        scale_unique(&mut q, &mut slots, 0.5).unwrap();
+        assert_eq!(q.linear(), [(VarId(0), -0.5), (VarId(2), -1.5)]);
+        assert_eq!(q.quadratic(), [(VarId(1), VarId(1), 2.5)]);
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((2.5, 2.5)));
+        q.negate();
+        assert_eq!(q.linear(), [(VarId(0), 0.5), (VarId(2), 1.5)]);
+        assert_eq!(q.quadratic(), [(VarId(1), VarId(1), -2.5)]);
+        assert_eq!(q.diagonal_coefficient_magnitude_bounds(), Some((2.5, 2.5)));
     }
 
     #[test]

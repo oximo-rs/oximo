@@ -685,28 +685,31 @@ pub(crate) fn merge_unique(
 
     let constant = sum(left.constant, product(finite(offset).ok()?, scale).ok()?).ok()?;
     let coefficient_scale = scale * left.coefficient_sign();
-    let mut values_changed = false;
-    let mut order_changed = false;
+    let mut linear_values_changed = false;
+    let mut linear_order_changed = false;
     for &(v, c) in linear {
         let slot = slots.linear.get(&v);
         let current = slot.map_or(0.0, |&i| left.linear[i].1);
         let value = sum(current, product(finite(c).ok()?, coefficient_scale).ok()?).ok()?;
-        values_changed |= value.to_bits() != current.to_bits();
-        order_changed |= if slot.is_some() { value == 0.0 } else { value != 0.0 };
+        linear_values_changed |= value.to_bits() != current.to_bits();
+        linear_order_changed |= if slot.is_some() { value == 0.0 } else { value != 0.0 };
     }
 
+    let mut quadratic_values_changed = false;
+    let mut quadratic_order_changed = false;
     for &(a, b, h) in quadratic {
         let slot = slots.quadratic.get(&(a, b));
         let current = slot.map_or(0.0, |&i| left.quadratic[i].2);
         let value = sum(current, product(h, coefficient_scale).ok()?).ok()?;
-        values_changed |= value.to_bits() != current.to_bits();
-        order_changed |= if slot.is_some() { value == 0.0 } else { value != 0.0 };
+        quadratic_values_changed |= value.to_bits() != current.to_bits();
+        quadratic_order_changed |= if slot.is_some() { value == 0.0 } else { value != 0.0 };
     }
 
-    if order_changed {
-        left.invalidate_order();
-    } else if values_changed {
-        left.invalidate_view();
+    if linear_values_changed || linear_order_changed {
+        left.invalidate_linear(linear_order_changed);
+    }
+    if quadratic_values_changed || quadratic_order_changed {
+        left.invalidate_quadratic(quadratic_order_changed);
     }
 
     left.constant = constant;
