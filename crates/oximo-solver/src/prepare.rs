@@ -3,7 +3,7 @@
 use std::cell::Ref;
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oximo_core::{
@@ -114,16 +114,72 @@ pub struct PreparedExpressions {
     arena: ExprArena,
     linear: ExtractionCache<LinearTerms<'static>>,
     quadratic: ExtractionCache<QuadraticTerms>,
+    affine_borrowability: AffineBorrowability,
     resident: Option<Arc<crate::resident::ResidentExpressions>>,
     workset: Option<QuadraticWorkset>,
     operators: OnceLock<Arc<crate::requirements::OperatorSummaries>>,
     #[cfg(test)]
     affine_extractions: AtomicU64,
+    #[cfg(test)]
+    affine_validations: AtomicU64,
 }
 
 const CACHE_EXPRESSIONS: usize = 256;
 const CACHE_COEFFICIENTS: usize = 16_384;
 const CACHE_SHARDS: usize = 16;
+
+// Bound failed probes independently of expression width and cache state.
+const BORROWED_SUM_CHILDREN: usize = 8;
+const AFFINE_BORROWABILITY_ENTRIES: usize = 16;
+
+/// Fully associative eligibility memo for immutable affine children.
+#[derive(Debug)]
+struct AffineBorrowability {
+    entries: [AtomicU64; AFFINE_BORROWABILITY_ENTRIES],
+    next: AtomicUsize,
+}
+
+impl Default for AffineBorrowability {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| AtomicU64::new(u64::MAX)),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl AffineBorrowability {
+    #[inline]
+    fn get(&self, child: ExprId) -> Option<bool> {
+        let key = u64::from(child.0) << 1;
+        self.entries.iter().find_map(|entry| {
+            let cached = entry.load(Ordering::Relaxed);
+            (cached & !1 == key).then_some(cached & 1 != 0)
+        })
+    }
+
+    fn insert(&self, child: ExprId, canonical: bool) {
+        let key = u64::from(child.0) << 1;
+        let record = key | u64::from(canonical);
+        for entry in &self.entries {
+            let cached = entry.load(Ordering::Relaxed);
+            if cached & !1 == key {
+                return;
+            }
+            if cached == u64::MAX {
+                match entry.compare_exchange(u64::MAX, record, Ordering::Relaxed, Ordering::Relaxed)
+                {
+                    Ok(_) => return,
+                    Err(existing) if existing & !1 == key => return,
+                    Err(_) => {}
+                }
+            }
+        }
+
+        self.entries[self.next.fetch_add(1, Ordering::Relaxed) % AFFINE_BORROWABILITY_ENTRIES]
+            .store(record, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug)]
 struct CacheEntries<T> {
@@ -392,7 +448,7 @@ impl<'a> LoweringContext<'a> {
         self.linear(expr).ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
-    /// Borrow direct affine terms; otherwise reuse resident terms or extract uncached.
+    /// Borrow direct or scalar-shifted affine terms; otherwise reuse resident terms or extract uncached.
     ///
     /// # Errors
     /// Returns a lazily named nonlinear-expression error when extraction fails.
@@ -403,8 +459,8 @@ impl<'a> LoweringContext<'a> {
         expr: ExprId,
         location: impl FnOnce() -> String,
     ) -> Result<LinearTerms<'_>, SolverError> {
-        if let ExprNode::Linear { coeffs, constant } = self.arena.get(expr) {
-            return Ok(LinearTerms::borrowed(coeffs, *constant));
+        if let Some(terms) = self.expressions.borrowed_linear(expr) {
+            return Ok(terms);
         }
         if self.expressions.resident.is_some() {
             return self.require_linear(expr, location).map(AffineTerms::into_owned);
@@ -425,7 +481,7 @@ impl<'a> LoweringContext<'a> {
         self.quadratic(expr).ok_or_else(|| self.nonlinear_error(expr, location()))
     }
 
-    /// Borrow direct affine terms or extract a polynomial of degree at most two.
+    /// Borrow direct or scalar-shifted affine terms or extract a polynomial of degree at most two.
     ///
     /// # Errors
     /// Returns a lazily named nonlinear-expression error when extraction fails.
@@ -434,8 +490,11 @@ impl<'a> LoweringContext<'a> {
         expr: ExprId,
         location: impl FnOnce() -> String,
     ) -> Result<PolynomialTerms<'_>, SolverError> {
-        if let ExprNode::Linear { coeffs, constant } = self.arena.get(expr) {
-            return Ok(PolynomialTerms::Affine(LinearTerms::borrowed(coeffs, *constant)));
+        if let Some(terms) = self.expressions.borrowed_linear(expr)
+            // Compound polynomial extraction rejects nonfinite results.
+            && (terms.constant.is_finite() || !matches!(self.arena.get(expr), ExprNode::Add(_)))
+        {
+            return Ok(PolynomialTerms::Affine(terms));
         }
         self.quadratic(expr)
             .map(PolynomialTerms::Quadratic)
@@ -487,11 +546,14 @@ impl PreparedExpressions {
             arena,
             linear: ExtractionCache::default(),
             quadratic: ExtractionCache::default(),
+            affine_borrowability: AffineBorrowability::default(),
             resident: None,
             workset: None,
             operators: OnceLock::new(),
             #[cfg(test)]
             affine_extractions: AtomicU64::new(0),
+            #[cfg(test)]
+            affine_validations: AtomicU64::new(0),
         }
     }
 
@@ -553,7 +615,8 @@ impl PreparedExpressions {
             .and_then(|summaries| summaries.get(root))
             .is_some_and(|operators| operators & !MASK == 0)
     }
-    /// Borrow direct affine terms, reuse cached polynomials, or extract through the affine cache.
+    /// Borrow direct or scalar-shifted affine terms, reuse cached polynomials, or extract.
+    /// Bounded flat sums with one canonical affine child and literal constants borrow its coefficients.
     ///
     /// # Panics
     /// Panics for an expression outside this arena or a poisoned cache.
@@ -567,8 +630,77 @@ impl PreparedExpressions {
                 .quadratic()
                 .is_empty()
                 .then(|| AffineTerms::Borrowed(LinearTerms::borrowed(q.linear(), q.constant()))),
-            _ => self.compound_linear(expr),
+            _ => self.wrapped_linear(expr),
         }
+    }
+
+    #[inline]
+    fn borrowed_linear(&self, expr: ExprId) -> Option<LinearTerms<'_>> {
+        match self.arena.get(expr) {
+            ExprNode::Linear { coeffs, constant } => Some(LinearTerms::borrowed(coeffs, *constant)),
+            ExprNode::Quadratic(q) => {
+                q.quadratic().is_empty().then(|| LinearTerms::borrowed(q.linear(), q.constant()))
+            }
+            ExprNode::Add(children) => self.borrowed_affine_sum(children),
+            _ => None,
+        }
+    }
+
+    // Inspect immediate children only.
+    #[inline(never)]
+    fn borrowed_affine_sum(&self, children: &[ExprId]) -> Option<LinearTerms<'_>> {
+        if children.len() > BORROWED_SUM_CHILDREN {
+            return None;
+        }
+        let mut coefficients = None;
+        let mut constant = 0.0;
+        for &child in children {
+            let node = self.arena.get(child);
+            let (coeffs, offset) = match node {
+                ExprNode::Const(value) => {
+                    constant += value;
+                    continue;
+                }
+                ExprNode::Linear { coeffs, constant } => (coeffs.as_slice(), *constant),
+                ExprNode::Quadratic(q) if q.quadratic().is_empty() => (q.linear(), q.constant()),
+                _ => return None,
+            };
+            if coefficients.is_some() {
+                return None;
+            }
+
+            coefficients = Some((child, coeffs));
+            constant += offset;
+        }
+        let (child, coefficients) = coefficients?;
+        self.can_borrow_affine(child, coefficients)
+            .then(|| LinearTerms::borrowed(coefficients, constant))
+    }
+
+    fn can_borrow_affine(&self, child: ExprId, coefficients: &[(oximo_expr::VarId, f64)]) -> bool {
+        if let Some(canonical) = self.affine_borrowability.get(child) {
+            return canonical;
+        }
+        #[cfg(test)]
+        self.affine_validations.fetch_add(1, Ordering::Relaxed);
+
+        // Raw Linear nodes may contain duplicates, explicit zeros or nonfinite values.
+        // We fall back to extraction unless no canonicalization is needed.
+        let canonical = coefficients.iter().all(|&(_, c)| c.is_finite() && c != 0.0)
+            && coefficients.windows(2).all(|pair| pair[0].0.index() < pair[1].0.index());
+        self.affine_borrowability.insert(child, canonical);
+
+        canonical
+    }
+
+    #[inline(never)]
+    fn wrapped_linear(&self, expr: ExprId) -> Option<AffineTerms<'_>> {
+        if let ExprNode::Add(children) = self.arena.get(expr)
+            && let Some(terms) = self.borrowed_affine_sum(children)
+        {
+            return Some(AffineTerms::Borrowed(terms));
+        }
+        self.compound_linear(expr)
     }
 
     // Keep cache admission out of the direct-affine hot loop in each adapter.
@@ -761,6 +893,542 @@ fn resident_extract<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn affine_borrowability_evicts_by_capacity_without_aliasing_child_ids() {
+        let cache = AffineBorrowability::default();
+        for child in 0..16 {
+            cache.insert(ExprId(child * 16), child % 2 == 0);
+        }
+        cache.insert(ExprId(256), false);
+        assert_eq!(cache.get(ExprId(0)), None);
+        assert_eq!(cache.get(ExprId(256)), Some(false));
+
+        for child in 1..16 {
+            assert_eq!(cache.get(ExprId(child * 16)), Some(child % 2 == 0));
+        }
+    }
+
+    #[test]
+    fn affine_borrowability_keeps_concurrently_published_results() {
+        let cache = AffineBorrowability::default();
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let cache = &cache;
+                scope.spawn(move || {
+                    for i in 0..1002 {
+                        let child = ExprId(((i + worker) % 8) * 16);
+                        let canonical = child.0.is_multiple_of(32);
+                        cache.insert(child, canonical);
+                        assert_eq!(cache.get(child), Some(canonical));
+                    }
+                });
+            }
+        });
+
+        for child in 0..8 {
+            assert_eq!(cache.get(ExprId(child * 16)), Some(child % 2 == 0));
+        }
+    }
+
+    #[test]
+    fn scalar_sums_borrow_one_direct_affine_child_without_cache_work() {
+        use oximo_expr::VarId;
+
+        for quadratic in [false, true] {
+            for width in [0, 1, 1000] {
+                let mut arena = ExprArena::new();
+                let coefficients = (0..width).map(|i| (VarId(i), 2.0)).collect();
+                let affine = if quadratic {
+                    arena.push(ExprNode::Quadratic(Arc::new(
+                        QuadraticTerms::from_coefficients(vec![], coefficients, 3.0).unwrap(),
+                    )))
+                } else {
+                    arena.linear(coefficients, 3.0)
+                };
+
+                let zero = arena.constant(0.0);
+                let five = arena.constant(5.0);
+                let minus_two = arena.constant(-2.0);
+                let roots = [
+                    affine,
+                    arena.push(ExprNode::Add(vec![affine].into())),
+                    arena.push(ExprNode::Add(vec![affine, zero].into())),
+                    arena.push(ExprNode::Add(vec![zero, affine].into())),
+                    arena.push(ExprNode::Add(vec![five, affine, minus_two].into())),
+                ];
+
+                for prepared in [
+                    PreparedExpressions::new(arena.clone()),
+                    PreparedExpressions::for_preparation(arena.clone()),
+                    PreparedExpressions::for_preparation(arena.clone())
+                        .with_resident(Arc::default()),
+                ] {
+                    let coefficients = match prepared.arena.get(affine) {
+                        ExprNode::Linear { coeffs, .. } => coeffs.as_slice(),
+                        ExprNode::Quadratic(q) => q.linear(),
+                        _ => unreachable!(),
+                    };
+                    for root in roots {
+                        let expected = extract_linear(&prepared.arena, root).unwrap();
+                        for _ in 0..3 {
+                            let Some(AffineTerms::Borrowed(terms)) = prepared.linear(root) else {
+                                panic!("scalar-shifted affine terms were copied")
+                            };
+                            assert!(matches!(terms.coeffs, std::borrow::Cow::Borrowed(_)));
+                            assert!(std::ptr::eq(terms.coeffs.as_ref(), coefficients));
+                            assert_eq!(terms.coeffs, expected.coeffs);
+                            assert_eq!(terms.constant.to_bits(), expected.constant.to_bits());
+                        }
+                    }
+
+                    assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 0);
+                    assert!(prepared.linear.shards.get().is_none());
+                    assert!(prepared.quadratic.shards.get().is_none());
+                    assert_eq!(prepared.quadratic_analysis_stats().attempts, 0);
+                    if let Some(resident) = &prepared.resident {
+                        assert!(resident.linear.lock().unwrap().is_empty());
+                        assert!(resident.quadratic.lock().unwrap().is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_sum_constants_keep_extraction_order_and_ieee_arithmetic() {
+        use oximo_expr::VarId;
+
+        for (left, offset, right) in [
+            (-0.0, -0.0, -0.0),
+            (1e16, -1e16, 1.0),
+            (1e16, 1.0, -1e16),
+            (f64::MAX, f64::MAX, -f64::MAX),
+            (f64::INFINITY, f64::NEG_INFINITY, 1.0),
+            (1.0, f64::from_bits(0x7ff8_0000_0000_0042), 2.0),
+        ] {
+            for quadratic in [false, true] {
+                if quadratic && !offset.is_finite() {
+                    continue;
+                }
+                let mut arena = ExprArena::new();
+                let affine = if quadratic {
+                    arena.push(ExprNode::Quadratic(Arc::new(
+                        QuadraticTerms::from_coefficients(vec![], vec![(VarId(0), 1.0)], offset)
+                            .unwrap(),
+                    )))
+                } else {
+                    arena.linear(vec![(VarId(0), 1.0)], offset)
+                };
+
+                let left = arena.constant(left);
+                let right = arena.constant(right);
+                for children in [vec![left, affine, right], vec![affine, left, right]] {
+                    let root = arena.push(ExprNode::Add(children.into()));
+                    let expected = extract_linear(&arena, root).unwrap();
+                    let prepared = PreparedExpressions::new(arena.clone());
+                    let terms = prepared.linear(root).unwrap();
+                    assert_eq!(terms.constant.to_bits(), expected.constant.to_bits());
+                    assert!(matches!(terms.coeffs, std::borrow::Cow::Borrowed(_)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_sums_canonicalize_raw_affine_coefficients() {
+        use oximo_expr::VarId;
+
+        let mut arena = ExprArena::new();
+        let affine = arena.linear(
+            vec![(VarId(2), -0.0), (VarId(0), 2.0), (VarId(0), -1.0), (VarId(1), 0.0)],
+            3.0,
+        );
+        let five = arena.constant(5.0);
+        let root = arena.push(ExprNode::Add(vec![five, affine].into()));
+        let prepared = PreparedExpressions::new(arena);
+        let direct = prepared.linear(affine).unwrap();
+        let wrapped = prepared.linear(root).unwrap();
+        let expected = extract_linear(prepared.arena(), root).unwrap();
+        assert_eq!(direct.coeffs.len(), 4);
+        assert_eq!(wrapped.coeffs, expected.coeffs);
+        assert!(!std::ptr::eq(direct.coeffs.as_ref(), wrapped.coeffs.as_ref()));
+        assert_eq!(wrapped.constant, 8.0);
+    }
+
+    #[test]
+    fn scalar_sum_polynomials_reject_nonfinite_coefficients_and_duplicate_overflow() {
+        use oximo_core::prelude::*;
+
+        let model = Model::new("invalid wrapped polynomial coefficients");
+        variable!(model, x);
+        objective!(model, Min, x);
+
+        let mut roots = Vec::new();
+        {
+            let mut arena = model.__sum_context().borrow_mut();
+            let zero = arena.constant(0.0);
+            for values in [vec![f64::INFINITY], vec![f64::NAN], vec![f64::MAX, f64::MAX]] {
+                let coefficients = values.into_iter().map(|c| (x.var_id().unwrap(), c)).collect();
+                let affine = arena.linear(coefficients, 0.0);
+                for children in [vec![affine, zero], vec![zero, affine]] {
+                    roots.push(arena.push(ExprNode::Add(children.into())));
+                }
+            }
+        }
+
+        let prepared = LoweringContext::new(&model).unwrap();
+        for root in roots {
+            assert!(extract_quadratic(prepared.arena(), root).is_none());
+            for _ in 0..3 {
+                let error = prepared.require_polynomial(root, || "invalid wrapped row".into());
+                assert!(matches!(
+                    error,
+                    Err(SolverError::Nonlinear { location, .. }) if location == "invalid wrapped row"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_sum_polynomials_merge_duplicate_coefficients_before_upload() {
+        use oximo_core::prelude::*;
+
+        let model = Model::new("duplicate wrapped polynomial coefficients");
+        variable!(model, x);
+        objective!(model, Min, x);
+
+        let root = {
+            let mut arena = model.__sum_context().borrow_mut();
+            let affine =
+                arena.linear(vec![(x.var_id().unwrap(), 2.0), (x.var_id().unwrap(), -1.0)], 3.0);
+            let zero = arena.constant(0.0);
+            arena.push(ExprNode::Add(vec![affine, zero].into()))
+        };
+        let prepared = LoweringContext::new(&model).unwrap();
+        for _ in 0..3 {
+            let terms = prepared.require_polynomial(root, || "duplicate row".into()).unwrap();
+            let coefficients = match &terms {
+                PolynomialTerms::Affine(terms) => terms.coeffs.as_ref(),
+                PolynomialTerms::Quadratic(terms) => terms.linear(),
+            };
+            assert_eq!(coefficients, &[(x.var_id().unwrap(), 1.0)]);
+
+            let linear = prepared.linear(root).unwrap();
+            assert_eq!(linear.coeffs.as_ref(), coefficients);
+
+            let streamed = prepared.require_linear_once(root, || "duplicate row".into()).unwrap();
+            assert_eq!(streamed.coeffs.as_ref(), coefficients);
+        }
+    }
+
+    #[test]
+    fn scalar_sum_borrowability_is_memoized_for_valid_and_invalid_coefficients() {
+        use oximo_expr::VarId;
+
+        for valid in [false, true] {
+            let mut arena = ExprArena::new();
+            let mut coefficients: Vec<_> = (0..1000).map(|i| (VarId(i), 1.0)).collect();
+            if !valid {
+                coefficients[999].0 = VarId(998);
+            }
+            let affine = arena.linear(coefficients, 3.0);
+            let zero = arena.constant(0.0);
+            let root = arena.push(ExprNode::Add(vec![affine, zero].into()));
+            let prepared = PreparedExpressions::new(arena);
+            for _ in 0..501 {
+                assert_eq!(prepared.borrowed_linear(root).is_some(), valid);
+            }
+            assert_eq!(prepared.affine_validations.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn scalar_sum_borrowability_keeps_colliding_children_memoized() {
+        use oximo_expr::VarId;
+
+        let mut arena = ExprArena::new();
+        let good = arena.linear(vec![(VarId(0), 1.0)], 0.0);
+        for _ in 1..CACHE_SHARDS {
+            arena.push(ExprNode::Const(0.0));
+        }
+        let bad = arena.linear(vec![(VarId(0), 2.0), (VarId(0), -1.0)], 0.0);
+        assert_eq!(good.index() % CACHE_SHARDS, bad.index() % CACHE_SHARDS);
+
+        let zero = arena.constant(0.0);
+        let good = arena.push(ExprNode::Add(vec![good, zero].into()));
+        let bad = arena.push(ExprNode::Add(vec![bad, zero].into()));
+        let prepared = PreparedExpressions::new(arena);
+        for _ in 0..501 {
+            assert!(prepared.borrowed_linear(good).is_some());
+            assert!(prepared.borrowed_linear(bad).is_none());
+        }
+        assert_eq!(prepared.affine_validations.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn scalar_sum_borrowability_retains_a_full_cache_of_colliding_children() {
+        use oximo_expr::VarId;
+
+        let mut arena = ExprArena::new();
+        let mut leaves = Vec::new();
+        for i in 0..16 {
+            while arena.len() < i * 16 {
+                arena.push(ExprNode::Const(0.0));
+            }
+            let valid = i % 2 == 0;
+            let mut coefficients: Vec<_> = (0..1000).map(|j| (VarId(j), 1.0)).collect();
+            if !valid {
+                coefficients[999].0 = VarId(998);
+            }
+            let leaf = arena.linear(coefficients, 0.0);
+            assert_eq!(leaf.index(), i * 16);
+
+            leaves.push((leaf, valid));
+        }
+
+        let zero = arena.constant(0.0);
+        let roots: Vec<_> = leaves
+            .into_iter()
+            .map(|(leaf, valid)| (arena.push(ExprNode::Add(vec![leaf, zero].into())), valid))
+            .collect();
+        let prepared = PreparedExpressions::new(arena);
+
+        for i in 0..1002 {
+            let (root, valid) = roots[i % roots.len()];
+            assert_eq!(prepared.borrowed_linear(root).is_some(), valid);
+        }
+        assert_eq!(prepared.affine_validations.load(Ordering::Relaxed), 16);
+    }
+
+    #[test]
+    fn scalar_sum_probe_is_bounded_and_wide_fallbacks_keep_cached_terms() {
+        use oximo_expr::VarId;
+
+        let mut arena = ExprArena::new();
+        let affine = arena.linear(vec![(VarId(0), 2.0)], 3.0);
+        let zero = arena.constant(0.0);
+        let mut children = vec![zero; BORROWED_SUM_CHILDREN - 1];
+        children.push(affine);
+        let at_limit = arena.push(ExprNode::Add(children.clone().into()));
+        children.push(zero);
+        let over_limit = arena.push(ExprNode::Add(children.into()));
+        let mut roots = vec![over_limit];
+        for affine_children in 0..=2 {
+            let mut children = vec![zero; 4096];
+            children.extend(std::iter::repeat_n(affine, affine_children));
+            roots.push(arena.push(ExprNode::Add(children.into())));
+        }
+
+        let prepared = PreparedExpressions::for_preparation(arena);
+        assert!(prepared.borrowed_linear(at_limit).is_some());
+
+        let validations = prepared.affine_validations.load(Ordering::Relaxed);
+        for root in roots {
+            assert!(prepared.borrowed_linear(root).is_none());
+            let expected = extract_linear(prepared.arena(), root).unwrap();
+            prepared.linear(root).unwrap();
+            let Some(AffineTerms::Shared(first)) = prepared.linear(root) else {
+                panic!("wide fallback was not cached")
+            };
+            assert_eq!(first.coeffs, expected.coeffs);
+            assert_eq!(first.constant.to_bits(), expected.constant.to_bits());
+            for _ in 0..501 {
+                let Some(AffineTerms::Shared(next)) = prepared.linear(root) else {
+                    panic!("wide fallback was re-extracted")
+                };
+                assert!(Arc::ptr_eq(&first, &next));
+            }
+        }
+        assert_eq!(prepared.affine_validations.load(Ordering::Relaxed), validations);
+    }
+
+    #[test]
+    fn scalar_sum_fast_path_leaves_other_shapes_to_existing_extraction() {
+        use oximo_expr::{UnaryOp, VarId};
+
+        let mut arena = ExprArena::new();
+        let affine = arena.linear(vec![(VarId(0), 2.0)], 3.0);
+        let zero = arena.constant(0.0);
+        let one = arena.constant(1.0);
+        let parameter = arena.new_param(7.0);
+        let parameter = arena.param(parameter);
+        let var = arena.var(VarId(1));
+        let nested = arena.push(ExprNode::Add(vec![affine, zero].into()));
+        let square = arena.push(ExprNode::Quadratic(Arc::new(
+            QuadraticTerms::from_coefficients(vec![(VarId(0), VarId(0), 1.0)], vec![], 0.0)
+                .unwrap(),
+        )));
+        let nonlinear = arena.push(ExprNode::Unary(UnaryOp::Sin, var));
+        let roots = [
+            arena.push(ExprNode::Add(vec![affine, affine].into())),
+            arena.push(ExprNode::Add(vec![nested, zero].into())),
+            arena.push(ExprNode::Add(vec![affine, parameter].into())),
+            arena.push(ExprNode::Add(vec![affine, var].into())),
+            arena.push(ExprNode::Mul(vec![one, affine].into())),
+            arena.push(ExprNode::Unary(UnaryOp::Neg, affine)),
+            arena.push(ExprNode::Add(vec![affine, square].into())),
+            arena.push(ExprNode::Add(vec![affine, nonlinear].into())),
+            arena.push(ExprNode::Add(vec![zero, one].into())),
+            arena.push(ExprNode::Add(vec![].into())),
+            square,
+        ];
+
+        let prepared = PreparedExpressions::for_preparation(arena);
+        for root in roots {
+            assert!(prepared.borrowed_linear(root).is_none());
+            let expected = extract_linear(&prepared.arena, root);
+            for _ in 0..3 {
+                let actual = prepared.linear(root);
+                assert_eq!(actual.is_some(), expected.is_some());
+                if let (Some(actual), Some(expected)) = (actual, &expected) {
+                    assert_eq!(actual.coeffs, expected.coeffs);
+                    assert_eq!(actual.constant.to_bits(), expected.constant.to_bits());
+                }
+            }
+        }
+        assert!(prepared.affine_extractions.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn scalar_sums_borrow_through_all_preparation_entry_points_and_resident_reuse() {
+        use crate::resident::PersistentPreparation;
+        use oximo_core::prelude::*;
+
+        for quadratic in [false, true] {
+            let model = Model::new("scalar sum entry points");
+            variable!(model, x);
+            param!(model, p = 1.0);
+            constraint!(model, parameter_row, x <= p);
+            let row = constraint!(model, row, x <= 20.0);
+
+            let arena = model.__sum_context();
+            let (affine, root) = {
+                let mut arena = arena.borrow_mut();
+                let coefficients = vec![(x.var_id().unwrap(), 2.0)];
+                let affine = if quadratic {
+                    arena.push(ExprNode::Quadratic(Arc::new(
+                        QuadraticTerms::from_coefficients(vec![], coefficients, 3.0).unwrap(),
+                    )))
+                } else {
+                    arena.linear(coefficients, 3.0)
+                };
+                let five = arena.constant(5.0);
+                let minus_two = arena.constant(-2.0);
+                let root = arena.push(ExprNode::Add(vec![five, affine, minus_two].into()));
+                (affine, root)
+            };
+
+            let expression = oximo_expr::Expr::new(root, arena).as_affine().unwrap();
+            model.set_constraint_function(row, expression.into_function()).unwrap();
+            objective!(model, Min, x);
+
+            let mut persistent = PersistentPreparation::default();
+            for (round, value) in [1.0, 2.0, 2.0].into_iter().enumerate() {
+                model.set_param(p, value).unwrap();
+                let fresh = LoweringContext::new(&model).unwrap();
+                let resident = persistent.prepare(&model).unwrap();
+                for prepared in [&fresh, &resident] {
+                    let coefficients = match prepared.arena.get(affine) {
+                        ExprNode::Linear { coeffs, .. } => coeffs.as_slice(),
+                        ExprNode::Quadratic(q) => q.linear(),
+                        _ => unreachable!(),
+                    };
+                    for _ in 0..3 {
+                        let terms = prepared.linear(root).unwrap();
+                        let streamed = prepared
+                            .require_linear_once(root, || panic!("eager streaming diagnostic"))
+                            .unwrap();
+                        let PolynomialTerms::Affine(polynomial) = prepared
+                            .require_polynomial(root, || panic!("eager polynomial diagnostic"))
+                            .unwrap()
+                        else {
+                            panic!("scalar sum was extracted as a quadratic")
+                        };
+
+                        let required = prepared
+                            .require_linear(root, || panic!("eager affine diagnostic"))
+                            .unwrap();
+                        for result in [&*terms, &streamed, &polynomial, &*required] {
+                            assert!(matches!(result.coeffs, std::borrow::Cow::Borrowed(_)));
+                            assert!(std::ptr::eq(result.coeffs.as_ref(), coefficients));
+                            assert_eq!(result.constant, 6.0);
+                        }
+                        let source_row = &prepared.constraints().algebraic()[row.row_id().index()];
+                        assert_eq!(
+                            shifted_bounds(source_row, terms.constant),
+                            (f64::NEG_INFINITY, 14.0)
+                        );
+                    }
+                    assert_eq!(prepared.affine_extractions.load(Ordering::Relaxed), 0);
+                    assert!(prepared.linear.shards.get().is_none());
+                    assert!(prepared.quadratic.shards.get().is_none());
+                    assert_eq!(prepared.quadratic_analysis_stats().attempts, 0);
+                    if let Some(cache) = &prepared.resident {
+                        assert!(cache.linear.lock().unwrap().is_empty());
+                        assert!(cache.quadratic.lock().unwrap().is_empty());
+                        if round > 0 {
+                            assert!(cache.admits(root));
+                        }
+                    }
+                }
+                drop(resident);
+                persistent.commit();
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_sum_polynomial_fallback_keeps_nonfinite_result_rejection() {
+        use oximo_core::prelude::*;
+
+        let model = Model::new("nonfinite scalar sum");
+        variable!(model, x);
+        objective!(model, Min, x);
+
+        let arena = model.__sum_context();
+        let (root, square, nested) = {
+            let mut arena = arena.borrow_mut();
+            let affine = arena.linear(vec![(x.var_id().unwrap(), 2.0)], f64::MAX);
+            let large = arena.constant(f64::MAX);
+            let root = arena.push(ExprNode::Add(vec![affine, large].into()));
+            let square = arena.push(ExprNode::Quadratic(Arc::new(
+                QuadraticTerms::from_coefficients(
+                    vec![(x.var_id().unwrap(), x.var_id().unwrap(), 1.0)],
+                    vec![],
+                    0.0,
+                )
+                .unwrap(),
+            )));
+            let nested = arena.push(ExprNode::Add(vec![square, large].into()));
+            (root, square, nested)
+        };
+        let prepared = LoweringContext::new(&model).unwrap();
+        assert_eq!(prepared.linear(root).unwrap().constant, f64::INFINITY);
+        assert_eq!(
+            prepared.require_linear_once(root, || panic!("affine sum failed")).unwrap().constant,
+            f64::INFINITY
+        );
+
+        let error = prepared.require_polynomial(root, || "overflowed sum".into()).unwrap_err();
+        assert!(matches!(
+            error,
+            SolverError::Nonlinear { location, .. } if location == "overflowed sum"
+        ));
+
+        for root in [square, nested] {
+            assert!(matches!(
+                prepared.require_polynomial(root, || panic!("quadratic sum failed")).unwrap(),
+                PolynomialTerms::Quadratic(_)
+            ));
+
+            let error = prepared.require_linear_once(root, || "quadratic sum".into()).unwrap_err();
+            assert!(matches!(
+                error,
+                SolverError::Nonlinear { location, .. } if location == "quadratic sum"
+            ));
+        }
+    }
 
     fn polynomial_caches(arena: &ExprArena, root: ExprId) -> [PreparedExpressions; 2] {
         let caches = [

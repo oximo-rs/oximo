@@ -979,6 +979,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wrapped_duplicate_affine_row_uploads_merged_coefficient() {
+        use oximo_core::prelude::*;
+
+        let model = Model::new("wrapped duplicate affine row");
+        variable!(model, x);
+        let row = constraint!(model, row, x <= 4.0);
+        objective!(model, Min, x);
+
+        let arena = model.__sum_context();
+        let root = {
+            let mut arena = arena.borrow_mut();
+            let affine =
+                arena.linear(vec![(x.var_id().unwrap(), 2.0), (x.var_id().unwrap(), -1.0)], 0.0);
+            let zero = arena.constant(0.0);
+            arena.push(oximo_expr::ExprNode::Add(vec![affine, zero].into()))
+        };
+
+        let expression = oximo_expr::Expr::new(root, arena).as_affine().unwrap();
+        model.set_constraint_function(row, expression.into_function()).unwrap();
+        let prepared = LoweringContext::new(&model).unwrap();
+        let (task, _) = build_task_prepared(&model, &MosekOptions::default(), &prepared).unwrap();
+        assert_eq!(task.get_aij(0, 0).unwrap(), 1.0);
+    }
+
+    #[test]
     fn native_hessian_upload_uses_checked_polynomial_conversion() {
         let terms = QuadraticTerms::from_coefficients(
             vec![(VarId(0), VarId(0), 3.0), (VarId(1), VarId(0), 5.0)],
