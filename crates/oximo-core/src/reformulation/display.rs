@@ -79,7 +79,24 @@ impl fmt::Display for crate::gdp::GdpReformulationReport {
             plural(self.generated_rows.len()),
             self.hull_variables.len(),
             if self.hull_variables.len() == 1 { "copy" } else { "copies" }
-        )
+        )?;
+        if !self.hull_epigraphs.is_empty() {
+            write!(
+                f,
+                ", {} conic epigraph{}",
+                self.hull_epigraphs.len(),
+                plural(self.hull_epigraphs.len())
+            )?;
+        }
+        if !self.hull_quadratic_fallbacks.is_empty() {
+            write!(
+                f,
+                ", {} quadratic Hull fallback{}",
+                self.hull_quadratic_fallbacks.len(),
+                plural(self.hull_quadratic_fallbacks.len())
+            )?;
+        }
+        Ok(())
     }
 }
 
