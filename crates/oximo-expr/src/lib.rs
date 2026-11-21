@@ -8,6 +8,7 @@ mod arena;
 mod captured;
 mod classify;
 mod compensated_sum;
+mod convexity;
 pub mod degree;
 mod eval;
 mod fold;
@@ -38,6 +39,7 @@ pub use captured::CapturedExpr;
 #[cfg(test)]
 pub use classify::ClassificationStats;
 pub use classify::{ExprClass, classify};
+pub use convexity::CurvatureError;
 pub use degree::{
     Affine, Constant, Degree, Dynamic, ExpressionDegree, LeafDegree, Nonlinear, ParameterDegree,
     Quadratic, VariableDegree,
