@@ -395,6 +395,7 @@ impl PlanBuilder {
             .iter()
             .flat_map(|r| r.residual.iter().map(|t| t.id))
             .chain(self.report.hull_variables.iter().map(|m| m.activation))
+            .chain(self.report.hull_epigraphs.iter().map(|m| m.activation))
             .collect();
 
         while let Some(id) = stack.pop() {
@@ -458,6 +459,9 @@ impl PlanBuilder {
         }
 
         for mapping in &mut self.report.hull_variables {
+            mapping.activation = remap(mapping.activation);
+        }
+        for mapping in &mut self.report.hull_epigraphs {
             mapping.activation = remap(mapping.activation);
         }
     }
@@ -641,6 +645,9 @@ impl ValidatedPlan {
         };
 
         for mapping in &mut report.hull_variables {
+            mapping.activation = remap(mapping.activation);
+        }
+        for mapping in &mut report.hull_epigraphs {
             mapping.activation = remap(mapping.activation);
         }
 

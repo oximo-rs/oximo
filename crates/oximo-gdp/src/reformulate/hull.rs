@@ -9,25 +9,30 @@
 //!   convex sets using the perspective function", Computational Optimization and
 //!   Applications 76, 589–614.
 //!   <https://doi.org/10.1007/s10589-020-00176-0>
+//! - Sergey Gusev and David E. Bernal Neira, "Exact Hull Reformulation for
+//!   Quadratically Constrained Generalized Disjunctive Programs",
+//!   <https://doi.org/10.48550/arXiv.2508.16093>
 
 use super::big_m::{BigMRowAnalysis, analyze_big_m_row, checked_big_m_row, row_m};
 use super::plan::{Linear, PlanBuilder};
 use super::{
     BigMValues, GdpError, GdpHullDomainContext, GdpHullScope, GdpMethod, GdpReformulationOptions,
-    GdpSizeLimits, Hull, HullInclusivePolicy,
+    GdpSizeLimits, Hull, HullInclusivePolicy, HullQuadratic,
 };
 use crate::bounds::{BoundError, Bounder, Bounds};
 use oximo_core::gdp::{
     BooleanId, BoundSide, DisjunctConstraintId, DisjunctConstraintRecord, DisjunctionId,
     DisjunctionKind, GdpDisjunctionArtifacts, GdpHullActivation, GdpHullBranchSumMapping,
-    GdpHullPatternMapping, GdpHullVariableMapping, GdpMethodKind, GdpRowArtifacts, GdpSnapshot,
+    GdpHullEpigraphMapping, GdpHullPatternMapping, GdpHullQuadraticFallback,
+    GdpHullQuadraticFallbackReason, GdpHullUnshiftedMapping, GdpHullVariableMapping, GdpMethodKind,
+    GdpRowArtifacts, GdpSnapshot,
 };
 use oximo_core::{
     Domain, ExprArena, ExprId, ExprNode, GeneratedConstraintId, GeneratedVarId, Model, VarId,
 };
 use oximo_expr::{
-    AffineResidual, EvalContext, LinearTerms, ParamId, SignedExpr, evaluate, extract_linear,
-    split_affine, split_linear,
+    AffineResidual, CurvatureError, EvalContext, LinearTerms, ParamId, QuadraticTerms, SignedExpr,
+    evaluate, extract_linear, split_affine, split_linear,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
@@ -162,6 +167,7 @@ enum Origin {
     Numeric(usize),
     Disjunction(usize),
     Bounds(usize),
+    Unshifted(usize),
 }
 
 /// Whether a coordinate is physical or local to a Boolean activation subtree.
@@ -321,6 +327,7 @@ impl HullSupport {
 
 struct Substitution {
     activation: GdpHullActivation,
+    branch: Option<BooleanId>,
     scope: GdpHullScope,
     guard: Linear,
     denominator: Option<ExprId>,
@@ -376,6 +383,7 @@ struct Compiler<'a> {
     activation_nodes: FxHashMap<GdpHullActivation, ExprId>,
     branch_sum_weights: FxHashMap<VarId, DisjunctionId>,
     has_children: Vec<bool>,
+    unshifted: FxHashMap<VarId, VarId>,
 }
 
 impl PlanBuilder {
@@ -446,6 +454,7 @@ impl PlanBuilder {
             activation_nodes: FxHashMap::default(),
             branch_sum_weights: FxHashMap::default(),
             has_children: vec![false; data.booleans.len()],
+            unshifted: FxHashMap::default(),
             row_reports: data
                 .rows
                 .iter()
@@ -974,6 +983,9 @@ impl Compiler<'_> {
                 Origin::Numeric(i) => self.row_reports[i].constraints.push(generated),
                 Origin::Disjunction(i) => self.disjunction_reports[i].constraints.push(generated),
                 Origin::Bounds(i) => self.plan.report.hull_variables[i].constraints.push(generated),
+                Origin::Unshifted(i) => {
+                    self.plan.report.hull_unshifted[i].constraints.push(generated);
+                }
             }
         }
 
@@ -1298,6 +1310,7 @@ impl Compiler<'_> {
             );
             let mut substitution = Substitution {
                 activation: self.activation_kind(disjunction, &guard),
+                branch,
                 scope,
                 guard,
                 denominator: None,
@@ -1366,6 +1379,17 @@ impl Compiler<'_> {
         let mut output = Vec::new();
         let (terms, residual) = row.body.split(&self.arena);
         let terms = terms.into_owned();
+
+        if settings.quadratic() != HullQuadratic::Perspective && !residual.is_empty() {
+            match self.homogeneous_residual(&terms, &residual, substitution) {
+                Ok(quadratic) => {
+                    let conic = settings.quadratic() == HullQuadratic::Conic;
+                    return self.homogeneous_hull_row(row, &terms, &quadratic, substitution, conic);
+                }
+                Err(reason) => self.record_fallback(&row, None, reason),
+            }
+        }
+
         let mut transformed = Linear::default();
         transformed = transformed.add(substitution.guard.clone().scaled(terms.constant));
 
@@ -1429,6 +1453,323 @@ impl Compiler<'_> {
         }
 
         Ok(output)
+    }
+
+    /// The residual as one quadratic in copied coordinates, or why the row
+    /// needs the general perspective.
+    fn homogeneous_residual(
+        &self,
+        terms: &LinearTerms<'_>,
+        residual: &[SignedExpr],
+        substitution: &Substitution,
+    ) -> Result<QuadraticTerms, GdpHullQuadraticFallbackReason> {
+        let mut parts = Vec::with_capacity(residual.len());
+        for term in residual {
+            let q = oximo_expr::extract_quadratic(&self.arena, term.id)
+                .ok_or(GdpHullQuadraticFallbackReason::NotQuadratic)?;
+            parts.push((q, if term.neg { -1.0 } else { 1.0 }));
+        }
+
+        let copied = |v: VarId| substitution.copies.contains_key(&v);
+        if !terms.coeffs.iter().all(|&(v, _)| copied(v))
+            || !parts.iter().all(|(q, _)| q.variables().all(copied))
+        {
+            return Err(GdpHullQuadraticFallbackReason::UncopiedCoordinate);
+        }
+
+        let mut quadratic = Vec::new();
+        let mut linear = Vec::new();
+        let mut constant = 0.0;
+        for (q, sign) in &parts {
+            quadratic.extend(q.quadratic().iter().map(|&(a, b, c)| (a, b, sign * c)));
+            linear.extend(q.linear().iter().map(|&(v, c)| (v, sign * c)));
+            constant += sign * q.constant();
+        }
+
+        QuadraticTerms::from_coefficients(quadratic, linear, constant)
+            .map_err(|_| GdpHullQuadraticFallbackReason::NotQuadratic)
+    }
+
+    /// Record a source row that did not use the requested form.
+    fn record_fallback(
+        &mut self,
+        row: &Row,
+        side: Option<BoundSide>,
+        reason: GdpHullQuadraticFallbackReason,
+    ) {
+        if let Some(source) = row.kind.source_constraint() {
+            self.plan.report.hull_quadratic_fallbacks.push(GdpHullQuadraticFallback {
+                source,
+                side,
+                reason,
+            });
+        }
+    }
+
+    /// Exact quadratic Hull: `y^2 * h(x)` with `x = z/y + r`, written as a
+    /// polynomial in the copies `z` and the activation `y`.
+    ///
+    /// Each coordinate `z` becomes `u = z + r*y`.
+    /// With `conic`, any one-sided source row with a convex quadratic part
+    /// uses the conic epigraph instead.
+    fn homogeneous_hull_row(
+        &mut self,
+        row: Row,
+        terms: &LinearTerms<'_>,
+        residual: &QuadraticTerms,
+        substitution: &Substitution,
+        conic: bool,
+    ) -> Result<Vec<Row>, GdpError> {
+        let mut merged: Vec<_> = terms.coeffs.iter().chain(residual.linear()).copied().collect();
+        merged.sort_unstable_by_key(|(v, _)| v.index());
+        merged.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 += later.1;
+            }
+            same
+        });
+        merged.retain(|&(_, c)| c != 0.0);
+
+        let constant = terms.constant + residual.constant();
+        if !constant.is_finite() || merged.iter().any(|(_, c)| !c.is_finite()) {
+            return Err(GdpError::NumericOverflow);
+        }
+        let terms = &LinearTerms::owned(merged, constant);
+
+        let guard = &substitution.guard;
+        let lifted: FxHashMap<VarId, Linear> = terms
+            .coeffs
+            .iter()
+            .map(|&(v, _)| v)
+            .chain(residual.variables())
+            .map(|v| (v, lifted(substitution, v)))
+            .collect();
+
+        let mut transformed = guard.clone().scaled(terms.constant);
+        for &(v, c) in terms.coeffs.iter() {
+            transformed = transformed.add(lifted[&v].clone().scaled(c));
+        }
+
+        // Cancelled or hidden affine terms where the exact affine Hull applies.
+        let affine_only = residual.quadratic().is_empty();
+        let mut quadratic = Products::default();
+        for &(a, b, c) in residual.quadratic() {
+            quadratic.multiply(&lifted[&a], &lifted[&b], c);
+        }
+
+        let source = row.kind.source_constraint().filter(|_| conic);
+        let mut curvature = Curvature::new(residual);
+
+        let mut output = Vec::new();
+        for (bound, lower, upper) in sides(row.lower, row.upper) {
+            self.plan.record_row_expansions(1)?;
+            let side = if lower.is_finite() { BoundSide::Lower } else { BoundSide::Upper };
+            let affine = checked_affine(
+                &mut self.arena,
+                transformed.clone().add(guard.clone().scaled(-bound)),
+                terms,
+                substitution,
+                bound,
+                (&row.name, side, row.roundoff),
+            )?;
+
+            let body = if affine_only {
+                self.arena.affine_body(affine)?
+            } else {
+                let sign = match (lower.is_finite(), upper.is_finite()) {
+                    (true, false) => Some(-1.0),
+                    (false, true) => Some(1.0),
+                    _ => None,
+                };
+                if let Some((source, sign)) = source.zip(sign) {
+                    let conic = match curvature.convex(sign) {
+                        Ok(()) => self.conic_side(
+                            &row,
+                            (source, sign, side, bound),
+                            terms,
+                            residual,
+                            &affine,
+                            substitution,
+                        )?,
+                        Err(reason) => Err(reason),
+                    };
+                    match conic {
+                        Ok(rows) => {
+                            output.extend(rows);
+                            continue;
+                        }
+                        Err(reason) => self.record_fallback(&row, Some(side), reason),
+                    }
+                }
+
+                let mut products = quadratic.clone();
+                products.multiply(guard, &affine, 1.0);
+                products.body(&mut self.arena)?
+            };
+
+            output.push(Row {
+                body,
+                lower,
+                upper,
+                name: row.name.clone(),
+                origins: row.origins.clone(),
+                kind: RowKind::Reformulated,
+                enforcement: RowEnforcement::Homogeneous { activation: substitution.activation },
+                roundoff: row.roundoff,
+            });
+        }
+
+        Ok(output)
+    }
+
+    /// Conic exact Hull of one convex side `sign * h(x) <= 0`.
+    fn conic_side(
+        &mut self,
+        row: &Row,
+        (source, sign, side, bound): (DisjunctConstraintId, f64, BoundSide, f64),
+        terms: &LinearTerms<'_>,
+        residual: &QuadraticTerms,
+        affine: &Linear,
+        substitution: &Substitution,
+    ) -> Result<Result<Vec<Row>, GdpHullQuadraticFallbackReason>, GdpError> {
+        // At an integer point `t <= -sign*(c'x + d)`, bounded over the box.
+        // And here `terms` already holds the residual's affine part.
+        let mut upper = -sign * (terms.constant - bound);
+        for &(v, c) in terms.coeffs.iter() {
+            let interval = self.boxes[v.index()];
+            upper += (-sign * c * interval.lower).max(-sign * c * interval.upper);
+        }
+        if !upper.is_finite() {
+            return Ok(Err(GdpHullQuadraticFallbackReason::UnboundedEpigraph));
+        }
+        let upper = upper.max(0.0);
+
+        self.plan.record_row_expansions(2)?;
+        let guard = &substitution.guard;
+        let epigraph = self.auxiliary(0.0, upper, substitution.branch)?;
+        let activation = self.activation_node(substitution.activation, guard)?;
+        self.plan.report.hull_epigraphs.push(GdpHullEpigraphMapping {
+            source,
+            side,
+            generated: GeneratedVarId::from_raw(epigraph),
+            disjunction: match substitution.scope {
+                GdpHullScope::Disjunction(id) => Some(id),
+                GdpHullScope::Standalone(_) => None,
+            },
+            indicator: match substitution.activation {
+                GdpHullActivation::Indicator { indicator, .. } => Some(indicator),
+                _ => None,
+            },
+            activation,
+            activation_kind: substitution.activation,
+            upper,
+        });
+
+        // Solvers usually recognize `s'Qs <= t * y` as a rotated cone only when `y`
+        // appears in the bilinear term alone.
+        // Shifted copies get an unshifted variable `s = z + r*y` defined by a homogeneous row.
+        let mut output = Vec::new();
+        let mut coordinates = FxHashMap::default();
+        for &(a, b, _) in residual.quadratic() {
+            for v in [a, b] {
+                if coordinates.contains_key(&v) {
+                    continue;
+                }
+                let coordinate = self.unshifted_coordinate(v, substitution, &mut output)?;
+                coordinates.insert(v, coordinate);
+            }
+        }
+
+        let mut cone = Products::default();
+        for &(a, b, c) in residual.quadratic() {
+            cone.multiply(
+                &Linear::variable(coordinates[&a]),
+                &Linear::variable(coordinates[&b]),
+                sign * c,
+            );
+        }
+        cone.multiply(&Linear::variable(epigraph), guard, -1.0);
+
+        let rows = [
+            (cone.body(&mut self.arena)?, row.roundoff),
+            (
+                self.arena
+                    .affine_body(Linear::variable(epigraph).add(affine.clone().scaled(sign)))?,
+                row.roundoff,
+            ),
+            (
+                self.arena
+                    .affine_body(Linear::variable(epigraph).add(guard.clone().scaled(-upper)))?,
+                32.0 * f64::EPSILON,
+            ),
+        ];
+
+        output.extend(rows.into_iter().map(|(body, roundoff)| Row {
+            body,
+            lower: f64::NEG_INFINITY,
+            upper: 0.0,
+            name: row.name.clone(),
+            origins: row.origins.clone(),
+            kind: RowKind::Reformulated,
+            enforcement: RowEnforcement::Homogeneous { activation: substitution.activation },
+            roundoff,
+        }));
+
+        Ok(Ok(output))
+    }
+
+    /// The copy itself without a reference, otherwise a local variable
+    /// `s = z + r*y`, so `s = y*x` at integer points.
+    ///
+    /// Coordinates are shared by all conic rows of a copy within one
+    /// transformation call.
+    fn unshifted_coordinate(
+        &mut self,
+        v: VarId,
+        substitution: &Substitution,
+        output: &mut Vec<Row>,
+    ) -> Result<VarId, GdpError> {
+        let copy = substitution.copies[&v];
+        let reference = substitution.references.get(&v).copied().unwrap_or(0.0);
+        if reference == 0.0 {
+            return Ok(copy);
+        }
+        if let Some(&coordinate) = self.unshifted.get(&copy) {
+            return Ok(coordinate);
+        }
+
+        self.plan.record_row_expansions(1)?;
+        let interval = self.boxes[v.index()];
+        let coordinate =
+            self.auxiliary(interval.lower.min(0.0), interval.upper.max(0.0), substitution.branch)?;
+        self.unshifted.insert(copy, coordinate);
+
+        let mapping = self.plan.report.hull_unshifted.len();
+        self.plan.report.hull_unshifted.push(GdpHullUnshiftedMapping {
+            copy: GeneratedVarId::from_raw(copy),
+            generated: GeneratedVarId::from_raw(coordinate),
+            constraints: Vec::new(),
+        });
+
+        let body = self.arena.affine_body(
+            Linear::variable(coordinate)
+                .add(Linear::variable(copy).scaled(-1.0))
+                .add(substitution.guard.clone().scaled(-reference)),
+        )?;
+
+        output.push(Row {
+            body,
+            lower: 0.0,
+            upper: 0.0,
+            name: "Hull unshifted copy".into(),
+            origins: vec![Origin::Unshifted(mapping)],
+            kind: RowKind::CopyBound,
+            enforcement: RowEnforcement::Homogeneous { activation: substitution.activation },
+            roundoff: 32.0 * f64::EPSILON,
+        });
+
+        Ok(coordinate)
     }
 
     fn perspective(
@@ -1814,17 +2155,16 @@ fn selected_first(pattern: &GdpHullPatternMapping) -> Option<BooleanId> {
     pattern.selected.first().copied()
 }
 
-/// Normalize the complete affine part, including nonlinear perspective
-/// corrections, before checking and committing exactly that representation.
-fn checked_hull_body(
+/// Normalize a generated affine row and check it against its source at
+/// activation one.
+fn checked_affine(
     arena: &mut PlanningArena,
     mut generated: Linear,
-    residual: &[SignedExpr],
     source: &LinearTerms<'_>,
     substitution: &Substitution,
     bound: f64,
     diagnostic: (&SmolStr, BoundSide, f64),
-) -> Result<RowBody, GdpError> {
+) -> Result<Linear, GdpError> {
     generated.normalize(&mut arena.coefficient_slots)?;
     check_active_row(
         &LinearTerms::borrowed(&generated.terms, generated.constant),
@@ -1834,6 +2174,22 @@ fn checked_hull_body(
         diagnostic,
         &mut arena.recovery_coefficients,
     )?;
+
+    Ok(generated)
+}
+
+/// Normalize the complete affine part, including nonlinear perspective
+/// corrections, before checking and committing exactly that representation.
+fn checked_hull_body(
+    arena: &mut PlanningArena,
+    generated: Linear,
+    residual: &[SignedExpr],
+    source: &LinearTerms<'_>,
+    substitution: &Substitution,
+    bound: f64,
+    diagnostic: (&SmolStr, BoundSide, f64),
+) -> Result<RowBody, GdpError> {
+    let generated = checked_affine(arena, generated, source, substitution, bound, diagnostic)?;
 
     if residual.is_empty() {
         return Ok(RowBody::normalized_affine(generated));
@@ -2030,6 +2386,79 @@ impl RecoverySum {
         let value = self.sum + self.correction;
 
         if value.is_finite() { Ok(value) } else { Err(GdpError::NumericOverflow) }
+    }
+}
+
+/// Polynomial coefficients accumulated from products of affine forms.
+#[derive(Clone, Default)]
+struct Products {
+    quadratic: Vec<(VarId, VarId, f64)>,
+    linear: Vec<(VarId, f64)>,
+    constant: f64,
+}
+
+impl Products {
+    /// Add `scale*a*b`.
+    fn multiply(&mut self, a: &Linear, b: &Linear, scale: f64) {
+        if scale == 0.0 {
+            return;
+        }
+
+        for &(u, x) in &a.terms {
+            for &(v, y) in &b.terms {
+                self.quadratic.push((u, v, scale * x * y));
+            }
+            self.linear.push((u, scale * x * b.constant));
+        }
+        for &(v, y) in &b.terms {
+            self.linear.push((v, scale * a.constant * y));
+        }
+
+        self.constant += scale * a.constant * b.constant;
+    }
+}
+
+/// The unshifted copy `u = z + r*y` of a copied coordinate.
+fn lifted(substitution: &Substitution, v: VarId) -> Linear {
+    let reference = substitution.references.get(&v).copied().unwrap_or(0.0);
+    Linear::variable(substitution.copies[&v]).add(substitution.guard.clone().scaled(reference))
+}
+
+impl Products {
+    fn body(self, arena: &mut PlanningArena) -> Result<RowBody, GdpError> {
+        let body = QuadraticTerms::from_coefficients(self.quadratic, self.linear, self.constant)
+            .map_err(|_| GdpError::NumericOverflow)?;
+        Ok(RowBody::Expression(arena.push(ExprNode::Quadratic(Arc::new(body)))?))
+    }
+}
+
+/// Convexity of `sign * x'Qx`, computed on demand once per sign.
+struct Curvature<'a> {
+    terms: &'a QuadraticTerms,
+    /// Results for the upper (`+Q`) and lower (`-Q`) sides.
+    cache: [Option<Result<(), GdpHullQuadraticFallbackReason>>; 2],
+}
+
+impl<'a> Curvature<'a> {
+    fn new(terms: &'a QuadraticTerms) -> Self {
+        Self { terms, cache: [None, None] }
+    }
+
+    /// Whether `sign * x'Qx` is convex.
+    fn convex(&mut self, sign: f64) -> Result<(), GdpHullQuadraticFallbackReason> {
+        let slot = usize::from(sign < 0.0);
+        let terms = self.terms;
+        *self.cache[slot].get_or_insert_with(|| {
+            let convex = if sign < 0.0 { terms.is_concave() } else { terms.is_convex() };
+            match convex {
+                Ok(true) => Ok(()),
+                Err(CurvatureError::Dimension { .. }) => {
+                    Err(GdpHullQuadraticFallbackReason::CurvatureDimension)
+                }
+                // Uncertified, including Hessians that overflow `f64`.
+                Ok(false) | Err(_) => Err(GdpHullQuadraticFallbackReason::Nonconvex),
+            }
+        })
     }
 }
 

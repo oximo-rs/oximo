@@ -20,6 +20,17 @@ fn satisfied(model: &Model, values: &[f64]) -> bool {
 
 /// Construct the exact integer lift, independently of generated row bodies.
 fn lift(model: &Model, report: &GdpReformulationReport, source: &[f64]) -> Vec<f64> {
+    lift_with(model, report, source, |_, _| 0.0)
+}
+
+/// Integer lift including conic epigraphs at their least feasible values
+/// `activation * sign * x'Qx`, with `x'Qx` given per source row.
+fn lift_with(
+    model: &Model,
+    report: &GdpReformulationReport,
+    source: &[f64],
+    quadratic: impl Fn(DisjunctConstraintId, &[f64]) -> f64,
+) -> Vec<f64> {
     let mut values = source.to_vec();
     values.resize(model.num_variables(), 0.0);
     for pattern in &report.hull_patterns {
@@ -38,15 +49,29 @@ fn lift(model: &Model, report: &GdpReformulationReport, source: &[f64]) -> Vec<f
                 .sum::<f64>();
     }
     let arena = model.arena();
-    for copy in &report.hull_variables {
-        let activation = evaluate(&arena, copy.activation, &&values[..]).unwrap();
+    for _ in 0..3 {
+        for epigraph in &report.hull_epigraphs {
+            let activation = evaluate(&arena, epigraph.activation, &&values[..]).unwrap();
+            let sign = if epigraph.side == BoundSide::Upper { 1.0 } else { -1.0 };
+            values[epigraph.generated.index()] =
+                activation * sign * quadratic(epigraph.source, source);
+        }
+        for copy in &report.hull_variables {
+            let activation = evaluate(&arena, copy.activation, &&values[..]).unwrap();
 
-        assert_eq!(
-            copy.activation_kind.value_with(|v| values.get(v.index()).copied()),
-            Some(activation)
-        );
-        values[copy.generated.index()] =
-            activation * (values[copy.source.index()] - copy.reference);
+            assert_eq!(
+                copy.activation_kind.value_with(|v| values.get(v.index()).copied()),
+                Some(activation)
+            );
+            values[copy.generated.index()] =
+                activation * (values[copy.source.index()] - copy.reference);
+        }
+        for unshifted in &report.hull_unshifted {
+            let copy =
+                report.hull_variables.iter().find(|c| c.generated == unshifted.copy).unwrap();
+            let activation = evaluate(&arena, copy.activation, &&values[..]).unwrap();
+            values[unshifted.generated.index()] = activation * values[copy.source.index()];
+        }
     }
     values
 }
@@ -1551,4 +1576,504 @@ fn incremental_hull_distinguishes_historical_copies_from_later_source_variables(
             .iter()
             .any(|mapping| mapping.source == ReformulationVarId::Source(later.var_id().unwrap()))
     );
+}
+
+fn quadratic_rows(model: &Model, report: &GdpReformulationReport) -> Vec<oximo_expr::ExprId> {
+    let rows = model.constraints();
+    report
+        .rows
+        .iter()
+        .flat_map(|r| r.constraints.iter().map(|id| rows.algebraic()[id.index()].lhs))
+        .collect()
+}
+
+#[test]
+fn homogeneous_quadratic_hull_is_exact_at_integer_points_without_division() {
+    for reference in [None, Some(1.5)] {
+        let model = Model::new("homogeneous quadratic Hull");
+
+        variable!(model, -2.0 <= x <= 3.0);
+        variable!(model, -1.0 <= w <= 4.0);
+        boolean_variable!(model, a);
+        disjunct_constraint!(model, a, -1.0 <= x * x - 2.0 * x * w + 0.5 * w + 1.0 <= 3.0);
+        disjunct_constraint!(model, a, x * w == 2.0);
+
+        let mut options = GdpReformulationOptions::new(
+            Hull::default().with_quadratic(HullQuadratic::Homogeneous),
+        );
+        if let Some(r) = reference {
+            options = options.with_hull_reference_coordinate(x, r);
+        }
+        let report = model.reformulate_gdp(options).unwrap();
+
+        let arena = model.arena();
+        for root in quadratic_rows(&model, &report) {
+            assert!(oximo_expr::extract_quadratic(&arena, root).is_some());
+        }
+        drop(arena);
+
+        let h = |x: f64, w: f64| x * x - 2.0 * x * w + 0.5 * w + 1.0;
+        for active in [0.0, 1.0] {
+            for x in [-2.0, -1.0, 0.5, 1.0, 2.0, 3.0] {
+                for w in [-1.0, 0.0, 1.0, 2.0, 4.0] {
+                    let feasible = (-1.0..=3.0).contains(&h(x, w)) && x * w == 2.0;
+                    assert_eq!(
+                        satisfied(&model, &lift(&model, &report, &[x, w, active])),
+                        active == 0.0 || feasible,
+                        "x={x} w={w} active={active} reference={reference:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn homogeneous_quadratic_hull_matches_the_unregularized_formula_at_fractional_points() {
+    let model = Model::new("fractional homogeneous quadratic");
+
+    variable!(model, -2.0 <= x <= 2.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x * x + 3.0 * x <= 2.0);
+
+    let reference = 0.5;
+    let report = model
+        .reformulate_gdp(
+            GdpReformulationOptions::new(
+                Hull::default().with_quadratic(HullQuadratic::Homogeneous),
+            )
+            .with_hull_reference_coordinate(x, reference),
+        )
+        .unwrap();
+    let copy =
+        report.hull_variables.iter().find(|c| c.indicator == Some(a.id())).unwrap().generated;
+
+    let (y, z) = (0.4, 0.2);
+    let mut values = vec![0.0; model.num_variables()];
+    values[a.binary().var_id().unwrap().index()] = y;
+    values[copy.index()] = z;
+
+    // y^2 * (h(z / y + r) - 2), h(x) = x^2 + 3x.
+    let x = z / y + reference;
+    let expected = y * y * (x * x + 3.0 * x - 2.0);
+    let rows = model.constraints();
+    let arena = model.arena();
+    let &[id] = &report.rows[0].constraints[..] else { panic!("one side") };
+    let value = evaluate(&arena, rows.algebraic()[id.index()].lhs, &&values[..]).unwrap();
+    assert!((value - expected).abs() < 1e-12, "{value} vs {expected}");
+}
+
+#[test]
+fn homogeneous_quadratic_hull_keeps_perspectives_for_other_nonlinear_rows() {
+    let model = Model::new("mixed nonlinear Hull");
+
+    variable!(model, 1.0 <= x <= 4.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x.exp() + x * x <= 3.0_f64.exp() + 9.0);
+
+    let report =
+        model.reformulate_gdp(Hull::default().with_quadratic(HullQuadratic::Homogeneous)).unwrap();
+    let arena = model.arena();
+    for root in quadratic_rows(&model, &report) {
+        assert!(oximo_expr::extract_quadratic(&arena, root).is_none());
+    }
+    drop(arena);
+    for active in [0.0, 1.0] {
+        for value in [1.0, 2.0, 3.0, 4.0] {
+            assert_eq!(
+                satisfied(&model, &lift(&model, &report, &[value, active])),
+                active == 0.0 || value <= 3.0
+            );
+        }
+    }
+}
+
+fn conic() -> Hull {
+    Hull::default().with_quadratic(HullQuadratic::Conic)
+}
+
+#[test]
+fn conic_quadratic_hull_is_exact_at_integer_points_on_convex_sides() {
+    let cases = [
+        (f64::NEG_INFINITY, 4.0, 1.0, vec![BoundSide::Upper]),
+        (1.0, 4.0, 1.0, vec![BoundSide::Upper]),
+        (-4.0, f64::INFINITY, -1.0, vec![BoundSide::Lower]),
+        (2.0, 2.0, 1.0, vec![]),
+    ];
+    for (lower, upper, scale, expected) in cases {
+        for reference in [None, Some(0.5)] {
+            let model = Model::new("conic quadratic Hull");
+
+            variable!(model, -2.0 <= x <= 3.0);
+            variable!(model, -1.0 <= w <= 2.0);
+            boolean_variable!(model, a);
+            let q = move |x: f64, w: f64| scale * (x * x + x * w + w * w);
+            disjunct_constraint!(
+                model,
+                a,
+                lower <= scale * (x * x + x * w + w * w) - x + 0.5 * w <= upper
+            );
+
+            let mut options = GdpReformulationOptions::new(conic());
+            if let Some(r) = reference {
+                options = options
+                    .with_hull_reference_coordinate(x, r)
+                    .with_hull_reference_coordinate(w, -r);
+            }
+            let report = model.reformulate_gdp(options).unwrap();
+
+            let sides: Vec<_> = report.hull_epigraphs.iter().map(|e| e.side).collect();
+            assert_eq!(sides, expected);
+            assert!(report.hull_epigraphs.iter().all(|e| e.source == DisjunctConstraintId(0)));
+
+            let arena = model.arena();
+            let binary = a.binary().var_id().unwrap();
+            let epigraphs: Vec<_> =
+                report.hull_epigraphs.iter().map(|e| e.generated.raw_id()).collect();
+            let mut cones = 0;
+            for root in quadratic_rows(&model, &report) {
+                let q = oximo_expr::extract_quadratic(&arena, root).unwrap();
+                if !q.variables().any(|v| epigraphs.contains(&v)) {
+                    continue;
+                }
+                if q.quadratic().is_empty() {
+                    continue;
+                }
+
+                cones += 1;
+                assert!(q.linear().is_empty() && q.constant() == 0.0);
+                for &(i, j, _) in q.quadratic() {
+                    if i == binary || j == binary {
+                        let other = if i == binary { j } else { i };
+                        assert!(epigraphs.contains(&other), "activation in the quadratic form");
+                    }
+                }
+            }
+            assert_eq!(cones, expected.len());
+            drop(arena);
+
+            for active in [0.0, 1.0] {
+                for x in [-2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 3.0] {
+                    for w in [-1.0, 0.0, 1.0, 2.0] {
+                        let value = q(x, w) - x + 0.5 * w;
+                        let values =
+                            lift_with(&model, &report, &[x, w, active], |_, s| q(s[0], s[1]));
+                        assert_eq!(
+                            satisfied(&model, &values),
+                            active == 0.0 || (lower..=upper).contains(&value),
+                            "x={x} w={w} active={active} case=({lower}, {upper}, {scale})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn conic_quadratic_hull_projects_onto_the_perspective_closure_at_fractional_points() {
+    let model = Model::new("fractional conic quadratic");
+
+    variable!(model, -2.0 <= x <= 2.0);
+    variable!(model, -2.0 <= w <= 2.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x * x + 2.0 * w * w + x - w <= 1.0);
+
+    let reference = 0.5;
+    let report = model
+        .reformulate_gdp(
+            GdpReformulationOptions::new(conic()).with_hull_reference_coordinate(x, reference),
+        )
+        .unwrap();
+    let copies = |v: VarId| -> Vec<_> {
+        report
+            .hull_variables
+            .iter()
+            .filter(|c| c.source.raw_id() == v && c.indicator.is_some())
+            .collect()
+    };
+    let (zx, zw) = (copies(x.var_id().unwrap()), copies(w.var_id().unwrap()));
+    assert_eq!((zx.len(), zw.len()), (1, 1));
+
+    let [unshifted] = &report.hull_unshifted[..] else { panic!("one unshifted coordinate") };
+    assert_eq!(unshifted.copy, zx[0].generated);
+
+    let [epigraph] = &report.hull_epigraphs[..] else { panic!("one epigraph") };
+
+    let y = 0.5;
+    let mut feasible = 0;
+    for ux in [-0.8, -0.3, 0.0, 0.2, 0.6] {
+        for uw in [-0.9, -0.4, 0.0, 0.3, 0.8] {
+            // Unshifted copies `u`.
+            let closure = (ux * ux + 2.0 * uw * uw) / y + ux - uw - y;
+            let mut values = vec![0.0; model.num_variables()];
+
+            // Complement copies stay zero.
+            values[x.var_id().unwrap().index()] = reference + ux - reference * y;
+            values[w.var_id().unwrap().index()] = uw;
+            values[a.binary().var_id().unwrap().index()] = y;
+            for (copies, u) in [(&zx, ux), (&zw, uw)] {
+                for copy in copies {
+                    values[copy.generated.index()] = u - copy.reference * y;
+                }
+            }
+            values[unshifted.generated.index()] = ux;
+            values[epigraph.generated.index()] = (ux * ux + 2.0 * uw * uw) / y;
+            assert_eq!(satisfied(&model, &values), closure <= 1e-12, "u=({ux}, {uw})");
+
+            feasible += usize::from(closure <= 1e-12);
+        }
+    }
+    assert!((1..25).contains(&feasible), "{feasible}");
+}
+
+#[test]
+fn conic_quadratic_hull_uses_the_homogeneous_form_for_nonconvex_sides() {
+    let model = Model::new("nonconvex conic fallback");
+
+    variable!(model, -2.0 <= x <= 3.0);
+    variable!(model, -1.0 <= w <= 4.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x * w <= 2.0);
+    disjunct_constraint!(model, a, x * x - w * w <= 1.0);
+
+    let report = model.reformulate_gdp(conic()).unwrap();
+    assert!(report.hull_epigraphs.is_empty());
+
+    for active in [0.0, 1.0] {
+        for x in [-2.0, 0.0, 1.0, 3.0] {
+            for w in [-1.0, 0.0, 2.0, 4.0] {
+                assert_eq!(
+                    satisfied(&model, &lift(&model, &report, &[x, w, active])),
+                    active == 0.0 || (x * w <= 2.0 && x * x - w * w <= 1.0)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn conic_quadratic_hull_is_exact_in_nested_and_enumerated_trees() {
+    for enumerate in [false, true] {
+        let model = Model::new("nested conic");
+
+        variable!(model, -5.0 <= x <= 5.0);
+        variable!(model, -5.0 <= w <= 5.0);
+        let parent = disjunct!(model, parent, |d| {
+            constraint!(d, x * x + w * w <= 9.0);
+        });
+        let other = disjunct!(model, other, |d| {
+            constraint!(d, x <= -4.0);
+        });
+        let a = disjunct!(model, a, |d| {
+            constraint!(d, (x - 1.0) * (x - 1.0) + (w - 1.0) * (w - 1.0) <= 1.0);
+        });
+        let b = disjunct!(model, b, |d| {
+            constraint!(d, (x + 1.0) * (x + 1.0) + w * w <= 0.5);
+        });
+        if enumerate {
+            disjunction!(model, [parent, other], AtLeastOne);
+        } else {
+            disjunction!(model, [parent, other]);
+        }
+        disjunction!(model, [a, b], parent = parent);
+
+        let hull =
+            conic().with_inclusive_policy(HullInclusivePolicy::Enumerate { max_patterns: 3 });
+        let report = model
+            .reformulate_gdp(
+                GdpReformulationOptions::new(hull)
+                    .with_hull_reference_coordinate(x, 0.5)
+                    .with_hull_reference_coordinate(w, -1.0),
+            )
+            .unwrap();
+        assert!(report.hull_epigraphs.len() >= 3);
+        assert!(
+            report.hull_quadratic_fallbacks.is_empty(),
+            "{:?}",
+            report.hull_quadratic_fallbacks
+        );
+        assert!(!report.hull_unshifted.is_empty());
+
+        // Fallbacks list source rows only.
+        let rows = model.constraints();
+        let arena = model.arena();
+        for i in report.generated_rows.clone() {
+            let root = rows.algebraic()[i].lhs;
+            assert!(
+                oximo_expr::extract_quadratic(&arena, root).is_some(),
+                "row {i} is not quadratic"
+            );
+        }
+        drop((arena, rows));
+
+        let mut selections = vec![[1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0]];
+        if enumerate {
+            selections.extend([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 1.0]]);
+        }
+        for [p, o, ia, ib] in selections {
+            for x in [-5.0_f64, -4.0, -1.0, 0.0, 0.5, 1.0, 2.0, 3.0] {
+                for w in [-1.0_f64, 0.0, 0.5, 1.0, 2.0] {
+                    let feasible = (p == 0.0 || x * x + w * w <= 9.0)
+                        && (o == 0.0 || x <= -4.0)
+                        && (ia == 0.0 || (x - 1.0).powi(2) + (w - 1.0).powi(2) <= 1.0)
+                        && (ib == 0.0 || (x + 1.0).powi(2) + w * w <= 0.5);
+                    let values = lift_with(&model, &report, &[x, w, p, o, ia, ib], |_, s| {
+                        s[0] * s[0] + s[1] * s[1]
+                    });
+                    assert_eq!(
+                        satisfied(&model, &values),
+                        feasible,
+                        "enumerate={enumerate} selection={:?} x={x} w={w}",
+                        [p, o, ia, ib]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn conic_rows_share_one_unshifted_coordinate_per_copy() {
+    let model = Model::new("shared unshifted coordinate");
+
+    variable!(model, -2.0 <= x <= 3.0);
+    variable!(model, -1.0 <= w <= 2.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x * x + w * w <= 4.0);
+    disjunct_constraint!(model, a, (x - 1.0) * (x - 1.0) <= 1.0);
+
+    let report = model
+        .reformulate_gdp(
+            GdpReformulationOptions::new(conic()).with_hull_reference_coordinate(x, 1.0),
+        )
+        .unwrap();
+    assert_eq!(report.hull_epigraphs.len(), 2);
+
+    let [unshifted] = &report.hull_unshifted[..] else { panic!("one coordinate for x") };
+    assert_eq!(unshifted.constraints.len(), 1);
+    assert!(report.hull_variables.iter().all(|c| c.generated != unshifted.generated));
+
+    let q = |id: DisjunctConstraintId, s: &[f64]| {
+        if id.index() == 0 { s[0] * s[0] + s[1] * s[1] } else { s[0] * s[0] }
+    };
+    for active in [0.0, 1.0] {
+        for x in [-2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 3.0] {
+            for w in [-1.0, 0.0, 1.0, 2.0] {
+                let feasible = x * x + w * w <= 4.0 && (x - 1.0) * (x - 1.0) <= 1.0;
+                assert_eq!(
+                    satisfied(&model, &lift_with(&model, &report, &[x, w, active], q)),
+                    active == 0.0 || feasible,
+                    "x={x} w={w} active={active}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn conic_quadratic_hull_accepts_rank_one_forms_from_rational_coefficients() {
+    let model = Model::new("rank-one cone");
+
+    variable!(model, -5.0 <= x <= 5.0);
+    variable!(model, -5.0 <= w <= 5.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, (0.1 * x + 0.3 * w) * (0.1 * x + 0.3 * w) <= 1.0);
+
+    let report = model.reformulate_gdp(conic()).unwrap();
+    assert_eq!(report.hull_epigraphs.len(), 1);
+    assert_eq!(report.hull_quadratic_fallbacks, []);
+}
+
+#[test]
+fn quadratic_hull_fallbacks_report_their_reasons() {
+    use oximo_gdp::GdpHullQuadraticFallbackReason as Reason;
+
+    let model = Model::new("quadratic Hull fallbacks");
+
+    variable!(model, 0.5 <= x <= 3.0);
+    variable!(model, -1.0 <= w <= 4.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x.exp() <= 3.0);
+    disjunct_constraint!(model, a, x * x == 1.0);
+    disjunct_constraint!(model, a, x * w <= 2.0);
+    disjunct_constraint!(model, a, 1.0 <= x * x + w * w <= 4.0);
+
+    let report = model.reformulate_gdp(conic()).unwrap();
+    let fallbacks: Vec<_> = report
+        .hull_quadratic_fallbacks
+        .iter()
+        .map(|f| (f.source.index(), f.side, f.reason))
+        .collect();
+    assert_eq!(
+        fallbacks,
+        [
+            (0, None, Reason::NotQuadratic),
+            (2, Some(BoundSide::Upper), Reason::Nonconvex),
+            (3, Some(BoundSide::Lower), Reason::Nonconvex),
+        ]
+    );
+    assert_eq!(report.hull_epigraphs.len(), 1);
+    assert!(report.to_string().contains("1 conic epigraph, 3 quadratic Hull fallbacks"));
+
+    let model = Model::new("homogeneous fallbacks");
+    variable!(model, 0.5 <= x <= 3.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x.exp() + x * x <= 3.0);
+    disjunct_constraint!(model, a, x * x == 1.0);
+    let report =
+        model.reformulate_gdp(Hull::default().with_quadratic(HullQuadratic::Homogeneous)).unwrap();
+    let reasons: Vec<_> = report.hull_quadratic_fallbacks.iter().map(|f| f.reason).collect();
+    assert_eq!(reasons, [Reason::NotQuadratic]);
+}
+
+#[test]
+fn cancelled_quadratic_parts_keep_the_affine_hull() {
+    for quadratic in [HullQuadratic::Homogeneous, HullQuadratic::Conic] {
+        let model = Model::new("cancelled quadratic");
+
+        variable!(model, -2.0 <= x <= 3.0);
+        boolean_variable!(model, a);
+        disjunct_constraint!(model, a, (x + 1.0) * (x + 1.0) - x * x <= 3.0);
+
+        let report = model.reformulate_gdp(Hull::default().with_quadratic(quadratic)).unwrap();
+        assert!(report.hull_epigraphs.is_empty());
+
+        let arena = model.arena();
+        for root in quadratic_rows(&model, &report) {
+            let q = oximo_expr::extract_quadratic(&arena, root).unwrap();
+            assert!(q.quadratic().is_empty(), "bilinear activation product");
+        }
+        drop(arena);
+
+        for active in [0.0, 1.0] {
+            for x in [-2.0, 0.0, 1.0, 2.0, 3.0] {
+                assert_eq!(
+                    satisfied(&model, &lift(&model, &report, &[x, active])),
+                    active == 0.0 || x <= 1.0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn conic_epigraph_bound_uses_merged_affine_coefficients() {
+    let model = Model::new("merged epigraph bound");
+
+    variable!(model, -3.0 <= x <= 3.0);
+    boolean_variable!(model, a);
+    // `x^2 + 1 <= 2`, affine terms of the sq cancel against `2x`.
+    disjunct_constraint!(model, a, (x - 1.0) * (x - 1.0) + 2.0 * x <= 2.0);
+
+    let report = model.reformulate_gdp(conic()).unwrap();
+    let [epigraph] = &report.hull_epigraphs[..] else { panic!("one epigraph") };
+    assert_eq!(epigraph.upper, 1.0);
+
+    for active in [0.0, 1.0] {
+        for x in [-3.0, -1.0, -0.5, 0.0, 1.0, 2.0, 3.0] {
+            let values = lift_with(&model, &report, &[x, active], |_, s| s[0] * s[0]);
+            assert_eq!(satisfied(&model, &values), active == 0.0 || x * x <= 1.0, "x={x}");
+        }
+    }
 }
