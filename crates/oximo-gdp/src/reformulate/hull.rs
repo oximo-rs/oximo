@@ -1636,10 +1636,20 @@ impl Compiler<'_> {
         // At an integer point `t <= -sign*(c'x + d)`, bounded over the box.
         // And here `terms` already holds the residual's affine part.
         let mut upper = -sign * (terms.constant - bound);
+        let mut magnitude = terms.constant.abs() + bound.abs();
         for &(v, c) in terms.coeffs.iter() {
             let interval = self.boxes[v.index()];
-            upper += (-sign * c * interval.lower).max(-sign * c * interval.upper);
+            let term = (-sign * c * interval.lower).max(-sign * c * interval.upper);
+            upper += term;
+            magnitude += term.abs();
         }
+
+        // Round outward since each product and sum has relative error at most
+        // `EPSILON / 2`, so `(2n + 2)*EPSILON*magnitude` covers the accumulated
+        // error of the `2n + 1` operations above.
+        #[expect(clippy::cast_precision_loss, reason = "row length is far below 2^52")]
+        let operations = 2.0 * terms.coeffs.len() as f64 + 2.0;
+        let upper = (upper + operations * f64::EPSILON * magnitude).next_up();
         if !upper.is_finite() {
             return Ok(Err(GdpHullQuadraticFallbackReason::UnboundedEpigraph));
         }

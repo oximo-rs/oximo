@@ -2058,6 +2058,30 @@ fn cancelled_quadratic_parts_keep_the_affine_hull() {
 }
 
 #[test]
+fn conic_epigraph_bound_rounds_outward() {
+    let model = Model::new("rounded epigraph bound");
+
+    variable!(model, 0.0 <= x <= 1.0);
+    variable!(model, 0.0 <= y <= 1.0);
+    variable!(model, 0.0 <= z <= 1.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, x * x + y * y + z * z - 0.3 * x - 0.3 * y - 0.4 * z <= 2.0);
+
+    let report = model.reformulate_gdp(conic()).unwrap();
+    let [epigraph] = &report.hull_epigraphs[..] else { panic!("one epigraph") };
+    assert!(epigraph.upper >= 3.0, "{}", epigraph.upper);
+
+    let squares = |_, s: &[f64]| s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
+    for active in [1.0, 0.0] {
+        let values = lift_with(&model, &report, &[1.0, 1.0, 1.0, active], squares);
+        let t = values[epigraph.generated.index()];
+        assert_eq!(t, 3.0 * active);
+        assert!(t <= epigraph.upper * active, "t = {t} exceeds its bound");
+        assert!(satisfied(&model, &values), "active = {active}");
+    }
+}
+
+#[test]
 fn conic_epigraph_bound_uses_merged_affine_coefficients() {
     let model = Model::new("merged epigraph bound");
 
@@ -2068,7 +2092,7 @@ fn conic_epigraph_bound_uses_merged_affine_coefficients() {
 
     let report = model.reformulate_gdp(conic()).unwrap();
     let [epigraph] = &report.hull_epigraphs[..] else { panic!("one epigraph") };
-    assert_eq!(epigraph.upper, 1.0);
+    assert!((1.0..1.0 + 1e-12).contains(&epigraph.upper), "{}", epigraph.upper);
 
     for active in [0.0, 1.0] {
         for x in [-3.0, -1.0, -0.5, 0.0, 1.0, 2.0, 3.0] {
