@@ -1613,16 +1613,21 @@ fn homogeneous_quadratic_hull_is_exact_at_integer_points_without_division() {
         drop(arena);
 
         let h = |x: f64, w: f64| x * x - 2.0 * x * w + 0.5 * w + 1.0;
+        let grid = [-2.0, -1.0, 0.5, 1.0, 2.0, 3.0]
+            .into_iter()
+            .flat_map(|x| [-1.0, 0.0, 1.0, 2.0, 4.0].map(|w| (x, w)));
+
+        // Points on `x*w = 2` that violate only the lb or ub.
+        let (below, above) = ((0.75, 8.0 / 3.0), (3.0, 2.0 / 3.0));
+        assert!(h(below.0, below.1) < -1.0 && h(above.0, above.1) > 3.0);
         for active in [0.0, 1.0] {
-            for x in [-2.0, -1.0, 0.5, 1.0, 2.0, 3.0] {
-                for w in [-1.0, 0.0, 1.0, 2.0, 4.0] {
-                    let feasible = (-1.0..=3.0).contains(&h(x, w)) && x * w == 2.0;
-                    assert_eq!(
-                        satisfied(&model, &lift(&model, &report, &[x, w, active])),
-                        active == 0.0 || feasible,
-                        "x={x} w={w} active={active} reference={reference:?}"
-                    );
-                }
+            for (x, w) in grid.clone().chain([below, above]) {
+                let feasible = (-1.0..=3.0).contains(&h(x, w)) && (x * w - 2.0).abs() <= 1e-12;
+                assert_eq!(
+                    satisfied(&model, &lift(&model, &report, &[x, w, active])),
+                    active == 0.0 || feasible,
+                    "x={x} w={w} active={active} reference={reference:?}"
+                );
             }
         }
     }
@@ -1822,7 +1827,7 @@ fn conic_quadratic_hull_projects_onto_the_perspective_closure_at_fractional_poin
     let [epigraph] = &report.hull_epigraphs[..] else { panic!("one epigraph") };
 
     let y = 0.5;
-    let mut feasible = 0;
+    let (mut feasible, mut cone_only) = (0, 0);
     for ux in [-0.8, -0.3, 0.0, 0.2, 0.6] {
         for uw in [-0.9, -0.4, 0.0, 0.3, 0.8] {
             // Unshifted copies `u`.
@@ -1843,9 +1848,17 @@ fn conic_quadratic_hull_projects_onto_the_perspective_closure_at_fractional_poin
             assert_eq!(satisfied(&model, &values), closure <= 1e-12, "u=({ux}, {uw})");
 
             feasible += usize::from(closure <= 1e-12);
+
+            // `t = 0` keeps `t + c'u + d*y <= 0` and `0 <= t <= U*y`.
+            if closure > 1e-12 && ux - uw - y <= 0.0 {
+                values[epigraph.generated.index()] = 0.0;
+                assert!(!satisfied(&model, &values), "cone accepts t = 0 at u=({ux}, {uw})");
+                cone_only += 1;
+            }
         }
     }
     assert!((1..25).contains(&feasible), "{feasible}");
+    assert!(cone_only > 0);
 }
 
 #[test]
@@ -1860,6 +1873,14 @@ fn conic_quadratic_hull_uses_the_homogeneous_form_for_nonconvex_sides() {
 
     let report = model.reformulate_gdp(conic()).unwrap();
     assert!(report.hull_epigraphs.is_empty());
+    assert_eq!(report.rows.len(), 2);
+    assert!(report.rows.iter().all(|r| r.constraints.len() == 1));
+
+    let arena = model.arena();
+    for root in quadratic_rows(&model, &report) {
+        assert!(oximo_expr::extract_quadratic(&arena, root).is_some());
+    }
+    drop(arena);
 
     for active in [0.0, 1.0] {
         for x in [-2.0, 0.0, 1.0, 3.0] {
