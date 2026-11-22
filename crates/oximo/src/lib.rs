@@ -48,6 +48,7 @@ pub use oximo_gdp::{
     BigM, BigMValues, BooleanValueError, GdpError, GdpHullDomainContext, GdpHullScope, GdpMethod,
     GdpModelExt, GdpModelSize, GdpPlanningLimits, GdpPlanningSummary, GdpReformulationOptions,
     GdpResultExt, GdpSizeLimits, GdpSolveError, GdpSolver, GdpSolverExt, Hull, HullInclusivePolicy,
+    HullQuadratic,
 };
 
 #[cfg(any(feature = "scip", feature = "scip-system"))]
@@ -127,7 +128,7 @@ pub mod prelude {
         BigM, BigMValues, BooleanValueError, GdpError, GdpHullDomainContext, GdpHullScope,
         GdpMethod, GdpModelExt, GdpModelSize, GdpPlanningLimits, GdpPlanningSummary,
         GdpReformulationOptions, GdpResultExt, GdpSizeLimits, GdpSolveError, GdpSolver,
-        GdpSolverExt, Hull, HullInclusivePolicy,
+        GdpSolverExt, Hull, HullInclusivePolicy, HullQuadratic,
     };
     pub use oximo_solver::{
         CompatibilityReport, ConstraintEvaluation, ConstraintSignature, DualStatus,
