@@ -1655,6 +1655,44 @@ fn homogeneous_quadratic_hull_expands_shifted_rows_at_the_reference() {
 }
 
 #[test]
+fn homogeneous_quadratic_hull_accepts_square_coefficients_above_half_the_float_range() {
+    let q = 1e308;
+    assert!(q > f64::MAX / 2.0);
+    let model = Model::new("large square coefficient");
+
+    variable!(model, -1.0 <= x <= 1.0);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, q * x * x <= q);
+
+    let hull = Hull::default().with_quadratic(HullQuadratic::Homogeneous);
+    let report = model.reformulate_gdp(GdpReformulationOptions::new(hull)).unwrap();
+    for active in [0.0, 1.0] {
+        for x in [-1.0, 0.0, 1.0] {
+            assert!(satisfied(&model, &lift(&model, &report, &[x, active])), "x={x}");
+        }
+    }
+}
+
+#[test]
+fn homogeneous_quadratic_hull_scales_references_whose_square_overflows() {
+    let (q, r) = (1e-300, 1e200);
+    let model = Model::new("large reference");
+
+    variable!(model, 0.0 <= x <= 2.0 * r);
+    boolean_variable!(model, a);
+    disjunct_constraint!(model, a, q * x * x <= 4e100);
+
+    let hull = Hull::default().with_quadratic(HullQuadratic::Homogeneous);
+    let options = GdpReformulationOptions::new(hull).with_hull_reference_coordinate(x, r);
+    let report = model.reformulate_gdp(options).unwrap();
+    for active in [0.0, 1.0] {
+        for x in [0.0, r, 2.0 * r] {
+            assert!(satisfied(&model, &lift(&model, &report, &[x, active])), "x={x}");
+        }
+    }
+}
+
+#[test]
 fn homogeneous_quadratic_hull_matches_the_unregularized_formula_at_fractional_points() {
     let model = Model::new("fractional homogeneous quadratic");
 

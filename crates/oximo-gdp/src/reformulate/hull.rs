@@ -2468,7 +2468,8 @@ fn reference_expansion(
         let (ra, rb) = (reference(a), reference(b));
         let i = slot(a, &mut gradient);
         if a == b {
-            gradient[i].1.add_product(2.0 * q, ra)?;
+            gradient[i].1.add_product(q, ra)?;
+            gradient[i].1.add_product(q, ra)?;
         } else {
             gradient[i].1.add_product(q, rb)?;
             let j = slot(b, &mut gradient);
@@ -2477,8 +2478,14 @@ fn reference_expansion(
 
         // `ra * rb` split exactly.
         let product = ra * rb;
-        value.add_product(q, product)?;
-        value.add_product(q, ra.mul_add(rb, -product))?;
+        if product.is_finite() {
+            value.add_product(q, product)?;
+            value.add_product(q, ra.mul_add(rb, -product))?;
+        } else {
+            let scaled = q * ra;
+            value.add_product(scaled, rb)?;
+            value.add_product(q.mul_add(ra, -scaled), rb)?;
+        }
     }
 
     let mut expansion = substitution.guard.clone().scaled(value.value()?);
