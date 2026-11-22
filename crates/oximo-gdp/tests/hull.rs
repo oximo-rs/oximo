@@ -1629,6 +1629,27 @@ fn homogeneous_quadratic_hull_is_exact_at_integer_points_without_division() {
 }
 
 #[test]
+fn homogeneous_quadratic_hull_expands_shifted_rows_at_the_reference() {
+    let a = 12_345_678.9_f64;
+    let c = a * a;
+    let model = Model::new("shifted homogeneous row");
+
+    variable!(model, a - 2.0 <= x <= a + 2.0);
+    boolean_variable!(model, active);
+    disjunct_constraint!(model, active, x * x - 2.0 * a * x + c <= 1.0);
+
+    let hull = Hull::default().with_quadratic(HullQuadratic::Homogeneous);
+    let options = GdpReformulationOptions::new(hull).with_hull_reference_coordinate(x, a);
+    let report = model.reformulate_gdp(options).unwrap();
+    let [row] = quadratic_rows(&model, &report)[..] else { panic!("one row") };
+
+    let values = lift(&model, &report, &[a, 1.0]);
+    let value = evaluate(&model.arena(), row, &&values[..]).unwrap();
+    let exact = -a.mul_add(a, -c) - 1.0;
+    assert!((value - exact).abs() <= 1e-12, "{value} vs {exact}");
+}
+
+#[test]
 fn homogeneous_quadratic_hull_matches_the_unregularized_formula_at_fractional_points() {
     let model = Model::new("fractional homogeneous quadratic");
 

@@ -1553,9 +1553,13 @@ impl Compiler<'_> {
 
         // Cancelled or hidden affine terms where the exact affine Hull applies.
         let affine_only = residual.quadratic().is_empty();
+
+        // The quadratic part in copies, `z'Qz`.
+        // References enter only the compensated expansion below.
         let mut quadratic = Products::default();
         for &(a, b, c) in residual.quadratic() {
-            quadratic.multiply(&lifted[&a], &lifted[&b], c);
+            let (a, b) = (substitution.copies[&a], substitution.copies[&b]);
+            quadratic.quadratic.push((a, b, c));
         }
 
         let source = row.kind.source_constraint().filter(|_| conic);
@@ -1603,8 +1607,9 @@ impl Compiler<'_> {
                     }
                 }
 
+                let expansion = reference_expansion(terms, residual, substitution, bound)?;
                 let mut products = quadratic.clone();
-                products.multiply(guard, &affine, 1.0);
+                products.multiply(guard, &expansion, 1.0);
                 products.body(&mut self.arena)?
             };
 
@@ -2426,6 +2431,63 @@ impl Products {
 
         self.constant += scale * a.constant * b.constant;
     }
+}
+
+/// The degree-one part of the exact quadratic Hull, expanded at the
+/// references `r` with compensated sums:
+///
+/// ```text
+/// y^2 * (h(z/y + r) - bound) = z'Qz + y * (grad h(r)'z + (h(r) - bound) * y).
+/// ```
+fn reference_expansion(
+    terms: &LinearTerms<'_>,
+    residual: &QuadraticTerms,
+    substitution: &Substitution,
+    bound: f64,
+) -> Result<Linear, GdpError> {
+    let reference = |v: VarId| substitution.references.get(&v).copied().unwrap_or(0.0);
+    let mut gradient: Vec<(VarId, RecoverySum)> = Vec::new();
+    let mut index: FxHashMap<VarId, usize> = FxHashMap::default();
+    let mut slot = |v: VarId, gradient: &mut Vec<(VarId, RecoverySum)>| {
+        *index.entry(v).or_insert_with(|| {
+            gradient.push((v, RecoverySum::default()));
+            gradient.len() - 1
+        })
+    };
+
+    let mut value = RecoverySum::default();
+    value.add(terms.constant)?;
+    value.add(-bound)?;
+    for &(v, c) in terms.coeffs.iter() {
+        let i = slot(v, &mut gradient);
+        gradient[i].1.add(c)?;
+        value.add_product(c, reference(v))?;
+    }
+
+    for &(a, b, q) in residual.quadratic() {
+        let (ra, rb) = (reference(a), reference(b));
+        let i = slot(a, &mut gradient);
+        if a == b {
+            gradient[i].1.add_product(2.0 * q, ra)?;
+        } else {
+            gradient[i].1.add_product(q, rb)?;
+            let j = slot(b, &mut gradient);
+            gradient[j].1.add_product(q, ra)?;
+        }
+
+        // `ra * rb` split exactly.
+        let product = ra * rb;
+        value.add_product(q, product)?;
+        value.add_product(q, ra.mul_add(rb, -product))?;
+    }
+
+    let mut expansion = substitution.guard.clone().scaled(value.value()?);
+    for (v, sum) in gradient {
+        let copy = Linear::variable(substitution.copies[&v]);
+        expansion = expansion.add(copy.scaled(sum.value()?));
+    }
+
+    Ok(expansion)
 }
 
 /// The unshifted copy `u = z + r*y` of a copied coordinate.
