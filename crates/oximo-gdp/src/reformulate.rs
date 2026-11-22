@@ -73,11 +73,16 @@ pub enum HullInclusivePolicy {
 pub struct Hull {
     epsilon: f64,
     inclusive_policy: HullInclusivePolicy,
+    quadratic: HullQuadratic,
 }
 
 impl Default for Hull {
     fn default() -> Self {
-        Self { epsilon: 1e-6, inclusive_policy: HullInclusivePolicy::Reject }
+        Self {
+            epsilon: 1e-6,
+            inclusive_policy: HullInclusivePolicy::Reject,
+            quadratic: HullQuadratic::Perspective,
+        }
     }
 }
 
@@ -103,6 +108,57 @@ impl Hull {
     pub const fn inclusive_policy(self) -> HullInclusivePolicy {
         self.inclusive_policy
     }
+
+    /// Choose how rows with quadratic nonlinear parts are transformed.
+    #[must_use]
+    pub const fn with_quadratic(mut self, quadratic: HullQuadratic) -> Self {
+        self.quadratic = quadratic;
+        self
+    }
+
+    pub const fn quadratic(self) -> HullQuadratic {
+        self.quadratic
+    }
+}
+
+/// Hull transformation of disjunct rows whose nonlinear part is quadratic.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HullQuadratic {
+    /// The regularized perspective `s * h(v/s)` with `s = eps + (1 - eps)*y`,
+    /// shared with every other nonlinear row. Exact at binary activations only.
+    #[default]
+    Perspective,
+    /// Exact homogenization `y^2 * h(v/y)`, written without division as
+    /// `v'Qv + (c'v)y + d y^2` in shifted coordinates. Degree two is
+    /// preserved, so the reformulated row stays quadratic and free of epsilon.
+    ///
+    /// A convex quadratic row may become nonconvex (indefinite in `(v, y)`).
+    /// Rows whose nonlinear part is not quadratic, or that involve
+    /// coordinates without Hull copies, keep the regularized perspective and
+    /// are listed in
+    /// [`hull_quadratic_fallbacks`](oximo_core::gdp::GdpReformulationReportData::hull_quadratic_fallbacks).
+    Homogeneous,
+    /// Conic exact Hull (CEHR) for each one-sided side of a source row whose
+    /// quadratic part is convex on that side (`Q` PSD for `<=`, `-Q` PSD for
+    /// `>=`), and [`Self::Homogeneous`] otherwise. A convex side
+    /// `x'Qx + c'x + d <= 0` becomes, with a local epigraph variable `t`,
+    ///
+    /// ```text
+    /// u'Qu <= t*y, t + c'u + d*y <= 0, 0 <= t <= U*y,
+    /// ```
+    ///
+    /// where `u = y*x` are the unshifted copies and `U` bounds `t` over the
+    /// effective variable box. The first row is a rotated second-order cone
+    /// in `(u, t, y)` with nonnegative `t` and `y`. A shifted copy `z` gets a
+    /// local coordinate `u = z + r * y`, listed in
+    /// [`hull_unshifted`](oximo_core::gdp::GdpReformulationReportData::hull_unshifted),
+    /// so that `y` appears only in the bilinear term. When `y` is a single
+    /// variable, solvers usually presolve these rows into second-order cones
+    /// even for a continuous `y`.
+    /// A complementary activation `1 - b` gives an equally exact and
+    /// convex row that solvers may not recognize as a cone.
+    Conic,
 }
 
 /// Method selected independently for each disjunction.

@@ -637,6 +637,74 @@ pub struct GdpHullVariableMapping {
     pub constraints: Vec<crate::GeneratedConstraintId>,
 }
 
+/// Epigraph of the convex quadratic part of one source-row side in the conic
+/// exact Hull (CEHR).
+///
+/// With `sign = +1` for an upper side and `sign = -1` for a lower side,
+/// the side `sign*(x'Qx + c'x + d) <= 0` with PSD `sign*Q` becomes
+///
+/// ```text
+/// sign*u'Qu <= t*activation, t + sign*(c'u + d*activation) <= 0,
+/// 0 <= t <= upper*activation,
+/// ```
+///
+/// where `u = activation*x` holds the unshifted copies.
+#[derive(Clone, Debug)]
+pub struct GdpHullEpigraphMapping {
+    /// Source row that this epigraph reformulates.
+    pub source: DisjunctConstraintId,
+    pub side: BoundSide,
+    /// The epigraph variable `t`.
+    pub generated: crate::GeneratedVarId,
+    /// Disjunction owning the branch, `None` for a standalone disjunct.
+    pub disjunction: Option<DisjunctionId>,
+    /// Branch owning an indicator activation.
+    pub indicator: Option<BooleanId>,
+    /// Affine activation `y` multiplying `t` in the cone.
+    pub activation: ExprId,
+    /// Raw structural counterpart of `activation`.
+    pub activation_kind: GdpHullActivation,
+    /// Bound `U` of `t <= U*activation`.
+    pub upper: f64,
+}
+
+/// Unshifted conic coordinate `s = z + reference*activation` of a shifted
+/// Hull copy `z`, so `s = activation*source`.
+#[derive(Clone, Debug)]
+pub struct GdpHullUnshiftedMapping {
+    /// The shifted copy in [`GdpReformulationReportData::hull_variables`].
+    pub copy: crate::GeneratedVarId,
+    pub generated: crate::GeneratedVarId,
+    pub constraints: Vec<crate::GeneratedConstraintId>,
+}
+
+/// Why a source row or side did not use the form requested by a
+/// quadratic Hull option.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GdpHullQuadraticFallbackReason {
+    /// The nonlinear part is not a polynomial of degree two.
+    NotQuadratic,
+    /// The row uses a coordinate without a Hull copy, such as a selector.
+    UncopiedCoordinate,
+    /// The quadratic part is not convex on this side (conic only).
+    Nonconvex,
+    /// Too many quadratic variables to certify convexity (conic only).
+    CurvatureDimension,
+    /// No finite epigraph bound over the effective box (conic only).
+    UnboundedEpigraph,
+}
+
+/// A source row, or one of its sides, that fell back from the requested
+/// quadratic Hull form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GdpHullQuadraticFallback {
+    pub source: DisjunctConstraintId,
+    /// `None` when the whole row fell back.
+    pub side: Option<BoundSide>,
+    pub reason: GdpHullQuadraticFallbackReason,
+}
+
 /// Activation shared by unused branches of a flat exactly-one group.
 /// `weight = 1 - sum(binary indicators in excluded)`, where excluded branches are
 /// those using the copied coordinate. Several coordinates can share one weight.
@@ -844,6 +912,9 @@ pub struct GdpReformulationReportData {
     pub hull_variables: Vec<GdpHullVariableMapping>,
     pub hull_patterns: Vec<GdpHullPatternMapping>,
     pub hull_branch_sums: Vec<GdpHullBranchSumMapping>,
+    pub hull_epigraphs: Vec<GdpHullEpigraphMapping>,
+    pub hull_unshifted: Vec<GdpHullUnshiftedMapping>,
+    pub hull_quadratic_fallbacks: Vec<GdpHullQuadraticFallback>,
 }
 
 /// Owned copy of GDP source records. Later model changes do not affect it.
