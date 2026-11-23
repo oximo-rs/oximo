@@ -183,3 +183,18 @@ fn gurobi_persistent_iis_without_solve_errors() {
         other => panic!("expected Backend error, got {other:?}"),
     }
 }
+
+#[test]
+fn gurobi_soc_dual_includes_affine_head_sign_multiplier_at_the_origin() {
+    let m = Model::new("soc_origin_dual");
+    variable!(m, x);
+    variable!(m, y);
+    let cone = soc_constraint!(m, cone, [x] <= y - 1.0);
+    objective!(m, Min, y);
+
+    let r = Gurobi.solve(&m, &GurobiOptions::default().qcp_dual(1)).unwrap();
+    assert_eq!(r.termination, TerminationStatus::Optimal);
+    let z = r.soc_dual.get(cone.soc_id()).expect("cone dual");
+    assert!((z[0] - 1.0).abs() < 1e-6, "{z:?}");
+    assert!(z[1].abs() < 1e-6, "{z:?}");
+}
