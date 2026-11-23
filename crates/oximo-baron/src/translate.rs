@@ -1373,10 +1373,8 @@ fn parse_dual_solution(
         if in_prices {
             if let Some(&id) = con_order.get(k - 1) {
                 let _ = oximo_solver::reconstruct::try_accumulate_dual(&mut dual, id, val, 1.0);
-            } else {
-                if let Some(Some(id)) = soc_order.get(k - con_order.len() - 1) {
-                    soc_prices.insert(*id, val);
-                }
+            } else if let Some(Some(id)) = soc_order.get(k - con_order.len() - 1) {
+                soc_prices.insert(*id, val);
             }
         } else if k <= var_order.len() {
             // Declaration order is bounded independently of the text position.
