@@ -63,3 +63,25 @@ fn mosek_feature_exposes_persistent_solver_through_prelude() {
         assert!((result.objective().unwrap() - coefficient * upper).abs() < 1e-7);
     }
 }
+
+#[test]
+fn mosek_soc_dual_is_independent_of_objective_sense() {
+    let dual = |maximize: bool| {
+        let m = Model::new("soc_sense");
+        variable!(m, x);
+        variable!(m, y);
+        let cone = soc_constraint!(m, cone, [x, y] <= 3.0);
+        if maximize {
+            objective!(m, Max, x + 2.0 * y);
+        } else {
+            objective!(m, Min, -x - 2.0 * y);
+        }
+        let r = Mosek.solve(&m, &MosekOptions::default()).unwrap();
+        r.soc_dual.get(cone.soc_id()).expect("cone dual").to_vec()
+    };
+    let (max, min) = (dual(true), dual(false));
+    assert!(max[0] > 0.0, "{max:?}");
+    for (a, b) in max.iter().zip(&min) {
+        assert!((a - b).abs() < 1e-6, "{max:?} vs {min:?}");
+    }
+}

@@ -681,6 +681,7 @@ fn extract_result(
     let mut dual = SolutionValues::default();
     let mut soc_dual = oximo_solver::SocDuals::new();
     let mut psd_dual = FxHashMap::default();
+    let maximize = model.objective().as_ref().is_some_and(|o| o.sense == ObjectiveSense::Maximize);
     let mut reduced_costs = SolutionValues::default();
     if has_point {
         let mut values = vec![0.0; variables.len()];
@@ -704,13 +705,13 @@ fn extract_result(
             &mut dual,
             &mut reduced_costs,
         )?;
-        collect_continuous_soc_duals(task, solution_type, meta, &mut soc_dual);
+        collect_continuous_soc_duals(task, solution_type, meta, maximize, &mut soc_dual);
         for &(id, acc, n) in &meta.psd_accs {
             let mut values = vec![0.0; oximo_core::triangle_len(n)];
             if task.get_acc_dot_y(solution_type, acc, &mut values).is_ok() {
                 // MOSEK returns objective-signed ACC multipliers. Restore the
                 // objective-independent PSD cone multiplier used by oximo.
-                if model.objective().as_ref().is_some_and(|o| o.sense == ObjectiveSense::Maximize) {
+                if maximize {
                     for value in &mut values {
                         *value = -*value;
                     }
@@ -811,6 +812,7 @@ fn collect_continuous_soc_duals(
     task: &TaskCB,
     solution_type: i32,
     meta: &Meta,
+    maximize: bool,
     soc_dual: &mut oximo_solver::SocDuals,
 ) {
     let mut dot_y = Vec::new();
@@ -818,6 +820,11 @@ fn collect_continuous_soc_duals(
         dot_y.clear();
         dot_y.resize(dim, 0.0);
         if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok() {
+            if maximize {
+                for value in &mut dot_y {
+                    *value = -*value;
+                }
+            }
             soc_dual.insert(id, &dot_y);
         }
     }
