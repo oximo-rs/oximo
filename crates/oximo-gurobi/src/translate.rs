@@ -993,6 +993,9 @@ pub(crate) struct SocHandle {
     pub links: Vec<(gurobi_rs::Var, gurobi_rs::Constr)>,
     /// Model variables used directly as cone heads.
     pub direct_heads: Vec<VarId>,
+    /// Per head, the auxiliary `aux >= 0` variable, or `None` for a
+    /// direct head or one that is constant.
+    pub head_aux: Vec<Option<gurobi_rs::Var>>,
     /// The cone's affine members, used to rescale the squared-row multiplier.
     pub form: SocForm,
 }
@@ -1230,6 +1233,7 @@ fn add_soc_rows(
             gurobi_vars,
             links: Vec::new(),
             direct_heads: Vec::new(),
+            head_aux: Vec::new(),
         };
         let mut q = QuadExpr::new();
         match &form.head {
@@ -1249,12 +1253,13 @@ fn add_soc_rows(
         }
         let qrow =
             gurobi_model.add_qconstr(s.name.as_str(), c!(q <= 0.0)).map_err(map_gurobi_err)?;
-        let SocLowering { links, direct_heads, .. } = lowering;
+        let SocLowering { links, direct_heads, head_aux, .. } = lowering;
         rows.push(SocHandle {
             id: SocConstraintId(u32::try_from(i).expect("SOC count overflow")),
             quadratic: qrow,
             links,
             direct_heads,
+            head_aux,
             form,
         });
     }
@@ -1275,6 +1280,7 @@ struct SocLowering<'a> {
     gurobi_vars: &'a [gurobi_rs::Var],
     links: Vec<(gurobi_rs::Var, gurobi_rs::Constr)>,
     direct_heads: Vec<VarId>,
+    head_aux: Vec<Option<gurobi_rs::Var>>,
 }
 
 impl SocLowering<'_> {
@@ -1297,6 +1303,7 @@ impl SocLowering<'_> {
         {
             if head {
                 self.direct_heads.push(var);
+                self.head_aux.push(None);
             }
             return Ok((self.gurobi_vars[var.index()], c));
         }
@@ -1314,6 +1321,9 @@ impl SocLowering<'_> {
             .add_constr(&format!("{}_link{k}", self.name), c!(e == member.constant))
             .map_err(map_gurobi_err)?;
         self.links.push((aux, link));
+        if head {
+            self.head_aux.push(Some(aux));
+        }
         Ok((aux, 1.0))
     }
 }
@@ -1620,9 +1630,24 @@ fn collect_solution(
                 model.get_obj_attr(attr::QCPi, &handle.quadratic).ok().map(|pi| (handle.id, pi))
             })
             .collect();
-        oximo_solver::SocDuals::from_squared_rows(
+
+        let sign_multipliers: FxHashMap<(SocConstraintId, usize), f64> = soc_rows
+            .iter()
+            .flat_map(|handle| {
+                handle.head_aux.iter().enumerate().map(move |(k, aux)| (handle, k, aux))
+            })
+            .filter_map(|(handle, k, aux)| {
+                let value = match aux {
+                    Some(aux) => model.get_obj_attr(attr::RC, aux).ok()?,
+                    None => 0.0,
+                };
+                Some(((handle.id, k), value))
+            })
+            .collect();
+        oximo_solver::SocDuals::from_squared_rows_with_signs(
             soc_rows.iter().map(|handle| (handle.id, &handle.form)),
             |id| multipliers.get(&id).copied(),
+            |id, head| sign_multipliers.get(&(id, head)).copied(),
             |v| first.primal.get(v),
         )
     });
@@ -1841,6 +1866,9 @@ pub mod benchmark_support {
         let built = build(model, &GurobiOptions::default(), env)?;
         Ok(built.vars.len() + built.constrs.len() + built.soc_rows.len())
     }
+
+    /// A built native Gurobi model, kept alive by the caller so its destruction can be
+    /// excluded from a timer.
 }
 
 #[cfg(test)]
