@@ -11,7 +11,7 @@ use mosek::{
 };
 use oximo_core::{
     ConstraintId, Domain, IndicatorConstraintId, Model, ModelKind, ObjectiveSense, Sense,
-    SocConstraintId,
+    SocConstraintId, SocKind,
 };
 use oximo_expr::{LinearTerms, QuadraticTerms, VarId};
 use oximo_solver::{
@@ -26,9 +26,9 @@ pub(crate) struct Meta {
     pub parameters: oximo_solver::ParameterSnapshot,
     pub(crate) kind: ModelKind,
     row_by_constraint: Vec<Option<i32>>,
-    explicit_accs: Vec<(SocConstraintId, i64, usize)>,
+    explicit_accs: Vec<(SocConstraintId, i64, usize, SocKind)>,
     psd_accs: Vec<(PsdConstraintId, i64, usize)>,
-    detected_accs: Vec<(ConstraintId, i64, usize)>,
+    detected_accs: Vec<(ConstraintId, i64, usize, SocKind)>,
     indicator_afes: Vec<(IndicatorConstraintId, i64)>,
 }
 
@@ -239,6 +239,7 @@ fn build_rows_and_cones(
             SocConstraintId(u32::try_from(id).map_err(|_| overflow("SOC constraint"))?),
             next_acc,
             dim,
+            form.kind(),
         ));
         next_acc += 1;
     }
@@ -249,6 +250,7 @@ fn build_rows_and_cones(
             ConstraintId(u32::try_from(id).map_err(|_| overflow("row ID"))?),
             next_acc,
             dim,
+            form.kind(),
         ));
         task.put_acc_name(next_acc, &constraints[id].name).map_err(backend)?;
         next_acc += 1;
@@ -463,13 +465,13 @@ pub(crate) fn refresh_task(
                         .require_quadratic(row.lhs, || format!("constraint {:?}", row.name))?;
                     let form =
                         oximo_core::__detect_soc_from_quadratic(prepared.variables(), row, &q);
-                    if let Some((_, acc, dim)) =
-                        meta.detected_accs.iter().find(|(source, _, _)| source == id)
+                    if let Some((_, acc, dim, kind)) =
+                        meta.detected_accs.iter().find(|(source, ..)| source == id)
                     {
                         let Some(form) = form else {
                             return Ok(false);
                         };
-                        if !refresh_soc(task, *acc, *dim, &form, &mut scratch)? {
+                        if !refresh_soc(task, *acc, *dim, *kind, &form, &mut scratch)? {
                             return Ok(false);
                         }
                     } else {
@@ -497,8 +499,8 @@ pub(crate) fn refresh_task(
                     if !prepared.constraints().second_order_cones()[id.index()].active {
                         continue;
                     }
-                    let Some((_, acc, dim)) =
-                        meta.explicit_accs.iter().find(|(source, _, _)| source == id)
+                    let Some((_, acc, dim, kind)) =
+                        meta.explicit_accs.iter().find(|(source, ..)| source == id)
                     else {
                         return Ok(false);
                     };
@@ -506,7 +508,7 @@ pub(crate) fn refresh_task(
                         let form = prepared.explicit_soc(
                             &prepared.constraints().second_order_cones()[id.index()],
                         )?;
-                        if !refresh_soc(task, *acc, *dim, &form, &mut scratch)? {
+                        if !refresh_soc(task, *acc, *dim, *kind, &form, &mut scratch)? {
                             return Ok(false);
                         }
                     }
@@ -576,10 +578,11 @@ fn refresh_soc(
     task: &mut TaskCB,
     acc: i64,
     dimension: usize,
+    kind: SocKind,
     form: &oximo_core::SocForm,
     scratch: &mut TaskScratch,
 ) -> Result<bool, SolverError> {
-    if dimension != form.dimension() {
+    if dimension != form.dimension() || kind != form.kind() {
         return Ok(false);
     }
     let mut afes = vec![0; dimension];
@@ -816,7 +819,7 @@ fn collect_continuous_soc_duals(
     soc_dual: &mut oximo_solver::SocDuals,
 ) {
     let mut dot_y = Vec::new();
-    for &(id, acc, dim) in &meta.explicit_accs {
+    for &(id, acc, dim, _) in &meta.explicit_accs {
         dot_y.clear();
         dot_y.resize(dim, 0.0);
         if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok() {
@@ -1123,5 +1126,40 @@ mod tests {
             build_task_prepared(&m, &MosekOptions::default(), &prepared).unwrap();
         meta.explicit_accs.clear();
         assert!(!refresh_task(&prepared, &change, &mut task, &mut meta).unwrap());
+    }
+
+    #[test]
+    #[expect(clippy::many_single_char_names)]
+    fn soc_refresh_rebuilds_when_the_cone_kind_changes_at_equal_dimension() {
+        use oximo_core::prelude::*;
+
+        let standard = Model::new("standard cone");
+        variable!(standard, x);
+        variable!(standard, y);
+        variable!(standard, t >= 0.0);
+        standard.add_soc_constraint("cone", [x, y], t);
+        objective!(standard, Min, t);
+
+        let rotated = Model::new("rotated cone");
+        variable!(rotated, x);
+        variable!(rotated, u >= 0.0);
+        variable!(rotated, v >= 0.0);
+        rotated.add_rotated_soc_constraint("cone", [x], u, v);
+        objective!(rotated, Min, u + v);
+
+        let prepared = LoweringContext::new(&standard).unwrap();
+        let (mut task, meta) =
+            build_task_prepared(&standard, &MosekOptions::default(), &prepared).unwrap();
+        let (_, acc, dim, kind) = meta.explicit_accs[0];
+        assert_eq!(kind, SocKind::Standard);
+
+        let mut scratch = TaskScratch::default();
+        let same = prepared.explicit_soc(&prepared.constraints().second_order_cones()[0]).unwrap();
+        assert!(refresh_soc(&mut task, acc, dim, kind, &same, &mut scratch).unwrap());
+
+        let other = LoweringContext::new(&rotated).unwrap();
+        let swapped = other.explicit_soc(&other.constraints().second_order_cones()[0]).unwrap();
+        assert_eq!(swapped.dimension(), dim);
+        assert!(!refresh_soc(&mut task, acc, dim, kind, &swapped, &mut scratch).unwrap());
     }
 }
