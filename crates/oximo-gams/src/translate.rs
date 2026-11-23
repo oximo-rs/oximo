@@ -102,7 +102,7 @@ pub fn solve(
         .map_err(|e| SolverError::Backend(format!("cannot create temp dir: {e}")))?;
 
     let sol_path = tmp_dir.join("solution.txt");
-    write_solution_puts(&mut gms, vars.len(), constraints, socs);
+    write_solution_puts(&mut gms, vars.len(), constraints, &soc_forms);
 
     // - Write .gms file
     let gms_path = tmp_dir.join("model.gms");
@@ -299,7 +299,7 @@ fn write_solution_puts(
     gms: &mut String,
     n_variables: usize,
     constraints: &[AlgebraicConstraint],
-    socs: &[SocConstraint],
+    soc_forms: &[(SocConstraintId, oximo_core::SocForm)],
 ) {
     writeln!(gms, "File oximo_sol / 'solution.txt' /;").unwrap();
     writeln!(gms, "Put oximo_sol;").unwrap();
@@ -330,15 +330,21 @@ fn write_solution_puts(
             writeln!(gms, "Put 'D{i}=' eq_c{i}.m:0:15 /;").unwrap();
         }
     }
-    write_soc_marginal_puts(gms, socs);
+    write_soc_marginal_puts(gms, soc_forms);
     writeln!(gms, "Putclose oximo_sol;").unwrap();
 }
 
 /// Emit `Z{i}=` PUT lines reading each lowered SOC row's marginal, mirroring
 /// the `D{i}` constraint-dual lines.
-fn write_soc_marginal_puts(gms: &mut String, socs: &[SocConstraint]) {
-    for (i, _) in socs.iter().enumerate().filter(|(_, soc)| soc.active) {
+fn write_soc_marginal_puts(gms: &mut String, soc_forms: &[(SocConstraintId, oximo_core::SocForm)]) {
+    for (id, form) in soc_forms {
+        let i = id.index();
         writeln!(gms, "Put 'Z{i}=' eq_soc{i}.m:0:15 /;").unwrap();
+        for h in form.head.iter().enumerate().filter(|(_, head)| !is_constant(head)).map(|(h, _)| h)
+        {
+            let suffix = SOC_SIGN_SUFFIXES[h];
+            writeln!(gms, "Put 'Y{i}_{h}=' eq_soc{i}{suffix}.m:0:15 /;").unwrap();
+        }
     }
 }
 
@@ -406,6 +412,8 @@ fn parseoximo_solution(
     let mut dual = SolutionValues::default();
     let mut reduced_costs = SolutionValues::default();
     let mut soc_marginals = SolutionValues::default();
+    let mut soc_sign_marginals: std::collections::HashMap<(u32, usize), f64> =
+        std::collections::HashMap::new();
     let mut ignored = [0; 4];
     if has_sol {
         for line in content.lines().map(str::trim) {
@@ -415,6 +423,19 @@ fn parseoximo_solution(
                 (2, rest)
             } else if let Some(rest) = line.strip_prefix('Z') {
                 (3, rest)
+            } else if let Some(rest) = line.strip_prefix('Y') {
+                if has_duals
+                    && let Some((name, text)) = rest.split_once('=')
+                    && let Some((cone, head)) = name.split_once('_')
+                    && let (Ok(cone), Ok(head), Some(value)) = (
+                        cone.trim().parse::<u32>(),
+                        head.trim().parse::<usize>(),
+                        parse_gams_float(text.trim()),
+                    )
+                {
+                    soc_sign_marginals.insert((cone, head), value);
+                }
+                continue;
             } else {
                 (0, line)
             };
@@ -471,9 +492,10 @@ fn parseoximo_solution(
     // the members' values at the primal point.
     let mut soc_dual = oximo_solver::SocDuals::new();
     if has_duals && !soc_marginals.is_empty() {
-        soc_dual = oximo_solver::SocDuals::from_squared_rows(
+        soc_dual = oximo_solver::SocDuals::from_squared_rows_with_signs(
             soc_forms.iter().map(|(id, form)| (*id, form)),
             |id| soc_marginals.get(id),
+            |id, head| soc_sign_marginals.get(&(id.0, head)).copied().filter(|m| m.is_finite()),
             |v| primal.get(v),
         );
     }
@@ -1358,6 +1380,9 @@ fn is_constant(terms: &LinearTerms<'_>) -> bool {
     terms.coeffs.iter().all(|&(_, coefficient)| coefficient == 0.0)
 }
 
+/// Equation-name suffix of the sign row of head `0` and head `1`.
+const SOC_SIGN_SUFFIXES: [&str; 2] = ["_sign", "_sign2"];
+
 /// The `head >= 0` sign rows of a squared cone lowering, with their name
 /// suffixes. Squaring loses the head signs, so each head with variables needs
 /// one. A constant head emits no row: [`explicit_soc_forms`] already rejected a
@@ -1366,7 +1391,7 @@ fn soc_sign_rows<'p>(
     prepared: &'p PreparedExpressions,
     soc: &SocConstraint,
 ) -> Vec<(&'static str, AffineTerms<'p>)> {
-    ["_sign", "_sign2"]
+    SOC_SIGN_SUFFIXES
         .into_iter()
         .zip(soc.head().iter())
         .map(|(suffix, &root)| {
@@ -1871,7 +1896,8 @@ mod tests {
             sense_kw,
             opts,
         );
-        write_solution_puts(&mut gms, vars.len(), constraints, &socs);
+        let soc_forms = explicit_soc_forms(&prepared, &socs).unwrap();
+        write_solution_puts(&mut gms, vars.len(), constraints, &soc_forms);
         gms
     }
 
@@ -2093,14 +2119,15 @@ mod tests {
         ] {
             model.set_constraint_active(row, row_active).unwrap();
             model.set_constraint_active(cone, soc_active).unwrap();
-            let mut text = "STATUS=1\nSOLVESTAT=1\nMARGINALS=1\n0=0\nR0=0\nD1=0\nZ1=0\n".to_owned();
+            let mut text =
+                "STATUS=1\nSOLVESTAT=1\nMARGINALS=1\n0=0\nR0=0\nD1=0\nZ1=0\nY1_0=0\n".to_owned();
 
             if capture_row {
                 text.push_str("D0=0\n");
             }
 
             if capture_soc {
-                text.push_str("Z0=0\n");
+                text.push_str("Z0=0\nY0_0=0\n");
             }
 
             let mut result = parseoximo_solution(
@@ -2420,7 +2447,8 @@ mod tests {
 
     #[test]
     fn soc_marginal_is_rescaled_to_norm_form() {
-        let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\n";
+        let content =
+            "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\nY0_0=0\n";
         let bound = oximo_core::SocForm {
             head: oximo_core::SocHead::Standard(LinearTerms {
                 coeffs: vec![(VarId(1), 1.0)].into(),
@@ -2431,7 +2459,9 @@ mod tests {
         };
 
         for index in [0_usize, 1] {
-            let content = content.replace("Z0=", &format!("Z{index}="));
+            let content = content
+                .replace("Z0=", &format!("Z{index}="))
+                .replace("Y0_0=", &format!("Y{index}_0="));
             let bounds: Vec<_> = (0..=index)
                 .map(|i| (SocConstraintId(u32::try_from(i).unwrap()), bound.clone()))
                 .collect();
@@ -2463,8 +2493,12 @@ mod tests {
         variable!(model, t >= 0.0);
         model.add_soc_constraint("first", [x], t);
         model.add_soc_constraint("second", [x], t);
-        write_soc_marginal_puts(&mut gms, &model.soc_constraints());
+        model.__minimize(t);
+        let prepared = LoweringContext::new(&model).unwrap();
+        let forms = explicit_soc_forms(&prepared, &model.soc_constraints()).unwrap();
+        write_soc_marginal_puts(&mut gms, &forms);
         assert!(gms.contains("Put 'Z0=' eq_soc0.m:0:15 /;"), "{gms}");
+        assert!(gms.contains("Put 'Y0_0=' eq_soc0_sign.m:0:15 /;"), "{gms}");
         assert!(gms.contains("Put 'Z1=' eq_soc1.m:0:15 /;"), "{gms}");
     }
 

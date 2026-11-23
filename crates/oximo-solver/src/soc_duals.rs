@@ -180,10 +180,23 @@ impl SocDuals {
         terms: impl IntoIterator<Item = f64>,
         lambda: f64,
     ) {
+        self.insert_from_squared_row_with_signs(id, head, terms, lambda, [0.0; 2]);
+    }
+
+    /// Like [`Self::insert_from_squared_row`], also adding the magnitude of
+    /// each head's `head >= 0` sign-row multiplier to that head component.
+    pub fn insert_from_squared_row_with_signs(
+        &mut self,
+        id: SocConstraintId,
+        head: SocHead<f64>,
+        terms: impl IntoIterator<Item = f64>,
+        lambda: f64,
+        sign: [f64; 2],
+    ) {
         let scale = 2.0 * lambda.abs();
         let (head, head_len) = match head {
-            SocHead::Standard(t) => ([t * scale, 0.0], 1),
-            SocHead::Rotated(u, v) => ([v * scale, u * scale], 2),
+            SocHead::Standard(t) => ([t * scale + sign[0].abs(), 0.0], 1),
+            SocHead::Rotated(u, v) => ([v * scale + sign[0].abs(), u * scale + sign[1].abs()], 2),
         };
         self.insert_iter(
             id,
@@ -197,6 +210,18 @@ impl SocDuals {
     pub fn from_squared_rows<'f>(
         forms: impl IntoIterator<Item = (SocConstraintId, &'f SocForm)>,
         multiplier: impl Fn(SocConstraintId) -> Option<f64>,
+        primal: impl Fn(oximo_expr::VarId) -> Option<f64>,
+    ) -> Self {
+        Self::from_squared_rows_with_signs(forms, multiplier, |_, _| Some(0.0), primal)
+    }
+
+    /// Like [`Self::from_squared_rows`] for lowerings that also emit a
+    /// `head >= 0` row per head with variables.
+    #[must_use]
+    pub fn from_squared_rows_with_signs<'f>(
+        forms: impl IntoIterator<Item = (SocConstraintId, &'f SocForm)>,
+        multiplier: impl Fn(SocConstraintId) -> Option<f64>,
+        sign_multiplier: impl Fn(SocConstraintId, usize) -> Option<f64>,
         primal: impl Fn(oximo_expr::VarId) -> Option<f64>,
     ) -> Self {
         let value_of = |terms: &oximo_expr::LinearTerms<'_>| {
@@ -217,7 +242,27 @@ impl SocDuals {
             if form.terms.iter().any(|w| value_of(w).map(|w| members.push(w)).is_none()) {
                 continue;
             }
-            duals.insert_from_squared_row(id, head, members.iter().copied(), lambda);
+            let mut sign = [0.0; 2];
+            let mut complete = true;
+            for (k, h) in form.head.iter().enumerate() {
+                if h.coeffs.iter().all(|&(_, c)| c == 0.0) {
+                    continue;
+                }
+                match sign_multiplier(id, k) {
+                    Some(m) => sign[k] = m,
+                    None => complete = false,
+                }
+            }
+            if !complete {
+                continue;
+            }
+            duals.insert_from_squared_row_with_signs(
+                id,
+                head,
+                members.iter().copied(),
+                lambda,
+                sign,
+            );
         }
 
         duals
@@ -401,6 +446,19 @@ mod tests {
         assert_eq!(rotated.standard_bound(), None);
         assert_eq!(duals.get(SocConstraintId(1)), Some([2.0, 1.0].as_slice()));
         assert_eq!(SocDualRef::new(SocKind::Rotated, &[1.0, 1.0]), None);
+    }
+
+    #[test]
+    fn sign_row_multipliers_add_to_head_duals_at_the_origin() {
+        let mut duals = SocDuals::new();
+        duals.insert_from_squared_row_with_signs(
+            SocConstraintId(0),
+            SocHead::Rotated(0.0, 0.0),
+            [0.0],
+            0.0,
+            [0.5, -0.25],
+        );
+        assert_eq!(duals.get(SocConstraintId(0)), Some([0.5, 0.25, 0.0].as_slice()));
     }
 
     #[test]
