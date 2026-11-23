@@ -1866,7 +1866,6 @@ pub mod benchmark_support {
         let built = build(model, &GurobiOptions::default(), env)?;
         Ok(built.vars.len() + built.constrs.len() + built.soc_rows.len())
     }
-
 }
 
 #[cfg(test)]
