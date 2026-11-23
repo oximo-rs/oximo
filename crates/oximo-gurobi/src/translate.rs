@@ -1867,8 +1867,6 @@ pub mod benchmark_support {
         Ok(built.vars.len() + built.constrs.len() + built.soc_rows.len())
     }
 
-    /// A built native Gurobi model, kept alive by the caller so its destruction can be
-    /// excluded from a timer.
 }
 
 #[cfg(test)]
