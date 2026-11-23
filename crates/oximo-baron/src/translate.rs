@@ -10,7 +10,7 @@ use std::{fs, io};
 
 use oximo_core::{
     AlgebraicConstraint, ConstraintId, Domain, Model, ModelId, ModelMismatchError, Objective,
-    ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId, VarId,
+    ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId, SocForm, VarId,
 };
 use oximo_expr::{ExprArena, ExprId, ExprNode, LinearTerms, UnaryOp};
 use oximo_solver::{
@@ -65,7 +65,7 @@ pub fn solve(
     let sense = model.objective().as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
     let prepared = LoweringContext::new(model)?;
     let parameters = prepared.arena().parameter_snapshot();
-    let (bar, var_order, con_order, soc_order, soc_bounds) =
+    let (bar, var_order, con_order, soc_order, soc_forms) =
         build_bar_prepared(model, &prepared, opts).map_err(translation_rejection)?;
     let run = run_baron(&bar, opts, exec)?;
     let mut result = parse_solution(
@@ -77,7 +77,7 @@ pub fn solve(
         &var_order,
         &con_order,
         &soc_order,
-        &soc_bounds,
+        &soc_forms,
         model.id(),
         &parameters,
     );
@@ -248,11 +248,16 @@ fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<Baron
 /// variable declaration order (see [`write_var_declarations`]) used to decode
 /// BARON's numeric solution-pool blocks, the constraint emit-order (see
 /// [`write_equations`]) used to fold range duals back onto their
-/// `ConstraintId`, the emitted active-SOC ID order, and the affine bound side
-/// of each explicit SOC constraint used to rescale its squared-row price to
-/// the norm form.
-type BarParts =
-    (String, Vec<VarId>, Vec<ConstraintId>, Vec<SocConstraintId>, Vec<LinearTerms<'static>>);
+/// `ConstraintId`, the emitted SOC row order, and the affine members of each
+/// active explicit cone, used to rescale its squared-row price to the cone
+/// dual.
+type BarParts = (
+    String,
+    Vec<VarId>,
+    Vec<ConstraintId>,
+    Vec<Option<SocConstraintId>>,
+    Vec<(SocConstraintId, SocForm)>,
+);
 
 /// Check the complete translation, including operator restrictions, without running BARON.
 pub(crate) fn validate_model(model: &Model, opts: &BaronOptions) -> Result<(), SolverError> {
@@ -281,7 +286,7 @@ fn build_bar_prepared(
     let vars = prepared.variables();
     let model_constraints = prepared.constraints();
     let constraints = model_constraints.algebraic();
-    let socs = prepared.constraints().second_order_cones();
+    let soc_forms = explicit_soc_forms(prepared, prepared.constraints().second_order_cones())?;
     let objective = prepared.objective();
 
     let mut bar = String::with_capacity(4096);
@@ -307,14 +312,56 @@ fn build_bar_prepared(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let (con_order, soc_order) =
-        write_equations(&mut bar, prepared, constraints, socs, &convex_equation_ids)?;
+        write_equations(&mut bar, prepared, constraints, &soc_forms, &convex_equation_ids)?;
     write_objective(&mut bar, prepared, objective)?;
     write_starting_point(&mut bar, vars);
-    let soc_bounds = socs
-        .iter()
-        .map(|s| prepared.linear(s.bound).expect("SOC bound is validated affine").into_owned())
-        .collect();
-    Ok((bar, var_order, con_order, soc_order, soc_bounds))
+    Ok((bar, var_order, con_order, soc_order, soc_forms))
+}
+
+/// The affine members of every active explicit cone, keyed by cone ID.
+fn explicit_soc_forms(
+    prepared: &PreparedExpressions,
+    socs: &[SocConstraint],
+) -> Result<Vec<(SocConstraintId, SocForm)>, SolverError> {
+    socs.iter()
+        .enumerate()
+        .filter(|(_, soc)| soc.active)
+        .map(|(index, soc)| {
+            let id = SocConstraintId(u32::try_from(index).expect("SOC count overflow"));
+            Ok((id, prepared.explicit_soc(soc)?))
+        })
+        .collect()
+}
+
+/// Whether an affine member has no variable with a nonzero coefficient.
+fn is_constant(terms: &LinearTerms<'_>) -> bool {
+    terms.coeffs.iter().all(|&(_, coefficient)| coefficient == 0.0)
+}
+
+/// The sign rows `head >= 0` of a squared cone lowering, with their name
+/// suffixes.
+fn soc_sign_rows<'f>(
+    name: &str,
+    form: &'f SocForm,
+) -> Result<Vec<(&'static str, &'f LinearTerms<'static>)>, SolverError> {
+    if form.components().all(is_constant) {
+        return Err(SolverError::Backend(format!(
+            "second-order cone {name:?} has no variables; BARON requires every constraint to \
+             contain at least one variable"
+        )));
+    }
+    let mut rows = Vec::with_capacity(form.head.component_count());
+    for (suffix, head) in ["_sign", "_sign2"].into_iter().zip(form.head.iter()) {
+        if !is_constant(head) {
+            rows.push((suffix, head));
+        } else if head.constant < 0.0 {
+            return Err(SolverError::Backend(format!(
+                "second-order cone {name:?} has the negative constant head {}, so it is empty",
+                head.constant
+            )));
+        }
+    }
+    Ok(rows)
 }
 
 // - .bar writers
@@ -449,9 +496,9 @@ fn write_equations(
     bar: &mut String,
     prepared: &PreparedExpressions,
     constraints: &[AlgebraicConstraint],
-    socs: &[SocConstraint],
+    socs: &[(SocConstraintId, SocForm)],
     convex_equation_ids: &[ConstraintId],
-) -> Result<(Vec<ConstraintId>, Vec<SocConstraintId>), SolverError> {
+) -> Result<(Vec<ConstraintId>, Vec<Option<SocConstraintId>>), SolverError> {
     let arena = prepared.arena();
     let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
     let mut soc_order = Vec::new();
@@ -482,10 +529,16 @@ fn write_equations(
         }
     }
 
-    for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
+    let mut soc_rows = Vec::with_capacity(socs.len());
+    for (id, form) in socs {
+        let i = id.index();
+        let signs = soc_sign_rows(&format!("soc{i}"), form)?;
         names.push(format!("soc{i}"));
-        names.push(format!("soc{i}_sign"));
-        soc_order.push(SocConstraintId(u32::try_from(i).expect("SOC count overflow")));
+        names.extend(signs.iter().map(|(suffix, _)| format!("soc{i}{suffix}")));
+        // The quadratic row carries the cone price; sign rows map to nothing.
+        soc_order.push(Some(*id));
+        soc_order.extend(std::iter::repeat_n(None, signs.len()));
+        soc_rows.push((*id, form, signs));
     }
     let convex_names = convex_equation_names(constraints, convex_equation_ids)?;
     if names.is_empty() {
@@ -497,7 +550,7 @@ fn write_equations(
         writeln!(bar, "CONVEX_EQUATIONS {};", convex_names.join(", ")).unwrap();
     }
     bar.push_str(&bodies);
-    write_soc_rows(bar, prepared, socs);
+    write_soc_rows(bar, &soc_rows);
     writeln!(bar).unwrap();
     Ok((emit_map, soc_order))
 }
@@ -542,30 +595,46 @@ fn convex_equation_names(
     Ok(names)
 }
 
-/// Emit each explicit SOC constraint `||terms||_2 <= bound` as the polynomial
-/// row `(term_1)^2 + ... - (bound)^2 <= 0` plus the sign row `bound >= 0`
-/// (squaring loses the sign of the bound side).
-fn write_soc_rows(bar: &mut String, prepared: &PreparedExpressions, socs: &[SocConstraint]) {
-    for (i, s) in socs.iter().enumerate().filter(|(_, c)| c.active) {
-        write!(bar, "soc{i}: ").unwrap();
+/// One active cone's emitted rows: the cone ID, its affine members and the
+/// sign rows chosen by [`soc_sign_rows`].
+type SocRows<'f> = (SocConstraintId, &'f SocForm, Vec<(&'static str, &'f LinearTerms<'static>)>);
 
-        for (k, &term) in s.terms.iter().enumerate() {
+/// Emit each explicit SOC constraint as a polynomial row plus sign rows.
+///
+/// Standard `||terms||_2 <= t`: `(term_1)^2 + ... - (t)^2 <= 0` and `t >= 0`.
+/// Rotated `||terms||_2^2 <= 2 u v`: `(term_1)^2 + ... - 2 * (u) * (v) <= 0`
+/// with `u >= 0` and `v >= 0`.
+fn write_soc_rows(bar: &mut String, socs: &[SocRows<'_>]) {
+    for (id, form, signs) in socs {
+        let i = id.index();
+        write!(bar, "soc{i}: ").unwrap();
+        for (k, term) in form.terms.iter().enumerate() {
             if k > 0 {
                 write!(bar, " + ").unwrap();
             }
-            let t = prepared.linear(term).expect("SOC members are validated affine");
             write!(bar, "(").unwrap();
-            write_linear(bar, &t, true);
+            write_linear(bar, term, true);
             write!(bar, ")^2").unwrap();
         }
-        let b = prepared.linear(s.bound).expect("SOC bound is validated affine");
-        write!(bar, " - (").unwrap();
-        write_linear(bar, &b, true);
-        writeln!(bar, ")^2 <= 0;").unwrap();
-
-        write!(bar, "soc{i}_sign: ").unwrap();
-        write_linear(bar, &b, true);
-        writeln!(bar, " >= 0;").unwrap();
+        match &form.head {
+            oximo_core::SocHead::Standard(t) => {
+                write!(bar, " - (").unwrap();
+                write_linear(bar, t, true);
+                writeln!(bar, ")^2 <= 0;").unwrap();
+            }
+            oximo_core::SocHead::Rotated(u, v) => {
+                write!(bar, " - 2 * (").unwrap();
+                write_linear(bar, u, true);
+                write!(bar, ") * (").unwrap();
+                write_linear(bar, v, true);
+                writeln!(bar, ") <= 0;").unwrap();
+            }
+        }
+        for (suffix, head) in signs {
+            write!(bar, "soc{i}{suffix}: ").unwrap();
+            write_linear(bar, head, true);
+            writeln!(bar, " >= 0;").unwrap();
+        }
     }
 }
 
@@ -869,8 +938,8 @@ fn parse_solution(
     mut raw_log: Option<String>,
     var_order: &[VarId],
     con_order: &[ConstraintId],
-    soc_order: &[SocConstraintId],
-    soc_bounds: &[LinearTerms<'_>],
+    soc_order: &[Option<SocConstraintId>],
+    soc_forms: &[(SocConstraintId, SocForm)],
     model_id: ModelId,
     parameters: &oximo_solver::ParameterSnapshot,
 ) -> SolverResult {
@@ -923,30 +992,22 @@ fn parse_solution(
         (SolutionValues::default(), SolutionValues::default(), FxHashMap::default())
     };
 
-    // Rescale each SOC squared-row price to the norm-form bound multiplier
-    // using the bound's value at the best primal point.
-    let mut soc_dual = SolutionValues::default();
+    // Rescale each SOC squared-row price to the cone's dual vector.
+    let mut soc_dual = oximo_solver::SocDuals::new();
     if let Some(best) = solutions.first().filter(|_| !soc_prices.is_empty()) {
-        soc_dual = SolutionValues::missing(soc_bounds.len());
-        for (i, bound) in soc_bounds.iter().enumerate() {
-            let id = SocConstraintId(u32::try_from(i).expect("SOC count overflow"));
-            if let Some(price) = soc_prices.get(&id) {
-                let Some(b_val) = bound.coeffs.iter().try_fold(bound.constant, |acc, &(v, c)| {
-                    best.primal.get(v).map(|value| acc + c * value)
-                }) else {
-                    continue;
-                };
-                soc_dual.set(id, Some(2.0 * b_val * price.abs()));
-            }
-        }
+        soc_dual = oximo_solver::SocDuals::from_squared_rows(
+            soc_forms.iter().map(|(id, form)| (*id, form)),
+            |id| soc_prices.get(&id).copied(),
+            |v| best.primal.get(v),
+        );
     }
 
     let has_captured_multipliers = dual.values().chain(reduced_costs.values()).any(f64::is_finite)
-        || soc_dual.values().any(|value| value.is_finite() && value >= 0.0);
+        || soc_dual.iter().any(|(_, z)| z.iter().all(|value| value.is_finite()));
     let dual_reported = has_sol && res.to_ascii_lowercase().contains("corresponding dual solution");
     let empty_dual_section = dual_reported
         && !has_captured_multipliers
-        && !(var_order.is_empty() && con_order.is_empty() && soc_bounds.is_empty());
+        && !(var_order.is_empty() && con_order.is_empty() && soc_forms.is_empty());
     record_readback_diagnostics(&mut raw_log, ignored_coordinates, empty_dual_section);
 
     let best_bound = match sense {
@@ -1269,7 +1330,7 @@ fn parse_dual_solution(
     res: &str,
     var_order: &[VarId],
     con_order: &[ConstraintId],
-    soc_order: &[SocConstraintId],
+    soc_order: &[Option<SocConstraintId>],
 ) -> DualParts {
     // BARON may print the dual vector more than once (e.g. for a solution
     // found during preprocessing and again after `*** Normal completion ***`);
@@ -1312,15 +1373,9 @@ fn parse_dual_solution(
         if in_prices {
             if let Some(&id) = con_order.get(k - 1) {
                 let _ = oximo_solver::reconstruct::try_accumulate_dual(&mut dual, id, val, 1.0);
-            } else {
-                // Past the ConstraintId rows: the appended SOC pairs, two
-                // rows per cone. Keep the quadratic row's price, skip the
-                // sign row's.
-                let rel = k - con_order.len() - 1;
-                if rel.is_multiple_of(2)
-                    && let Some(&id) = soc_order.get(rel / 2)
-                {
-                    soc_prices.insert(id, val);
+            } else {.
+                if let Some(Some(id)) = soc_order.get(k - con_order.len() - 1) {
+                    soc_prices.insert(*id, val);
                 }
             }
         } else if k <= var_order.len() {
@@ -1514,7 +1569,7 @@ pub mod benchmark_support {
     pub fn render_equations(model: &Model, parallel: bool) -> Result<String, SolverError> {
         let arena = PreparedExpressions::new((*model.arena()).clone());
         let constraints = model.constraints().algebraic().to_vec();
-        let socs = model.soc_constraints().clone();
+        let socs = explicit_soc_forms(&arena, &model.soc_constraints())?;
         let mut out = String::new();
         let map = if parallel {
             render_parallel(&mut out, &arena, &constraints, &socs)?
@@ -1529,7 +1584,7 @@ pub mod benchmark_support {
         out: &mut String,
         arena: &PreparedExpressions,
         constraints: &[AlgebraicConstraint],
-        socs: &[SocConstraint],
+        socs: &[(SocConstraintId, SocForm)],
     ) -> Result<Vec<ConstraintId>, SolverError> {
         let mut emit_map = Vec::with_capacity(constraints.len());
         if constraints.is_empty() && socs.is_empty() {
@@ -1544,8 +1599,13 @@ pub mod benchmark_support {
             }
         }
 
-        for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
-            names.extend([format!("soc{i}"), format!("soc{i}_sign")]);
+        let mut soc_rows = Vec::with_capacity(socs.len());
+        for (id, form) in socs {
+            let i = id.index();
+            let signs = soc_sign_rows(&format!("soc{i}"), form)?;
+            names.push(format!("soc{i}"));
+            names.extend(signs.iter().map(|(suffix, _)| format!("soc{i}{suffix}")));
+            soc_rows.push((*id, form, signs));
         }
         writeln!(out, "EQUATIONS {};", names.join(", ")).unwrap();
         let fragments: Vec<String> = constraints
@@ -1556,7 +1616,7 @@ pub mod benchmark_support {
         for fragment in fragments {
             out.push_str(&fragment);
         }
-        write_soc_rows(out, arena, socs);
+        write_soc_rows(out, &soc_rows);
         writeln!(out).unwrap();
         Ok(emit_map)
     }
@@ -2215,7 +2275,7 @@ mod tests {
                 result.dual.insert(row.row_id(), 0.0);
             }
             if capture_soc {
-                result.soc_dual.insert(cone.soc_id(), 0.0);
+                result.soc_dual.insert(cone.soc_id(), &[0.0, 0.0]);
             }
             let con_order = if row_active { vec![row.row_id()] } else { Vec::new() };
             require_active_dual_evidence(
@@ -2459,8 +2519,12 @@ The best solution found is:
  >>>       2            -.75000000000000000000000
  >>>       3             0.0000000000000000000000
 ";
-        let (dual, _rc, soc) =
-            parse_dual_solution(res, &[VarId(0)], &[ConstraintId(0)], &[SocConstraintId(0)]);
+        let (dual, _rc, soc) = parse_dual_solution(
+            res,
+            &[VarId(0)],
+            &[ConstraintId(0)],
+            &[Some(SocConstraintId(0)), None],
+        );
         assert_eq!(dual.get(ConstraintId(0)), Some(2.0));
         assert_eq!(dual.len(), 1);
         assert_eq!(soc.get(&SocConstraintId(0)), Some(&-0.75));
@@ -2485,7 +2549,7 @@ The best solution found is:
         let (bar, var_order, con_order, soc_order, soc_bounds) =
             build_bar(&model, &BaronOptions::default()).unwrap();
         assert!(bar.contains("EQUATIONS c0_lo, c0_hi, soc1, soc1_sign, soc3, soc3_sign;"));
-        assert_eq!(soc_order, vec![cones[1].soc_id(), cones[3].soc_id()]);
+        assert_eq!(soc_order, vec![Some(cones[1].soc_id()), None, Some(cones[3].soc_id()), None]);
 
         let res = "The best solution found is:\nx0 0 2 10\nThe above solution has an objective value of: 0\n\n\
  >>> Corresponding dual solution vector is:\n\
@@ -2519,8 +2583,8 @@ The best solution found is:
         let result = finalize_result(result, &model, var_order.len());
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
         assert_eq!(result.dual.get(row), Some(1.0));
-        assert_eq!(result.soc_dual.get(cones[1].soc_id()), Some(6.0));
-        assert_eq!(result.soc_dual.get(cones[3].soc_id()), Some(20.0));
+        assert_eq!(result.soc_dual.get(cones[1].soc_id()).map(|z| z[0]), Some(6.0));
+        assert_eq!(result.soc_dual.get(cones[3].soc_id()).map(|z| z[0]), Some(20.0));
         assert_eq!(result.soc_dual.len(), 2);
 
         for i in [0, 2, 4] {

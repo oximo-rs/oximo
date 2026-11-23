@@ -1,4 +1,4 @@
-use oximo_solver::prepare::{LoweringContext, PreparedExpressions};
+use oximo_solver::prepare::{AffineTerms, LoweringContext, PreparedExpressions};
 use oximo_solver::reconstruct::{finalize_result, require_active_dual_evidence};
 use oximo_solver::{SolutionValueId, SolutionValues};
 use std::borrow::Cow;
@@ -65,6 +65,10 @@ pub fn solve(
     let indicators = prepared.constraints().indicators();
     let objective = prepared.objective();
     let sense = objective.as_ref().map_or(ObjectiveSense::Minimize, |o| o.sense);
+    // The affine members of each active explicit cone, kept to rescale the
+    // squared-form `eq_soc{i}` marginal back to the cone dual after the solve
+    // (see `parseoximo_solution`).
+    let soc_forms = explicit_soc_forms(&prepared, socs)?;
 
     let sense_kw = match sense {
         ObjectiveSense::Minimize => "minimizing",
@@ -99,14 +103,6 @@ pub fn solve(
 
     let sol_path = tmp_dir.join("solution.txt");
     write_solution_puts(&mut gms, vars.len(), constraints, socs);
-
-    // The affine bound side of each explicit SOC constraint, kept to rescale
-    // the squared-form `eq_soc{i}` marginal back to the norm form after the
-    // solve (see `parseoximo_solution`).
-    let soc_bounds: Vec<LinearTerms<'static>> = socs
-        .iter()
-        .map(|s| prepared.linear(s.bound).expect("SOC bound is validated affine").into_owned())
-        .collect();
 
     // - Write .gms file
     let gms_path = tmp_dir.join("model.gms");
@@ -184,7 +180,7 @@ pub fn solve(
         );
         let mut result = parseoximo_solution(
             &content,
-            &soc_bounds,
+            &soc_forms,
             mixed_integer,
             elapsed,
             raw_log,
@@ -353,7 +349,7 @@ fn write_soc_marginal_puts(gms: &mut String, socs: &[SocConstraint]) {
 #[expect(clippy::too_many_lines)]
 fn parseoximo_solution(
     content: &str,
-    soc_bounds: &[LinearTerms<'_>],
+    soc_forms: &[(SocConstraintId, oximo_core::SocForm)],
     mixed_integer: bool,
     elapsed: std::time::Duration,
     mut raw_log: Option<String>,
@@ -446,7 +442,7 @@ fn parseoximo_solution(
                 }
                 3 if has_duals => set_put_value(
                     &mut soc_marginals,
-                    soc_bounds.len(),
+                    soc_forms.last().map_or(0, |(id, _)| id.index() + 1),
                     SocConstraintId(index),
                     value,
                     &mut ignored[3],
@@ -471,28 +467,21 @@ fn parseoximo_solution(
         }
     }
 
-    // Rescale each lowered SOC row's marginal to the norm-form bound
-    // multiplier using the bound's value at the primal point.
-    let mut soc_dual = SolutionValues::default();
+    // Rescale each lowered SOC row's marginal to the cone's dual vector using
+    // the members' values at the primal point.
+    let mut soc_dual = oximo_solver::SocDuals::new();
     if has_duals && !soc_marginals.is_empty() {
-        soc_dual = SolutionValues::missing(soc_bounds.len());
-        for (i, bound) in soc_bounds.iter().enumerate() {
-            let idx = u32::try_from(i).expect("SOC count overflow");
-            if let Some(m) = soc_marginals.get(SocConstraintId(idx)) {
-                let Some(b_val) = bound.coeffs.iter().try_fold(bound.constant, |sum, &(v, c)| {
-                    primal.get(v).map(|value| sum + c * value)
-                }) else {
-                    continue;
-                };
-                soc_dual.set(SocConstraintId(idx), Some(2.0 * b_val * m.abs()));
-            }
-        }
+        soc_dual = oximo_solver::SocDuals::from_squared_rows(
+            soc_forms.iter().map(|(id, form)| (*id, form)),
+            |id| soc_marginals.get(id),
+            |v| primal.get(v),
+        );
     }
 
     let has_captured_multipliers = dual.values().chain(reduced_costs.values()).any(f64::is_finite)
-        || soc_dual.values().any(|value| value.is_finite() && value >= 0.0);
+        || soc_dual.iter().any(|(_, z)| z.iter().all(|value| value.is_finite()));
     let empty_dual_section =
-        has_duals && !has_captured_multipliers && (counts != (0, 0) || !soc_bounds.is_empty());
+        has_duals && !has_captured_multipliers && (counts != (0, 0) || !soc_forms.is_empty());
     if empty_dual_section {
         let log = raw_log.get_or_insert_with(String::new);
         if !log.is_empty() {
@@ -1206,9 +1195,7 @@ fn write_equations(
         }
     }
 
-    for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
-        write!(gms, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
-    }
+    write_soc_equation_names(gms, prepared, socs);
 
     for (sos_id, constraint) in active_sos_constraints(sos_constraints) {
         for member_index in 0..constraint.members.len() {
@@ -1339,14 +1326,80 @@ fn ordered_sos_members(constraint: &SosConstraint) -> Vec<&SosMember> {
     members
 }
 
-/// Emit each explicit SOC constraint `||terms||_2 <= bound` as the quadratic
-/// row `sqr(term_1) + ... =l= sqr(bound)` plus the sign row `bound =g= 0`
-/// (squaring loses the sign of the bound side).
+/// The affine members of every active explicit cone, keyed by cone ID.
+///
+/// # Errors
+/// Returns a backend error for a cone with a negative constant head, which is
+/// empty (see [`soc_sign_rows`]).
+fn explicit_soc_forms(
+    prepared: &PreparedExpressions,
+    socs: &[SocConstraint],
+) -> Result<Vec<(SocConstraintId, oximo_core::SocForm)>, SolverError> {
+    socs.iter()
+        .enumerate()
+        .filter(|(_, soc)| soc.active)
+        .map(|(index, soc)| {
+            let form = prepared.explicit_soc(soc)?;
+            if let Some(head) =
+                form.head.iter().find(|head| is_constant(head) && head.constant < 0.0)
+            {
+                return Err(SolverError::Backend(format!(
+                    "second-order cone {:?} has the negative constant head {}, so it is empty",
+                    soc.name, head.constant
+                )));
+            }
+            Ok((SocConstraintId(u32::try_from(index).expect("SOC count overflow")), form))
+        })
+        .collect()
+}
+
+/// Whether an affine member has no variable with a nonzero coefficient.
+fn is_constant(terms: &LinearTerms<'_>) -> bool {
+    terms.coeffs.iter().all(|&(_, coefficient)| coefficient == 0.0)
+}
+
+/// The `head >= 0` sign rows of a squared cone lowering, with their name
+/// suffixes. Squaring loses the head signs, so each head with variables needs
+/// one. A constant head emits no row: [`explicit_soc_forms`] already rejected a
+/// negative one, and a nonnegative one holds trivially.
+fn soc_sign_rows<'p>(
+    prepared: &'p PreparedExpressions,
+    soc: &SocConstraint,
+) -> Vec<(&'static str, AffineTerms<'p>)> {
+    ["_sign", "_sign2"]
+        .into_iter()
+        .zip(soc.head().iter())
+        .map(|(suffix, &root)| {
+            (suffix, prepared.linear(root).expect("SOC head is validated affine"))
+        })
+        .filter(|(_, head)| !is_constant(head))
+        .collect()
+}
+
+/// Declare every active cone's quadratic row and sign rows.
+fn write_soc_equation_names(
+    gms: &mut String,
+    prepared: &PreparedExpressions,
+    socs: &[SocConstraint],
+) {
+    for (i, soc) in socs.iter().enumerate().filter(|(_, c)| c.active) {
+        write!(gms, ", eq_soc{i}").unwrap();
+        for (suffix, _) in soc_sign_rows(prepared, soc) {
+            write!(gms, ", eq_soc{i}{suffix}").unwrap();
+        }
+    }
+}
+
+/// Emit each explicit SOC constraint as a quadratic row plus sign rows.
+///
+/// Standard `||terms||_2 <= t`: `sqr(term_1) + ... =l= sqr(t)` and `t =g= 0`
+/// (squaring loses the sign). Rotated `||terms||_2^2 <= 2 u v`:
+/// `sqr(term_1) + ... =l= 2 * (u) * (v)` with `u =g= 0` and `v =g= 0`.
 fn write_soc_equations(gms: &mut String, prepared: &PreparedExpressions, socs: &[SocConstraint]) {
     for (i, s) in socs.iter().enumerate().filter(|(_, c)| c.active) {
         write!(gms, "eq_soc{i}.. ").unwrap();
 
-        for (k, &term) in s.terms.iter().enumerate() {
+        for (k, &term) in s.terms().iter().enumerate() {
             if k > 0 {
                 write!(gms, " +").unwrap();
             }
@@ -1355,14 +1408,26 @@ fn write_soc_equations(gms: &mut String, prepared: &PreparedExpressions, socs: &
             write_linear(gms, &t, true);
             write!(gms, " )").unwrap();
         }
-        let b = prepared.linear(s.bound).expect("SOC bound is validated affine");
-        write!(gms, " =l= sqr(").unwrap();
-        write_linear(gms, &b, true);
-        writeln!(gms, " );").unwrap();
-
-        write!(gms, "eq_soc{i}_sign..").unwrap();
-        write_linear(gms, &b, true);
-        writeln!(gms, " =g= 0;").unwrap();
+        let head = |root| prepared.linear(root).expect("SOC head is validated affine");
+        match s.head() {
+            oximo_core::SocHead::Standard(t) => {
+                write!(gms, " =l= sqr(").unwrap();
+                write_linear(gms, &head(t), true);
+                writeln!(gms, " );").unwrap();
+            }
+            oximo_core::SocHead::Rotated(u, v) => {
+                write!(gms, " =l= 2 * (").unwrap();
+                write_linear(gms, &head(u), true);
+                write!(gms, " ) * (").unwrap();
+                write_linear(gms, &head(v), true);
+                writeln!(gms, " );").unwrap();
+            }
+        }
+        for (suffix, head) in soc_sign_rows(prepared, s) {
+            write!(gms, "eq_soc{i}{suffix}..").unwrap();
+            write_linear(gms, &head, true);
+            writeln!(gms, " =g= 0;").unwrap();
+        }
     }
 }
 
@@ -1690,9 +1755,7 @@ pub mod benchmark_support {
             }
         }
 
-        for (i, _) in socs.iter().enumerate().filter(|(_, c)| c.active) {
-            write!(out, ", eq_soc{i}, eq_soc{i}_sign").unwrap();
-        }
+        write_soc_equation_names(out, arena, socs);
         writeln!(out, ";\n").unwrap();
         writeln!(out, "eq_obj..  v_obj =e= 0;").unwrap();
         let fragments: Vec<String> = constraints
@@ -2012,7 +2075,12 @@ mod tests {
         let inactive_cone = soc_constraint!(model, inactive_cone, [x] <= x);
         model.set_constraint_active(inactive, false).unwrap();
         model.set_constraint_active(inactive_cone, false).unwrap();
-        let bounds = vec![LinearTerms { coeffs: vec![(VarId(0), 1.0)].into(), constant: 0.0 }; 2];
+        let x_terms = LinearTerms { coeffs: vec![(VarId(0), 1.0)].into(), constant: 0.0 };
+        let form = oximo_core::SocForm {
+            head: oximo_core::SocHead::Standard(x_terms.clone()),
+            terms: vec![x_terms],
+        };
+        let bounds = vec![(cone.soc_id(), form.clone()), (inactive_cone.soc_id(), form)];
 
         for (row_active, soc_active, capture_row, capture_soc, expected) in [
             (true, false, false, false, DualStatus::Unknown),
@@ -2353,11 +2421,20 @@ mod tests {
     #[test]
     fn soc_marginal_is_rescaled_to_norm_form() {
         let content = "STATUS=1\nSOLVESTAT=1\nOBJVAL=-1.0\nMARGINALS=1\n0=-1.0\n1=1.5\nZ0=-0.75\n";
-        let bound = LinearTerms { coeffs: vec![(VarId(1), 1.0)].into(), constant: 0.5 };
+        let bound = oximo_core::SocForm {
+            head: oximo_core::SocHead::Standard(LinearTerms {
+                coeffs: vec![(VarId(1), 1.0)].into(),
+                constant: 0.5,
+            }),
+            // One term `x0`, matching the fixture cones' dimension.
+            terms: vec![LinearTerms { coeffs: vec![(VarId(0), 1.0)].into(), constant: 0.0 }],
+        };
 
         for index in [0_usize, 1] {
             let content = content.replace("Z0=", &format!("Z{index}="));
-            let bounds = vec![bound.clone(); index + 1];
+            let bounds: Vec<_> = (0..=index)
+                .map(|i| (SocConstraintId(u32::try_from(i).unwrap()), bound.clone()))
+                .collect();
             let result = finalize_parsed(
                 parseoximo_solution(
                     &content,
@@ -2372,8 +2449,9 @@ mod tests {
             );
             let id = SocConstraintId(u32::try_from(index).unwrap());
             assert_eq!(result.soc_dual.len(), 1);
-            let multiplier = result.soc_dual.get(id).expect("SOC dual missing");
-            assert!((multiplier - 3.0).abs() < 1e-9, "{id:?}: {multiplier}");
+            // z = 2 |m| (t, -w) with t = 1.5 + 0.5 and w = -1.
+            let z = result.soc_dual.get(id).expect("SOC dual missing");
+            assert!((z[0] - 3.0).abs() < 1e-9 && (z[1] - 1.5).abs() < 1e-9, "{id:?}: {z:?}");
         }
     }
 
