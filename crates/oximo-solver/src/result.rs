@@ -349,7 +349,8 @@ fn evaluate_soc_at(
         oximo_core::SocHead::Standard(t) => t - norm,
         oximo_core::SocHead::Rotated(u, v) => {
             let r = std::f64::consts::FRAC_1_SQRT_2;
-            (u + v) * r - ((u - v) * r).hypot(norm)
+            let (u, v) = (u * r, v * r);
+            (u + v) - (u - v).hypot(norm)
         }
     };
     Some(SocEvaluation { head, norm, slack, violation: (-slack).max(0.0) })
@@ -1357,6 +1358,41 @@ mod tests {
 
         let negative = result.soc_evaluation_at(&m, cone, 2).unwrap().unwrap();
         assert!(negative.violation > 0.0, "{negative:?}");
+    }
+
+    #[test]
+    fn rotated_soc_slack_stays_finite_for_large_heads() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("rotated soc scaling");
+        variable!(m, x);
+        variable!(m, u);
+        variable!(m, v);
+        let cone = soc_constraint!(m, cone, [x] in rotated(u, v));
+        let result = SolverResult {
+            model_id: m.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![SolutionPoint {
+                model_id: m.id(),
+                primal: [
+                    (x.var_id().unwrap(), 0.0),
+                    (u.var_id().unwrap(), 1e308),
+                    (v.var_id().unwrap(), 1e308),
+                ]
+                .into_iter()
+                .collect(),
+                objective: None,
+                parameters: m.arena().parameter_snapshot(),
+            }],
+            ..Default::default()
+        };
+
+        let evaluation = result.soc_evaluation(&m, cone).unwrap().unwrap();
+        assert!(evaluation.slack.is_finite(), "{evaluation:?}");
+
+        let expected = 2.0 * (1e308 * std::f64::consts::FRAC_1_SQRT_2);
+        assert!((evaluation.slack - expected).abs() < 1e295, "{evaluation:?}");
+        assert_eq!(evaluation.violation, 0.0);
     }
 
     #[test]
