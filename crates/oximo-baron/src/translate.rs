@@ -251,13 +251,8 @@ fn run_baron(bar: &str, opts: &BaronOptions, exec: Option<&str>) -> Result<Baron
 /// `ConstraintId`, the emitted SOC row order, and the affine members of each
 /// active explicit cone, used to rescale its squared-row price to the cone
 /// dual.
-type BarParts = (
-    String,
-    Vec<VarId>,
-    Vec<ConstraintId>,
-    Vec<Option<SocConstraintId>>,
-    Vec<(SocConstraintId, SocForm)>,
-);
+type BarParts =
+    (String, Vec<VarId>, Vec<ConstraintId>, Vec<SocRowKey>, Vec<(SocConstraintId, SocForm)>);
 
 /// Check the complete translation, including operator restrictions, without running BARON.
 pub(crate) fn validate_model(model: &Model, opts: &BaronOptions) -> Result<(), SolverError> {
@@ -498,7 +493,7 @@ fn write_equations(
     constraints: &[AlgebraicConstraint],
     socs: &[(SocConstraintId, SocForm)],
     convex_equation_ids: &[ConstraintId],
-) -> Result<(Vec<ConstraintId>, Vec<Option<SocConstraintId>>), SolverError> {
+) -> Result<(Vec<ConstraintId>, Vec<SocRowKey>), SolverError> {
     let arena = prepared.arena();
     let mut emit_map: Vec<ConstraintId> = Vec::with_capacity(constraints.len());
     let mut soc_order = Vec::new();
@@ -535,9 +530,11 @@ fn write_equations(
         let signs = soc_sign_rows(&format!("soc{i}"), form)?;
         names.push(format!("soc{i}"));
         names.extend(signs.iter().map(|(suffix, _)| format!("soc{i}{suffix}")));
-        // The quadratic row carries the cone price; sign rows map to nothing.
-        soc_order.push(Some(*id));
-        soc_order.extend(std::iter::repeat_n(None, signs.len()));
+        // The quadratic row price and each head's sign-row price both feed the
+        // cone dual.
+        soc_order.push((*id, None));
+        soc_order
+            .extend(signs.iter().map(|(suffix, _)| (*id, Some(usize::from(*suffix == "_sign2")))));
         soc_rows.push((*id, form, signs));
     }
     let convex_names = convex_equation_names(constraints, convex_equation_ids)?;
@@ -938,7 +935,7 @@ fn parse_solution(
     mut raw_log: Option<String>,
     var_order: &[VarId],
     con_order: &[ConstraintId],
-    soc_order: &[Option<SocConstraintId>],
+    soc_order: &[SocRowKey],
     soc_forms: &[(SocConstraintId, SocForm)],
     model_id: ModelId,
     parameters: &oximo_solver::ParameterSnapshot,
@@ -995,9 +992,10 @@ fn parse_solution(
     // Rescale each SOC squared-row price to the cone's dual vector.
     let mut soc_dual = oximo_solver::SocDuals::new();
     if let Some(best) = solutions.first().filter(|_| !soc_prices.is_empty()) {
-        soc_dual = oximo_solver::SocDuals::from_squared_rows(
+        soc_dual = oximo_solver::SocDuals::from_squared_rows_with_signs(
             soc_forms.iter().map(|(id, form)| (*id, form)),
-            |id| soc_prices.get(&id).copied(),
+            |id| soc_prices.get(&(id, None)).copied(),
+            |id, head| soc_prices.get(&(id, Some(head))).copied(),
             |v| best.primal.get(v),
         );
     }
@@ -1309,11 +1307,13 @@ fn parse_solution_pool(
     out
 }
 
+/// An appended SOC row where the cone ID with `None` for its squared quadratic row,
+/// or `Some(h)` for the `head >= 0` sign row of head `h`.
+type SocRowKey = (SocConstraintId, Option<usize>);
+
 /// `(dual, reduced_costs, soc_prices)` parsed from BARON's dual section.
-/// `soc_prices` keys the raw price of each appended SOC quadratic row by cone
-/// ID (its sign row is skipped).
-type DualParts =
-    (SolutionValues<ConstraintId>, SolutionValues<VarId>, FxHashMap<SocConstraintId, f64>);
+/// `soc_prices` keys the raw price of each appended SOC row by [`SocRowKey`].
+type DualParts = (SolutionValues<ConstraintId>, SolutionValues<VarId>, FxHashMap<SocRowKey, f64>);
 
 /// Parse the dual solution BARON prints
 ///
@@ -1330,7 +1330,7 @@ fn parse_dual_solution(
     res: &str,
     var_order: &[VarId],
     con_order: &[ConstraintId],
-    soc_order: &[Option<SocConstraintId>],
+    soc_order: &[SocRowKey],
 ) -> DualParts {
     // BARON may print the dual vector more than once (e.g. for a solution
     // found during preprocessing and again after `*** Normal completion ***`);
@@ -1342,7 +1342,7 @@ fn parse_dual_solution(
         con_order.iter().map(|id| id.index().saturating_add(1)).max().unwrap_or(0),
     );
     let mut reduced_costs = SolutionValues::missing(var_order.len());
-    let mut soc_prices: FxHashMap<SocConstraintId, f64> = FxHashMap::default();
+    let mut soc_prices: FxHashMap<SocRowKey, f64> = FxHashMap::default();
     let strip = |l: &str| l.trim_start().trim_start_matches(">>>").trim().to_string();
 
     // Marginals first, then prices once the `Constraint no. Price` header is
@@ -1373,8 +1373,8 @@ fn parse_dual_solution(
         if in_prices {
             if let Some(&id) = con_order.get(k - 1) {
                 let _ = oximo_solver::reconstruct::try_accumulate_dual(&mut dual, id, val, 1.0);
-            } else if let Some(Some(id)) = soc_order.get(k - con_order.len() - 1) {
-                soc_prices.insert(*id, val);
+            } else if let Some(&key) = soc_order.get(k - con_order.len() - 1) {
+                soc_prices.insert(key, val);
             }
         } else if k <= var_order.len() {
             // Declaration order is bounded independently of the text position.
@@ -2521,12 +2521,13 @@ The best solution found is:
             res,
             &[VarId(0)],
             &[ConstraintId(0)],
-            &[Some(SocConstraintId(0)), None],
+            &[(SocConstraintId(0), None), (SocConstraintId(0), Some(0))],
         );
         assert_eq!(dual.get(ConstraintId(0)), Some(2.0));
         assert_eq!(dual.len(), 1);
-        assert_eq!(soc.get(&SocConstraintId(0)), Some(&-0.75));
-        assert_eq!(soc.len(), 1);
+        assert_eq!(soc.get(&(SocConstraintId(0), None)), Some(&-0.75));
+        assert_eq!(soc.get(&(SocConstraintId(0), Some(0))), Some(&0.0));
+        assert_eq!(soc.len(), 2);
     }
 
     #[test]
@@ -2547,7 +2548,15 @@ The best solution found is:
         let (bar, var_order, con_order, soc_order, soc_bounds) =
             build_bar(&model, &BaronOptions::default()).unwrap();
         assert!(bar.contains("EQUATIONS c0_lo, c0_hi, soc1, soc1_sign, soc3, soc3_sign;"));
-        assert_eq!(soc_order, vec![Some(cones[1].soc_id()), None, Some(cones[3].soc_id()), None]);
+        assert_eq!(
+            soc_order,
+            vec![
+                (cones[1].soc_id(), None),
+                (cones[1].soc_id(), Some(0)),
+                (cones[3].soc_id(), None),
+                (cones[3].soc_id(), Some(0)),
+            ]
+        );
 
         let res = "The best solution found is:\nx0 0 2 10\nThe above solution has an objective value of: 0\n\n\
  >>> Corresponding dual solution vector is:\n\
@@ -2581,8 +2590,8 @@ The best solution found is:
         let result = finalize_result(result, &model, var_order.len());
         assert_eq!(result.dual_status, DualStatus::FeasiblePoint);
         assert_eq!(result.dual.get(row), Some(1.0));
-        assert_eq!(result.soc_dual.get(cones[1].soc_id()).map(|z| z[0]), Some(6.0));
-        assert_eq!(result.soc_dual.get(cones[3].soc_id()).map(|z| z[0]), Some(20.0));
+        assert_eq!(result.soc_dual.get(cones[1].soc_id()).map(|z| z[0]), Some(6.0 + 99.0));
+        assert_eq!(result.soc_dual.get(cones[3].soc_id()).map(|z| z[0]), Some(20.0 + 98.0));
         assert_eq!(result.soc_dual.len(), 2);
 
         for i in [0, 2, 4] {
