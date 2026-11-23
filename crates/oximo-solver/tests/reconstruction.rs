@@ -42,12 +42,12 @@ fn active_dual_evidence_reports_all_missing_groups_and_preserves_native_logs() {
         result.raw_log = Some("native log".into());
         result.reduced_costs.insert(VarId(0), 0.0);
         result.dual.insert(inactive_row.row_id(), 0.0);
-        result.soc_dual.insert(inactive_cone.soc_id(), 0.0);
+        result.soc_dual.insert(inactive_cone.soc_id(), &[0.0, 0.0]);
         if let Some(value) = row_value {
             result.dual.insert(row.row_id(), value);
         }
         if let Some(value) = soc_value {
-            result.soc_dual.insert(cone.soc_id(), value);
+            result.soc_dual.insert(cone.soc_id(), &[value, 0.0]);
         }
 
         require_active_dual_evidence(&mut result, [row.row_id()], &model.soc_constraints());
@@ -88,10 +88,13 @@ fn custom_solver_can_grow_public_result_fields_without_preallocating() {
     assert_eq!(result.reduced_costs.slot_count(), 0);
 
     result.dual.insert(row.row_id(), 1.0);
-    result.soc_dual.extend([(cone.soc_id(), 2.0)]);
+    result.soc_dual.extend([(cone.soc_id(), [2.0, 0.0])]);
     result.reduced_costs.insert(x.var_id().unwrap(), 0.0);
     assert_eq!(result.dual_of(row), Ok(Some(1.0)));
-    assert_eq!(result.soc_dual_of(cone), Ok(Some(2.0)));
+    assert_eq!(
+        result.soc_dual_of(cone).map(|z| z.and_then(oximo_solver::SocDualRef::standard_bound)),
+        Ok(Some(2.0))
+    );
     assert_eq!(result.reduced_costs.get(x.var_id().unwrap()), Some(0.0));
 }
 
@@ -125,7 +128,7 @@ fn finalization_bounds_all_scalar_fields_without_a_source_projection() {
     result.add_solution([(VarId(0), 0.0)].into_iter().collect(), None);
     result.dual_status = DualStatus::FeasiblePoint;
     result.dual.extend([(row.row_id(), 0.0), (ConstraintId(1_000_000), 1.0)]);
-    result.soc_dual.extend([(cone.soc_id(), 0.0), (SocConstraintId(1_000_000), 1.0)]);
+    result.soc_dual.extend([(cone.soc_id(), [0.0, 0.0]), (SocConstraintId(1_000_000), [1.0, 0.0])]);
     result.reduced_costs.extend([(VarId(0), 0.0), (VarId(1_000_000), 1.0)]);
     result
         .semantic_dual
@@ -138,7 +141,7 @@ fn finalization_bounds_all_scalar_fields_without_a_source_projection() {
         assert_eq!(result.soc_dual.slot_count(), 1);
         assert_eq!(result.reduced_costs.slot_count(), 1);
         assert_eq!(result.dual.as_dense(), Some([0.0].as_slice()));
-        assert_eq!(result.soc_dual.as_dense(), Some([0.0].as_slice()));
+        assert_eq!(result.soc_dual.iter().map(|(_, z)| z[0]).collect::<Vec<_>>(), vec![0.0]);
         assert_eq!(result.reduced_costs.as_dense(), Some([0.0].as_slice()));
         assert!(
             result
@@ -193,7 +196,7 @@ fn captured_finalization_excludes_later_declarations_in_every_registry() {
     );
     result.dual_status = DualStatus::FeasiblePoint;
     result.dual.extend([(row.row_id(), 0.0), (later_row.row_id(), 5.0)]);
-    result.soc_dual.extend([(cone.soc_id(), 0.0), (later_cone.soc_id(), 5.0)]);
+    result.soc_dual.extend([(cone.soc_id(), [0.0, 0.0]), (later_cone.soc_id(), [5.0, 0.0])]);
     result.reduced_costs.extend([(x.var_id().unwrap(), 0.0), (later.var_id().unwrap(), 5.0)]);
     result.psd_dual.insert(later_psd.psd_id(), SymmetricMatrix::from_upper_triangle(1, [5.0]));
     let current = finalize_result(result.clone(), &model, coordinates.variables);
@@ -204,7 +207,7 @@ fn captured_finalization_excludes_later_declarations_in_every_registry() {
     let captured = finalize_result_with_coordinates(result, &model, coordinates);
     assert_eq!(captured.primal().unwrap().slot_count(), 1);
     assert_eq!(captured.dual.as_dense(), Some([0.0].as_slice()));
-    assert_eq!(captured.soc_dual.as_dense(), Some([0.0].as_slice()));
+    assert_eq!(captured.soc_dual.iter().map(|(_, z)| z[0]).collect::<Vec<_>>(), vec![0.0]);
     assert_eq!(captured.reduced_costs.as_dense(), Some([0.0].as_slice()));
     assert!(captured.psd_dual.is_empty());
 }

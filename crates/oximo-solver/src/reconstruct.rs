@@ -21,7 +21,8 @@ use crate::{
 
 /// Require at least one usable multiplier for each active constraint group.
 /// Backends select the algebraic row IDs; SOC IDs are indices into `socs`.
-/// Algebraic multipliers must be finite, and SOC multipliers must also be nonnegative.
+/// Algebraic multipliers must be finite; SOC multipliers must match the cone's
+/// dimension, be finite and have nonnegative head multipliers.
 ///
 /// # Panics
 /// Panics if an active SOC index exceeds `u32::MAX`.
@@ -45,7 +46,7 @@ pub fn require_active_dual_evidence(
                 result
                     .soc_dual
                     .get(SocConstraintId(u32::try_from(index).unwrap()))
-                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+                    .is_some_and(|z| valid_soc_dual(z, &socs[index]))
             }));
 
     if missing_rows || missing_socs {
@@ -184,7 +185,8 @@ fn finalize_result_retaining(
     retained: &FxHashSet<VarId>,
     projection: ProjectionCoordinates<'_>,
 ) -> SolverResult {
-    let result = normalize_result(result, variables, retained, projection);
+    let mut result = normalize_result(result, variables, retained, projection);
+    retain_valid_soc_duals(&mut result, model);
     result.with_semantic_dual_defaults_filtered(model, |id| projection.includes_semantic(id))
 }
 
@@ -461,7 +463,7 @@ fn normalize_duals(
     if result.dual_status != DualStatus::FeasiblePoint {
         result.semantic_dual.clear();
         result.dual = SolutionValues::default();
-        result.soc_dual = SolutionValues::default();
+        result.soc_dual.clear();
         result.psd_dual.clear();
         result.reduced_costs = SolutionValues::default();
         return;
@@ -524,7 +526,7 @@ fn normalize_projected_duals(
 
     result
         .soc_dual
-        .retain(|id, value| id.index() < coordinates.soc && value.is_finite() && value >= 0.0);
+        .retain(|id, z| id.index() < coordinates.soc && z.iter().all(|value| value.is_finite()));
     result.psd_dual.retain(|id, matrix| {
         id.index() < coordinates.psd && matrix.upper_triangle().iter().all(|v| v.is_finite())
     });
@@ -532,8 +534,35 @@ fn normalize_projected_duals(
         .reduced_costs
         .retain(|id, value| source_variables.contains(id.index()) && value.is_finite());
     result.dual.compact_if_excess();
-    result.soc_dual.compact_if_excess();
     result.reduced_costs.compact_if_excess();
+}
+
+/// Relative tolerance for a cone dual's head sign, so interior-point duals
+/// that sit on the boundary are not discarded.
+const SOC_DUAL_SIGN_TOLERANCE: f64 = 1e-9;
+
+/// A usable cone dual for `cone`:
+/// one finite multiplier per cone component, with nonnegative
+/// head multipliers (`zt`, or both `zu` and `zv`) up to a small
+/// relative tolerance.
+fn valid_soc_dual(z: &[f64], cone: &SocConstraint) -> bool {
+    if z.len() != cone.dimension() || !z.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+
+    let scale = z.iter().fold(1.0_f64, |max, value| max.max(value.abs()));
+    z[..cone.kind().head_len()].iter().all(|&head| head >= -SOC_DUAL_SIGN_TOLERANCE * scale)
+}
+
+/// Drop cone duals whose shape or head signs do not match the source cone.
+fn retain_valid_soc_duals(result: &mut SolverResult, model: &oximo_core::Model) {
+    if result.soc_dual.is_empty() {
+        return;
+    }
+    let socs = model.soc_constraints();
+    result
+        .soc_dual
+        .retain(|id, z| socs.get(id.index()).is_some_and(|cone| valid_soc_dual(z, cone)));
 }
 
 /// Coordinate counts captured from a source model before solving or reformulation.
@@ -1032,7 +1061,7 @@ impl<'a> SourceProjection<'a> {
             soc: coordinates.soc_constraints,
             psd: coordinates.psd_constraints,
         };
-        let result = normalize_validated_result(
+        let mut result = normalize_validated_result(
             ValidatedResult(result),
             source_variables,
             retained,
@@ -1044,6 +1073,7 @@ impl<'a> SourceProjection<'a> {
                 }
             },
         );
+        retain_valid_soc_duals(&mut result, source);
         Ok(result
             .with_semantic_dual_defaults_filtered(source, |id| projection.includes_semantic(id)))
     }

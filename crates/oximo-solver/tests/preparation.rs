@@ -119,7 +119,7 @@ fn explicit_form_recovers_affine_rows() {
     assert_eq!(form.terms.len(), 2);
     assert_eq!(form.terms[0].coeffs.len(), 2);
     assert_eq!(form.terms[1].constant, 1.0);
-    assert_eq!(form.bound.coeffs, vec![(model.variable_id("t").unwrap(), 1.0)]);
+    assert_eq!(norm_head(&form).coeffs, vec![(model.variable_id("t").unwrap(), 1.0)]);
 }
 
 #[test]
@@ -153,20 +153,24 @@ fn explicit_cones_use_the_same_parameter_snapshot_as_polynomials() {
     objective!(model, Min, t);
     let prepared = LoweringContext::new(&model).unwrap();
     let soc = &prepared.constraints().second_order_cones()[0];
-    prepared.linear(soc.terms[0]).unwrap();
-    let AffineTerms::Shared(first) = prepared.linear(soc.terms[0]).unwrap() else {
+    prepared.linear(soc.terms()[0]).unwrap();
+    let AffineTerms::Shared(first) = prepared.linear(soc.terms()[0]).unwrap() else {
         panic!("parameterized member should use shared extraction");
     };
     model.set_param(p, 5.0).unwrap();
     let form = prepared.explicit_soc(soc).unwrap();
     assert_eq!(form.terms[0].coeffs[0].1, 2.0);
-    assert_eq!(form.bound.constant, 2.0);
-    let AffineTerms::Shared(second) = prepared.linear(soc.terms[0]).unwrap() else {
+    assert_eq!(norm_head(&form).constant, 2.0);
+    let AffineTerms::Shared(second) = prepared.linear(soc.terms()[0]).unwrap() else {
         unreachable!()
     };
     assert!(Arc::ptr_eq(&first, &second));
     let fresh = LoweringContext::new(&model).unwrap();
     let form = fresh.explicit_soc(&fresh.constraints().second_order_cones()[0]).unwrap();
     assert_eq!(form.terms[0].coeffs[0].1, 5.0);
-    assert_eq!(form.bound.constant, 5.0);
+    assert_eq!(norm_head(&form).constant, 5.0);
+}
+
+fn norm_head(form: &oximo_core::SocForm) -> &oximo_expr::LinearTerms<'static> {
+    form.standard_bound().expect("expected a standard cone")
 }
