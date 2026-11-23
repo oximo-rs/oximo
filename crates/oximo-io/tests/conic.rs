@@ -43,6 +43,30 @@ fn mps_writer_rejects_soc_constraints_when_indicators_are_present() {
 }
 
 #[test]
+#[expect(clippy::many_single_char_names)]
+fn text_writers_keep_detected_cones_as_quadratic_rows() {
+    let m = Model::new("detected");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    constraint!(m, standard, x * x <= t * t);
+    constraint!(m, rotated, x * x + y * y <= 2.0 * u * v);
+    objective!(m, Min, t + u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let lp = to_lp_string(&m).expect("LP export");
+    assert!(lp.contains("rotated"), "{lp}");
+    for format in [MpsQuadraticFormat::Gurobi, MpsQuadraticFormat::Cplex, MpsQuadraticFormat::Mosek]
+    {
+        let options = MpsWriteOptions { quadratic_format: format };
+        to_mps_string_with(&m, &options).expect("MPS export");
+    }
+    to_nl_string(&m).expect("NL export");
+}
+
+#[test]
 fn nl_writer_rejects_soc_constraints() {
     assert!(matches!(to_nl_string(&soc_model()), Err(IoError::Conic)));
 }

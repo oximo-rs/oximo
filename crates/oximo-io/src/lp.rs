@@ -22,7 +22,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
-use oximo_core::{Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, SosType, var_name};
+use oximo_core::{Domain, Model, ObjectiveSense, Relate, Sense, SosType, var_name};
 use oximo_expr::{Expr, QuadraticTerms, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::FxHashSet;
 
@@ -1169,9 +1169,7 @@ pub fn write_lp<W: Write>(model: &Model, out: &mut W) -> Result<(), IoError> {
         return Err(IoError::Conic);
     }
 
-    if model.has_active_soc_constraints()
-        || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
-    {
+    if model.has_active_soc_constraints() {
         return Err(IoError::Conic);
     }
     let arena = model.arena();
