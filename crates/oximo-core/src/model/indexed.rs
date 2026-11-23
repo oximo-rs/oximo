@@ -106,13 +106,13 @@ fn prepare_range<
     pending
 }
 
-fn prepare_soc<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
+fn prepare_soc<'a, A: IntoAffineFunction<'a>, B: crate::function_set::SocHeadInput<'a>>(
     name: SmolStr,
     terms: impl IntoIterator<Item = A>,
     bound: B,
-    expected_arena: usize,
+    arena: &'a oximo_expr::ExprArenaCell,
 ) -> PendingSoc {
-    PendingSoc::new(name, terms, bound, expected_arena)
+    PendingSoc::new(name, terms, bound, arena)
 }
 
 impl Model {
@@ -587,7 +587,7 @@ impl Model {
         T,
         F,
         A: IntoAffineFunction<'a>,
-        B: IntoAffineFunction<'a>,
+        B: crate::function_set::SocHeadInput<'a>,
     >(
         &'a self,
         name_prefix: &str,
@@ -607,7 +607,7 @@ impl Model {
         T,
         F,
         A: IntoAffineFunction<'a>,
-        B: IntoAffineFunction<'a>,
+        B: crate::function_set::SocHeadInput<'a>,
     >(
         &'a self,
         name_prefix: &str,
@@ -628,7 +628,7 @@ impl Model {
             for key in &keys {
                 let name: SmolStr = format_index_name_small(name_prefix, key);
                 let (terms, bound) = rule(K::from_index_key(key));
-                self.add_soc_constraint(name, terms, bound);
+                self.__add_soc_constraint_head(name, terms, bound);
             }
             return;
         }
@@ -636,7 +636,6 @@ impl Model {
         #[cfg(feature = "benchmark-support")]
         let mut phases = PhaseTimer::new();
         let arena = &self.arena;
-        let expected_arena = arena_key(arena);
         let mut batch = arena.__begin_batch();
         let snapshot = batch.snapshot();
         let chunk_size = indexed_chunk_size(keys.len());
@@ -651,7 +650,7 @@ impl Model {
                         .map(|key| {
                             let name = format_index_name_small(name_prefix, key);
                             let (terms, bound) = rule(K::from_index_key(key));
-                            prepare_soc(name, terms, bound, expected_arena)
+                            prepare_soc(name, terms, bound, arena)
                         })
                         .collect::<Vec<_>>()
                 })

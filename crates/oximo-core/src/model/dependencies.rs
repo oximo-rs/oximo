@@ -329,9 +329,8 @@ impl Model {
 
             for (index, constraint) in constraints.second_order_cones().iter().enumerate() {
                 let id = SocConstraintId(u32::try_from(index).expect("SOC count fits u32"));
-                let parameters = builder.parameters_for_roots(
-                    constraint.terms.iter().copied().chain(std::iter::once(constraint.bound)),
-                );
+                let parameters =
+                    builder.parameters_for_roots(constraint.components().iter().copied());
                 builder.add_target(ParameterTarget::SecondOrderCone(id), parameters);
             }
 

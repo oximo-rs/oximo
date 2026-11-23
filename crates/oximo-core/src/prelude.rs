@@ -42,7 +42,10 @@ pub use crate::reformulation::{
     ReformulationError, SosReformulationArtifacts, SosReformulationOptions,
 };
 pub use crate::set::{FromIndexKey, IndexKey, IndexTuple, Set, SetIter};
-pub use crate::soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
+pub use crate::soc::{
+    RotatedSocConstraintHandle, SocConstraint, SocConstraintHandle, SocConstraintId, SocForm,
+    SocHead, SocKind,
+};
 pub use crate::sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use crate::sum::SumDomain;
 pub use crate::var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable};
@@ -64,8 +67,9 @@ pub use oximo_macros::{
 pub use crate::function_set::{
     AffineConstraintIr, AnyScalarFunction, Constraint, EqualTo, Function, FunctionInSet,
     GreaterThan, Interval, IntoAffineConstraint, IntoAffineFunction, IntoFunction, LessThan,
-    LowerConstraint, ScalarAffineFunction, ScalarDynamicFunction, ScalarNonlinearFunction,
-    ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet, VectorAffineFunction,
+    LowerConstraint, RotatedSecondOrderCone, ScalarAffineFunction, ScalarDynamicFunction,
+    ScalarNonlinearFunction, ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet,
+    SocMember, SocSet, VectorAffineFunction,
 };
 pub use oximo_expr::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
 

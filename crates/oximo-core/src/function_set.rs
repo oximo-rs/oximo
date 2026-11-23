@@ -170,6 +170,45 @@ pub struct SecondOrderCone {
 }
 impl Set for SecondOrderCone {}
 
+/// The rotated Lorentz cone `2 x0 x1 >= ||x2:||^2` with `x0, x1 >= 0`.
+/// Components are ordered `[u, v, w...]`, so the dimension is at least three.
+#[derive(Clone, Copy, Debug)]
+pub struct RotatedSecondOrderCone {
+    pub dimension: usize,
+}
+impl Set for RotatedSecondOrderCone {}
+
+/// The explicit second-order cone sets:
+/// - [`SecondOrderCone`] and
+/// - [`RotatedSecondOrderCone`].
+/// Sealed.
+///
+/// Handles `ConstraintHandle<VectorAffineData, S>` with `S: SocSet` share the
+/// explicit SOC registry and its result queries.
+pub trait SocSet: Set + Copy + sealed::SealedSocSet {
+    /// The cone kind of this set.
+    const KIND: crate::SocKind;
+
+    /// Number of cone components.
+    fn dimension(&self) -> usize;
+}
+
+impl sealed::SealedSocSet for SecondOrderCone {}
+impl SocSet for SecondOrderCone {
+    const KIND: crate::SocKind = crate::SocKind::Standard;
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+}
+
+impl sealed::SealedSocSet for RotatedSecondOrderCone {}
+impl SocSet for RotatedSecondOrderCone {
+    const KIND: crate::SocKind = crate::SocKind::Rotated;
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+}
+
 macro_rules! scalar_function {
     ($(#[$meta:meta])* $name:ident, $degree:ty) => {
         /// A scalar function retaining its symbolic arena representation.
@@ -291,6 +330,90 @@ impl<'a> IntoAffineFunction<'a> for Expr<'a, Affine> {
 impl<'a> IntoAffineFunction<'a> for Expr<'a, Constant> {
     fn into_affine_function(self) -> ScalarAffineFunction<'a> {
         self.into()
+    }
+}
+
+/// A scalar cone head.
+pub trait SocMember<'a> {
+    /// Register this member in `arena` (the owning model's) and return its root.
+    ///
+    /// # Panics
+    /// Panics if an expression belongs to another model.
+    #[doc(hidden)]
+    fn soc_root(self, arena: &'a oximo_expr::ExprArenaCell) -> ExprId;
+}
+
+impl<'a, T: IntoAffineFunction<'a>> SocMember<'a> for T {
+    fn soc_root(self, arena: &'a oximo_expr::ExprArenaCell) -> ExprId {
+        let expr = self.into_affine_function().expression();
+        assert_eq!(
+            crate::model::arena_key(expr.arena()),
+            crate::model::arena_key(arena),
+            "SOC components must belong to the same model"
+        );
+        expr.into_id()
+    }
+}
+
+impl<'a> SocMember<'a> for f64 {
+    fn soc_root(self, arena: &'a oximo_expr::ExprArenaCell) -> ExprId {
+        Expr::constant(arena, self).into_id()
+    }
+}
+
+/// The scalar head of an explicit SOC as written in `soc_constraint!`:
+/// one affine bound `t` for the standard cone `||w|| <= t`, or
+/// a [`RotatedHead`]  `(u, v)` for the rotated cone `||w||^2 <= 2 u v`.
+/// Selecting the head type selects the cone kind and the returned handle type.
+///
+/// Macro support; not part of the stable public API. Use
+/// [`Model::add_soc_constraint`] or [`Model::add_rotated_soc_constraint`].
+#[doc(hidden)]
+pub trait SocHeadInput<'a> {
+    /// Typed handle returned when the cone is registered.
+    type Handle;
+
+    /// The cone kind this head denotes.
+    const KIND: crate::SocKind;
+
+    /// Append the head's affine roots in declared order, checking ownership.
+    fn push_roots(self, arena: &'a oximo_expr::ExprArenaCell, out: &mut Vec<ExprId>);
+
+    fn handle(id: crate::SocConstraintId, model_id: oximo_expr::ModelId) -> Self::Handle;
+}
+
+/// The `(u, v)` head of a rotated cone, as produced by `in rotated(u, v)` in
+/// `soc_constraint!`.
+///
+/// Macro support; not part of the stable public API.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct RotatedHead<U, V>(pub U, pub V);
+
+impl<'a, B: SocMember<'a>> SocHeadInput<'a> for B {
+    type Handle = SocConstraintHandle;
+    const KIND: crate::SocKind = crate::SocKind::Standard;
+
+    fn push_roots(self, arena: &'a oximo_expr::ExprArenaCell, out: &mut Vec<ExprId>) {
+        out.push(self.soc_root(arena));
+    }
+
+    fn handle(id: crate::SocConstraintId, model_id: oximo_expr::ModelId) -> Self::Handle {
+        SocConstraintHandle::new(id, model_id)
+    }
+}
+
+impl<'a, U: SocMember<'a>, V: SocMember<'a>> SocHeadInput<'a> for RotatedHead<U, V> {
+    type Handle = crate::RotatedSocConstraintHandle;
+    const KIND: crate::SocKind = crate::SocKind::Rotated;
+
+    fn push_roots(self, arena: &'a oximo_expr::ExprArenaCell, out: &mut Vec<ExprId>) {
+        out.push(self.0.soc_root(arena));
+        out.push(self.1.soc_root(arena));
+    }
+
+    fn handle(id: crate::SocConstraintId, model_id: oximo_expr::ModelId) -> Self::Handle {
+        crate::RotatedSocConstraintHandle::new(id, model_id)
     }
 }
 
@@ -440,6 +563,7 @@ pub(crate) mod sealed {
     pub trait Sealed {}
     pub trait ScalarSet {}
     pub trait ScalarInput {}
+    pub trait SealedSocSet {}
 }
 
 /// Recognized lowering outputs. Sealed to the existing heterogeneous IR shapes.
@@ -814,6 +938,7 @@ impl<'a> VectorAffineFunction<'a> {
 }
 
 impl FunctionInSet<SecondOrderCone> for VectorAffineFunction<'_> {}
+impl FunctionInSet<RotatedSecondOrderCone> for VectorAffineFunction<'_> {}
 
 /// A lowered SOC with model provenance and checked dimension.
 #[derive(Debug)]
@@ -831,6 +956,29 @@ impl<'a> LowerConstraint<SecondOrderCone> for VectorAffineFunction<'a> {
         assert!(set.dimension >= 2, "SOC needs at least two components, got {}", set.dimension);
         assert_eq!(self.dimension(), set.dimension, "SOC dimension mismatch");
         SocConstraintIr(self)
+    }
+}
+
+/// A lowered rotated SOC with model provenance and checked dimension.
+#[derive(Debug)]
+pub struct RotatedSocConstraintIr<'a>(pub(crate) VectorAffineFunction<'a>);
+impl sealed::Sealed for RotatedSocConstraintIr<'_> {}
+impl ConstraintIr for RotatedSocConstraintIr<'_> {
+    type Handle = crate::RotatedSocConstraintHandle;
+    fn register(self, model: &Model, name: SmolStr) -> Self::Handle {
+        model.register_rotated_soc_ir(name, self)
+    }
+}
+impl<'a> LowerConstraint<RotatedSecondOrderCone> for VectorAffineFunction<'a> {
+    type Ir = RotatedSocConstraintIr<'a>;
+    fn lower(self, set: RotatedSecondOrderCone) -> Self::Ir {
+        assert!(
+            set.dimension >= 3,
+            "rotated SOC needs at least three components, got {}",
+            set.dimension
+        );
+        assert_eq!(self.dimension(), set.dimension, "rotated SOC dimension mismatch");
+        RotatedSocConstraintIr(self)
     }
 }
 
@@ -953,6 +1101,7 @@ macro_rules! owned_scalar_pairs {
 owned_scalar_pairs!(LessThan, GreaterThan, EqualTo, Interval);
 
 impl FunctionInSet<SecondOrderCone> for crate::VectorAffineData {}
+impl FunctionInSet<RotatedSecondOrderCone> for crate::VectorAffineData {}
 impl FunctionInSet<crate::PositiveSemidefiniteCone> for crate::SymmetricAffineData {}
 
 impl<D: Degree> crate::objective::ObjectiveFunction for crate::ScalarFunctionData<D> {}

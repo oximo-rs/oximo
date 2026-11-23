@@ -95,7 +95,7 @@ pub enum FunctionRepresentationRef<'a> {
 /// Recognized common views, before ownership, numeric and dimension validation.
 pub(crate) enum NativeConstraintRef<'a> {
     Scalar { root: ExprId, lower: f64, upper: f64 },
-    Soc { components: &'a [ExprId], dimension: usize },
+    Soc { components: &'a [ExprId], dimension: usize, kind: crate::SocKind },
     Psd { matrix: &'a crate::SymmetricMatrix<ExprId>, dimension: usize },
     Sos { variables: VariableVectorRef<'a>, set: &'a super::SpecialOrderedSet },
     Indicator { trigger: VarId, consequent: &'a FunctionValue, set: &'a super::IndicatorSet },
@@ -110,10 +110,10 @@ impl SemanticPair {
                 let (lower, upper) = self.set.scalar_bounds()?;
                 NativeConstraintRef::Scalar { root, lower, upper }
             }
-            Function::VectorAffine(components) => NativeConstraintRef::Soc {
-                components,
-                dimension: self.set.downcast_ref::<crate::SecondOrderCone>()?.dimension,
-            },
+            Function::VectorAffine(components) => {
+                let (kind, dimension) = self.set.soc_kind()?;
+                NativeConstraintRef::Soc { components, dimension, kind }
+            }
             Function::SymmetricAffine(matrix) => NativeConstraintRef::Psd {
                 matrix,
                 dimension: self

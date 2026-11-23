@@ -8,7 +8,7 @@ pub(crate) use storage::{Representation, ScalarSignature, SemanticRegistry};
 pub use views::SemanticConstraints;
 
 use super::Model;
-use crate::function_set::{SecondOrderCone, validate_bounds};
+use crate::function_set::validate_bounds;
 use crate::semantic::{
     ConstraintOrigin, FunctionRepresentationRef, NativeConstraintRef, SemanticConstraint,
     SemanticConstraintId, SemanticPair,
@@ -279,8 +279,8 @@ impl Model {
                 );
                 return self.__add_constraint(name, scalar).id();
             }
-            NativeConstraintRef::Soc { components, dimension } => {
-                assert!(dimension >= 2, "SOC needs at least two components");
+            NativeConstraintRef::Soc { components, dimension, kind } => {
+                crate::soc::assert_soc_dimension(kind, dimension);
                 assert_eq!(components.len(), dimension, "SOC dimension mismatch");
                 {
                     let arena = self.arena.borrow();
@@ -298,12 +298,11 @@ impl Model {
                 let mut rows = self.soc_constraints.borrow_mut();
                 let id =
                     crate::SocConstraintId(u32::try_from(rows.len()).expect("SOC count overflow"));
-                rows.push(SocConstraint {
-                    name: name.clone(),
-                    bound: components[0],
-                    terms: pair.function.soc_terms(components),
-                    active: true,
-                });
+                rows.push(SocConstraint::new(
+                    name.clone(),
+                    pair.function.soc_components(components),
+                    kind,
+                ));
                 self.soc_names_mut().insert(name.clone(), id);
                 SemanticConstraintId::SecondOrderCone(id)
             }
@@ -716,15 +715,8 @@ impl Model {
                     rows[id.index()].upper = upper;
                 }
                 SemanticConstraintId::SecondOrderCone(_) => {
-                    check_dimension(
-                        record
-                            .pair
-                            .set
-                            .downcast_ref::<SecondOrderCone>()
-                            .expect("SOC set")
-                            .dimension,
-                        value.downcast_ref::<SecondOrderCone>().expect("SOC set").dimension,
-                    )?;
+                    let dimension = |set: &crate::SetValue| set.soc_kind().expect("SOC set").1;
+                    check_dimension(dimension(&record.pair.set), dimension(&value))?;
                 }
                 SemanticConstraintId::PositiveSemidefinite(_) => {
                     check_dimension(
@@ -836,7 +828,7 @@ impl Model {
             }
             (
                 SemanticConstraintId::SecondOrderCone(id),
-                Some(NativeConstraintRef::Soc { components, dimension }),
+                Some(NativeConstraintRef::Soc { components, dimension, .. }),
             ) => {
                 check_dimension(dimension, components.len())?;
                 assert!(
@@ -845,8 +837,8 @@ impl Model {
                     "SOC function must be affine"
                 );
                 let mut rows = self.soc_constraints.borrow_mut();
-                rows[id.index()].bound = components[0];
-                rows[id.index()].terms = record.pair.function.soc_terms(components);
+                // The typed handle fixes the set, so the cone kind is unchanged.
+                rows[id.index()].set_components(record.pair.function.soc_components(components));
             }
             (
                 SemanticConstraintId::PositiveSemidefinite(id),

@@ -260,8 +260,8 @@ fn typed_and_macro_soc_share_the_registry() {
         m.add_constraint("direct", Constraint::new(vector, SecondOrderCone { dimension: 2 }));
     let generated = soc_constraint!(m, generated, [x] <= t);
     let cones = m.soc_constraints();
-    assert_eq!(cones[direct.index()].terms, cones[generated.index()].terms);
-    assert_eq!(cones[direct.index()].bound, cones[generated.index()].bound);
+    assert_eq!(cones[direct.index()].terms(), cones[generated.index()].terms());
+    assert_eq!(cones[direct.index()].head(), cones[generated.index()].head());
     let _ = x.powi(1).as_affine().unwrap().into_affine_function();
 }
 

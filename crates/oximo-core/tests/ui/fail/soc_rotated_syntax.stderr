@@ -1,0 +1,62 @@
+error: expected `soc(bound)` or `rotated(u, v)` after `in`
+ --> tests/ui/fail/soc_rotated_syntax.rs:9:40
+  |
+9 |     soc_constraint!(m, unknown, [x] in cone(u, v));
+  |                                        ^^^^
+
+error: `rotated(u, v)` takes exactly two heads
+  --> tests/ui/fail/soc_rotated_syntax.rs:10:45
+   |
+10 |     soc_constraint!(m, arity, [x] in rotated(u));
+   |                                             ^^^
+
+error: `soc(bound)` takes exactly one bound
+  --> tests/ui/fail/soc_rotated_syntax.rs:11:45
+   |
+11 |     soc_constraint!(m, soc_arity, [x] in soc(u, v));
+   |                                             ^^^^^^
+
+error[E0277]: the trait bound `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>): oximo_core::function_set::SocHeadInput<'_>` is not satisfied
+ --> tests/ui/fail/soc_rotated_syntax.rs:8:38
+  |
+8 |     soc_constraint!(m, tuple, [x] <= (u, v));
+  |     ---------------------------------^^^^^^-
+  |     |                                |
+  |     |                                unsatisfied trait bound
+  |     required by a bound introduced by this call
+  |
+  = help: the trait `IntoAffineFunction<'_>` is not implemented for `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>)`
+  = help: the following other types implement trait `IntoAffineFunction<'a>`:
+            &T
+            Expr<'a, oximo_core::Affine>
+            Expr<'a, oximo_core::Constant>
+            Expr<'a, oximo_expr::degree::ParameterDegree>
+            Expr<'a, oximo_expr::degree::VariableDegree>
+            ScalarAffineFunction<'a>
+  = note: required for `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>)` to implement `SocMember<'_>`
+  = note: required for `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>)` to implement `oximo_core::function_set::SocHeadInput<'_>`
+note: required by a bound in `model::constraints::<impl oximo_core::Model>::__add_soc_constraint_head`
+ --> src/model/constraints.rs
+  |
+  | impl Model {
+...
+  |     pub fn __add_soc_constraint_head<'a, A: IntoAffineFunction<'a>, B: SocHeadInput<'a>>(
+  |                                                                        ^^^^^^^^^^^^^^^^ required by this bound in `model::constraints::<impl Model>::__add_soc_constraint_head`
+
+error[E0277]: the trait bound `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>): IntoAffineFunction<'_>` is not satisfied
+ --> tests/ui/fail/soc_rotated_syntax.rs:8:5
+  |
+8 |     soc_constraint!(m, tuple, [x] <= (u, v));
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+  = help: the trait `IntoAffineFunction<'_>` is not implemented for `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>)`
+  = help: the following other types implement trait `IntoAffineFunction<'a>`:
+            &T
+            Expr<'a, oximo_core::Affine>
+            Expr<'a, oximo_core::Constant>
+            Expr<'a, oximo_expr::degree::ParameterDegree>
+            Expr<'a, oximo_expr::degree::VariableDegree>
+            ScalarAffineFunction<'a>
+  = note: required for `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>)` to implement `SocMember<'_>`
+  = note: required for `(Expr<'_, oximo_expr::degree::VariableDegree>, Expr<'_, oximo_expr::degree::VariableDegree>)` to implement `oximo_core::function_set::SocHeadInput<'_>`
+  = note: this error originates in the macro `soc_constraint` (in Nightly builds, run with -Z macro-backtrace for more info)

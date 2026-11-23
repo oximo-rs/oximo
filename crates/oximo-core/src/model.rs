@@ -76,7 +76,7 @@ fn model_mismatch(
     Err(ModelMismatchError::new(expected, actual))
 }
 
-fn arena_key(arena: &ExprArenaCell) -> usize {
+pub(crate) fn arena_key(arena: &ExprArenaCell) -> usize {
     std::ptr::from_ref(arena) as usize
 }
 

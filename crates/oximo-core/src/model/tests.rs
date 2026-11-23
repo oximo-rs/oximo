@@ -543,6 +543,7 @@ fn indexed_constraint_handles_match_in_serial_and_parallel() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines)]
 fn indexed_build_forced_parallel_matches_serial_for_every_family() {
     #[derive(Debug, PartialEq)]
     struct Digest {
@@ -575,6 +576,10 @@ fn indexed_build_forced_parallel_matches_serial_for_every_family() {
         let t = model.__var("t").lb(0.0).build();
         let cones = |i: usize| ([x[i] + 1.0, y[i] - 1.0], t + p[i]);
         model.add_soc_constraints_over_with("q", &keys, &cones, Some(parallel));
+        let rotated = |i: usize| {
+            ([x[i] - 2.0], crate::function_set::RotatedHead(t + p[i], f64::midpoint(i as f64, 1.0)))
+        };
+        model.add_soc_constraints_over_with("rq", &keys, &rotated, Some(parallel));
         let explicit_sos = |i: usize| [(x[i], 1.0), (y[i], 2.0)];
         model.add_sos_constraints_over_with(
             "s",
@@ -629,11 +634,11 @@ fn indexed_build_forced_parallel_matches_serial_for_every_family() {
             .iter()
             .map(|constraint| {
                 let terms: Vec<_> = constraint
-                    .terms
+                    .terms()
                     .iter()
                     .map(|&term| extract_linear(&arena, term).unwrap().into_owned())
                     .collect();
-                let bound = extract_linear(&arena, constraint.bound).unwrap().into_owned();
+                let bound = constraint.head().map(|r| extract_linear(&arena, r).unwrap());
                 format!("{}:{terms:?}:{bound:?}", constraint.name)
             })
             .collect::<Vec<_>>();

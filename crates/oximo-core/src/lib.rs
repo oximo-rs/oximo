@@ -82,9 +82,12 @@ pub use set::{
 pub use shared::SharedSlice;
 #[doc(hidden)]
 pub use soc::{
-    __detect_soc_from_quadratic, __is_detected_soc_from_quadratic, __soc_bound_variable,
+    __detect_soc_from_quadratic, __is_detected_soc_from_quadratic, __soc_head_variables,
 };
-pub use soc::{SocConstraint, SocConstraintHandle, SocConstraintId, SocForm};
+pub use soc::{
+    RotatedSocConstraintHandle, SocConstraint, SocConstraintHandle, SocConstraintId, SocForm,
+    SocHead, SocKind, rotate_heads,
+};
 pub use sos::{SosConstraint, SosConstraintHandle, SosConstraintId, SosMember, SosType};
 pub use sum::SumDomain;
 pub use var::{Bound, IntoBound, ResolvedVariable, VarBuilder, Variable, var_name};
@@ -107,9 +110,9 @@ pub use oximo_macros::{
 pub use crate::function_set::{
     AffineConstraintIr, AnyScalarFunction, AnyScalarFunctionData, Constraint, EqualTo, Function,
     FunctionInSet, GreaterThan, Interval, IntoAffineConstraint, IntoAffineFunction, IntoFunction,
-    LessThan, LowerConstraint, ScalarAffineFunction, ScalarDynamicFunction,
-    ScalarNonlinearFunction, ScalarQuadraticFunction, SecondOrderCone, Set as ConstraintSet,
-    VectorAffineFunction,
+    LessThan, LowerConstraint, RotatedSecondOrderCone, RotatedSocConstraintIr,
+    ScalarAffineFunction, ScalarDynamicFunction, ScalarNonlinearFunction, ScalarQuadraticFunction,
+    SecondOrderCone, Set as ConstraintSet, SocMember, SocSet, VectorAffineFunction,
 };
 pub use oximo_expr::{Affine, Constant, Degree, Dynamic, Nonlinear, Quadratic};
 

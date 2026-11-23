@@ -397,6 +397,10 @@ soc_constraint!(m, risk[i in assets], [s[i] * w[i]] <= cap); // family: risk[key
 
 The method form `m.add_soc_constraint("cone", [x, y], t)` is equivalent.
 
+`[terms] in rotated(u, v)` registers the rotated cone `||terms||_2^2 <= 2 u v`
+with `u, v >= 0` (the cone implies the sign condition), and returns a
+`RotatedSocConstraintHandle`.
+
 ## Objectives
 
 ```rust,ignore

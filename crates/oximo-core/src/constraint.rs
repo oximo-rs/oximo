@@ -219,8 +219,9 @@ impl<F, S> ConstraintHandle<F, S> {
     }
 }
 
-impl crate::SocConstraintHandle {
-    /// Return the ID of this constraint in the explicit SOC registry.
+impl<S: crate::function_set::SocSet> ConstraintHandle<crate::semantic::VectorAffineData, S> {
+    /// Return the ID of this constraint in the explicit SOC registry, shared
+    /// by standard and rotated cones.
     ///
     /// # Panics
     /// Panics when the constraint has no SOC view.
@@ -229,6 +230,11 @@ impl crate::SocConstraintHandle {
             crate::semantic::SemanticConstraintId::SecondOrderCone(id) => id,
             _ => panic!("constraint has no SOC view"),
         }
+    }
+
+    /// The cone kind fixed by this handle's set type.
+    pub const fn soc_kind(self) -> crate::SocKind {
+        S::KIND
     }
 }
 
