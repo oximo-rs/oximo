@@ -370,7 +370,7 @@ fn assemble_minimum(
             raw_status: "MinimumFound".into(),
             x: minimum.x,
             lambda: minimum.lambda,
-            soc_dual: Vec::new(),
+            soc_dual: oximo_solver::SocDuals::new(),
             reduced,
             objective: Some(minimum.objective),
             iterations: 0,

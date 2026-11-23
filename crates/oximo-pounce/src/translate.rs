@@ -63,8 +63,8 @@ pub(crate) struct Outcome {
     pub raw_status: String,
     pub x: Vec<f64>,
     pub lambda: Vec<f64>,
-    /// Explicit second-order-cone bound multipliers in model order.
-    pub soc_dual: Vec<f64>,
+    /// Explicit second-order-cone dual vectors, in declared component order.
+    pub soc_dual: oximo_solver::SocDuals,
     pub reduced: Option<Vec<f64>>,
     pub objective: Option<f64>,
     pub iterations: u64,
@@ -445,7 +445,7 @@ pub(crate) fn assemble(
     let mut solutions = Vec::new();
     let mut dual = SolutionValues::default();
     let mut reduced_costs = SolutionValues::default();
-    let mut soc_dual = SolutionValues::default();
+    let mut soc_dual = oximo_solver::SocDuals::new();
 
     if has_point {
         let primal =
@@ -460,7 +460,7 @@ pub(crate) fn assemble(
             }
             reduced_costs = SolutionValues::from_dense(red);
         }
-        soc_dual = SolutionValues::from_dense(o.soc_dual);
+        soc_dual = o.soc_dual;
         solutions.push(SolutionPoint {
             model_id,
             primal,
@@ -905,7 +905,7 @@ mod retry_tests {
                     raw_status: raw_status.into(),
                     x: vec![1.0],
                     lambda: vec![2.0],
-                    soc_dual: Vec::new(),
+                    soc_dual: oximo_solver::SocDuals::new(),
                     reduced: None,
                     objective: Some(1.0),
                     iterations: 1,
@@ -928,7 +928,7 @@ mod retry_tests {
                 raw_status: "SolveSucceeded".into(),
                 x: vec![1.0],
                 lambda: vec![2.0],
-                soc_dual: Vec::new(),
+                soc_dual: oximo_solver::SocDuals::new(),
                 reduced: None,
                 objective: Some(1.0),
                 iterations: 1,
@@ -950,7 +950,7 @@ mod retry_tests {
             raw_status: "InfeasibleProblemDetected".into(),
             x: Vec::new(),
             lambda: Vec::new(),
-            soc_dual: Vec::new(),
+            soc_dual: oximo_solver::SocDuals::new(),
             reduced: None,
             objective: None,
             iterations: 0,
