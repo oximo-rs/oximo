@@ -181,6 +181,7 @@ impl Set for RotatedSecondOrderCone {}
 /// The explicit second-order cone sets:
 /// - [`SecondOrderCone`] and
 /// - [`RotatedSecondOrderCone`].
+///
 /// Sealed.
 ///
 /// Handles `ConstraintHandle<VectorAffineData, S>` with `S: SocSet` share the
