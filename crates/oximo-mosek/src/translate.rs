@@ -375,22 +375,27 @@ fn append_soc(
     next_afe: &mut i64,
     scratch: &mut TaskScratch,
 ) -> Result<usize, SolverError> {
-    let dim = 1 + form.terms.len();
+    let dim = form.dimension();
     task.append_afes(i64::try_from(dim).map_err(|_| overflow("SOC dimension"))?)
         .map_err(backend)?;
     let first = *next_afe;
-    put_afe(task, first, &form.bound, scratch)?;
-    for (offset, terms) in form.terms.iter().enumerate() {
+    for (offset, terms) in form.components().enumerate() {
         put_afe(
             task,
-            first + i64::try_from(offset + 1).map_err(|_| overflow("AFE index"))?,
+            first + i64::try_from(offset).map_err(|_| overflow("AFE index"))?,
             terms,
             scratch,
         )?;
     }
-    let domain = task
-        .append_quadratic_cone_domain(i64::try_from(dim).map_err(|_| overflow("SOC dimension"))?)
-        .map_err(backend)?;
+    let size = i64::try_from(dim).map_err(|_| overflow("SOC dimension"))?;
+
+    // MOSEK's rotated domain is `2 x0 x1 >= ||x2:||^2`.
+    let domain = if form.head.is_rotated() {
+        task.append_r_quadratic_cone_domain(size)
+    } else {
+        task.append_quadratic_cone_domain(size)
+    }
+    .map_err(backend)?;
     scratch.acc_rhs.clear();
     scratch.acc_rhs.resize(dim, 0.0);
     task.append_acc_seq(domain, first, &scratch.acc_rhs).map_err(backend)?;
@@ -574,13 +579,12 @@ fn refresh_soc(
     form: &oximo_core::SocForm,
     scratch: &mut TaskScratch,
 ) -> Result<bool, SolverError> {
-    if dimension != form.terms.len() + 1 {
+    if dimension != form.dimension() {
         return Ok(false);
     }
     let mut afes = vec![0; dimension];
     task.get_acc_afe_idx_list(acc, &mut afes).map_err(backend)?;
-    for (afe, terms) in afes.into_iter().zip(std::iter::once(&form.bound).chain(form.terms.iter()))
-    {
+    for (afe, terms) in afes.into_iter().zip(form.components()) {
         put_afe(task, afe, terms, scratch)?;
     }
     Ok(true)
@@ -675,7 +679,7 @@ fn extract_result(
     let variables = model.resolved_variables();
     let mut solutions = Vec::new();
     let mut dual = SolutionValues::default();
-    let mut soc_dual = SolutionValues::default();
+    let mut soc_dual = oximo_solver::SocDuals::new();
     let mut psd_dual = FxHashMap::default();
     let mut reduced_costs = SolutionValues::default();
     if has_point {
@@ -692,7 +696,6 @@ fn extract_result(
         });
     }
     if has_dual {
-        soc_dual = SolutionValues::missing(model.num_soc_constraints());
         collect_continuous_duals(
             task,
             solution_type,
@@ -808,14 +811,14 @@ fn collect_continuous_soc_duals(
     task: &TaskCB,
     solution_type: i32,
     meta: &Meta,
-    soc_dual: &mut SolutionValues<SocConstraintId>,
+    soc_dual: &mut oximo_solver::SocDuals,
 ) {
+    let mut dot_y = Vec::new();
     for &(id, acc, dim) in &meta.explicit_accs {
-        let mut dot_y = vec![0.0; dim];
-        if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok()
-            && let Some(&bound_multiplier) = dot_y.first()
-        {
-            soc_dual.set(id, Some(bound_multiplier));
+        dot_y.clear();
+        dot_y.resize(dim, 0.0);
+        if task.get_acc_dot_y(solution_type, acc, &mut dot_y).is_ok() {
+            soc_dual.insert(id, &dot_y);
         }
     }
 }

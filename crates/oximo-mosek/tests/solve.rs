@@ -1,3 +1,5 @@
+#![expect(clippy::many_single_char_names)]
+
 use oximo_core::prelude::*;
 use oximo_mosek::{Mosek, MosekOptions, solve};
 use oximo_solver::{
@@ -92,7 +94,7 @@ fn explicit_detected_and_mixed_integer_socp() {
     objective!(explicit, Min, t);
     let result = solve(&explicit, &MosekOptions::default()).unwrap();
     close(result.value_of(t).unwrap().unwrap(), 5.0);
-    close(result.soc_dual_of(cone).unwrap().unwrap(), 1.0);
+    close(result.soc_dual_of(cone).unwrap().unwrap().standard_bound().unwrap(), 1.0);
 
     let detected = Model::new("detected");
     variable!(detected, dx);
@@ -316,4 +318,82 @@ fn persistent_rebuilds_after_linear_row_change() {
         close(resident.value_of(x).unwrap().unwrap(), cold.value_of(x).unwrap().unwrap());
         close(resident.objective().unwrap(), cold.objective().unwrap());
     }
+}
+
+#[test]
+fn rotated_soc_explicit_and_detected_with_vector_dual() {
+    // min u + v
+    // s.t.  x^2 + y^2 <= 2 u v,
+    // x = y = 1.
+    // Optimum 2 at u = v = 1.
+    let build = |explicit: bool| {
+        let m = Model::new("rsoc");
+        variable!(m, x);
+        variable!(m, y);
+        variable!(m, u >= 0.0);
+        variable!(m, v >= 0.0);
+        m.fix(x, 1.0).unwrap();
+        m.fix(y, 1.0).unwrap();
+        let handle = if explicit {
+            Some(m.add_rotated_soc_constraint("r", [x, y], u, v))
+        } else {
+            constraint!(m, r, x * x + y * y <= 2.0 * u * v);
+            None
+        };
+        objective!(m, Min, u + v);
+        (m, handle)
+    };
+
+    let (explicit, handle) = build(true);
+    assert_eq!(explicit.kind(), ModelKind::SOCP);
+
+    let result = solve(&explicit, &MosekOptions::default()).unwrap();
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+
+    close(result.objective().unwrap(), 2.0);
+    let z = result.soc_dual_of(handle.unwrap()).unwrap().expect("vector dual").as_slice().to_vec();
+    assert_eq!(z.len(), 4);
+    assert!((z[0] - 1.0).abs() < 1e-5 && (z[1] - 1.0).abs() < 1e-5, "{z:?}");
+    assert!(2.0 * z[0] * z[1] >= z[2] * z[2] + z[3] * z[3] - 1e-6, "{z:?}");
+
+    let (detected, _) = build(false);
+    let result = solve(&detected, &MosekOptions::default()).unwrap();
+    assert_eq!(result.termination, TerminationStatus::Optimal);
+    close(result.objective().unwrap(), 2.0);
+}
+
+#[test]
+fn rotated_soc_persistent_parameter_update() {
+    let m = Model::new("rsoc param");
+    variable!(m, x);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    param!(m, p = 1.0);
+    m.fix(x, 1.0).unwrap();
+    m.add_rotated_soc_constraint("r", [p * x], u, v);
+    objective!(m, Min, u + v);
+
+    let mut solver = Mosek.persistent();
+    let first = solver.solve(&m, &MosekOptions::default()).unwrap();
+    close(first.objective().unwrap(), 2.0 * 0.5f64.sqrt());
+    m.set_param(p, 2.0).unwrap();
+    let second = solver.solve(&m, &MosekOptions::default()).unwrap();
+    close(second.objective().unwrap(), 2.0 * 2.0f64.sqrt());
+}
+
+#[test]
+fn rotated_soc_with_constant_head() {
+    // min t
+    // s.t. x^2 <= 2 t * 1, x = 3  =>  t = 4.5.
+    let m = Model::new("rsoc_constant_head");
+    variable!(m, x);
+    variable!(m, t);
+    m.fix(x, 3.0).unwrap();
+    let cone = soc_constraint!(m, r, [x] in rotated(t, 1.0));
+    objective!(m, Min, t);
+    let result = solve(&m, &MosekOptions::default()).unwrap();
+    close(result.objective().unwrap(), 4.5);
+    let z = result.soc_dual_of(cone).unwrap().expect("rotated dual");
+    let SocHead::Rotated(zu, zv) = z.head() else { panic!("rotated dual") };
+    assert!(2.0 * zu * zv >= z.terms()[0].powi(2) - 1e-6, "{z:?}");
 }
