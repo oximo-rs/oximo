@@ -185,6 +185,7 @@ fn gurobi_persistent_iis_without_solve_errors() {
 }
 
 #[test]
+#[expect(clippy::many_single_char_names)]
 fn gurobi_soc_dual_includes_affine_head_sign_multiplier_at_the_origin() {
     let m = Model::new("soc_origin_dual");
     variable!(m, x);
@@ -197,4 +198,23 @@ fn gurobi_soc_dual_includes_affine_head_sign_multiplier_at_the_origin() {
     let z = r.soc_dual.get(cone.soc_id()).expect("cone dual");
     assert!((z[0] - 1.0).abs() < 1e-6, "{z:?}");
     assert!(z[1].abs() < 1e-6, "{z:?}");
+}
+
+#[test]
+fn gurobi_rotated_soc_dual_with_affine_heads() {
+    for lb in [2.0, -1.0] {
+        let m = Model::new("rotated_dual");
+        variable!(m, x >= lb);
+        variable!(m, y1);
+        variable!(m, y2);
+        let cone = m.add_rotated_soc_constraint("cone", [x], y1 - 1.0, y2 - 1.0);
+        objective!(m, Min, y1 + y2);
+
+        let r = Gurobi.solve(&m, &GurobiOptions::default().qcp_dual(1)).unwrap();
+        assert_eq!(r.termination, TerminationStatus::Optimal);
+
+        let z = r.soc_dual.get(cone.soc_id()).expect("cone dual");
+        assert!((z[0] - 1.0).abs() < 1e-5 && (z[1] - 1.0).abs() < 1e-5, "lb={lb}: {z:?}");
+        assert!(2.0 * z[0] * z[1] >= z[2] * z[2] - 1e-6, "lb={lb}: {z:?}");
+    }
 }
