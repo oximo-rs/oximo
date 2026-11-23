@@ -123,6 +123,9 @@ pub fn logical_constraint(input: TokenStream) -> TokenStream {
 /// register the second-order cone constraint `||terms||_2 <= bound` (every
 /// term and the bound must be affine), an auto-named anonymous cone, or an
 /// indexed family of cones.
+/// `[terms] in soc(bound)` is the same standard cone;
+/// `[terms] in rotated(u, v)` registers the rotated cone
+/// `||terms||_2^2 <= 2 u v` with `u, v >= 0` instead.
 #[proc_macro]
 pub fn soc_constraint(input: TokenStream) -> TokenStream {
     soc::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
