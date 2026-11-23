@@ -270,7 +270,7 @@ pub(crate) fn extract_result(
             dual_status,
             solutions,
             dual,
-            soc_dual: SolutionValues::default(),
+            soc_dual: oximo_solver::SocDuals::new(),
             psd_dual: FxHashMap::default(),
             reduced_costs,
             best_bound,
