@@ -166,7 +166,8 @@ impl SocDuals {
             && let [z0, z1, ..] = stored
         {
             let r = std::f64::consts::FRAC_1_SQRT_2;
-            (*z0, *z1) = ((*z0 + *z1) * r, (*z0 - *z1) * r);
+            let (a, b) = (*z0 * r, *z1 * r);
+            (*z0, *z1) = (a + b, a - b);
         }
     }
 
@@ -446,6 +447,16 @@ mod tests {
         assert_eq!(rotated.standard_bound(), None);
         assert_eq!(duals.get(SocConstraintId(1)), Some([2.0, 1.0].as_slice()));
         assert_eq!(SocDualRef::new(SocKind::Rotated, &[1.0, 1.0]), None);
+    }
+
+    #[test]
+    fn standard_rewrite_dual_stays_finite_for_large_components() {
+        let mut duals = SocDuals::new();
+        duals.insert_from_standard(SocConstraintId(0), SocKind::Rotated, &[1e308, 1e308, 0.0]);
+        let z = duals.get(SocConstraintId(0)).unwrap();
+        assert!(z.iter().all(|v| v.is_finite()), "{z:?}");
+        assert!((z[0] - 2.0 * (1e308 * std::f64::consts::FRAC_1_SQRT_2)).abs() < 1e295, "{z:?}");
+        assert_eq!(z[1], 0.0);
     }
 
     #[test]
