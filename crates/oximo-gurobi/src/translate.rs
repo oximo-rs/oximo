@@ -8,14 +8,14 @@ use gurobi_rs::prelude::*;
 use oximo_core::{
     AlgebraicConstraint, ConstraintId, Domain, IndicatorConstraint, IndicatorConstraintId, Model,
     ModelId, ModelKind, ObjectiveSense, ResolvedVariable, Sense, SocConstraint, SocConstraintId,
-    SosConstraint, SosConstraintId, SosType, VarId, var_name,
+    SocForm, SosConstraint, SosConstraintId, SosType, VarId, var_name,
 };
 use oximo_expr::{ExprArena, ExprId, LinearTerms, QuadraticTerms, describe_nonlinear_term};
 use oximo_solver::{
     DualStatus, Iis, PrimalStatus, SolutionPoint, SolverError, SolverResult, TerminationStatus,
     VarBoundKind,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::GurobiOptions;
 use crate::nonlinear::{GeneratedConstraint, LoweredExpr, LoweringCtx, lower, validate_supported};
@@ -64,6 +64,7 @@ pub(crate) struct Built {
     pub objective_variables: Vec<gurobi_rs::Var>,
     aux_counter: u32,
     pub soc_rows: Vec<SocHandle>,
+    soc_direct_heads: FxHashSet<VarId>,
     pub sos: Vec<(SosConstraintId, gurobi_rs::SOS)>,
     pub indicators: Vec<(IndicatorConstraintId, Vec<gurobi_rs::GenConstr>)>,
     pub obj_constant: f64,
@@ -210,6 +211,9 @@ impl Built {
                     }
                     ParameterTarget::VariableBound(id) => {
                         let v = &prepared.variables()[id.index()];
+                        if v.lb < 0.0 && self.soc_direct_heads.contains(id) {
+                            return Ok(false);
+                        }
                         lower_bounds.push((self.vars[id.index()], v.lb));
                         upper_bounds.push((self.vars[id.index()], v.ub));
                     }
@@ -283,7 +287,10 @@ impl Built {
                         {
                             let old = self.soc_rows.remove(position);
                             self.model.remove(old.quadratic).map_err(map_gurobi_err)?;
-                            self.model.remove(old.bound_sign).map_err(map_gurobi_err)?;
+                            for (aux, link) in old.links {
+                                self.model.remove(link).map_err(map_gurobi_err)?;
+                                self.model.remove(aux).map_err(map_gurobi_err)?;
+                            }
                             self.model.update().map_err(map_gurobi_err)?;
                             let source = &prepared.constraints().second_order_cones()[id.index()];
                             let mut handles = add_soc_rows(
@@ -298,6 +305,7 @@ impl Built {
                             };
                             handle.id = *id;
                             self.soc_rows.insert(position, handle);
+                            self.soc_direct_heads = direct_soc_heads(&self.soc_rows);
                         }
                     }
                     ParameterTarget::Indicator(id) => {
@@ -501,6 +509,7 @@ pub(crate) fn build_validated(
         objective_generated,
         objective_variables,
         aux_counter,
+        soc_direct_heads: direct_soc_heads(&soc_rows),
         soc_rows,
         sos: special_ordered_sets,
         indicators: indicator_handles,
@@ -772,9 +781,12 @@ fn read_iis(built: &Built) -> Result<Iis, SolverError> {
     for handle in &built.soc_rows {
         let quadratic =
             model.get_obj_attr(attr::IISQConstr, &handle.quadratic).map_err(map_gurobi_err)?;
-        let sign =
-            model.get_obj_attr(attr::IISConstr, &handle.bound_sign).map_err(map_gurobi_err)?;
-        if quadratic != 0 || sign != 0 {
+        let mut generated = 0;
+        for (aux, link) in &handle.links {
+            generated |= model.get_obj_attr(attr::IISConstr, link).map_err(map_gurobi_err)?;
+            generated |= model.get_obj_attr(attr::IISLB, aux).map_err(map_gurobi_err)?;
+        }
+        if quadratic != 0 || generated != 0 {
             iis.soc_constraints.push(handle.id);
         }
     }
@@ -972,13 +984,22 @@ pub(crate) struct ConstraintHandle {
 
 /// The native rows associated with one explicit second-order cone.
 ///
-/// Squaring `||terms|| <= bound` also requires the generated `bound >= 0`
-/// side row. Both rows belong to the original cone for IIS reporting.
+/// The quadratic row and every generated `aux = member` link belong
+/// to the original cone for IIS reporting.
 pub(crate) struct SocHandle {
     pub id: SocConstraintId,
     pub quadratic: gurobi_rs::QConstr,
-    pub bound_sign: gurobi_rs::Constr,
-    pub bound: LinearTerms<'static>,
+    /// Generated auxiliary variables and their `aux = member` rows.
+    pub links: Vec<(gurobi_rs::Var, gurobi_rs::Constr)>,
+    /// Model variables used directly as cone heads.
+    pub direct_heads: Vec<VarId>,
+    /// The cone's affine members, used to rescale the squared-row multiplier.
+    pub form: SocForm,
+}
+
+/// Every variable that some cone uses directly as a head.
+fn direct_soc_heads(rows: &[SocHandle]) -> FxHashSet<VarId> {
+    rows.iter().flat_map(|handle| handle.direct_heads.iter().copied()).collect()
 }
 
 /// Add every model constraint, returning the per-constraint row handle.
@@ -1168,13 +1189,18 @@ fn add_constraints(
         .collect()
 }
 
-/// Lower each explicit SOC constraint `||terms||_2 <= bound` to the quadratic
-/// row `sum(term_i^2) - bound^2 <= 0` plus the linear side condition
-/// `bound >= 0`.
+/// Lower each explicit SOC constraint to one quadratic row in Gurobi's
+/// recognized cone shape, plus linking rows for generated components.
 ///
-/// Returns each cone's quadratic-row handle plus its affine bound side, in
+/// Standard `||w||_2 <= t` becomes `sum(c_i^2 w_i^2) - c_t^2 t^2 <= 0` and
+/// rotated `||w||_2^2 <= 2 u v` becomes `sum(c_i^2 w_i^2) - 2 c_u c_v u v <= 0`,
+/// where every member is a single variable. A term that is not `c x`, or a
+/// head that is not `c x` with `c > 0` and `lb(x) >= 0`, is replaced by an
+/// auxiliary variable `h = affine` (`h >= 0` for heads).
+///
+/// Returns each cone's native handles plus its affine members, in
 /// `SocConstraintId` order, so `collect_solution` can rescale the squared-form
-/// `QCPi` multiplier back to the norm form.
+/// `QCPi` multiplier back to the cone form.
 fn add_soc_rows(
     prepared: &PreparedExpressions,
     vars: &[ResolvedVariable],
@@ -1185,59 +1211,110 @@ fn add_soc_rows(
     let arena = prepared.arena();
     let mut rows = Vec::with_capacity(socs.len());
     for (i, s) in socs.iter().enumerate().filter(|(_, c)| c.active) {
+        let affine = |root: ExprId, what: &str| {
+            prepared.linear(root).map(AffineTerms::into_owned).ok_or_else(|| {
+                SolverError::Nonlinear {
+                    location: format!("second-order cone {:?} {what}", s.name),
+                    term: describe_nonlinear_term(arena, root, &|v| var_name(vars, v))
+                        .unwrap_or_else(|| "<nonlinear>".into()),
+                }
+            })
+        };
+        let terms =
+            s.terms().iter().map(|&term| affine(term, "term")).collect::<Result<Vec<_>, _>>()?;
+        let form = SocForm { terms, head: s.head().try_map(|root| affine(root, "head"))? };
+
+        let mut lowering = SocLowering {
+            name: &s.name,
+            vars,
+            gurobi_vars,
+            links: Vec::new(),
+            direct_heads: Vec::new(),
+        };
         let mut q = QuadExpr::new();
-        for &term in &s.terms {
-            let t = prepared.linear(term).ok_or_else(|| SolverError::Nonlinear {
-                location: format!("second-order cone {:?} term {i}", s.name),
-                term: describe_nonlinear_term(arena, term, &|v| var_name(vars, v))
-                    .unwrap_or_else(|| "<nonlinear>".into()),
-            })?;
-            add_squared_affine(&mut q, &t, 1.0, gurobi_vars);
+        match &form.head {
+            oximo_core::SocHead::Standard(t) => {
+                let (t, c) = lowering.member(gurobi_model, t, Member::Head)?;
+                q.add_qterm(-c * c, t, t);
+            }
+            oximo_core::SocHead::Rotated(u, v) => {
+                let (u, cu) = lowering.member(gurobi_model, u, Member::Head)?;
+                let (v, cv) = lowering.member(gurobi_model, v, Member::Head)?;
+                q.add_qterm(-2.0 * cu * cv, u, v);
+            }
         }
-        let b = prepared.linear(s.bound).ok_or_else(|| SolverError::Nonlinear {
-            location: format!("second-order cone {:?} bound", s.name),
-            term: describe_nonlinear_term(arena, s.bound, &|v| var_name(vars, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })?;
-        add_squared_affine(&mut q, &b, -1.0, gurobi_vars);
+        for term in &form.terms {
+            let (w, c) = lowering.member(gurobi_model, term, Member::Term)?;
+            q.add_qterm(c * c, w, w);
+        }
         let qrow =
             gurobi_model.add_qconstr(s.name.as_str(), c!(q <= 0.0)).map_err(map_gurobi_err)?;
-
-        let mut e = LinExpr::new();
-        for &(v, co) in b.coeffs.iter() {
-            e.add_term(co, gurobi_vars[v.index()]);
-        }
-        let sign_name = format!("{}_sign", s.name);
-        let sign_row =
-            gurobi_model.add_constr(&sign_name, c!(e >= -b.constant)).map_err(map_gurobi_err)?;
+        let SocLowering { links, direct_heads, .. } = lowering;
         rows.push(SocHandle {
             id: SocConstraintId(u32::try_from(i).expect("SOC count overflow")),
             quadratic: qrow,
-            bound_sign: sign_row,
-            bound: b.into_owned(),
+            links,
+            direct_heads,
+            form,
         });
     }
     Ok(rows)
 }
 
-/// Expand `sign * (a'x + c)^2` into `q`.
-fn add_squared_affine(
-    q: &mut QuadExpr,
-    t: &LinearTerms,
-    sign: f64,
-    gurobi_vars: &[gurobi_rs::Var],
-) {
-    for (i, &(vi, ci)) in t.coeffs.iter().enumerate() {
-        q.add_qterm(sign * ci * ci, gurobi_vars[vi.index()], gurobi_vars[vi.index()]);
-        for &(vj, cj) in &t.coeffs.as_ref()[i + 1..] {
-            q.add_qterm(sign * 2.0 * ci * cj, gurobi_vars[vi.index()], gurobi_vars[vj.index()]);
+/// The role of a cone member being mapped to a single variable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Member {
+    Head,
+    Term,
+}
+
+/// Per-cone state while mapping affine cone members to single variables.
+struct SocLowering<'a> {
+    name: &'a str,
+    vars: &'a [ResolvedVariable],
+    gurobi_vars: &'a [gurobi_rs::Var],
+    links: Vec<(gurobi_rs::Var, gurobi_rs::Constr)>,
+    direct_heads: Vec<VarId>,
+}
+
+impl SocLowering<'_> {
+    /// Express `member` as `c * x` for a single Gurobi variable `x`, adding an
+    /// auxiliary `x = member` (with `x >= 0` for a head) when needed.
+    fn member(
+        &mut self,
+        model: &mut gurobi_rs::Model,
+        member: &LinearTerms<'_>,
+        role: Member,
+    ) -> Result<(gurobi_rs::Var, f64), SolverError> {
+        let head = role == Member::Head;
+        if member.constant == 0.0
+            && let [(var, c)] = *member.coeffs
+            && c != 0.0
+            && match role {
+                Member::Head => c > 0.0 && self.vars[var.index()].lb >= 0.0,
+                Member::Term => !self.direct_heads.contains(&var),
+            }
+        {
+            if head {
+                self.direct_heads.push(var);
+            }
+            return Ok((self.gurobi_vars[var.index()], c));
         }
-        if t.constant != 0.0 {
-            q.add_term(sign * 2.0 * ci * t.constant, gurobi_vars[vi.index()]);
+        let k = self.links.len();
+        let lb = if head { 0.0 } else { f64::NEG_INFINITY };
+        let aux = model
+            .add_var(&format!("{}_aux{k}", self.name), Continuous, 0.0, lb, f64::INFINITY, [])
+            .map_err(map_gurobi_err)?;
+        let mut e = LinExpr::new();
+        e.add_term(1.0, aux);
+        for &(v, c) in member.coeffs.iter() {
+            e.add_term(-c, self.gurobi_vars[v.index()]);
         }
-    }
-    if t.constant != 0.0 {
-        q.add_constant(sign * t.constant * t.constant);
+        let link = model
+            .add_constr(&format!("{}_link{k}", self.name), c!(e == member.constant))
+            .map_err(map_gurobi_err)?;
+        self.links.push((aux, link));
+        Ok((aux, 1.0))
     }
 }
 
@@ -1453,7 +1530,7 @@ type Collected = (
     Vec<SolutionPoint>,
     SolutionValues<VarId>,
     SolutionValues<ConstraintId>,
-    SolutionValues<SocConstraintId>,
+    oximo_solver::SocDuals,
     bool,
 );
 
@@ -1489,7 +1566,7 @@ fn collect_solution(
             Vec::new(),
             SolutionValues::default(),
             SolutionValues::default(),
-            SolutionValues::default(),
+            oximo_solver::SocDuals::new(),
             false,
         );
     }
@@ -1505,7 +1582,7 @@ fn collect_solution(
             solutions,
             SolutionValues::default(),
             SolutionValues::default(),
-            SolutionValues::default(),
+            oximo_solver::SocDuals::new(),
             false,
         );
     }
@@ -1534,27 +1611,21 @@ fn collect_solution(
         }
     }
 
-    // Convert the squared-form multiplier back to the norm-form
-    // bound multiplier `z0 = 2 * bound_value * |QCPi|`.
-    // Available only under `QCPDual=1`.
-    let mut soc_dual = SolutionValues::missing(
-        soc_rows.iter().map(|handle| handle.id.index().saturating_add(1)).max().unwrap_or(0),
-    );
-    if let Some(first) = solutions.first() {
-        let primal = &first.primal;
-        for handle in soc_rows {
-            if let Ok(pi) = model.get_obj_attr(attr::QCPi, &handle.quadratic) {
-                let b_val = handle.bound.constant
-                    + handle
-                        .bound
-                        .coeffs
-                        .iter()
-                        .map(|&(v, c)| c * primal.get(v).unwrap_or(0.0))
-                        .sum::<f64>();
-                soc_dual.set(handle.id, Some(2.0 * b_val * pi.abs()));
-            }
-        }
-    }
+    // Convert the squared-form multiplier `lambda = |QCPi|` back to the cone
+    // form. Available only under `QCPDual=1`.
+    let soc_dual = solutions.first().map_or_else(oximo_solver::SocDuals::new, |first| {
+        let multipliers: FxHashMap<SocConstraintId, f64> = soc_rows
+            .iter()
+            .filter_map(|handle| {
+                model.get_obj_attr(attr::QCPi, &handle.quadratic).ok().map(|pi| (handle.id, pi))
+            })
+            .collect();
+        oximo_solver::SocDuals::from_squared_rows(
+            soc_rows.iter().map(|handle| (handle.id, &handle.form)),
+            |id| multipliers.get(&id).copied(),
+            |v| first.primal.get(v),
+        )
+    });
 
     (solutions, reduced_costs, dual, soc_dual, dual_available)
 }
