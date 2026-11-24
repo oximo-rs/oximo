@@ -186,13 +186,16 @@ impl fmt::Display for SocDisplay<'_> {
             crate::SocHead::Standard(t) => {
                 write!(f, "|| {} {}", Sense::Le, render_expr(&arena, t, &resolve))?;
             }
-            crate::SocHead::Rotated(u, v) => write!(
-                f,
-                "||^2 {} 2 ({}) ({})",
-                Sense::Le,
-                render_expr(&arena, u, &resolve),
-                render_expr(&arena, v, &resolve)
-            )?,
+            crate::SocHead::Rotated(u, v) => {
+                let (u, v) = (render_expr(&arena, u, &resolve), render_expr(&arena, v, &resolve));
+                write!(
+                    f,
+                    "||^2 {} 2 ({u}) ({v}), {u} {} 0, {v} {} 0",
+                    Sense::Le,
+                    Sense::Ge,
+                    Sense::Ge
+                )?;
+            }
         }
         if !c.active {
             f.write_str(" (inactive)")?;

@@ -281,7 +281,7 @@ fn explicit_rotated_cone_round_trips_through_views() {
     assert_eq!(m.soc_constraint_handle_from_id(handle.soc_id()), None);
 
     let text = format!("{}", m.display_soc(handle.soc_id()));
-    assert_eq!(text, "r: ||x, y||^2 <= 2 (u) (v)");
+    assert_eq!(text, "r: ||x, y||^2 <= 2 (u) (v), u >= 0, v >= 0");
 }
 
 #[test]
