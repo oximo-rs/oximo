@@ -156,6 +156,7 @@ impl<'a> SemanticConstraints<'a> {
     }
 
     #[inline]
+    #[expect(clippy::too_many_lines)]
     fn view(&self, entry: super::storage::SemanticEntry) -> SemanticConstraintRef<'_> {
         use SemanticConstraintId as Id;
         let model_id = self.model_id;
@@ -197,10 +198,17 @@ impl<'a> SemanticConstraints<'a> {
                 (
                     &row.name,
                     row.active,
-                    FunctionRef::Vector { model_id, components: row.terms.with_prefix(1) },
-                    SetRef::Inline(crate::SetValue::new(crate::SecondOrderCone {
-                        dimension: row.terms.len() + 1,
-                    })),
+                    FunctionRef::Vector { model_id, components: row.shared_components().clone() },
+                    SetRef::Inline(match row.kind() {
+                        crate::SocKind::Standard => crate::SetValue::new(crate::SecondOrderCone {
+                            dimension: row.dimension(),
+                        }),
+                        crate::SocKind::Rotated => {
+                            crate::SetValue::new(crate::RotatedSecondOrderCone {
+                                dimension: row.dimension(),
+                            })
+                        }
+                    }),
                 )
             }
             (Id::PositiveSemidefinite(id), Representation::Psd) => {

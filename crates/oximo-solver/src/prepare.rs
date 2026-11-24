@@ -870,10 +870,9 @@ impl PreparedExpressions {
                 ))
             })
         };
-        Ok(SocForm {
-            terms: soc.terms.iter().map(|&expr| affine(expr)).collect::<Result<_, _>>()?,
-            bound: affine(soc.bound)?,
-        })
+        let terms = soc.terms().iter().map(|&expr| affine(expr)).collect::<Result<_, _>>()?;
+        let head = soc.head().try_map(affine)?;
+        Ok(SocForm { terms, head })
     }
 }
 

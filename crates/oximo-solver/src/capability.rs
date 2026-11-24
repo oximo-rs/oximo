@@ -539,7 +539,10 @@ fn query_constraint(solver: &SolverProfile, signature: ConstraintSignature) -> R
         }
     }
 
-    if kind == FunctionKind::VectorAffine && signature.set.is::<oximo_core::SecondOrderCone>() {
+    if kind == FunctionKind::VectorAffine
+        && (signature.set.is::<oximo_core::SecondOrderCone>()
+            || signature.set.is::<oximo_core::RotatedSecondOrderCone>())
+    {
         return if solver.soc {
             RequirementSupport::Supported
         } else {

@@ -5,14 +5,19 @@ use std::time::Duration;
 use crate::SolutionValues;
 use oximo_core::{
     ConstraintHandle, ConstraintId, IndexKey, IndexedVar, Model, ModelId, ModelMismatchError,
-    SocConstraintHandle, SocConstraintId, VarId,
+    SocConstraintId, VarId,
 };
+
+use crate::SocDualRef;
 use oximo_expr::{ExprArena, ExprId, ExprInput, ExprNode, WithParameters, evaluate};
 use rustc_hash::FxHashMap;
 
 pub use oximo_expr::ParameterSnapshot;
 
 use crate::status::{PrimalStatus, TerminationStatus};
+
+/// A typed handle to an explicit standard or rotated cone.
+type SocHandleOf<S> = ConstraintHandle<oximo_core::VectorAffineData, S>;
 
 /// A single primal point returned by a solver.
 ///
@@ -234,12 +239,58 @@ pub struct ConstraintEvaluation {
 }
 
 /// Activity and feasibility information for an explicit second-order cone.
+///
+/// `head` holds the evaluated head, `t` or `(u, v)`, and `norm` is `||w||_2`
+/// over the cone's terms for both kinds.
+///
+/// `slack` is the signed distance-like margin of the standard form: `t - ||w||`
+/// for a standard cone and, for a rotated cone, the margin of its exact rewrite
+/// `(u+v)/sqrt2 - ||((u-v)/sqrt2, w)||`.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SocEvaluation {
+    pub head: oximo_core::SocHead<f64>,
     pub norm: f64,
-    pub bound: f64,
     pub slack: f64,
     pub violation: f64,
+}
+
+/// Overflow-safe running Euclidean norm (`scale * sqrt(sum_squares)`).
+#[derive(Default)]
+struct NormAccumulator {
+    scale: f64,
+    sum_squares: f64,
+    has_nan: bool,
+    has_infinite: bool,
+}
+
+impl NormAccumulator {
+    fn push(&mut self, value: f64) {
+        let magnitude = value.abs();
+        if magnitude.is_nan() {
+            self.has_nan = true;
+        } else if magnitude.is_infinite() {
+            self.has_infinite = true;
+        } else if magnitude > 0.0 {
+            if magnitude > self.scale {
+                let ratio = self.scale / magnitude;
+                self.sum_squares = 1.0 + self.sum_squares * ratio * ratio;
+                self.scale = magnitude;
+            } else {
+                let ratio = magnitude / self.scale;
+                self.sum_squares += ratio * ratio;
+            }
+        }
+    }
+
+    fn norm(&self) -> f64 {
+        if self.has_nan {
+            f64::NAN
+        } else if self.has_infinite {
+            f64::INFINITY
+        } else {
+            self.scale * self.sum_squares.sqrt()
+        }
+    }
 }
 
 fn evaluate_at(
@@ -285,38 +336,24 @@ fn evaluate_soc_at(
     let arena = model.arena();
     let socs = model.soc_constraints();
     let constraint = socs.get(id.index())?;
-    let mut scale = 0.0_f64;
-    let mut sum_squares = 0.0_f64;
-    let mut has_nan = false;
-    let mut has_infinite = false;
-    for &term in &constraint.terms {
-        let value = evaluate_at(&arena, term, point, current_parameters)?;
-        let magnitude = value.abs();
-        if magnitude.is_nan() {
-            has_nan = true;
-        } else if magnitude.is_infinite() {
-            has_infinite = true;
-        } else if magnitude > 0.0 {
-            if magnitude > scale {
-                let ratio = scale / magnitude;
-                sum_squares = 1.0 + sum_squares * ratio * ratio;
-                scale = magnitude;
-            } else {
-                let ratio = magnitude / scale;
-                sum_squares += ratio * ratio;
-            }
-        }
+    let head = constraint
+        .head()
+        .try_map(|root| evaluate_at(&arena, root, point, current_parameters).ok_or(()))
+        .ok()?;
+    let mut accumulator = NormAccumulator::default();
+    for &term in constraint.terms() {
+        accumulator.push(evaluate_at(&arena, term, point, current_parameters)?);
     }
-    let norm = if has_nan {
-        f64::NAN
-    } else if has_infinite {
-        f64::INFINITY
-    } else {
-        scale * sum_squares.sqrt()
+    let norm = accumulator.norm();
+    let slack = match head {
+        oximo_core::SocHead::Standard(t) => t - norm,
+        oximo_core::SocHead::Rotated(u, v) => {
+            let r = std::f64::consts::FRAC_1_SQRT_2;
+            let (u, v) = (u * r, v * r);
+            (u + v) - (u - v).hypot(norm)
+        }
     };
-    let bound = evaluate_at(&arena, constraint.bound, point, current_parameters)?;
-    let slack = bound - norm;
-    Some(SocEvaluation { norm, bound, slack, violation: (-slack).max(0.0) })
+    Some(SocEvaluation { head, norm, slack, violation: (-slack).max(0.0) })
 }
 
 /// A solver's final result on a model.
@@ -342,7 +379,11 @@ pub struct SolverResult {
     /// Multipliers of stored algebraic rows, in those rows' coordinates.
     /// Prefer [`Self::dual_of`] for semantic constraint handles.
     pub dual: SolutionValues<ConstraintId>,
-    pub soc_dual: SolutionValues<SocConstraintId>,
+    /// Full dual vector of each explicit cone, in declared component order:
+    /// `[t, w...]` for a standard cone and `[u, v, w...]` for a rotated one.
+    /// Backends that cannot recover it leave the entry absent.
+    /// Prefer [`Self::soc_dual_of`] for typed handles.
+    pub soc_dual: crate::SocDuals,
     pub psd_dual: FxHashMap<PsdConstraintId, SymmetricMatrix<f64>>,
     pub reduced_costs: SolutionValues<VarId>,
     /// The best objective bound reported by the backend.
@@ -378,7 +419,7 @@ impl SolverResult {
             solutions: Vec::new(),
             semantic_dual: FxHashMap::default(),
             dual: SolutionValues::default(),
-            soc_dual: SolutionValues::default(),
+            soc_dual: crate::SocDuals::new(),
             psd_dual: FxHashMap::default(),
             reduced_costs: SolutionValues::default(),
             best_bound: None,
@@ -618,10 +659,10 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `model` or the best solution point
     /// does not belong to this result's model.
-    pub fn soc_evaluation(
+    pub fn soc_evaluation<S: oximo_core::SocSet>(
         &self,
         model: &Model,
-        constraint: SocConstraintHandle,
+        constraint: SocHandleOf<S>,
     ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
         self.soc_evaluation_at(model, constraint, 0)
     }
@@ -633,10 +674,10 @@ impl SolverResult {
     ///
     /// Returns [`ModelMismatchError`] if `model` or the selected solution point
     /// does not belong to this result's model.
-    pub fn soc_evaluation_at(
+    pub fn soc_evaluation_at<S: oximo_core::SocSet>(
         &self,
         model: &Model,
-        constraint: SocConstraintHandle,
+        constraint: SocHandleOf<S>,
         solution_index: usize,
     ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
         self.soc_evaluation_using_parameters(model, constraint, solution_index, false)
@@ -646,10 +687,10 @@ impl SolverResult {
     ///
     /// # Errors
     /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
-    pub fn soc_evaluation_with_current_parameters(
+    pub fn soc_evaluation_with_current_parameters<S: oximo_core::SocSet>(
         &self,
         model: &Model,
-        constraint: SocConstraintHandle,
+        constraint: SocHandleOf<S>,
     ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
         self.soc_evaluation_at_with_current_parameters(model, constraint, 0)
     }
@@ -658,19 +699,19 @@ impl SolverResult {
     ///
     /// # Errors
     /// Returns [`ModelMismatchError`] for a foreign model, constraint, or point.
-    pub fn soc_evaluation_at_with_current_parameters(
+    pub fn soc_evaluation_at_with_current_parameters<S: oximo_core::SocSet>(
         &self,
         model: &Model,
-        constraint: SocConstraintHandle,
+        constraint: SocHandleOf<S>,
         solution_index: usize,
     ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
         self.soc_evaluation_using_parameters(model, constraint, solution_index, true)
     }
 
-    fn soc_evaluation_using_parameters(
+    fn soc_evaluation_using_parameters<S: oximo_core::SocSet>(
         &self,
         model: &Model,
-        constraint: SocConstraintHandle,
+        constraint: SocHandleOf<S>,
         solution_index: usize,
         current_parameters: bool,
     ) -> Result<Option<SocEvaluation>, ModelMismatchError> {
@@ -769,18 +810,20 @@ impl SolverResult {
         }
     }
 
-    /// The norm-form bound multiplier of an explicit SOC constraint,
-    /// or `None` when the backend did not compute it.
+    /// The dual vector of an explicit standard or rotated cone, or `None`
+    /// when the backend did not compute it.
+    /// Its components are in declared order. For a standard cone
+    /// [`SocDualRef::standard_bound`] is the norm-form bound multiplier.
     ///
     /// # Errors
     ///
     /// Returns [`ModelMismatchError`] if `constraint` belongs to another model.
-    pub fn soc_dual_of(
+    pub fn soc_dual_of<S: oximo_core::SocSet>(
         &self,
-        constraint: SocConstraintHandle,
-    ) -> Result<Option<f64>, ModelMismatchError> {
+        constraint: SocHandleOf<S>,
+    ) -> Result<Option<SocDualRef<'_>>, ModelMismatchError> {
         ensure_model_id(self.model_id, constraint.model_id())?;
-        Ok(self.soc_dual.get(constraint.soc_id()))
+        Ok(self.soc_dual.get(constraint.soc_id()).and_then(|z| SocDualRef::new(S::KIND, z)))
     }
 
     /// Look up the best solution's primal value for a specific index of an
@@ -942,7 +985,16 @@ impl std::fmt::Display for ModelReport<'_> {
             let width = socs.iter().map(|s| s.name.len()).max().unwrap_or(0);
             for (i, s) in socs.iter().enumerate() {
                 let id = SocConstraintId(u32::try_from(i).expect("soc index fits u32"));
-                let d = r.soc_dual.get(id).map_or_else(|| "n/a".to_owned(), num);
+                let dual = r.soc_dual.get(id).and_then(|dual| SocDualRef::new(s.kind(), dual));
+                let d = dual.map_or_else(
+                    || "n/a".to_owned(),
+                    |dual| match dual.head() {
+                        oximo_core::SocHead::Standard(bound) => num(bound),
+                        oximo_core::SocHead::Rotated(first, second) => {
+                            format!("({}, {})", num(first), num(second))
+                        }
+                    },
+                );
                 writeln!(f, "  {:<width$}  dual = {d}", s.name)?;
             }
         }
@@ -1074,7 +1126,7 @@ mod tests {
         let result = SolverResult {
             model_id: source.id(),
             dual: [(source_row.row_id(), 3.0)].into_iter().collect(),
-            soc_dual: [(source_cone.soc_id(), 4.0)].into_iter().collect(),
+            soc_dual: [(source_cone.soc_id(), [4.0, 0.0])].into_iter().collect(),
             ..Default::default()
         };
 
@@ -1085,7 +1137,9 @@ mod tests {
         assert_eq!(result.constraint_evaluation(&source, foreign_row), Err(mismatch));
         assert_eq!(result.soc_evaluation(&source, foreign_cone), Err(mismatch));
         assert_eq!(result.dual_of(source_row), Ok(Some(3.0)));
-        assert_eq!(result.soc_dual_of(source_cone), Ok(Some(4.0)));
+        let dual = result.soc_dual_of(source_cone).unwrap().expect("SOC dual");
+        assert_eq!(dual.as_slice(), [4.0, 0.0].as_slice());
+        assert_eq!(dual.standard_bound(), Some(4.0));
     }
 
     #[test]
@@ -1181,7 +1235,12 @@ mod tests {
 
         assert_eq!(
             result.soc_evaluation(&m, cone),
-            Ok(Some(SocEvaluation { norm: 5.0, bound: 6.0, slack: 1.0, violation: 0.0 }))
+            Ok(Some(SocEvaluation {
+                head: oximo_core::SocHead::Standard(6.0),
+                norm: 5.0,
+                slack: 1.0,
+                violation: 0.0
+            }))
         );
         assert!(
             (result.soc_evaluation_at(&m, cone, 1).unwrap().unwrap().violation - 1.0).abs()
@@ -1229,26 +1288,111 @@ mod tests {
 
         let large = evaluation(0);
         assert_eq!(
-            (large.norm, large.bound, large.slack, large.violation),
-            (1e200, 2e200, 1e200, 0.0)
+            (large.head, large.norm, large.slack, large.violation),
+            (oximo_core::SocHead::Standard(2e200), 1e200, 1e200, 0.0)
         );
 
         let tiny = evaluation(1);
         assert_eq!(
-            (tiny.norm, tiny.bound, tiny.slack, tiny.violation),
-            (1e-200, 5e-201, -5e-201, 5e-201)
+            (tiny.head, tiny.norm, tiny.slack, tiny.violation),
+            (oximo_core::SocHead::Standard(5e-201), 1e-200, -5e-201, 5e-201)
         );
 
         let mixed = evaluation(2);
         assert_eq!(
-            (mixed.norm, mixed.bound, mixed.slack, mixed.violation),
-            (1e200, 5e199, -5e199, 5e199)
+            (mixed.head, mixed.norm, mixed.slack, mixed.violation),
+            (oximo_core::SocHead::Standard(5e199), 1e200, -5e199, 5e199)
         );
 
         assert_eq!(
             evaluation(3),
-            SocEvaluation { norm: 0.0, bound: 0.0, slack: 0.0, violation: 0.0 }
+            SocEvaluation {
+                head: oximo_core::SocHead::Standard(0.0),
+                norm: 0.0,
+                slack: 0.0,
+                violation: 0.0
+            }
         );
+    }
+
+    #[test]
+    fn rotated_soc_evaluation_reports_head_and_standard_rewrite() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("rotated soc evaluation");
+        variable!(m, x);
+        variable!(m, u);
+        variable!(m, v);
+        let cone = soc_constraint!(m, cone, [x] in rotated(u, v));
+        assert_eq!(m.rotated_soc_constraint_handle("cone"), Some(cone));
+        assert_eq!(m.soc_constraint_handle("cone"), None);
+
+        let point = |x_value: f64, u_value: f64, v_value: f64| SolutionPoint {
+            model_id: m.id(),
+            primal: [
+                (x.var_id().unwrap(), x_value),
+                (u.var_id().unwrap(), u_value),
+                (v.var_id().unwrap(), v_value),
+            ]
+            .into_iter()
+            .collect(),
+            objective: None,
+            parameters: m.arena().parameter_snapshot(),
+        };
+
+        let result = SolverResult {
+            model_id: m.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            // Inside (2 >= 1), on the boundary (2 = 2), and with negative heads.
+            solutions: vec![point(1.0, 1.0, 1.0), point(2.0, 1.0, 2.0), point(0.0, -1.0, -1.0)],
+            ..Default::default()
+        };
+
+        let inside = result.soc_evaluation(&m, cone).unwrap().unwrap();
+        assert_eq!(inside.head, oximo_core::SocHead::Rotated(1.0, 1.0));
+        assert!(inside.slack > 0.0 && inside.violation == 0.0);
+
+        let boundary = result.soc_evaluation_at(&m, cone, 1).unwrap().unwrap();
+        assert!(boundary.slack.abs() < 1e-12, "{boundary:?}");
+        assert!((boundary.norm - 2.0).abs() < f64::EPSILON, "{boundary:?}");
+
+        let negative = result.soc_evaluation_at(&m, cone, 2).unwrap().unwrap();
+        assert!(negative.violation > 0.0, "{negative:?}");
+    }
+
+    #[test]
+    fn rotated_soc_slack_stays_finite_for_large_heads() {
+        use oximo_core::{soc_constraint, variable};
+
+        let m = Model::new("rotated soc scaling");
+        variable!(m, x);
+        variable!(m, u);
+        variable!(m, v);
+        let cone = soc_constraint!(m, cone, [x] in rotated(u, v));
+        let result = SolverResult {
+            model_id: m.id(),
+            primal_status: PrimalStatus::FeasiblePoint,
+            solutions: vec![SolutionPoint {
+                model_id: m.id(),
+                primal: [
+                    (x.var_id().unwrap(), 0.0),
+                    (u.var_id().unwrap(), 1e308),
+                    (v.var_id().unwrap(), 1e308),
+                ]
+                .into_iter()
+                .collect(),
+                objective: None,
+                parameters: m.arena().parameter_snapshot(),
+            }],
+            ..Default::default()
+        };
+
+        let evaluation = result.soc_evaluation(&m, cone).unwrap().unwrap();
+        assert!(evaluation.slack.is_finite(), "{evaluation:?}");
+
+        let expected = 2.0 * (1e308 * std::f64::consts::FRAC_1_SQRT_2);
+        assert!((evaluation.slack - expected).abs() < 1e295, "{evaluation:?}");
+        assert_eq!(evaluation.violation, 0.0);
     }
 
     #[test]

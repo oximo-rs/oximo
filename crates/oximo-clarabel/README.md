@@ -144,7 +144,7 @@ let opts = ClarabelOptions::default()
 
 - `solutions` - primal points (`Vec<SolutionPoint>`). This backend returns a single point holding the `primal` values keyed by `VarId` and the `objective` (adjusted for the objective sign and any constant term). Access via `result.objective()` / `result.value_of(var)`
 - `dual` - constraint duals, keyed by `ConstraintId`, access via `result.dual_of(c)`. Reported for equality and single-sided/range linear constraints in the LP convention (`gradient = A' y` of the problem as posed)
-- `soc_dual` - for each explicit `soc_constraint!`, its norm-form bound multiplier (`z0`), keyed by `SocConstraintId`, access via `result.soc_dual_of(soc)`
+- `soc_dual` - for each explicit `soc_constraint!`, its full dual vector in declared component order (`[t, w...]`, or `[u, v, w...]` for a rotated cone), keyed by `SocConstraintId`. `result.soc_dual_of(soc)` returns a `SocDualRef` with `head()`, `terms()` and `standard_bound()` (the norm-form bound multiplier `z0` of a standard cone)
 - `reduced_costs` - not populated by this backend (always empty)
 - `termination` - why the solve stopped, mapped from Clarabel's `SolverStatus`: `Optimal` (`Solved`), `Infeasible` (`PrimalInfeasible`), `Unbounded` (`DualInfeasible`), `IterationLimit` (`MaxIterations`), `TimeLimit` (`MaxTime`), `Interrupted` (`AlmostSolved`), `NumericError` (`NumericalError` / `InsufficientProgress`), `NotSolved` (`Unsolved`)
 - `primal_status` - whether a usable point came back (`NoSolution` / `FeasiblePoint` / `OptimalPoint`), `result.has_solution()` is the shortcut

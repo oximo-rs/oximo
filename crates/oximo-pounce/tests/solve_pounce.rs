@@ -682,6 +682,31 @@ fn explicit_soc_routes_to_conic_ipm_and_reports_dual() {
 }
 
 #[test]
+#[expect(clippy::many_single_char_names)]
+fn rotated_soc_routes_to_conic_ipm_and_reports_vector_dual() {
+    let m = Model::new("rsoc");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, 0.0 <= u <= 10.0);
+    variable!(m, 0.0 <= v <= 10.0);
+    m.fix(x, 1.0).unwrap();
+    m.fix(y, 1.0).unwrap();
+    let cone = m.add_rotated_soc_constraint("r", [x, y], u, v);
+    objective!(m, Min, u + v);
+
+    let result = Pounce.solve(&m, &PounceOptions::default()).unwrap();
+    assert!(result.has_solution(), "{:?}", result.termination);
+
+    assert_close(result.objective().unwrap(), 2.0, 1e-4, "objective");
+    let z = result.soc_dual_of(cone).unwrap().expect("vector dual").as_slice().to_vec();
+    assert_eq!(z.len(), 4);
+
+    assert_close(z[0], 1.0, 1e-3, "zu");
+    assert_close(z[1], 1.0, 1e-3, "zv");
+    assert!(2.0 * z[0] * z[1] >= z[2] * z[2] + z[3] * z[3] - 1e-3, "{z:?}");
+}
+
+#[test]
 fn persistent_convex_ipm_and_active_set_follow_parameter_sweeps() {
     let m = Model::new("convex_sweep");
     param!(m, target = 1.0);

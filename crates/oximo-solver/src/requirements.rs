@@ -773,11 +773,13 @@ fn builtin_scalar(function: SemanticType) -> bool {
 
 fn builtin_pair(pair: ConstraintSignature) -> bool {
     use oximo_core::{
-        IndicatorFunctionData, IndicatorSet, PositiveSemidefiniteCone, SecondOrderCone,
-        SpecialOrderedSet, SymmetricAffineData, VariableVectorData, VectorAffineData,
+        IndicatorFunctionData, IndicatorSet, PositiveSemidefiniteCone, RotatedSecondOrderCone,
+        SecondOrderCone, SpecialOrderedSet, SymmetricAffineData, VariableVectorData,
+        VectorAffineData,
     };
     (builtin_scalar(pair.function) && scalar_set(pair.set))
-        || (pair.function.is::<VectorAffineData>() && pair.set.is::<SecondOrderCone>())
+        || (pair.function.is::<VectorAffineData>()
+            && (pair.set.is::<SecondOrderCone>() || pair.set.is::<RotatedSecondOrderCone>()))
         || (pair.function.is::<SymmetricAffineData>() && pair.set.is::<PositiveSemidefiniteCone>())
         || (pair.function.is::<IndicatorFunctionData>() && pair.set.is::<IndicatorSet>())
         || (pair.function.is::<VariableVectorData>() && pair.set.is::<SpecialOrderedSet>())

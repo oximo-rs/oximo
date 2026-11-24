@@ -819,7 +819,7 @@ fn soc_affine_terms_and_bound() {
     soc_constraint!(m, cone, [x - y, 2.0 * y + 1.0] <= t + 2.0);
     let model_constraints = m.constraints();
     let socs = model_constraints.second_order_cones();
-    assert_eq!(socs[0].terms.len(), 2);
+    assert_eq!(socs[0].terms().len(), 2);
 }
 
 #[test]

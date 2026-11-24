@@ -115,11 +115,19 @@ pub(crate) struct Meta {
     row_duals: Vec<Option<DualProjection<ConstraintId>>>,
     /// Row index of each SOC block's `s0` entry.
     soc_block_starts: Vec<usize>,
-    /// Count of leading SOC blocks that are explicit cones (duals reported).
-    n_explicit: usize,
-    explicit_soc_ids: Vec<SocConstraintId>,
+    /// The leading SOC blocks, one per active explicit cone (duals reported).
+    explicit_socs: Vec<ExplicitSocBlock>,
     psd_blocks: Vec<(PsdConstraintId, usize, usize)>,
     parameters: oximo_solver::ParameterSnapshot,
+}
+
+/// One explicit cone's Clarabel block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExplicitSocBlock {
+    id: SocConstraintId,
+    /// Block size, equal to the source cone's dimension.
+    size: usize,
+    kind: oximo_core::SocKind,
 }
 
 /// A translated Clarabel problem, conic data plus the [`Meta`] to read its
@@ -297,6 +305,7 @@ impl Problem {
                             let Some(form) = prepared.detected_soc(row) else {
                                 return Ok(None);
                             };
+                            let form = form.into_standard();
                             if !self.refresh_cone(start, size, &form, &mut delta) {
                                 return Ok(None);
                             }
@@ -324,25 +333,15 @@ impl Problem {
                             continue;
                         }
                         let Some(block) =
-                            self.meta.explicit_soc_ids.iter().position(|source| source == id)
+                            self.meta.explicit_socs.iter().position(|source| source.id == *id)
                         else {
                             return Ok(None);
                         };
-                        let form = prepared.explicit_soc(
-                            &prepared.constraints().second_order_cones()[id.index()],
-                        )?;
+                        let form = prepared
+                            .explicit_soc(&prepared.constraints().second_order_cones()[id.index()])?
+                            .into_standard();
                         let start = self.meta.soc_block_starts[block];
-                        let Some(size) = self
-                            .cones
-                            .iter()
-                            .filter_map(|cone| match cone {
-                                SupportedConeT::SecondOrderConeT(n) => Some(*n),
-                                _ => None,
-                            })
-                            .nth(block)
-                        else {
-                            return Ok(None);
-                        };
+                        let size = self.meta.explicit_socs[block].size;
                         if !self.refresh_cone(start, size, &form, &mut delta) {
                             return Ok(None);
                         }
@@ -397,10 +396,11 @@ impl Problem {
         form: &SocForm,
         delta: &mut NumericUpdate,
     ) -> bool {
-        if size != form.terms.len() + 1 {
+        debug_assert!(!form.head.is_rotated(), "Clarabel cones are in standard form");
+        if size != form.dimension() {
             return false;
         }
-        for (i, terms) in std::iter::once(&form.bound).chain(form.terms.iter()).enumerate() {
+        for (i, terms) in form.components().enumerate() {
             if !self.refresh_row(start + i, terms, -1.0, terms.constant, delta) {
                 return false;
             }
@@ -532,6 +532,7 @@ pub(crate) fn build_problem_prepared(
     build_problem_prepared_with(model, prepared, None, true)
 }
 
+#[expect(clippy::too_many_lines)]
 fn build_problem_prepared_with(
     _model: &Model,
     prepared: &LoweringContext<'_>,
@@ -603,12 +604,23 @@ fn build_problem_prepared_with(
             if let Row::Soc(form) = row {
                 detected_layout.insert(
                     ConstraintId(u32::try_from(index).expect("row ID")),
-                    (soc_block_starts[block], form.terms.len() + 1),
+                    (soc_block_starts[block], form.dimension()),
                 );
                 block += 1;
             }
         }
     }
+    let explicit_socs: Vec<ExplicitSocBlock> = socs
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.active)
+        .map(|(i, c)| ExplicitSocBlock {
+            id: SocConstraintId(u32::try_from(i).expect("SOC count overflow")),
+            size: c.dimension(),
+            kind: c.kind(),
+        })
+        .collect();
+    debug_assert_eq!(explicit_socs.len(), n_explicit);
     let problem = Problem {
         p_mat,
         q,
@@ -628,13 +640,7 @@ fn build_problem_prepared_with(
             obj_constant,
             row_duals,
             soc_block_starts,
-            n_explicit,
-            explicit_soc_ids: socs
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.active)
-                .map(|(i, _)| SocConstraintId(u32::try_from(i).expect("SOC count overflow")))
-                .collect(),
+            explicit_socs,
             psd_blocks,
             parameters: prepared.arena().parameter_snapshot(),
         },
@@ -694,11 +700,13 @@ fn classify_rows<'a>(
     let vars_ref = vars;
     let expressions: &PreparedExpressions = prepared;
     let classify_non_linear = |c: &oximo_core::AlgebraicConstraint| {
-        expressions.detected_soc(vars_ref, c).map(Row::Soc).ok_or_else(|| SolverError::Nonlinear {
-            location: format!("constraint {:?}", c.name),
-            term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
-                .unwrap_or_else(|| "<nonlinear>".into()),
-        })
+        expressions.detected_soc(vars_ref, c).map(|form| Row::Soc(form.into_standard())).ok_or_else(
+            || SolverError::Nonlinear {
+                location: format!("constraint {:?}", c.name),
+                term: describe_nonlinear_term(arena_ref, c.lhs, &|v| var_name(vars_ref, v))
+                    .unwrap_or_else(|| "<nonlinear>".into()),
+            },
+        )
     };
 
     // Preserve the very cheap LP fast path by extracting affine rows serially
@@ -766,9 +774,8 @@ fn translation_capacities(
     let mut soc_count = 0;
     for form in explicit_forms.iter().chain(detected_forms) {
         soc_count += 1;
-        row_count += 1 + form.terms.len();
-        nonzero_count += form.bound.coeffs.len()
-            + form.terms.iter().map(|term| term.coeffs.len()).sum::<usize>();
+        row_count += form.dimension();
+        nonzero_count += form.components().map(|term| term.coeffs.len()).sum::<usize>();
     }
     (row_count, nonzero_count, soc_count)
 }
@@ -862,24 +869,49 @@ fn soc_blocks(
     if let Some((arena, socs)) = direct {
         for soc in socs.iter().filter(|soc| soc.active) {
             soc_block_starts.push(acc.b.len());
-
-            for root in std::iter::once(soc.bound).chain(soc.terms.iter().copied()) {
+            match soc.head() {
+                oximo_core::SocHead::Standard(t) => push_direct_soc_row(acc, arena, t),
+                oximo_core::SocHead::Rotated(u, v) => {
+                    // Exact standard rewrite `[(u+v)/sqrt2, (u-v)/sqrt2, w...]`.
+                    let (sum, diff) = oximo_core::rotate_heads(
+                        &direct_soc_terms(arena, u),
+                        &direct_soc_terms(arena, v),
+                    );
+                    acc.push(&sum, -1.0, sum.constant);
+                    acc.push(&diff, -1.0, diff.constant);
+                }
+            }
+            for &root in soc.terms() {
                 push_direct_soc_row(acc, arena, root);
             }
-            soc_sizes.push(1 + soc.terms.len());
+            soc_sizes.push(soc.dimension());
             n_explicit += 1;
         }
     }
 
     for form in explicit_forms.iter().chain(detected_forms) {
+        debug_assert!(!form.head.is_rotated(), "Clarabel cones are in standard form");
         soc_block_starts.push(acc.b.len());
-        acc.push(&form.bound, -1.0, form.bound.constant);
-        for term in &form.terms {
-            acc.push(term, -1.0, term.constant);
+        for row in form.components() {
+            acc.push(row, -1.0, row.constant);
         }
-        soc_sizes.push(1 + form.terms.len());
+        soc_sizes.push(form.dimension());
     }
     (soc_sizes, soc_block_starts, n_explicit)
+}
+
+/// Affine terms of a direct-storage SOC root (see [`direct_soc_capacity`]).
+fn direct_soc_terms(arena: &ExprArena, root: ExprId) -> LinearTerms<'_> {
+    match arena.get(root) {
+        ExprNode::Var(variable) => LinearTerms::owned(vec![(*variable, 1.0)], 0.0),
+        ExprNode::Linear { coeffs, constant } => LinearTerms::borrowed(coeffs, *constant),
+        ExprNode::Const(value) => LinearTerms::owned(Vec::new(), *value),
+        ExprNode::Param(parameter) => LinearTerms::owned(
+            Vec::new(),
+            arena.try_param_value(*parameter).expect("checked parameter"),
+        ),
+        _ => unreachable!("direct SOC storage checked against the same immutable arena"),
+    }
 }
 
 /// Estimate row, matrix nonzero, and cone counts for active explicit SOC constraints
@@ -900,15 +932,24 @@ fn direct_soc_capacity(
     for soc in socs.iter().filter(|soc| soc.active) {
         cones += 1;
 
-        for root in std::iter::once(soc.bound).chain(soc.terms.iter().copied()) {
-            nonzeros += match arena.get(root) {
+        let head_len = soc.kind().head_len();
+        let mut head_nonzeros = 0;
+        for (index, &root) in soc.components().iter().enumerate() {
+            let count = match arena.get(root) {
                 ExprNode::Var(_) => 1,
                 ExprNode::Const(_) => 0,
                 ExprNode::Param(id) if arena.try_param_value(*id).is_some() => 0,
                 ExprNode::Linear { coeffs, .. } => coeffs.len(),
                 _ => return None,
             };
+            if index < head_len {
+                head_nonzeros += count;
+            }
+            nonzeros += count;
             rows += 1;
+        }
+        if soc.kind() == oximo_core::SocKind::Rotated {
+            nonzeros += head_nonzeros;
         }
     }
 
@@ -938,7 +979,10 @@ fn explicit_soc_forms(
     socs: &[oximo_core::SocConstraint],
     parallel: Option<bool>,
 ) -> Result<Vec<SocForm>, SolverError> {
-    let extract = |s: &oximo_core::SocConstraint| prepared.explicit_soc(s);
+    // Rotated cones are rewritten as standard cones.
+    // `read_result` rotates their duals back.
+    let extract =
+        |s: &oximo_core::SocConstraint| prepared.explicit_soc(s).map(SocForm::into_standard);
     let use_parallel = parallel.unwrap_or(false);
     let explicit_results: Vec<Result<SocForm, SolverError>> = if use_parallel {
         socs.par_iter().filter(|s| s.active).map(extract).collect()
@@ -977,7 +1021,7 @@ pub(crate) fn read_result(
 
     let mut solutions = Vec::new();
     let mut dual = SolutionValues::default();
-    let mut soc_dual = SolutionValues::default();
+    let mut soc_dual = oximo_solver::SocDuals::new();
     let mut psd_dual = FxHashMap::default();
     let mut dual_mapping_valid = true;
     if has_point {
@@ -995,7 +1039,6 @@ pub(crate) fn read_result(
     }
     if native_status == SolverStatus::Solved {
         dual = SolutionValues::missing(model.constraints().algebraic().len());
-        soc_dual = SolutionValues::missing(model.num_soc_constraints());
         for (r, &z) in solver.solution.z.iter().enumerate() {
             if let Some(Some(projection)) = meta.row_duals.get(r)
                 && projection.try_accumulate(&mut dual, z, meta.sign).is_err()
@@ -1004,14 +1047,12 @@ pub(crate) fn read_result(
             }
         }
 
-        for (&id, &start) in
-            meta.explicit_soc_ids.iter().zip(&meta.soc_block_starts).take(meta.n_explicit)
-        {
-            if let Some(&z0) = solver.solution.z.get(start)
-                && soc_dual.try_set(id, Some(z0)).is_err()
-            {
+        for (block, &start) in meta.explicit_socs.iter().zip(&meta.soc_block_starts) {
+            let Some(z) = solver.solution.z.get(start..start + block.size) else {
                 dual_mapping_valid = false;
-            }
+                continue;
+            };
+            soc_dual.insert_from_standard(block.id, block.kind, z);
         }
 
         for &(id, start, n) in &meta.psd_blocks {
@@ -1419,8 +1460,7 @@ mod tests {
             row_duals: Vec::new(),
             soc_block_starts: Vec::new(),
             psd_blocks: Vec::new(),
-            n_explicit: 0,
-            explicit_soc_ids: Vec::new(),
+            explicit_socs: Vec::new(),
             parameters: oximo_solver::ParameterSnapshot::default(),
         };
 
@@ -1437,8 +1477,7 @@ mod tests {
             row_duals: Vec::new(),
             soc_block_starts: Vec::new(),
             psd_blocks: Vec::new(),
-            n_explicit: 0,
-            explicit_soc_ids: Vec::new(),
+            explicit_socs: Vec::new(),
             parameters: oximo_solver::ParameterSnapshot::default(),
         };
 
@@ -1484,7 +1523,7 @@ mod tests {
         assert_eq!(serial.cones, parallel.cones);
         assert_eq!(serial.meta.row_duals, parallel.meta.row_duals);
         assert_eq!(serial.meta.soc_block_starts, parallel.meta.soc_block_starts);
-        assert_eq!(serial.meta.n_explicit, parallel.meta.n_explicit);
+        assert_eq!(serial.meta.explicit_socs, parallel.meta.explicit_socs);
         assert_eq!(serial.a_mat.colptr, automatic.a_mat.colptr);
         assert_eq!(serial.a_mat.rowval, automatic.a_mat.rowval);
         assert_eq!(serial.a_mat.nzval, automatic.a_mat.nzval);
@@ -1539,6 +1578,7 @@ mod tests {
             ],
             2.0 * t + 3.0,
         );
+        model.add_rotated_soc_constraint("rotated", [x + 1.0], 3.0 * x + 2.0 * t, t);
 
         let compare = || {
             let direct = build_problem(&model).unwrap();
@@ -1554,8 +1594,7 @@ mod tests {
             assert_eq!(direct.cones, extracted.cones);
             assert_eq!(direct.meta.row_duals, extracted.meta.row_duals);
             assert_eq!(direct.meta.soc_block_starts, extracted.meta.soc_block_starts);
-            assert_eq!(direct.meta.explicit_soc_ids, extracted.meta.explicit_soc_ids);
-            assert_eq!(direct.meta.n_explicit, extracted.meta.n_explicit);
+            assert_eq!(direct.meta.explicit_socs, extracted.meta.explicit_socs);
         };
 
         for value in [0.0, 2.0, 5.0] {
@@ -1666,7 +1705,12 @@ mod tests {
         assert_eq!(res.termination, TerminationStatus::Optimal);
         assert!(close(res.objective().unwrap(), -std::f64::consts::SQRT_2, 1e-6));
 
-        let z0 = res.soc_dual_of(disk).expect("matching model").expect("SOC dual missing");
+        let z0 = res
+            .soc_dual_of(disk)
+            .expect("matching model")
+            .expect("SOC dual missing")
+            .standard_bound()
+            .expect("standard cone");
         assert!(close(z0, std::f64::consts::SQRT_2, 1e-6), "z0 = {z0}");
     }
 
@@ -1934,7 +1978,7 @@ mod tests {
                 .into(),
         );
         let mut problem = build_problem_prepared(&m, &prepared).unwrap();
-        problem.meta.explicit_soc_ids.clear();
+        problem.meta.explicit_socs.clear();
         assert!(problem.refresh(&prepared, &change).unwrap().is_none());
     }
 }

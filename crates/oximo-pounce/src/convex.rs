@@ -242,12 +242,20 @@ enum ConstraintMap {
     Ineq { upper: Option<usize>, lower: Option<usize> },
 }
 
+/// One explicit cone's standard-form block in `G`/`h`.
+#[derive(Clone, Copy, Debug)]
+struct ExplicitSocBlock {
+    start: usize,
+    size: usize,
+    kind: oximo_core::SocKind,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Problem {
     pub qp: QpProblem,
     pub cones: Vec<ConeSpec>,
     maps: Vec<ConstraintMap>,
-    explicit_soc_starts: Vec<Option<usize>>,
+    explicit_socs: Vec<Option<ExplicitSocBlock>>,
     sign: f64,
     objective_constant: f64,
 }
@@ -353,21 +361,16 @@ impl Problem {
         if !source.active {
             return Ok(true);
         }
-        let Some(start) = self.explicit_soc_starts.get(id.index()).copied().flatten() else {
+        let Some(ExplicitSocBlock { start, size, .. }) =
+            self.explicit_socs.get(id.index()).copied().flatten()
+        else {
             return Ok(false);
         };
-        let form = prepared.explicit_soc(source)?;
-        let mut offset = 0;
-        let dimension = self.cones.iter().find_map(|cone| {
-            let dimension = cone.dim();
-            let matched = offset == start && matches!(cone, ConeSpec::SecondOrder(_));
-            offset += dimension;
-            matched.then_some(dimension)
-        });
-        if dimension != Some(form.terms.len() + 1) {
+        let form = prepared.explicit_soc(source)?.into_standard();
+        if size != form.dimension() {
             return Ok(false);
         }
-        for (i, terms) in std::iter::once(&form.bound).chain(form.terms.iter()).enumerate() {
+        for (i, terms) in form.components().enumerate() {
             if !replace_triplet_row(&mut self.qp.g, start + i, terms, -1.0) {
                 return Ok(false);
             }
@@ -487,7 +490,7 @@ pub(crate) fn build_problem(
             }
             maps[index] = ConstraintMap::Ineq { upper, lower };
         } else if let Some(form) = prepared.detected_soc(constraint) {
-            detected.push((index, form));
+            detected.push((index, form.into_standard()));
         } else {
             return Err(SolverError::Backend(format!(
                 "constraint {:?} cannot be represented by the selected convex route",
@@ -501,11 +504,11 @@ pub(crate) fn build_problem(
     if linear_ineq > 0 {
         cones.push(ConeSpec::Nonneg(linear_ineq));
     }
-    let explicit_soc_starts = append_explicit_socs(prepared, &mut g, &mut h, &mut cones)?;
+    let explicit_socs = append_explicit_socs(prepared, &mut g, &mut h, &mut cones)?;
     for (index, form) in detected {
         maps[index] = ConstraintMap::None;
         append_soc(&mut g, &mut h, &form);
-        cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
+        cones.push(ConeSpec::SecondOrder(form.dimension()));
     }
 
     Ok(Problem {
@@ -522,7 +525,7 @@ pub(crate) fn build_problem(
         },
         cones,
         maps,
-        explicit_soc_starts,
+        explicit_socs,
         sign,
         objective_constant,
     })
@@ -575,26 +578,29 @@ fn append_explicit_socs(
     g: &mut Vec<Triplet>,
     h: &mut Vec<f64>,
     cones: &mut Vec<ConeSpec>,
-) -> Result<Vec<Option<usize>>, SolverError> {
-    let mut starts = Vec::new();
-    for soc in prepared.constraints().second_order_cones() {
+) -> Result<Vec<Option<ExplicitSocBlock>>, SolverError> {
+    let socs = prepared.constraints().second_order_cones();
+    let mut blocks = Vec::with_capacity(socs.len());
+    for soc in socs {
         if !soc.active {
-            starts.push(None);
+            blocks.push(None);
             continue;
         }
-        let form = prepared.explicit_soc(soc)?;
-        starts.push(Some(h.len()));
+        // Rotated cones are rewritten as standard cones (`SocForm::into_standard`).
+        let form = prepared.explicit_soc(soc)?.into_standard();
+        blocks.push(Some(ExplicitSocBlock {
+            start: h.len(),
+            size: form.dimension(),
+            kind: soc.kind(),
+        }));
         append_soc(g, h, &form);
-        cones.push(ConeSpec::SecondOrder(1 + form.terms.len()));
+        cones.push(ConeSpec::SecondOrder(form.dimension()));
     }
-    Ok(starts)
+    Ok(blocks)
 }
 
 fn append_soc(g: &mut Vec<Triplet>, h: &mut Vec<f64>, form: &SocForm) {
-    let row = h.len();
-    push_row(g, row, &form.bound, -1.0);
-    h.push(form.bound.constant);
-    for term in &form.terms {
+    for term in form.components() {
         let row = h.len();
         push_row(g, row, term, -1.0);
         h.push(term.constant);
@@ -801,11 +807,13 @@ pub(crate) fn outcome(
             }
         };
     }
-    let soc_dual = problem
-        .explicit_soc_starts
-        .iter()
-        .map(|&row| row.and_then(|row| sol.z.get(row).copied()).unwrap_or(f64::NAN))
-        .collect();
+    let mut soc_dual = oximo_solver::SocDuals::new();
+    for (index, block) in problem.explicit_socs.iter().enumerate() {
+        let Some(block) = block else { continue };
+        let Some(z) = sol.z.get(block.start..block.start + block.size) else { continue };
+        let id = oximo_core::SocConstraintId(u32::try_from(index).expect("SOC count"));
+        soc_dual.insert_from_standard(id, block.kind, z);
+    }
     let reduced = Some(sol.z_lb.iter().zip(&sol.z_ub).map(|(l, u)| l - u).collect());
     Outcome {
         has_point: matches!(sol.status, QpStatus::Optimal | QpStatus::OptimalInaccurate),
@@ -1368,11 +1376,10 @@ mod tests {
             Some(std::borrow::Cow::Borrowed(_))
         ));
 
-        problem.explicit_soc_starts[0] = None;
+        let block = problem.explicit_socs[0].take();
         assert!(problem.refresh(&prepared, &opts, &change).unwrap().is_none());
 
-        problem.explicit_soc_starts[0] = Some(0);
-        problem.cones[0] = ConeSpec::SecondOrder(3);
+        problem.explicit_socs[0] = block.map(|block| ExplicitSocBlock { size: 3, ..block });
         assert!(problem.refresh(&prepared, &opts, &change).unwrap().is_none());
     }
 }

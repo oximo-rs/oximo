@@ -424,7 +424,7 @@ fn invalid_bound_and_dimension_updates_return_errors_without_mutation() {
         ),
         Err(ConstraintUpdateError::DimensionMismatch { expected: 2, actual: 3 })
     ));
-    assert_eq!(model.soc_constraints()[0].terms, [x.id()]);
+    assert_eq!(model.soc_constraints()[0].terms(), [x.id()]);
     assert_eq!(
         model
             .semantic_constraint(cone)
@@ -507,7 +507,7 @@ fn cone_views_and_forks_share_buffers_but_updates_remain_independent() {
         .matrix
         .upper_triangle();
 
-    assert_eq!(components[1..].as_ptr(), model.soc_constraints()[0].terms.as_ptr());
+    assert_eq!(components[1..].as_ptr(), model.soc_constraints()[0].terms().as_ptr());
     assert_eq!(triangle.as_ptr(), model.psd_constraints()[0].matrix.upper_triangle().as_ptr());
 
     let fork = model.fork();
@@ -539,8 +539,8 @@ fn cone_views_and_forks_share_buffers_but_updates_remain_independent() {
     )
     .unwrap();
 
-    assert_eq!(model.soc_constraints()[0].terms, [x.id(); 5]);
-    assert_eq!(fork.soc_constraints()[0].terms, [t.id(); 5]);
+    assert_eq!(model.soc_constraints()[0].terms(), [x.id(); 5]);
+    assert_eq!(fork.soc_constraints()[0].terms(), [t.id(); 5]);
     assert_eq!(model.psd_constraints()[0].matrix.upper_triangle(), &[t.id(), x.id(), t.id()]);
     assert_eq!(fork.psd_constraints()[0].matrix.upper_triangle(), &[x.id(), t.id(), x.id()]);
     assert_eq!(soc_record.pair.function.model_id(), model.id());
@@ -583,10 +583,10 @@ fn small_cone_views_keep_bound_prefixes_and_independent_updates() {
             },
         )
         .unwrap();
-        assert_eq!(fork.soc_constraints()[0].bound, x.id());
-        assert_eq!(&*fork.soc_constraints()[0].terms, vec![t.id(); width]);
-        assert_eq!(model.soc_constraints()[0].bound, t.id());
-        assert_eq!(&*model.soc_constraints()[0].terms, vec![x.id(); width]);
+        assert_eq!(fork.soc_constraints()[0].head(), SocHead::Standard(x.id()));
+        assert_eq!(fork.soc_constraints()[0].terms(), vec![t.id(); width]);
+        assert_eq!(model.soc_constraints()[0].head(), SocHead::Standard(t.id()));
+        assert_eq!(model.soc_constraints()[0].terms(), vec![x.id(); width]);
         assert_eq!(snapshot.pair.function.expressions(), roots);
     }
 }

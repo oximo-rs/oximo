@@ -8,6 +8,7 @@
 
 pub use crate::constraint::Relate;
 pub use crate::domain::Domain;
+pub use crate::function_set::{RotatedHead, SocHeadInput};
 #[cfg(feature = "gdp")]
 pub use crate::gdp::DisjunctionKind;
 pub use crate::set::{FromIndexKey, FromIndexKeyRef, IndexKeyRef, KeyCat, Set};

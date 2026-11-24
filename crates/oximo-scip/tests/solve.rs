@@ -113,6 +113,30 @@ fn explicit_cones_and_negative_rhs() {
 }
 
 #[test]
+fn rotated_cone_matches_quadratic_form_and_rejects_negative_heads() {
+    let m = Model::new("rsoc");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, 0.0 <= u <= 20.0);
+    variable!(m, 0.0 <= v <= 20.0);
+    m.fix(x, 3.0).unwrap();
+    m.fix(y, 4.0).unwrap();
+    m.add_rotated_soc_constraint("r", [x, y], u, v);
+    objective!(m, Min, u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+    close(solve(&m).objective().unwrap(), 5.0 * 2.0_f64.sqrt());
+
+    let m = Model::new("rsoc_free");
+    variable!(m, x);
+    variable!(m, -5.0 <= u <= 5.0);
+    variable!(m, -5.0 <= v <= 5.0);
+    m.fix(x, 1.0).unwrap();
+    m.add_rotated_soc_constraint("r", [x], u, v);
+    objective!(m, Min, u);
+    close(solve(&m).objective().unwrap(), 0.1);
+}
+
+#[test]
 fn nonlinear_objective_and_constraints() {
     let m = Model::new("nlp");
     variable!(m,0.0<=x<=2.0);
@@ -364,4 +388,22 @@ fn lp_duals_are_a_valid_original_certificate() {
     let r = Scip::new().solve(&m, &opts).unwrap();
     assert_eq!(r.dual_status, oximo_solver::DualStatus::FeasiblePoint);
     close(r.dual.get(row.row_id()).unwrap(), -1.0);
+}
+
+#[test]
+fn rotated_cone_with_constant_head() {
+    let m = Model::new("rsoc_constant_head");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= t <= 10.0);
+    m.fix(x, 3.0).unwrap();
+    soc_constraint!(m, r, [x] in rotated(t, 1.0));
+    objective!(m, Min, t);
+    close(solve(&m).objective().unwrap(), 4.5);
+
+    let m = Model::new("rsoc_negative_head");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= t <= 10.0);
+    soc_constraint!(m, r, [x] in rotated(t, -1.0));
+    objective!(m, Min, t);
+    assert_eq!(solve(&m).termination, TerminationStatus::Infeasible);
 }

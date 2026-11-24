@@ -1,7 +1,10 @@
-//! `soc_constraint!(model, [name | name = expr | name[i in dom, ...]], [terms] <= bound)`,
-//! register the second-order cone constraint `||terms||_2 <= bound`. Every
-//! term and the bound must be affine (validated at registration). The
-//! relation must be a bracketed term list on the left of a single `<=`.
+//! `soc_constraint!(model, [name | name = expr | name[i in dom, ...]], relation)`,
+//! register an explicit second-order cone constraint.
+//! The relation is:
+//! `[terms] <= bound` or `[terms] in soc(bound)`, the standard cone
+//! `||terms||_2 <= bound`, or
+//! `[terms] in rotated(u, v)`, the rotated cone `||terms||_2^2 <= 2 u v` with `u, v >= 0`.
+//! Every term and head must be affine (validated at registration).
 
 use proc_macro2::{Delimiter, Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
@@ -12,6 +15,8 @@ use crate::constraint::computed_name;
 use crate::{
     Named, RelOp, build_set, next_seg, oximo_root, parse_comma_list, parse_named, split_relops,
 };
+
+const SHAPE: &str = "a SOC constraint must be written `[term, ...] <= bound`, `[term, ...] in soc(bound)` or `[term, ...] in rotated(u, v)`";
 
 pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     let parts = parse_comma_list(input, "missing macro argument")?;
@@ -37,15 +42,17 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
 
     let expanded = match second {
         None => {
-            let (terms, bound) = parse_relation(first, &mut sums)?;
-            quote!( (#model).__add_soc_constraint_auto([#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound) )
+            let (terms, head) = parse_relation(first, &mut sums)?;
+            let head = head.tokens(&root);
+            quote!( (#model).__add_soc_constraint_auto([#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #head) )
         }
         Some(rel_tokens) => {
             // Computed name at run-time: `soc_constraint!(m, name = expr, ..)`.
             if let Some(name_expr) = computed_name(&first) {
-                let (terms, bound) = parse_relation(rel_tokens, &mut sums)?;
+                let (terms, head) = parse_relation(rel_tokens, &mut sums)?;
+                let head = head.tokens(&root);
                 return Ok(sums.wrap(quote!(
-                    (#model).add_soc_constraint(#name_expr, [#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound)
+                    (#model).__add_soc_constraint_head(#name_expr, [#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #head)
                 )));
             }
 
@@ -54,10 +61,11 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
             if let Some(binds) = &binds {
                 sums.indexed(binds);
             }
-            let (terms, bound) = parse_relation(rel_tokens, &mut sums)?;
+            let (terms, head) = parse_relation(rel_tokens, &mut sums)?;
+            let head = head.tokens(&root);
             match binds {
                 None => quote!(
-                    (#model).add_soc_constraint(#name_str, [#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound)
+                    (#model).__add_soc_constraint_head(#name_str, [#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #head)
                 ),
                 Some(binds) => {
                     let param = family_closure_param(&binds);
@@ -68,7 +76,7 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
                         (#model).__add_soc_constraints_over(
                             #name_str,
                             &(#set),
-                            |#param| { #used ([#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #bound) },
+                            |#param| { #used ([#(#root::__macro_support::IntoAffineFunction::into_affine_function(#terms)),*], #head) },
                         );
                     }
                 }
@@ -78,20 +86,46 @@ pub(crate) fn expand(input: TokenStream2) -> syn::Result<TokenStream2> {
     Ok(sums.wrap(expanded))
 }
 
-/// Parse the relation `[term, term, ...] <= bound` into the term expressions
-/// and the bound expression.
+/// The cone head written after the term list.
+enum Head {
+    /// `<= bound` or `in soc(bound)`.
+    Standard(Expr),
+    /// `in rotated(u, v)`.
+    Rotated(Expr, Expr),
+}
+
+impl Head {
+    fn tokens(&self, root: &TokenStream2) -> TokenStream2 {
+        match self {
+            Self::Standard(bound) => quote!(#bound),
+            Self::Rotated(u, v) => quote!(#root::__macro_support::RotatedHead(#u, #v)),
+        }
+    }
+}
+
+/// Parse `[term, ...] <= bound`, `[term, ...] in soc(bound)` or
+/// `[term, ...] in rotated(u, v)` into the term expressions and the head.
 fn parse_relation(
     tokens: TokenStream2,
     sums: &mut crate::sum::ModelSums,
-) -> syn::Result<(Vec<Expr>, Expr)> {
-    const SHAPE: &str = "a SOC constraint must be written `[term, term, ...] <= bound`";
-    let (segs, ops) = split_relops(&tokens);
-    let (lhs, rhs) = match (segs.len(), ops.as_slice()) {
-        (2, [RelOp::Le]) => {
-            let mut segs = segs.into_iter();
-            (next_seg(&mut segs)?, next_seg(&mut segs)?)
+) -> syn::Result<(Vec<Expr>, Head)> {
+    let tts: Vec<TokenTree> = tokens.clone().into_iter().collect();
+    let in_position = tts.iter().position(|tt| matches!(tt, TokenTree::Ident(i) if i == "in"));
+    let (lhs, head) = if let Some(at) = in_position {
+        let lhs: TokenStream2 = tts[..at].iter().cloned().collect();
+        let head = parse_cone_set(&tts[at + 1..], &tokens, sums)?;
+        (lhs, head)
+    } else {
+        let (segs, ops) = split_relops(&tokens);
+        match (segs.len(), ops.as_slice()) {
+            (2, [RelOp::Le]) => {
+                let mut segs = segs.into_iter();
+                let lhs = next_seg(&mut segs)?;
+                let rhs = next_seg(&mut segs)?;
+                (lhs, Head::Standard(parse_seg(rhs, sums)?))
+            }
+            _ => return Err(syn::Error::new_spanned(tokens, SHAPE)),
         }
-        _ => return Err(syn::Error::new_spanned(tokens, SHAPE)),
     };
 
     let mut lhs_tts = lhs.into_iter();
@@ -108,9 +142,37 @@ fn parse_relation(
     if terms.is_empty() {
         return Err(syn::Error::new(group.span(), "a SOC constraint needs at least one term"));
     }
+    Ok((terms, head))
+}
 
-    let bound = parse_seg(rhs, sums)?;
-    Ok((terms, bound))
+/// Parse `soc(t)` or `rotated(u, v)` after the `in` keyword.
+fn parse_cone_set(
+    tts: &[TokenTree],
+    all: &TokenStream2,
+    sums: &mut crate::sum::ModelSums,
+) -> syn::Result<Head> {
+    const CONE: &str = "expected `soc(bound)` or `rotated(u, v)` after `in`";
+    let (kind, args) = match tts {
+        [TokenTree::Ident(kind), TokenTree::Group(args)]
+            if (kind == "soc" || kind == "rotated")
+                && args.delimiter() == Delimiter::Parenthesis =>
+        {
+            (kind, args)
+        }
+        [first, ..] => return Err(syn::Error::new(first.span(), CONE)),
+        [] => return Err(syn::Error::new_spanned(all, CONE)),
+    };
+    let heads = parse_comma_list(args.stream(), "missing cone head")?;
+    if kind == "soc" {
+        let [t]: [TokenStream2; 1] = heads
+            .try_into()
+            .map_err(|_| syn::Error::new(args.span(), "`soc(bound)` takes exactly one bound"))?;
+        return Ok(Head::Standard(parse_seg(t, sums)?));
+    }
+    let [u, v]: [TokenStream2; 2] = heads
+        .try_into()
+        .map_err(|_| syn::Error::new(args.span(), "`rotated(u, v)` takes exactly two heads"))?;
+    Ok(Head::Rotated(parse_seg(u, sums)?, parse_seg(v, sums)?))
 }
 
 fn parse_seg(ts: TokenStream2, sums: &mut crate::sum::ModelSums) -> syn::Result<Expr> {

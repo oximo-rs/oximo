@@ -86,7 +86,27 @@ pub(crate) struct Row {
 pub(crate) struct Cone {
     name: String,
     terms: Vec<Formula>,
-    bound: Option<Formula>,
+    /// `[t]` or `[u, v]`; `None` for an inactive cone.
+    head: Option<oximo_core::SocHead<Formula>>,
+}
+
+impl Cone {
+    fn prepare_parts(
+        arena: &oximo_expr::ExprArena,
+        c: &oximo_core::SocConstraint,
+        columns: usize,
+    ) -> Result<(Vec<Formula>, Option<oximo_core::SocHead<Formula>>), SolverError> {
+        if !c.active {
+            return Ok((Vec::new(), None));
+        }
+        let terms = c
+            .terms()
+            .iter()
+            .map(|&e| Formula::prepare(arena, e, columns))
+            .collect::<Result<_, _>>()?;
+        let head = c.head().try_map(|e| Formula::prepare(arena, e, columns))?;
+        Ok((terms, Some(head)))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -202,22 +222,8 @@ impl Snapshot {
             .iter()
             .map(|c| {
                 crate::check_name(&c.name)?;
-                Ok(Cone {
-                    name: c.name.to_string(),
-                    terms: if c.active {
-                        c.terms
-                            .iter()
-                            .map(|&e| Formula::prepare(p.arena(), e, columns.len()))
-                            .collect::<Result<_, _>>()?
-                    } else {
-                        vec![]
-                    },
-                    bound: if c.active {
-                        Some(Formula::prepare(p.arena(), c.bound, columns.len())?)
-                    } else {
-                        None
-                    },
-                })
+                let (terms, head) = Cone::prepare_parts(p.arena(), c, columns.len())?;
+                Ok(Cone { name: c.name.to_string(), terms, head })
             })
             .collect::<Result<_, SolverError>>()?;
         let sets = p
@@ -300,19 +306,9 @@ impl Snapshot {
                     }
                     ParameterTarget::SecondOrderCone(id) => {
                         let c = &p.constraints().second_order_cones()[id.index()];
-                        fresh.cones[id.index()].terms = if c.active {
-                            c.terms
-                                .iter()
-                                .map(|&e| Formula::prepare(p.arena(), e, p.variables().len()))
-                                .collect::<Result<_, _>>()?
-                        } else {
-                            vec![]
-                        };
-                        fresh.cones[id.index()].bound = if c.active {
-                            Some(Formula::prepare(p.arena(), c.bound, p.variables().len())?)
-                        } else {
-                            None
-                        };
+                        let (terms, head) = Cone::prepare_parts(p.arena(), c, p.variables().len())?;
+                        fresh.cones[id.index()].terms = terms;
+                        fresh.cones[id.index()].head = head;
                     }
                     ParameterTarget::Indicator(id) => {
                         fresh.indicators[id.index()] =
@@ -480,17 +476,27 @@ impl Snapshot {
             debug_assert_eq!(i + 1, mapping.constraints.len());
         }
         for cone in self.cones.iter().skip(old.map_or(0, |s| s.cones.len())) {
-            let Some(bound) = &cone.bound else {
+            let Some(head) = &cone.head else {
                 continue;
             };
+            let mut squares: Vec<Expr> =
+                cone.terms.iter().map(|f| Expr::pow(f.native(&mapping.variables), 2.0)).collect();
+
+            // A rotated cone `||w||^2 <= 2 u v` is the standard cone
+            // `||(w, (u - v)/sqrt2)|| <= (u + v)/sqrt2`, with `u, v >= 0`.
+            let head = match head {
+                oximo_core::SocHead::Standard(t) => t.native(&mapping.variables),
+                oximo_core::SocHead::Rotated(u, v) => {
+                    let u = u.native(&mapping.variables);
+                    let v = v.native(&mapping.variables);
+                    let r = std::f64::consts::FRAC_1_SQRT_2;
+                    squares.push(Expr::pow((u.clone() - v.clone()) * r, 2.0));
+                    (u + v) * r
+                }
+            };
             // Direct norm expression.
-            let norm = Expr::pow(
-                Expr::sum(cone.terms.iter().map(|f| Expr::pow(f.native(&mapping.variables), 2.0))),
-                0.5,
-            );
-            let e = model
-                .build_expr(&(norm - bound.native(&mapping.variables)))
-                .map_err(crate::backend)?;
+            let norm = Expr::pow(Expr::sum(squares), 0.5);
+            let e = model.build_expr(&(norm - head)).map_err(crate::backend)?;
             model.add_cons_nonlinear(&e, f64::NEG_INFINITY, 0.0, &cone.name);
         }
         for sos in self.sets.iter().skip(old.map_or(0, |s| s.sets.len())) {

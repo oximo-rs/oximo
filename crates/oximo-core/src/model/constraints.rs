@@ -8,7 +8,7 @@ use crate::domain::Domain;
 use crate::function_set::{
     AlgebraicConstraintIr, Constraint, GreaterThan, Interval, IntoAffineConstraint,
     IntoAffineFunction, IntoFunction, LessThan, ScalarFunction, Set as ConstraintSet,
-    SocConstraintIr, validate_bounds,
+    SocConstraintIr, SocHeadInput, validate_bounds,
 };
 use crate::indicator::{
     IndicatorConstraint, IndicatorConstraintHandle, IndicatorConstraintId,
@@ -227,31 +227,31 @@ impl PendingConstraint {
 pub(super) struct PendingSoc {
     pub(super) name: SmolStr,
     pub(super) components: crate::SharedSlice<ExprId>,
+    pub(super) kind: crate::SocKind,
 }
 
 impl PendingSoc {
     /// Collect the affine SOC bound and terms while checking shared model ownership.
-    pub(super) fn new<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
+    pub(super) fn new<'a, A: IntoAffineFunction<'a>, B: SocHeadInput<'a>>(
         name: SmolStr,
         terms: impl IntoIterator<Item = A>,
-        bound: B,
-        expected_arena: usize,
+        head: B,
+        arena: &'a oximo_expr::ExprArenaCell,
     ) -> Self {
-        let bound = bound.into_affine_function().expression();
-        super::assert_expr_arena(&bound, expected_arena);
-        let components: crate::SharedSlice<_> = std::iter::once(bound.into_id())
-            .chain(terms.into_iter().map(|term| {
-                let term = term.into_affine_function().expression();
-                assert_eq!(
-                    super::arena_key(term.arena()),
-                    expected_arena,
-                    "SOC components must belong to the same model"
-                );
-                term.into_id()
-            }))
-            .collect();
-        assert!(components.len() >= 2, "SOC needs at least two components");
-        Self { name, components }
+        let expected_arena = super::arena_key(arena);
+        let mut roots = Vec::new();
+        head.push_roots(arena, &mut roots);
+        roots.extend(terms.into_iter().map(|term| {
+            let term = term.into_affine_function().expression();
+            assert_eq!(
+                super::arena_key(term.arena()),
+                expected_arena,
+                "SOC components must belong to the same model"
+            );
+            term.into_id()
+        }));
+        crate::soc::assert_soc_dimension(B::KIND, roots.len());
+        Self { name, components: roots.into(), kind: B::KIND }
     }
 
     /// Remap every SOC component after merging a worker arena.
@@ -928,23 +928,66 @@ impl Model {
     /// Register the explicit second-order cone constraint
     /// `||terms||_2 <= bound`.
     ///
-    /// Every member of `terms` and the `bound` must be affine; the bound is
-    /// additionally constrained to be nonnegative by the cone itself, so
-    /// backends emit a `bound >= 0` side condition where needed.
+    /// Every member of `terms` must be affine; the `bound` is affine or a plain
+    /// `f64`. The bound is additionally constrained to be nonnegative by the
+    /// cone itself, so backends emit a `bound >= 0` side condition where needed.
     ///
     /// # Panics
     ///
     /// Panics if a SOC constraint with the same name is already registered, if
     /// `terms` is empty, if any term or the bound is not affine, or if the
     /// count exceeds `u32::MAX`.
-    pub fn add_soc_constraint<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
+    pub fn add_soc_constraint<
+        'a,
+        A: IntoAffineFunction<'a>,
+        B: crate::function_set::SocMember<'a>,
+    >(
         &'a self,
         name: impl Into<SmolStr>,
         terms: impl IntoIterator<Item = A>,
         bound: B,
     ) -> SocConstraintHandle {
-        let pending = PendingSoc::new(name.into(), terms, bound, super::arena_key(&self.arena));
-        self.register_soc_components(pending.name, pending.components)
+        self.__add_soc_constraint_head(name, terms, bound)
+    }
+
+    /// Register the explicit rotated second-order cone constraint
+    /// `||terms||_2^2 <= 2 u v`, `u, v >= 0`.
+    ///
+    /// Every member of `terms` must be affine; each head is affine or a plain
+    /// `f64`. The heads are constrained to be nonnegative by the cone itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::add_soc_constraint`].
+    pub fn add_rotated_soc_constraint<
+        'a,
+        A: IntoAffineFunction<'a>,
+        U: crate::function_set::SocMember<'a>,
+        V: crate::function_set::SocMember<'a>,
+    >(
+        &'a self,
+        name: impl Into<SmolStr>,
+        terms: impl IntoIterator<Item = A>,
+        u: U,
+        v: V,
+    ) -> crate::RotatedSocConstraintHandle {
+        self.__add_soc_constraint_head(name, terms, crate::function_set::RotatedHead(u, v))
+    }
+
+    /// Register a standard or rotated cone selected by its head type.
+    /// Backs the named forms of the `soc_constraint!` macro.
+    ///
+    /// Not part of the stable public API.
+    #[doc(hidden)]
+    pub fn __add_soc_constraint_head<'a, A: IntoAffineFunction<'a>, B: SocHeadInput<'a>>(
+        &'a self,
+        name: impl Into<SmolStr>,
+        terms: impl IntoIterator<Item = A>,
+        head: B,
+    ) -> B::Handle {
+        let pending = PendingSoc::new(name.into(), terms, head, &self.arena);
+        let id = self.register_soc_components(pending.name, pending.components, pending.kind);
+        B::handle(id, self.id())
     }
 
     /// Check the lowered SOC function's ownership and register its affine components.
@@ -954,28 +997,41 @@ impl Model {
         ir: SocConstraintIr<'_>,
     ) -> SocConstraintHandle {
         let data = ir.0.into_data();
-        assert!(data.components.len() >= 2, "SOC needs at least two components");
+        crate::soc::assert_soc_dimension(crate::SocKind::Standard, data.components.len());
         self.ensure_model_id(data.model_id).unwrap_or_else(|error| panic!("{error}"));
-        self.register_soc_components(name, data.components)
+        let id = self.register_soc_components(name, data.components, crate::SocKind::Standard);
+        SocConstraintHandle::new(id, self.id())
     }
 
-    /// Register SOC components with the bound first, followed by the norm terms.
+    /// Check the lowered rotated SOC's ownership and register its affine components.
+    pub(crate) fn register_rotated_soc_ir(
+        &self,
+        name: SmolStr,
+        ir: crate::RotatedSocConstraintIr<'_>,
+    ) -> crate::RotatedSocConstraintHandle {
+        let data = ir.0.into_data();
+        crate::soc::assert_soc_dimension(crate::SocKind::Rotated, data.components.len());
+        self.ensure_model_id(data.model_id).unwrap_or_else(|error| panic!("{error}"));
+        let id = self.register_soc_components(name, data.components, crate::SocKind::Rotated);
+        crate::RotatedSocConstraintHandle::new(id, self.id())
+    }
+
+    /// Register SOC components with the head first (`t` or `u, v`), followed by the norm terms.
     fn register_soc_components(
         &self,
         name: SmolStr,
         components: crate::SharedSlice<ExprId>,
-    ) -> SocConstraintHandle {
+        kind: crate::SocKind,
+    ) -> SocConstraintId {
+        crate::soc::assert_soc_dimension(kind, components.len());
         let mut names = self.soc_names_mut();
         let mut rows = self.soc_constraints.borrow_mut();
         let id = SocConstraintId(u32::try_from(rows.len()).expect("SOC count overflow"));
         names.insert_unique(name.clone(), id);
-        let bound = components[0];
-        let dimension = components.len();
-        let terms = components.into_slice(1..dimension);
-        rows.push(SocConstraint { name, bound, terms, active: true });
+        rows.push(SocConstraint::new(name, components, kind));
         self.record_declared_native(id.into(), super::semantic::Representation::Soc);
         self.invalidate_kind();
-        SocConstraintHandle::new(id, self.id())
+        id
     }
 
     /// Append prevalidated SOC constraints and their semantic metadata in input order.
@@ -1001,17 +1057,13 @@ impl Model {
             let id = SocConstraintId(
                 u32::try_from(constraints.len()).expect("SOC constraint count overflow"),
             );
-            let components = item.components;
-            let bound = components[0];
-            let dimension = components.len();
-            let terms = components.into_slice(1..dimension);
             semantics.record_native(
                 id.into(),
                 item.name.clone(),
                 super::semantic::Representation::Soc,
                 crate::ConstraintOrigin::Declared,
             );
-            constraints.push(SocConstraint { name: item.name.clone(), terms, bound, active: true });
+            constraints.push(SocConstraint::new(item.name.clone(), item.components, item.kind));
             names.insert(item.name, id);
         }
 
@@ -1037,12 +1089,12 @@ impl Model {
     /// from an internal counter. Backs the name-less form of the
     /// `soc_constraint!` macro. Not part of the stable public API.
     #[doc(hidden)]
-    pub fn __add_soc_constraint_auto<'a, A: IntoAffineFunction<'a>, B: IntoAffineFunction<'a>>(
+    pub fn __add_soc_constraint_auto<'a, A: IntoAffineFunction<'a>, B: SocHeadInput<'a>>(
         &'a self,
         terms: impl IntoIterator<Item = A>,
         bound: B,
-    ) -> SocConstraintHandle {
-        self.add_soc_constraint(self.next_auto_soc_name(), terms, bound)
+    ) -> B::Handle {
+        self.__add_soc_constraint_head(self.next_auto_soc_name(), terms, bound)
     }
 
     /// Typed explicit-SOC registry for specialized backend passes.
@@ -1080,6 +1132,24 @@ impl Model {
         &self,
         id: SocConstraintId,
     ) -> Option<SocConstraintHandle> {
+        self.try_typed_handle(ConstraintHandle::new(id, self.id())).ok().flatten()
+    }
+
+    /// Return a named rotated SOC handle only when its semantic signature is
+    /// the built-in pair.
+    pub fn rotated_soc_constraint_handle(
+        &self,
+        name: &str,
+    ) -> Option<crate::RotatedSocConstraintHandle> {
+        self.rotated_soc_constraint_handle_from_id(self.soc_constraint_id(name)?)
+    }
+
+    /// Bind a raw SOC ID as a rotated cone only when it has the built-in
+    /// function/set signature.
+    pub fn rotated_soc_constraint_handle_from_id(
+        &self,
+        id: SocConstraintId,
+    ) -> Option<crate::RotatedSocConstraintHandle> {
         self.try_typed_handle(ConstraintHandle::new(id, self.id())).ok().flatten()
     }
 

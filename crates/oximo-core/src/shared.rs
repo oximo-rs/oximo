@@ -218,13 +218,6 @@ impl<T> SharedSlice<T> {
 }
 
 impl<T: Clone> SharedSlice<T> {
-    pub(crate) fn with_prefix(&self, count: usize) -> Self {
-        assert!(count <= self.range.start, "missing shared prefix");
-        let mut slice = self.clone();
-        slice.range.start -= count;
-        slice
-    }
-
     /// Share a subrange of this slice.
     ///
     /// # Panics

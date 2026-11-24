@@ -392,11 +392,11 @@ impl FunctionValue {
         Some((kind, root))
     }
 
-    pub(crate) fn soc_terms(&self, components: &[ExprId]) -> crate::SharedSlice<ExprId> {
-        self.downcast_ref::<VectorAffineData>().map_or_else(
-            || components[1..].to_vec().into(),
-            |data| data.components.slice(1..components.len()),
-        )
+    /// Every SOC component, sharing the function's buffer when it is the
+    /// built-in vector-affine data.
+    pub(crate) fn soc_components(&self, components: &[ExprId]) -> crate::SharedSlice<ExprId> {
+        self.downcast_ref::<VectorAffineData>()
+            .map_or_else(|| components.to_vec().into(), |data| data.components.clone())
     }
 
     #[inline]
@@ -529,6 +529,7 @@ builtin_set_storage!(
     EqualTo(crate::EqualTo),
     Interval(crate::Interval),
     SecondOrderCone(crate::SecondOrderCone),
+    RotatedSecondOrderCone(crate::RotatedSecondOrderCone),
     PositiveSemidefiniteCone(crate::PositiveSemidefiniteCone),
 );
 
@@ -560,6 +561,9 @@ impl SetValue {
             SetStorage::EqualTo(_) => SemanticType::of::<crate::EqualTo>(),
             SetStorage::Interval(_) => SemanticType::of::<crate::Interval>(),
             SetStorage::SecondOrderCone(_) => SemanticType::of::<crate::SecondOrderCone>(),
+            SetStorage::RotatedSecondOrderCone(_) => {
+                SemanticType::of::<crate::RotatedSecondOrderCone>()
+            }
             SetStorage::PositiveSemidefiniteCone(_) => {
                 SemanticType::of::<crate::PositiveSemidefiniteCone>()
             }
@@ -569,6 +573,16 @@ impl SetValue {
 
     pub fn downcast_ref<T: crate::function_set::Set>(&self) -> Option<&T> {
         self.0.erased().as_any().downcast_ref()
+    }
+
+    /// The kind and dimension of a built-in second-order cone set.
+    #[inline]
+    pub fn soc_kind(&self) -> Option<(crate::SocKind, usize)> {
+        match &self.0 {
+            SetStorage::SecondOrderCone(s) => Some((crate::SocKind::Standard, s.dimension)),
+            SetStorage::RotatedSecondOrderCone(s) => Some((crate::SocKind::Rotated, s.dimension)),
+            _ => None,
+        }
     }
 
     /// Project built-in scalar bound sets onto interval bounds without changing set identity.

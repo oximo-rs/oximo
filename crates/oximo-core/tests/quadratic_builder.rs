@@ -123,8 +123,8 @@ fn registered_soc_sources_survive_consuming_arithmetic() {
     let bound = 3.0 * x + 2.0;
     let cone = model.add_soc_constraint("cone", [&term], &bound);
     let registered = &model.soc_constraints()[cone.index()];
-    let term_id = registered.terms[0];
-    let bound_id = registered.bound;
+    let term_id = registered.terms()[0];
+    let bound_id = registered.components()[0];
     assert_eq!(term_id, term.id());
     assert_eq!(bound_id, bound.id());
 

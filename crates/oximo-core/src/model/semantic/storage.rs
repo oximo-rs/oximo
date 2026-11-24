@@ -24,7 +24,8 @@ impl Representation {
             }
             Id::SecondOrderCone(_)
                 if pair.function.signature().is::<crate::VectorAffineData>()
-                    && pair.set.signature().is::<crate::SecondOrderCone>() =>
+                    && (pair.set.signature().is::<crate::SecondOrderCone>()
+                        || pair.set.signature().is::<crate::RotatedSecondOrderCone>()) =>
             {
                 Self::Soc
             }

@@ -4,13 +4,13 @@ error[E0277]: the trait bound `oximo_core::VectorAffineFunction<'_>: FunctionInS
 6 |     let _ = Constraint::<VectorAffineFunction<'_>, LessThan<f64>>::new(vector, LessThan(1.0));
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FunctionInSet<oximo_core::LessThan>` is not implemented for `oximo_core::VectorAffineFunction<'_>`
   |
-help: the trait `FunctionInSet<oximo_core::LessThan>` is not implemented for `oximo_core::VectorAffineFunction<'_>`
-      but trait `FunctionInSet<oximo_core::SecondOrderCone>` is implemented for it
+help: `oximo_core::VectorAffineFunction<'_>` implements trait `FunctionInSet<S>`
  --> src/function_set.rs
   |
   | impl FunctionInSet<SecondOrderCone> for VectorAffineFunction<'_> {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: for that trait implementation, expected `oximo_core::SecondOrderCone`, found `oximo_core::LessThan`
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<oximo_core::SecondOrderCone>`
+  | impl FunctionInSet<RotatedSecondOrderCone> for VectorAffineFunction<'_> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FunctionInSet<RotatedSecondOrderCone>`
 note: required by a bound in `oximo_core::Constraint`
  --> src/function_set.rs
   |

@@ -140,10 +140,13 @@ fn constraint_and_soc_queries_use_saved_or_current_parameters_at_each_point() {
 
     let saved = result.soc_evaluation(&model, cone).unwrap().unwrap();
     let current = result.soc_evaluation_with_current_parameters(&model, cone).unwrap().unwrap();
-    assert_eq!((saved.norm, saved.bound, saved.slack, saved.violation), (6.0, 7.0, 1.0, 0.0));
     assert_eq!(
-        (current.norm, current.bound, current.slack, current.violation),
-        (12.0, 9.0, -3.0, 3.0)
+        (saved.norm, saved.head, saved.slack, saved.violation),
+        (6.0, SocHead::Standard(7.0), 1.0, 0.0)
+    );
+    assert_eq!(
+        (current.norm, current.head, current.slack, current.violation),
+        (12.0, SocHead::Standard(9.0), -3.0, 3.0)
     );
     assert_eq!(result.soc_evaluation_at(&model, cone, 1).unwrap().unwrap().norm, 8.0);
     assert_eq!(
@@ -167,8 +170,8 @@ fn constraint_and_soc_queries_use_saved_or_current_parameters_at_each_point() {
         30.0
     );
     assert_eq!(
-        result.soc_evaluation_with_current_parameters(&model, new_cone).unwrap().unwrap().bound,
-        10.0
+        result.soc_evaluation_with_current_parameters(&model, new_cone).unwrap().unwrap().head,
+        SocHead::Standard(10.0)
     );
 }
 

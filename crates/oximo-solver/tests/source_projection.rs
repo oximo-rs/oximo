@@ -1210,8 +1210,8 @@ fn projection_filters_generated_cone_duals() {
                 .collect(),
             Some(0.0),
         );
-        result.soc_dual.insert(cone.soc_id(), 2.0);
-        result.soc_dual.insert(generated_cone.soc_id(), 9.0);
+        result.soc_dual.insert(cone.soc_id(), &[2.0, -1.5]);
+        result.soc_dual.insert(generated_cone.soc_id(), &[9.0, -4.0]);
         result.psd_dual.insert(positivity.psd_id(), SymmetricMatrix::from_upper_triangle(1, [4.0]));
         result
             .psd_dual
@@ -1224,7 +1224,7 @@ fn projection_filters_generated_cone_duals() {
         let projected = projection.project(result).unwrap();
 
         assert_eq!(projected.soc_dual.len(), 1);
-        assert_eq!(projected.soc_dual.get(cone.soc_id()), Some(2.0));
+        assert_eq!(projected.soc_dual.get(cone.soc_id()), Some([2.0, -1.5].as_slice()));
         assert_eq!(projected.psd_dual.len(), 1);
         assert!(projected.psd_dual.contains_key(&positivity.psd_id()));
         assert_eq!(projected.semantic_dual.get(&cone.id()), Some(&Some(3.0)));
@@ -1256,7 +1256,7 @@ fn projection_without_source_rows_preserves_non_algebraic_semantic_mappings() {
         result.dual.insert(generated.row_id(), 7.0);
         result.semantic_dual.insert(generated.id(), Some(7.0));
         result.semantic_dual.insert(cone.id(), source_multiplier);
-        result.soc_dual.insert(cone.soc_id(), 2.0);
+        result.soc_dual.insert(cone.soc_id(), &[2.0, -1.5]);
 
         let projected = projection.project(result).unwrap();
         assert!(projected.dual.is_empty());
@@ -1266,6 +1266,8 @@ fn projection_without_source_rows_preserves_non_algebraic_semantic_mappings() {
             projected.semantic_dual.get(&cone.id()),
             Some(&source_multiplier.filter(|value| value.is_finite()))
         );
-        assert_eq!(projected.soc_dual_of(cone).unwrap(), Some(2.0));
+        let dual = projected.soc_dual_of(cone).unwrap().expect("cone dual");
+        assert_eq!(dual.standard_bound(), Some(2.0));
+        assert_eq!(dual.terms(), [-1.5].as_slice());
     }
 }

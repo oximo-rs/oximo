@@ -35,9 +35,9 @@ pub use oximo_solver::{
     HasUniversal, Iis, IisReport, InfeasibilityDiagnosis, ModelFeatures, ModelReport,
     ModelRequirements, ParameterSnapshot, PersistentSolver, PrimalStatus, Requirement,
     RequirementAlternative, RequirementDiagnostic, RequirementEntity, RequirementEntry,
-    RequirementOrigin, RequirementSupport, SocEvaluation, SolutionIndexError, SolutionIter,
-    SolutionKeys, SolutionPoint, SolutionValueId, SolutionValues, SolutionValuesIter, Solver,
-    SolverError, SolverProfile, SolverResult, TerminationStatus, UniversalOptions,
+    RequirementOrigin, RequirementSupport, SocDualRef, SocDuals, SocEvaluation, SolutionIndexError,
+    SolutionIter, SolutionKeys, SolutionPoint, SolutionValueId, SolutionValues, SolutionValuesIter,
+    Solver, SolverError, SolverProfile, SolverResult, TerminationStatus, UniversalOptions,
     UniversalOptionsExt, VarBoundKind, VariableDomain,
 };
 
@@ -135,10 +135,11 @@ pub mod prelude {
         ExpressionOperator, HasUniversal, Iis, IisReport, InfeasibilityDiagnosis, ModelFeatures,
         ModelReport, ModelRequirements, ParameterSnapshot, PersistentSolver, PrimalStatus,
         Requirement, RequirementAlternative, RequirementDiagnostic, RequirementEntity,
-        RequirementEntry, RequirementOrigin, RequirementSupport, SocEvaluation, SolutionIndexError,
-        SolutionIter, SolutionKeys, SolutionPoint, SolutionValueId, SolutionValues,
-        SolutionValuesIter, Solver, SolverError, SolverProfile, SolverResult, TerminationStatus,
-        UniversalOptions, UniversalOptionsExt, VarBoundKind, VariableDomain,
+        RequirementEntry, RequirementOrigin, RequirementSupport, SocDualRef, SocDuals,
+        SocEvaluation, SolutionIndexError, SolutionIter, SolutionKeys, SolutionPoint,
+        SolutionValueId, SolutionValues, SolutionValuesIter, Solver, SolverError, SolverProfile,
+        SolverResult, TerminationStatus, UniversalOptions, UniversalOptionsExt, VarBoundKind,
+        VariableDomain,
     };
 
     #[cfg(feature = "highs")]

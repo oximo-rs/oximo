@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use oximo_core::{
     Model, ModelKind, ModelParameterSnapshot, ParameterDependencies, ParameterTarget,
-    ResolvedVariable, model::ModelUpdateKey,
+    ResolvedVariable, SocHead, model::ModelUpdateKey,
 };
 use oximo_expr::{ExprClass, ExprId, LinearTerms, QuadraticTerms, classify};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -75,7 +75,7 @@ pub struct PersistentPreparation {
     expressions: Arc<ResidentExpressions>,
     change: Option<PreparationChange>,
     kind_sensitive_rows: FxHashSet<oximo_core::ConstraintId>,
-    soc_status: Option<FxHashMap<oximo_core::ConstraintId, Option<oximo_expr::VarId>>>,
+    soc_status: Option<FxHashMap<oximo_core::ConstraintId, Option<SocHead<oximo_expr::VarId>>>>,
 }
 
 impl PersistentPreparation {
@@ -190,7 +190,7 @@ impl PersistentPreparation {
                 let row = &constraints.algebraic()[id.index()];
                 expressions
                     .quadratic(row.lhs)
-                    .and_then(|q| oximo_core::__soc_bound_variable(row, &q))
+                    .and_then(|q| oximo_core::__soc_head_variables(row, &q))
             };
             let all_rows = self.soc_status.is_none();
             let status = self.soc_status.get_or_insert_with(FxHashMap::default);
@@ -211,10 +211,9 @@ impl PersistentPreparation {
                 self.baseline.as_ref().expect("baseline").kind,
                 ModelKind::MIQCP | ModelKind::MISOCP | ModelKind::MISDP
             );
-            if status
-                .values()
-                .any(|candidate| candidate.is_none_or(|bound| variables[bound.index()].lb < 0.0))
-            {
+            if status.values().any(|candidate| {
+                candidate.is_none_or(|head| head.iter().any(|v| variables[v.index()].lb < 0.0))
+            }) {
                 if discrete { ModelKind::MIQCP } else { ModelKind::QCP }
             } else if model.has_active_psd_constraints() {
                 if discrete { ModelKind::MISDP } else { ModelKind::SDP }
@@ -266,8 +265,7 @@ fn roots(model: &Model, selected: Option<&[ParameterTarget]>) -> Vec<ExprId> {
                 }
                 ParameterTarget::SecondOrderCone(id) => {
                     let cone = &constraints.second_order_cones()[id.index()];
-                    roots.extend(cone.terms.iter().copied());
-                    roots.push(cone.bound);
+                    roots.extend_from_slice(cone.components());
                 }
                 ParameterTarget::PositiveSemidefinite(id) => roots.extend(
                     constraints.positive_semidefinite()[id.index()]
@@ -302,8 +300,7 @@ fn roots(model: &Model, selected: Option<&[ParameterTarget]>) -> Vec<ExprId> {
         if include(ParameterTarget::SecondOrderCone(oximo_core::SocConstraintId(
             u32::try_from(i).expect("cone ID"),
         ))) {
-            roots.extend(cone.terms.iter().copied());
-            roots.push(cone.bound);
+            roots.extend_from_slice(cone.components());
         }
     }
     for (i, cone) in constraints.positive_semidefinite().iter().enumerate() {
@@ -392,6 +389,28 @@ mod tests {
             lower.set_param_value(value).unwrap();
             let prepared = cache.prepare(&m).unwrap();
             assert_eq!(prepared.kind(), m.kind());
+            drop(prepared);
+            cache.commit();
+        }
+    }
+
+    #[test]
+    fn selective_kind_cache_tracks_rotated_cone_heads() {
+        let m = Model::new("resident rotated kind");
+        param!(m, p = 1.0);
+        param!(m, lower = 0.0);
+        variable!(m, x);
+        variable!(m, u >= lower);
+        variable!(m, v >= 0.0);
+        constraint!(m, r, p * x * x <= 2.0 * u * v);
+        objective!(m, Min, u + v);
+
+        let mut cache = PersistentPreparation::default();
+        for (p_value, lower_value) in [(1.0, 0.0), (2.0, 0.0), (2.0, -1.0), (3.0, 0.0)] {
+            p.set_param_value(p_value).unwrap();
+            lower.set_param_value(lower_value).unwrap();
+            let prepared = cache.prepare(&m).unwrap();
+            assert_eq!(prepared.kind(), m.kind(), "p={p_value}, lower={lower_value}");
             drop(prepared);
             cache.commit();
         }

@@ -41,6 +41,7 @@ pub struct GurobiPersistent {
     state: Option<State>,
     preparation: PersistentPreparation,
     callback_state: bool,
+    options: GurobiOptions,
     #[cfg(test)]
     updates: usize,
 }
@@ -64,6 +65,7 @@ impl GurobiPersistent {
         self.state = None;
         self.preparation.clear();
         self.callback_state = false;
+        self.options = GurobiOptions::default();
     }
 
     /// Compute an irreducible infeasible subsystem for the resident model, reusing the
@@ -222,9 +224,11 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
-        match self.solve_resident_with_callback(model, opts, callback, None) {
+        let effective = self.options.overlaid(opts);
+        match self.solve_resident_with_callback(model, &effective, callback, None) {
             Ok(result) => {
                 self.preparation.commit();
+                self.options = effective;
                 Ok(result)
             }
             Err(error) => {
@@ -250,9 +254,12 @@ impl GurobiPersistent {
     where
         F: Callback,
     {
-        match self.solve_resident_with_callback(model, opts, callback, Some(locations.into())) {
+        let effective = self.options.overlaid(opts);
+        match self.solve_resident_with_callback(model, &effective, callback, Some(locations.into()))
+        {
             Ok(result) => {
                 self.preparation.commit();
+                self.options = effective;
                 Ok(result)
             }
             Err(error) => {
@@ -287,9 +294,11 @@ impl Solver for GurobiPersistent {
         // error) can leave the resident model partially modified or its snapshot
         // stale. Drop the resident state on any error so the next solve rebuilds from
         // a clean slate, honoring the documented contract.
-        match self.solve_resident(model, opts) {
+        let effective = self.options.overlaid(opts);
+        match self.solve_resident(model, &effective) {
             Ok(result) => {
                 self.preparation.commit();
+                self.options = effective;
                 Ok(result)
             }
             Err(e) => {

@@ -27,7 +27,9 @@ pub mod reconstruct;
 #[doc(hidden)]
 pub mod resident;
 pub mod result;
+pub mod soc_duals;
 pub mod solution_values;
+pub use soc_duals::{SocDualRef, SocDuals};
 pub use solution_values::{
     SolutionIndexError, SolutionIter, SolutionKeys, SolutionValueId, SolutionValues,
     SolutionValuesIter,

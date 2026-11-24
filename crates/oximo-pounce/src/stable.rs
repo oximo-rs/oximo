@@ -253,7 +253,7 @@ fn run_builder(
         raw_status: format!("{:?}", sol.status),
         x: sol.x,
         lambda: sol.multipliers,
-        soc_dual: Vec::new(),
+        soc_dual: oximo_solver::SocDuals::new(),
         reduced: Some(reduced),
         objective: Some(sol.objective),
         iterations,

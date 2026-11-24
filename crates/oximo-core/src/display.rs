@@ -176,13 +176,27 @@ impl fmt::Display for SocDisplay<'_> {
         let c = &socs[self.id.index()];
         let resolve = |v| var_name(&vars, v);
         write!(f, "{}: ||", c.name)?;
-        for (i, t) in c.terms.iter().enumerate() {
+        for (i, t) in c.terms().iter().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
             }
             f.write_str(&render_expr(&arena, *t, &resolve))?;
         }
-        write!(f, "|| {} {}", Sense::Le, render_expr(&arena, c.bound, &resolve))?;
+        match c.head() {
+            crate::SocHead::Standard(t) => {
+                write!(f, "|| {} {}", Sense::Le, render_expr(&arena, t, &resolve))?;
+            }
+            crate::SocHead::Rotated(u, v) => {
+                let (u, v) = (render_expr(&arena, u, &resolve), render_expr(&arena, v, &resolve));
+                write!(
+                    f,
+                    "||^2 {} 2 ({u}) ({v}), {u} {} 0, {v} {} 0",
+                    Sense::Le,
+                    Sense::Ge,
+                    Sense::Ge
+                )?;
+            }
+        }
         if !c.active {
             f.write_str(" (inactive)")?;
         }

@@ -118,7 +118,12 @@ fn baron_soc_dual_matches_norm_form_multiplier() {
     let r = Baron::new().solve(&m, &opts).unwrap();
     assert!(r.has_solution());
     assert!((r.objective().unwrap() + std::f64::consts::SQRT_2).abs() < 1e-4);
-    let z0 = r.soc_dual_of(disk).expect("matching model").expect("SOC dual missing");
+    let z0 = r
+        .soc_dual_of(disk)
+        .expect("matching model")
+        .expect("SOC dual missing")
+        .standard_bound()
+        .expect("standard cone");
     assert!((z0 - std::f64::consts::SQRT_2).abs() < 1e-3, "z0 = {z0}");
 }
 
@@ -155,4 +160,63 @@ fn baron_iis_errors_on_feasible_model() {
         SolverError::Backend(msg) => assert!(msg.contains("not infeasible"), "{msg}"),
         other => panic!("expected Backend error, got {other:?}"),
     }
+}
+
+#[test]
+#[expect(clippy::many_single_char_names)]
+fn baron_rotated_soc_with_vector_dual() {
+    // min u + v  s.t.  x^2 + y^2 <= 2 u v, x = y = 1.
+    // Optimum 2 at u = v = 1.
+    let m = Model::new("rsocp");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, 0.0 <= u <= 10.0);
+    variable!(m, 0.0 <= v <= 10.0);
+    m.fix(x, 1.0).unwrap();
+    m.fix(y, 1.0).unwrap();
+    let cone = m.add_rotated_soc_constraint("r", [x, y], u, v);
+    objective!(m, Min, u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let opts = BaronOptions::default().want_dual(true).time_limit(Duration::from_secs(30));
+    let r = Baron::new().solve(&m, &opts).unwrap();
+    assert!(r.has_solution());
+    assert!((r.objective().unwrap() - 2.0).abs() < 1e-4);
+
+    let z = r.soc_dual_of(cone).unwrap().expect("vector dual").as_slice().to_vec();
+    assert_eq!(z.len(), 4);
+    assert!(
+        z.iter().zip([1.0, 1.0, -1.0, -1.0]).all(|(a, b)| (a - b).abs() < 1e-3),
+        "expected [1, 1, -1, -1], got {z:?}"
+    );
+}
+
+#[test]
+fn baron_rotated_soc_constant_head_and_dual_cone() {
+    // min t  s.t.  x^2 <= 2 t * 1, x = 3  =>  t = 4.5.
+    let m = Model::new("rsocp_constant_head");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= t <= 10.0);
+    m.fix(x, 3.0).unwrap();
+    let cone = soc_constraint!(m, r, [x] in rotated(t, 1.0));
+    objective!(m, Min, t);
+
+    let opts = BaronOptions::default().want_dual(true).time_limit(Duration::from_secs(30));
+    let r = Baron::new().solve(&m, &opts).unwrap();
+    assert!((r.objective().unwrap() - 4.5).abs() < 1e-4, "{:?}", r.objective());
+
+    if let Some(z) = r.soc_dual_of(cone).unwrap() {
+        let SocHead::Rotated(zu, zv) = z.head() else { panic!("rotated dual") };
+        assert!(zu >= 0.0 && zv >= 0.0);
+        assert!(2.0 * zu * zv >= z.terms()[0].powi(2) - 1e-4, "{z:?}");
+    }
+
+    let m = Model::new("rsocp_negative_head");
+    variable!(m, -10.0 <= x <= 10.0);
+    variable!(m, -10.0 <= t <= 10.0);
+    soc_constraint!(m, r, [x] in rotated(t, -1.0));
+    objective!(m, Min, t);
+
+    let error = Baron::new().solve(&m, &opts).unwrap_err();
+    assert!(error.to_string().contains("negative constant head"), "{error}");
 }

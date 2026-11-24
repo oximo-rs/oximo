@@ -18,8 +18,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use oximo_core::{
-    AlgebraicConstraint, Domain, Model, ModelKind, ObjectiveSense, Relate, Sense, SosConstraint,
-    SosType, var_name,
+    AlgebraicConstraint, Domain, Model, ObjectiveSense, Relate, Sense, SosConstraint, SosType,
+    var_name,
 };
 use oximo_expr::{Expr, QuadraticTerms, VarId, describe_nonlinear_term, extract_quadratic};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1461,9 +1461,7 @@ pub fn write_mps_with<W: Write>(
         return Err(IoError::Conic);
     }
 
-    if model.has_active_soc_constraints()
-        || matches!(model.kind(), ModelKind::SOCP | ModelKind::MISOCP)
-    {
+    if model.has_active_soc_constraints() {
         return Err(IoError::Conic);
     }
     if model.has_active_indicator_constraints() {

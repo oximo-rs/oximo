@@ -297,6 +297,29 @@ impl GurobiOptions {
         self
     }
 
+    /// Merge `newer` over `self` into a new set of options.
+    pub(crate) fn overlaid(&self, newer: &Self) -> Self {
+        fn merge<P: PartialEq + Copy, V: Clone>(base: &[(P, V)], newer: &[(P, V)]) -> Vec<(P, V)> {
+            base.iter()
+                .filter(|(p, _)| !newer.iter().any(|(q, _)| q == p))
+                .chain(newer)
+                .cloned()
+                .collect()
+        }
+        Self {
+            universal: UniversalOptions {
+                time_limit: newer.universal.time_limit.or(self.universal.time_limit),
+                threads: newer.universal.threads.or(self.universal.threads),
+                verbose: newer.universal.verbose.or(self.universal.verbose),
+            },
+            mip_gap: newer.mip_gap.or(self.mip_gap),
+            presolve: newer.presolve.or(self.presolve),
+            int_params: merge(&self.int_params, &newer.int_params),
+            double_params: merge(&self.double_params, &newer.double_params),
+            str_params: merge(&self.str_params, &newer.str_params),
+        }
+    }
+
     pub(crate) fn has_non_convex(&self) -> bool {
         self.int_params.iter().any(|(param, _)| *param == IntParam::NonConvex)
     }
@@ -397,6 +420,16 @@ mod tests {
         // but our vec preserves the full call sequence.
         let o = GurobiOptions::default().seed(123).seed(99);
         assert_eq!(o.int_params, vec![(IntParam::Seed, 123), (IntParam::Seed, 99)]);
+    }
+
+    #[test]
+    fn overlaid_keeps_earlier_settings_and_lets_newer_win() {
+        let earlier = GurobiOptions::default().threads(2).mip_gap(0.1).seed(7).bar_iter_limit(5);
+        let newer = GurobiOptions::default().mip_gap(0.5).seed(9);
+        let merged = earlier.overlaid(&newer);
+        assert_eq!(merged.universal.threads, Some(2));
+        assert_eq!(merged.mip_gap, Some(0.5));
+        assert_eq!(merged.int_params, vec![(IntParam::BarIterLimit, 5), (IntParam::Seed, 9)]);
     }
 
     #[test]
