@@ -313,6 +313,17 @@ impl SolverProfile {
         matches!(self.sos_support(kind), RequirementSupport::Supported)
     }
 
+    /// Whether explicit rotated second-order cones are confirmed, after overrides.
+    pub fn supports_rotated_soc(&self) -> bool {
+        matches!(
+            self.constraint_support(ConstraintSignature::of::<
+                oximo_core::VectorAffineData,
+                oximo_core::RotatedSecondOrderCone,
+            >()),
+            RequirementSupport::Supported
+        )
+    }
+
     /// Resolve kind-specific SOS support, including overrides and conditions.
     pub fn sos_support(&self, kind: SosType) -> RequirementSupport {
         self.support(&Requirement::Sos(kind))
