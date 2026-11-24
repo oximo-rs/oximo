@@ -19,6 +19,57 @@ pub enum CurvatureError {
     Hessian(#[from] HessianConversionError),
 }
 
+/// Sparse rows `f_k` of a factored quadratic form `sum_k (f_k'x)^2`,
+/// stored row-compressed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuadraticFactor {
+    offsets: Vec<usize>,
+    entries: Vec<(VarId, f64)>,
+}
+
+impl Default for QuadraticFactor {
+    fn default() -> Self {
+        Self { offsets: vec![0], entries: Vec::new() }
+    }
+}
+
+impl QuadraticFactor {
+    /// Number of rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Row `k` as `(variable, coefficient)` pairs without zeros.
+    #[must_use]
+    pub fn row(&self, k: usize) -> &[(VarId, f64)] {
+        &self.entries[self.offsets[k]..self.offsets[k + 1]]
+    }
+
+    /// All rows in order.
+    pub fn rows(&self) -> impl ExactSizeIterator<Item = &[(VarId, f64)]> + '_ {
+        (0..self.len()).map(|k| self.row(k))
+    }
+
+    /// `sum_k (f_k'x)^2`, with `value(v)` the coordinate of `v`.
+    pub fn evaluate(&self, mut value: impl FnMut(VarId) -> f64) -> f64 {
+        self.rows().map(|row| row.iter().map(|&(v, c)| c * value(v)).sum::<f64>().powi(2)).sum()
+    }
+
+    /// Append a row, dropping zero coefficients. Empty rows are skipped.
+    fn push_row(&mut self, row: impl IntoIterator<Item = (VarId, f64)>) {
+        self.entries.extend(row.into_iter().filter(|&(_, c)| c != 0.0));
+        if self.entries.len() > *self.offsets.last().expect("offsets start at zero") {
+            self.offsets.push(self.entries.len());
+        }
+    }
+}
+
 impl QuadraticTerms {
     /// Largest block of coupled quadratic variables whose curvature is
     /// checked.
@@ -38,7 +89,7 @@ impl QuadraticTerms {
     /// [`CurvatureError::Hessian`] when doubling a square coefficient
     /// overflows.
     pub fn is_convex(&self) -> Result<bool, CurvatureError> {
-        self.semidefinite(1.0)
+        self.semidefinite(1.0, None)
     }
 
     /// Whether the polynomial is concave, that is, whether its negation is
@@ -47,12 +98,41 @@ impl QuadraticTerms {
     /// # Errors
     /// Same as [`Self::is_convex`].
     pub fn is_concave(&self) -> Result<bool, CurvatureError> {
-        self.semidefinite(-1.0)
+        self.semidefinite(-1.0, None)
+    }
+
+    /// Rows with `sum_k (f_k'x)^2 = x'Qx` for the quadratic part, or `None`
+    /// when not convex.
+    ///
+    /// Remainders that [`Self::is_convex`] treats as zero (entries within a
+    /// tight tolerance of the unit-scaled diagonal) are dropped, so the factored
+    /// form may fall short of `x'Qx` by about that tolerance times the scaled
+    /// squared norm. A cone built from it is then a slight relaxation.
+    ///
+    /// # Errors
+    /// Same as [`Self::is_convex`].
+    pub fn convex_factor(&self) -> Result<Option<QuadraticFactor>, CurvatureError> {
+        let mut factor = QuadraticFactor::default();
+        Ok(self.semidefinite(1.0, Some(&mut factor))?.then_some(factor))
+    }
+
+    /// Like [`Self::convex_factor`], for `-x'Qx`.
+    ///
+    /// # Errors
+    /// Same as [`Self::is_convex`].
+    pub fn concave_factor(&self) -> Result<Option<QuadraticFactor>, CurvatureError> {
+        let mut factor = QuadraticFactor::default();
+        Ok(self.semidefinite(-1.0, Some(&mut factor))?.then_some(factor))
     }
 
     /// Whether `sign` times the Hessian is positive semidefinite.
-    fn semidefinite(&self, sign: f64) -> Result<bool, CurvatureError> {
+    fn semidefinite(
+        &self,
+        sign: f64,
+        mut factor: Option<&mut QuadraticFactor>,
+    ) -> Result<bool, CurvatureError> {
         let mut index: FxHashMap<VarId, usize> = FxHashMap::default();
+        let mut variables = Vec::new();
         let mut diagonal = Vec::new();
         let mut cross = Vec::new();
         for entry in self.checked_hessian_entries() {
@@ -60,6 +140,7 @@ impl QuadraticTerms {
             let mut position = |v: VarId| {
                 *index.entry(v).or_insert_with(|| {
                     diagonal.push(0.0);
+                    variables.push(v);
                     diagonal.len() - 1
                 })
             };
@@ -78,6 +159,21 @@ impl QuadraticTerms {
             || cross.iter().any(|&(i, j, _)| diagonal[i] == 0.0 || diagonal[j] == 0.0)
         {
             return Ok(false);
+        }
+
+        // `x'Qx = x'Hx / 2`.
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        if let Some(factor) = factor.as_deref_mut() {
+            let mut coupled = vec![false; diagonal.len()];
+            for &(i, j, _) in &cross {
+                coupled[i] = true;
+                coupled[j] = true;
+            }
+            for (i, &d) in diagonal.iter().enumerate() {
+                if !coupled[i] {
+                    factor.push_row([(variables[i], d.sqrt() * half)]);
+                }
+            }
         }
 
         for (members, entries) in blocks(diagonal.len(), &cross) {
@@ -105,7 +201,13 @@ impl QuadraticTerms {
                 matrix[b * n + a] += scaled;
             }
 
-            if !positive_semidefinite(n, matrix) {
+            let semidefinite = match factor.as_deref_mut() {
+                Some(factor) => factor_semidefinite::<true>(n, matrix, |row| {
+                    factor.push_row(row.map(|(k, c)| (variables[members[k]], c * scale[k] * half)));
+                }),
+                None => positive_semidefinite(n, matrix),
+            };
+            if !semidefinite {
                 return Ok(false);
             }
         }
@@ -157,11 +259,21 @@ fn blocks(n: usize, cross: &[Entry]) -> Vec<Block> {
     result
 }
 
+fn positive_semidefinite(n: usize, a: Vec<f64>) -> bool {
+    factor_semidefinite::<false>(n, a, |_| {})
+}
+
 /// Symmetric elimination with diagonal pivoting on a dense row-major matrix
 /// whose diagonal is at most about one.
-fn positive_semidefinite(n: usize, mut a: Vec<f64>) -> bool {
+/// Returns whether `a` is semidefinite.
+fn factor_semidefinite<const ROWS: bool>(
+    n: usize,
+    mut a: Vec<f64>,
+    mut row: impl FnMut(&mut dyn Iterator<Item = (usize, f64)>),
+) -> bool {
     #[expect(clippy::cast_precision_loss, reason = "dimension is at most 512")]
     let tolerance = 64.0 * f64::EPSILON * n as f64;
+    let mut order: Vec<usize> = if ROWS { (0..n).collect() } else { Vec::new() };
 
     for k in 0..n {
         let p = (k..n).max_by(|&i, &j| a[i * n + i].total_cmp(&a[j * n + j])).expect("rows");
@@ -171,6 +283,9 @@ fn positive_semidefinite(n: usize, mut a: Vec<f64>) -> bool {
             }
             for r in 0..n {
                 a.swap(r * n + k, r * n + p);
+            }
+            if ROWS {
+                order.swap(k, p);
             }
         }
 
@@ -184,6 +299,11 @@ fn positive_semidefinite(n: usize, mut a: Vec<f64>) -> bool {
             if coupling * coupling > pivot * (a[i * n + i] + tolerance) {
                 return false;
             }
+        }
+
+        if ROWS {
+            let root = pivot.sqrt();
+            row(&mut (k..n).map(|i| (order[i], a[i * n + k] / root)).filter(|&(_, c)| c != 0.0));
         }
 
         for i in k + 1..n {
@@ -287,6 +407,49 @@ mod tests {
 
         let max = u32::try_from(QuadraticTerms::MAX_CURVATURE_DIMENSION).unwrap();
         assert_eq!(chain(max).is_convex(), Ok(true));
+    }
+
+    /// `sum_k (f_k'x)^2` at `x`.
+    fn factored(rows: &QuadraticFactor, x: &[f64]) -> f64 {
+        rows.evaluate(|v| x[v.index()])
+    }
+
+    #[test]
+    fn factors_reproduce_the_quadratic_part() {
+        let q = QuadraticTerms::from_coefficients(
+            vec![
+                (VarId(0), VarId(0), 2.0),
+                (VarId(0), VarId(1), 2.0),
+                (VarId(1), VarId(1), 3.0),
+                (VarId(2), VarId(2), 4.0),
+                (VarId(2), VarId(3), -4.0),
+                (VarId(3), VarId(3), 1.0),
+                (VarId(4), VarId(4), 0.5),
+            ],
+            vec![(VarId(0), 7.0)],
+            1.0,
+        )
+        .unwrap();
+        let rows = q.convex_factor().unwrap().unwrap();
+        assert_eq!(rows.len(), 4, "the singular block contributes one row");
+
+        for x in [[1.0, -2.0, 0.5, 3.0, -1.0], [0.3, 0.1, -4.0, 2.0, 6.0]] {
+            let exact =
+                2.0 * x[0] * x[0] + 2.0 * x[0] * x[1] + 3.0 * x[1] * x[1] + 4.0 * x[2] * x[2]
+                    - 4.0 * x[2] * x[3]
+                    + x[3] * x[3]
+                    + 0.5 * x[4] * x[4];
+            assert!((factored(&rows, &x) - exact).abs() <= 1e-12 * exact.abs().max(1.0));
+        }
+        assert_eq!(q.concave_factor().unwrap(), None);
+
+        let negated = terms(vec![(VarId(0), VarId(0), -3.0), (VarId(0), VarId(1), 1.0)]);
+        assert_eq!(negated.concave_factor().unwrap(), None, "coupling through a zero diagonal");
+
+        let concave = terms(vec![(VarId(1), VarId(1), -3.0)]);
+        let rows = concave.concave_factor().unwrap().unwrap();
+        assert!((factored(&rows, &[0.0, 2.0]) - 12.0).abs() < 1e-12);
+        assert_eq!(chain(6).is_convex(), Ok(chain(6).convex_factor().unwrap().is_some()));
     }
 
     #[test]
