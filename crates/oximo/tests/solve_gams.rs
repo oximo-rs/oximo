@@ -435,7 +435,10 @@ fn gams_rotated_soc_with_vector_dual() {
     assert!((r.objective().unwrap() - 2.0).abs() < 1e-4);
     let z = r.soc_dual_of(cone).unwrap().expect("vector dual").as_slice().to_vec();
     assert_eq!(z.len(), 4);
-    assert!((z[0] - 1.0).abs() < 1e-3 && (z[1] - 1.0).abs() < 1e-3, "{z:?}");
+    assert!(
+        z.iter().zip([1.0, 1.0, -1.0, -1.0]).all(|(a, b)| (a - b).abs() < 1e-3),
+        "expected [1, 1, -1, -1], got {z:?}"
+    );
 }
 
 #[test]

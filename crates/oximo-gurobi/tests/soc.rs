@@ -208,17 +208,18 @@ fn persistent_cone_head_bound_turning_negative_keeps_the_cone() {
     param!(m, lower = 0.0);
     variable!(m, x);
     variable!(m, u >= lower);
-    variable!(m, v >= 0.0);
-    m.fix(x, 1.0).unwrap();
+    variable!(m, v);
+    m.fix(x, 0.0).unwrap();
+    m.fix(v, 0.0).unwrap();
     m.add_rotated_soc_constraint("r", [x], u, v);
     objective!(m, Min, u + v);
 
     let opts = GurobiOptions::default().non_convex(0);
     let mut solver = Gurobi.persistent();
-    for value in [0.0, -1.0] {
+    for (value, expected) in [(0.5, 0.5), (-1.0, 0.0), (0.25, 0.25)] {
         lower.set_param_value(value).unwrap();
         let r = solver.solve(&m, &opts).expect("solve");
-        assert!(close(r.objective().unwrap(), std::f64::consts::SQRT_2, 1e-5), "lower={value}");
+        assert!(close(r.objective().unwrap(), expected, 1e-6), "lower={value}");
     }
 }
 
