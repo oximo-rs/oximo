@@ -210,8 +210,10 @@ pub fn solve(
                 );
             }
 
-            if !pool.is_empty() {
-                result.solutions = pool;
+            if !pool.is_empty()
+                && let Some(incumbent) = result.solutions.pop()
+            {
+                result.solutions = merge_pool(incumbent, pool);
             }
         }
         result
@@ -625,6 +627,28 @@ fn read_solution_pool(
         ord.unwrap_or(std::cmp::Ordering::Equal)
     });
     (members, ignored)
+}
+
+/// The incumbent followed by every pool member that is a different point.
+fn merge_pool(incumbent: SolutionPoint, pool: Vec<SolutionPoint>) -> Vec<SolutionPoint> {
+    let mut merged = Vec::with_capacity(pool.len() + 1);
+    let others: Vec<_> = pool.into_iter().filter(|m| !same_point(&incumbent, m)).collect();
+    merged.push(incumbent);
+    merged.extend(others);
+    merged
+}
+
+/// Whether two points have the same primal values, up to printing precision.
+fn same_point(a: &SolutionPoint, b: &SolutionPoint) -> bool {
+    a.primal.len() == b.primal.len()
+        && (0..a.primal.slot_count().max(b.primal.slot_count())).all(|i| {
+            let id = VarId(u32::try_from(i).unwrap_or(u32::MAX));
+            match (a.value(id), b.value(id)) {
+                (None, None) => true,
+                (Some(x), Some(y)) => (x - y).abs() <= 1e-7 * (1.0 + x.abs().max(y.abs())),
+                _ => false,
+            }
+        })
 }
 
 /// `gdxdump` lives beside the `gams` executable.
@@ -2238,6 +2262,25 @@ mod tests {
         assert_eq!(r.best_bound, Some(10.0));
         assert_eq!(r.gap, None);
         assert!(r.raw_status.as_deref().unwrap().contains("modelstat=1 (optimal)"));
+    }
+
+    #[test]
+    fn pool_merge_keeps_the_incumbent_first_and_drops_only_its_own_copy() {
+        let point = |x: f64, y: f64, objective: f64| SolutionPoint {
+            model_id: ModelId::UNASSIGNED,
+            primal: [(VarId(0), x), (VarId(1), y)].into_iter().collect(),
+            objective: Some(objective),
+            parameters: oximo_solver::ParameterSnapshot::default(),
+        };
+        let incumbent = point(1.0, 2.0, 5.0);
+        let pool = vec![point(2.0, 1.0, 5.0), point(1.0, 2.0 + 1e-12, 5.0), point(0.0, 0.0, 6.0)];
+        let merged = merge_pool(incumbent, pool);
+        let values: Vec<_> =
+            merged.iter().map(|p| (p.value(VarId(0)), p.value(VarId(1)))).collect();
+        assert_eq!(
+            values,
+            [(Some(1.0), Some(2.0)), (Some(2.0), Some(1.0)), (Some(0.0), Some(0.0))]
+        );
     }
 
     #[test]
