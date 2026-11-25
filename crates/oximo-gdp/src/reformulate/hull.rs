@@ -985,7 +985,12 @@ impl Compiler<'_> {
     /// writes cones algebraically.
     fn algebraic_cones_above(&self, mut branch: Option<BooleanId>) -> bool {
         while let Some(b) = branch {
-            let Some(owner) = self.data.booleans[b.index()].owner else { break };
+            let Some(owner) = self.data.booleans[b.index()].owner else {
+                return matches!(
+                    self.options.default_method,
+                    GdpMethod::Hull(hull) if hull.cone_form() == Some(HullConeForm::Algebraic)
+                );
+            };
             if let GdpMethod::Hull(hull) = self.method(owner.index())
                 && hull.cone_form() == Some(HullConeForm::Algebraic)
             {
