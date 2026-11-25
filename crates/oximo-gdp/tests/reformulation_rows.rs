@@ -79,7 +79,7 @@ fn big_m_paths_agree_on_estimates_precedence_and_parameter_snapshots() {
             values[x.var_id().unwrap().index()] = 0.0;
             values[active.binary().var_id().unwrap().index()] = 1.0;
             assert!(artifact.constraints.iter().all(|id| {
-                let row = &rows.algebraic()[id.index()];
+                let row = &rows.algebraic()[id.algebraic().expect("algebraic row").index()];
                 let value = oximo_expr::evaluate(&arena, row.lhs, &&values[..]).unwrap();
                 value >= row.lower && value <= row.upper
             }));

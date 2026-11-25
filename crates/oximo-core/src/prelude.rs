@@ -16,12 +16,12 @@ pub use crate::gdp::{
     DisjunctConstraintHandle, DisjunctConstraintId, DisjunctConstraintRecord, DisjunctContext,
     DisjunctHandle, DisjunctState, DisjunctionHandle, DisjunctionId, DisjunctionKind,
     DisjunctionRecord, GdpBigMTerm, GdpBooleanMapping, GdpDisjunctionArtifacts, GdpFamily,
-    GdpHullActivation, GdpHullActivationHandle, GdpHullBranchSumMapping, GdpHullPatternMapping,
-    GdpHullVariableMapping, GdpLogicalArtifacts, GdpMethodKind, GdpPlanningStatistics,
-    GdpRangeHandles, GdpReformulationReport, GdpReformulationReportData, GdpRowArtifacts,
-    GdpSnapshot, GdpView, LogicalConstraintHandle, LogicalConstraintId, LogicalConstraintRecord,
-    LogicalExpr, ReformulationState, at_least, at_most, exactly, iff, implies, logical_and,
-    logical_or,
+    GdpGeneratedConstraint, GdpHullActivation, GdpHullActivationHandle, GdpHullBranchSumMapping,
+    GdpHullPatternMapping, GdpHullVariableMapping, GdpLogicalArtifacts, GdpMethodKind,
+    GdpPlanningStatistics, GdpRangeHandles, GdpReformulationReport, GdpReformulationReportData,
+    GdpRowArtifacts, GdpSnapshot, GdpView, LogicalConstraintHandle, LogicalConstraintId,
+    LogicalConstraintRecord, LogicalExpr, ReformulationState, at_least, at_most, exactly, iff,
+    implies, logical_and, logical_or,
 };
 pub use crate::indexed::{
     IndexedConstraint, IndexedIndicatorConstraint, IndexedParam, IndexedRangeConstraint,
@@ -89,5 +89,6 @@ pub use crate::objective::{ObjectiveFunction, SemanticObjective};
 pub use crate::{ScalarConstraintHandle, ScalarDualHandleError, ScalarDualQuery};
 
 pub use crate::reformulation::{
-    GeneratedConstraintId, GeneratedVarId, ReformulationProvenance, ReformulationVarId,
+    GeneratedConstraintId, GeneratedSocConstraintId, GeneratedVarId, ReformulationProvenance,
+    ReformulationVarId,
 };

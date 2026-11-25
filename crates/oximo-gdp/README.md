@@ -75,6 +75,12 @@ Nonlinear Hull uses regularized perspectives with epsilon `1e-6`. Set it with
 between zero and one. The formulation recovers the source behavior at binary
 activations. Changing epsilon affects the nonlinear relaxation.
 
+Quadratic rows can use an exact Hull via `Hull::default().with_quadratic(...)`.
+`HullQuadratic::Conic(HullConeForm::Explicit)` writes convex sides as explicit
+rotated cones, and `HullConeForm::Algebraic` as quadratic rows while other sides
+fall back to `HullQuadratic::Homogeneous`. `GdpSolver` switches to algebraic cones
+for backends that don't accept rotated cones.
+
 Reference coordinates default to zero. Restricted-domain functions such as
 `ln(x)` may require an explicit reference:
 

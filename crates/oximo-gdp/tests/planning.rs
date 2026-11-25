@@ -19,11 +19,15 @@ fn generated_names_skip_existing_suffixes_without_colliding_with_other_planned_r
     let constraints = model.constraints();
     assert_eq!(constraints.algebraic().len(), 12);
     assert_eq!(
-        constraints.algebraic()[report.rows[0].constraints[0].index()].name,
+        constraints.algebraic()
+            [report.rows[0].constraints[0].algebraic().expect("algebraic row").index()]
+        .name,
         "__oximo_gdp_row10_9"
     );
     assert_eq!(
-        constraints.algebraic()[report.rows[0].constraints[1].index()].name,
+        constraints.algebraic()
+            [report.rows[0].constraints[1].algebraic().expect("algebraic row").index()]
+        .name,
         "__oximo_gdp_row11_1"
     );
 }
@@ -49,7 +53,8 @@ fn checked_numeric_rows_remove_only_exactly_cancelled_indicator_coefficients() {
                     .with_big_m(row, BigMValues::upper(9.0)),
             )
             .unwrap();
-        let generated = report.rows.last().unwrap().constraints[0];
+        let generated =
+            report.rows.last().unwrap().constraints[0].algebraic().expect("algebraic row");
         let arena = model.arena();
         let rows = model.constraints();
         let terms =

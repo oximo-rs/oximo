@@ -666,6 +666,8 @@ pub struct GdpHullEpigraphMapping {
     pub activation_kind: GdpHullActivation,
     /// Bound `U` of `t <= U*activation`.
     pub upper: f64,
+    /// Entires of the cone `sign*u'Qu <= t*activation`.
+    pub cones: Vec<GdpGeneratedConstraint>,
 }
 
 /// Unshifted conic coordinate `s = z + reference*activation` of a shifted
@@ -770,10 +772,47 @@ pub struct GdpBigMTerm {
     pub upper: Option<f64>,
 }
 
+/// A generated algebraic row or second-order cone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GdpGeneratedConstraint {
+    Algebraic(crate::GeneratedConstraintId),
+    SecondOrderCone(crate::GeneratedSocConstraintId),
+}
+
+impl GdpGeneratedConstraint {
+    #[must_use]
+    pub const fn algebraic(self) -> Option<crate::GeneratedConstraintId> {
+        match self {
+            Self::Algebraic(id) => Some(id),
+            Self::SecondOrderCone(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn second_order_cone(self) -> Option<crate::GeneratedSocConstraintId> {
+        match self {
+            Self::SecondOrderCone(id) => Some(id),
+            Self::Algebraic(_) => None,
+        }
+    }
+}
+
+impl From<crate::GeneratedConstraintId> for GdpGeneratedConstraint {
+    fn from(id: crate::GeneratedConstraintId) -> Self {
+        Self::Algebraic(id)
+    }
+}
+
+impl From<crate::GeneratedSocConstraintId> for GdpGeneratedConstraint {
+    fn from(id: crate::GeneratedSocConstraintId) -> Self {
+        Self::SecondOrderCone(id)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GdpRowArtifacts {
     pub source: DisjunctConstraintId,
-    pub constraints: Vec<crate::GeneratedConstraintId>,
+    pub constraints: Vec<GdpGeneratedConstraint>,
     pub lower_m: Option<BigMSide>,
     pub upper_m: Option<BigMSide>,
     /// Actual child and ancestor relaxation amounts when a side was
@@ -901,6 +940,8 @@ pub struct GdpReformulationReportData {
     /// Complete appended algebraic-row index range (`ConstraintId::index`),
     /// including copy bounds and aggregation rows without a source-row origin.
     pub generated_rows: std::ops::Range<usize>,
+    /// Appended SOC-constraint index range (`SocConstraintId::index`).
+    pub generated_soc_constraints: std::ops::Range<usize>,
     /// All registered Boolean decisions, including previously transformed ones.
     pub booleans: Vec<GdpBooleanMapping>,
     /// Auxiliary variables created by this call. Boolean counterparts are in `booleans`.

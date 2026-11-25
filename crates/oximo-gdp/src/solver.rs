@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use oximo_core::{ConstraintId, Model, ModelId, VarId};
+use oximo_core::{ConstraintId, Model, ModelId, SocConstraintId, VarId};
 use oximo_solver::reconstruct::{
     ProjectionError, SourceCoordinates, SourceProjection, SourceProjectionPlan,
 };
@@ -51,6 +51,9 @@ impl<S: Solver> GdpSolver<S> {
     /// Reformulate pending GDP in place, solve, and project the result back to
     /// source coordinates.
     ///
+    /// Backends whose profile does not confirm rotated second-order cones get
+    /// [`HullConeForm::Algebraic`](crate::HullConeForm::Algebraic) cones.
+    ///
     /// The returned result carries only source variables plus the generated
     /// Hull activation variables that [`crate::GdpResultExt`] queries while
     /// other generated variables, rows, and multipliers from GDP, SOS, and indicator
@@ -70,7 +73,11 @@ impl<S: Solver> GdpSolver<S> {
         model: &Model,
         opts: &S::Options,
     ) -> Result<SolverResult, GdpSolveError> {
-        model.reformulate_gdp(self.options.clone())?;
+        let mut options = self.options.clone();
+        if !self.solver.profile(opts).supports_rotated_soc() {
+            options = options.with_algebraic_cones();
+        }
+        model.reformulate_gdp(options)?;
 
         // Without any in-place reformulation there are no generated
         // coordinates to remove, so the backend result is already in source
@@ -137,17 +144,20 @@ fn source_plan(model: &Model) -> SourceProjectionPlan {
     let reports = model.gdp_reformulations();
     let total_variables = model.num_variables();
     let total_rows = model.constraints().algebraic().len();
+    let total_socs = model.num_soc_constraints();
     let provenance = oximo_core::ReformulationProvenance::capture(model);
     let variable_ranges = || provenance.variable_ranges().iter().cloned();
     let row_ranges = || provenance.row_ranges().iter().cloned();
+    let soc_ranges = || provenance.soc_ranges().iter().cloned();
     let variables = total_variables - variable_ranges().map(|range| range.len()).sum::<usize>();
     let rows = total_rows - row_ranges().map(|range| range.len()).sum::<usize>();
+    let socs = total_socs - soc_ranges().map(|range| range.len()).sum::<usize>();
     let mut plan = SourceProjectionPlan::with_coordinates(
         model,
         SourceCoordinates {
             variables,
             algebraic_constraints: rows,
-            soc_constraints: model.num_soc_constraints(),
+            soc_constraints: socs,
             psd_constraints: model.num_psd_constraints(),
         },
     );
@@ -161,6 +171,12 @@ fn source_plan(model: &Model) -> SourceProjectionPlan {
         plan = plan.with_source_rows(
             source_indices(total_rows, row_ranges())
                 .map(|index| ConstraintId(u32::try_from(index).expect("constraint index"))),
+        );
+    }
+    if !source_is_prefix(socs, soc_ranges()) {
+        plan = plan.with_source_soc_constraints(
+            source_indices(total_socs, soc_ranges())
+                .map(|index| SocConstraintId(u32::try_from(index).expect("SOC index"))),
         );
     }
     plan.retain_variables(reports.iter().flat_map(|report| {

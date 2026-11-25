@@ -550,7 +550,7 @@ impl PlanBuilder {
                 source,
                 constraints: constraints
                     .into_iter()
-                    .map(oximo_core::GeneratedConstraintId::from_raw)
+                    .map(|id| oximo_core::GeneratedConstraintId::from_raw(id).into())
                     .collect(),
                 lower_m,
                 upper_m,

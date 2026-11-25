@@ -92,8 +92,12 @@ fn gdp_display_includes_every_generated_row_and_excludes_declared_rows() {
     let detailed = report.display(&model).to_string();
     assert!(detailed.starts_with(&summary));
 
-    let mapped: std::collections::HashSet<_> =
-        report.rows.iter().flat_map(|row| &row.constraints).map(|id| id.index()).collect();
+    let mapped: std::collections::HashSet<_> = report
+        .rows
+        .iter()
+        .flat_map(|row| &row.constraints)
+        .map(|id| id.algebraic().expect("algebraic row").index())
+        .collect();
     assert!(report.generated_rows.len() > mapped.len());
 
     let rows = model.constraints();

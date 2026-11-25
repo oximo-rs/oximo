@@ -119,6 +119,30 @@ impl Hull {
     pub const fn quadratic(self) -> HullQuadratic {
         self.quadratic
     }
+
+    /// The form of the conic Hull's cones, if [`HullQuadratic::Conic`].
+    pub(crate) const fn cone_form(self) -> Option<HullConeForm> {
+        match self.quadratic {
+            HullQuadratic::Conic(form) => Some(form),
+            HullQuadratic::Perspective | HullQuadratic::Homogeneous => None,
+        }
+    }
+}
+
+/// How [`HullQuadratic::Conic`] writes its rotated cones
+/// `sign*u'Qu <= t*y`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HullConeForm {
+    /// Rotated second-order cone constraints `||L'u||^2 <= 2 (t/2) y` with
+    /// `sign*Q = L L'`.
+    ///
+    /// [`GdpSolver`](crate::GdpSolver) switches to [`Self::Algebraic`] for
+    /// backends that do not accept rotated cones.
+    #[default]
+    Explicit,
+    /// Quadratic rows, for solvers or file writers without cone support.
+    /// Solvers usually still recognize them as cones.
+    Algebraic,
 }
 
 /// Hull transformation of disjunct rows whose nonlinear part is quadratic.
@@ -150,15 +174,12 @@ pub enum HullQuadratic {
     ///
     /// where `u = y*x` are the unshifted copies and `U` bounds `t` over the
     /// effective variable box. The first row is a rotated second-order cone
-    /// in `(u, t, y)` with nonnegative `t` and `y`. A shifted copy `z` gets a
-    /// local coordinate `u = z + r * y`, listed in
+    /// in `(u, t, y)`, written as selected by [`HullConeForm`]. A shifted
+    /// copy `z` gets a local coordinate `u = z + r * y`, listed in
     /// [`hull_unshifted`](oximo_core::gdp::GdpReformulationReportData::hull_unshifted),
-    /// so that `y` appears only in the bilinear term. When `y` is a single
-    /// variable, solvers usually presolve these rows into second-order cones
-    /// even for a continuous `y`.
-    /// A complementary activation `1 - b` gives an equally exact and
-    /// convex row that solvers may not recognize as a cone.
-    Conic,
+    /// so that `y` appears only in the bilinear term, which helps solvers
+    /// recognize the algebraic form as a cone.
+    Conic(HullConeForm),
 }
 
 /// Method selected independently for each disjunction.
@@ -326,6 +347,20 @@ impl GdpReformulationOptions {
             size_limits: GdpSizeLimits::default(),
             planning_limits: GdpPlanningLimits::default(),
         }
+    }
+
+    /// Write every [`HullConeForm::Explicit`] cone algebraically.
+    pub(crate) fn with_algebraic_cones(mut self) -> Self {
+        let lower = |method: &mut GdpMethod| {
+            if let GdpMethod::Hull(hull) = method
+                && hull.cone_form() == Some(HullConeForm::Explicit)
+            {
+                *hull = hull.with_quadratic(HullQuadratic::Conic(HullConeForm::Algebraic));
+            }
+        };
+        lower(&mut self.default_method);
+        self.methods.values_mut().for_each(lower);
+        self
     }
 
     /// Enable bounded affine propagation over unconditional and ancestor constraints.
