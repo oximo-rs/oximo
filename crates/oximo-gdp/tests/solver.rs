@@ -701,3 +701,92 @@ fn pending_logic_invalidates_cached_requirements_before_any_native_rows_exist() 
     model.reformulate_gdp(BigM::default()).unwrap();
     assert!(solver.validate_model(&model, &false).is_supported());
 }
+
+#[derive(Debug)]
+struct ConeSolver {
+    soc: bool,
+    cones: Vec<usize>,
+}
+
+impl Solver for ConeSolver {
+    type Options = ();
+
+    fn name(&self) -> &str {
+        "cones"
+    }
+
+    fn profile(&self, _opts: &()) -> std::borrow::Cow<'_, oximo_solver::SolverProfile> {
+        std::borrow::Cow::Owned(oximo_solver::SolverProfile::new(self.name()).with_soc(self.soc))
+    }
+
+    fn solve(&mut self, model: &Model, (): &()) -> Result<SolverResult, SolverError> {
+        model.ensure_gdp_reformulated()?;
+        self.cones.push(model.num_soc_constraints());
+        let mut result = SolverResult {
+            model_id: model.id(),
+            dual_status: DualStatus::FeasiblePoint,
+            ..SolverResult::default()
+        };
+        for (i, cone) in model.soc_constraints().iter().enumerate() {
+            let id = oximo_gdp::core::SocConstraintId(u32::try_from(i).unwrap());
+            result.soc_dual.insert(id, &vec![1.0; cone.dimension()]);
+        }
+        Ok(result)
+    }
+}
+
+fn conic_disks(model: &Model) -> (oximo_gdp::core::SocConstraintId, VarId, VarId) {
+    variable!(model, -2.0 <= x <= 2.0);
+    variable!(model, -2.0 <= w <= 2.0);
+    variable!(model, 0.0 <= z <= 5.0);
+    let source = soc_constraint!(model, [x] <= z).soc_id();
+    let left = disjunct!(model, left, |d| {
+        constraint!(d, (x + 1.0) * (x + 1.0) + w * w <= 1.0);
+    });
+    let right = disjunct!(model, right, |d| {
+        constraint!(d, (x - 1.0) * (x - 1.0) + w * w <= 1.0);
+    });
+    disjunction!(model, [left, right]);
+    (source, x.var_id().unwrap(), z.var_id().unwrap())
+}
+
+fn conic_hull() -> Hull {
+    Hull::default().with_quadratic(HullQuadratic::Conic(HullConeForm::Explicit))
+}
+
+#[test]
+fn generated_cones_are_dropped_around_later_source_cones() {
+    let model = Model::new("interleaved cones");
+    let (first, x, z) = conic_disks(&model);
+    let mut solver = ConeSolver { soc: true, cones: Vec::new() }.with_gdp(conic_hull());
+
+    let result = solver.solve(&model, &()).unwrap();
+    let generated = model.gdp_reformulations()[0].generated_soc_constraints.clone();
+    assert_eq!(generated, 1..3, "one explicit cone per disk");
+    assert_eq!(result.soc_dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [first]);
+
+    let (x, z) = (model.variable_handle(x), model.variable_handle(z));
+    let later = soc_constraint!(model, [x] <= z).soc_id();
+    let result = solver.solve(&model, &()).unwrap();
+    assert_eq!(result.soc_dual.iter().map(|(id, _)| id).collect::<Vec<_>>(), [first, later]);
+    assert_eq!(solver.into_inner().cones, [3, 4]);
+}
+
+#[test]
+fn backends_without_rotated_cones_get_algebraic_cones() {
+    let model = Model::new("algebraic cones");
+    conic_disks(&model);
+    let mut solver = ConeSolver { soc: false, cones: Vec::new() }.with_gdp(conic_hull());
+
+    solver.solve(&model, &()).unwrap();
+    let reports = model.gdp_reformulations();
+    assert!(reports[0].generated_soc_constraints.is_empty());
+    assert_eq!(reports[0].hull_epigraphs.len(), 2);
+    assert!(
+        reports[0]
+            .hull_epigraphs
+            .iter()
+            .all(|e| { matches!(e.cones[..], [GdpGeneratedConstraint::Algebraic(_)]) })
+    );
+    assert_eq!(solver.into_inner().cones, [1]);
+}

@@ -16,6 +16,20 @@ fn satisfied(model: &Model, values: &[f64]) -> bool {
             let value = evaluate(&arena, r.lhs, &values).unwrap();
             value.is_finite() && value >= r.lower - 1e-8 && value <= r.upper + 1e-8
         })
+        && model.soc_constraints().iter().all(|cone| {
+            let value = |&root| evaluate(&arena, root, &values).unwrap();
+            let squares: f64 = cone.terms().iter().map(|root| value(root).powi(2)).sum();
+            match cone.head() {
+                SocHead::Standard(t) => {
+                    let t = value(&t);
+                    t >= -1e-8 && squares <= t * t + 1e-8
+                }
+                SocHead::Rotated(u, v) => {
+                    let (u, v) = (value(&u), value(&v));
+                    u >= -1e-8 && v >= -1e-8 && squares <= 2.0 * u * v + 1e-8
+                }
+            }
+        })
 }
 
 /// Construct the exact integer lift, independently of generated row bodies.
@@ -472,6 +486,7 @@ fn nonlinear_fractional_perspective_matches_formula_and_ranges() {
     let rows = model.constraints();
     let arena = model.arena();
     for (&id, bound) in report.rows[0].constraints.iter().zip([0.5, 2.0]) {
+        let id = id.algebraic().expect("algebraic row");
         let value = evaluate(&arena, rows.algebraic()[id.index()].lhs, &&values[..]).unwrap();
 
         assert!((value - (expected - 0.4 * bound)).abs() < 1e-10);
@@ -1458,7 +1473,7 @@ fn shared_nonlinear_source_preparation_keeps_each_bound_and_parameter_snapshot()
         assert_eq!(
             source.constraints.iter().all(|id| {
                 let rows = model.constraints();
-                let row = &rows.algebraic()[id.index()];
+                let row = &rows.algebraic()[id.algebraic().expect("algebraic row").index()];
                 let value = evaluate(&arena, row.lhs, &&values[..]).unwrap();
                 value >= row.lower - 1e-8 && value <= row.upper + 1e-8
             }),
@@ -1583,7 +1598,8 @@ fn quadratic_rows(model: &Model, report: &GdpReformulationReport) -> Vec<oximo_e
     report
         .rows
         .iter()
-        .flat_map(|r| r.constraints.iter().map(|id| rows.algebraic()[id.index()].lhs))
+        .flat_map(|r| r.constraints.iter().filter_map(|c| c.algebraic()))
+        .map(|id| rows.algebraic()[id.index()].lhs)
         .collect()
 }
 
@@ -1723,6 +1739,7 @@ fn homogeneous_quadratic_hull_matches_the_unregularized_formula_at_fractional_po
     let rows = model.constraints();
     let arena = model.arena();
     let &[id] = &report.rows[0].constraints[..] else { panic!("one side") };
+    let id = id.algebraic().expect("algebraic row");
     let value = evaluate(&arena, rows.algebraic()[id.index()].lhs, &&values[..]).unwrap();
     assert!((value - expected).abs() < 1e-12, "{value} vs {expected}");
 }
@@ -1753,7 +1770,7 @@ fn homogeneous_quadratic_hull_keeps_perspectives_for_other_nonlinear_rows() {
 }
 
 fn conic() -> Hull {
-    Hull::default().with_quadratic(HullQuadratic::Conic)
+    Hull::default().with_quadratic(HullQuadratic::Conic(HullConeForm::Explicit))
 }
 
 #[test]
@@ -1765,7 +1782,9 @@ fn conic_quadratic_hull_is_exact_at_integer_points_on_convex_sides() {
         (2.0, 2.0, 1.0, vec![]),
     ];
     for (lower, upper, scale, expected) in cases {
-        for reference in [None, Some(0.5)] {
+        for (reference, explicit) in
+            [None, Some(0.5)].into_iter().flat_map(|r| [(r, true), (r, false)])
+        {
             let model = Model::new("conic quadratic Hull");
 
             variable!(model, -2.0 <= x <= 3.0);
@@ -1778,7 +1797,10 @@ fn conic_quadratic_hull_is_exact_at_integer_points_on_convex_sides() {
                 lower <= scale * (x * x + x * w + w * w) - x + 0.5 * w <= upper
             );
 
-            let mut options = GdpReformulationOptions::new(conic());
+            let form = if explicit { HullConeForm::Explicit } else { HullConeForm::Algebraic };
+            let mut options = GdpReformulationOptions::new(
+                Hull::default().with_quadratic(HullQuadratic::Conic(form)),
+            );
             if let Some(r) = reference {
                 options = options
                     .with_hull_reference_coordinate(x, r)
@@ -1794,6 +1816,34 @@ fn conic_quadratic_hull_is_exact_at_integer_points_on_convex_sides() {
             let binary = a.binary().var_id().unwrap();
             let epigraphs: Vec<_> =
                 report.hull_epigraphs.iter().map(|e| e.generated.raw_id()).collect();
+
+            let explicit_cones: Vec<_> = report
+                .rows
+                .iter()
+                .flat_map(|r| r.constraints.iter().filter_map(|c| c.second_order_cone()))
+                .collect();
+            assert_eq!(explicit_cones.len(), if explicit { expected.len() } else { 0 });
+            assert_eq!(report.generated_soc_constraints.len(), explicit_cones.len());
+            for (epigraph, id) in report.hull_epigraphs.iter().zip(&explicit_cones) {
+                assert_eq!(epigraph.cones, [GdpGeneratedConstraint::from(*id)]);
+                let socs = model.soc_constraints();
+                let SocHead::Rotated(u, v) = socs[id.index()].head() else { panic!("rotated") };
+                let u = oximo_expr::extract_linear(&arena, u).unwrap();
+                let v = oximo_expr::extract_linear(&arena, v).unwrap();
+                assert_eq!(&u.coeffs[..], [(epigraph.generated.raw_id(), 0.5)]);
+                assert_eq!(&v.coeffs[..], [(binary, 1.0)]);
+                assert!(socs[id.index()].terms().len() <= 2);
+            }
+            // Algebraic cones stay linked to their epigraph.
+            if !explicit {
+                assert!(
+                    report
+                        .hull_epigraphs
+                        .iter()
+                        .all(|e| { matches!(e.cones[..], [GdpGeneratedConstraint::Algebraic(_)]) })
+                );
+            }
+
             let mut cones = 0;
             for root in quadratic_rows(&model, &report) {
                 let q = oximo_expr::extract_quadratic(&arena, root).unwrap();
@@ -1813,7 +1863,7 @@ fn conic_quadratic_hull_is_exact_at_integer_points_on_convex_sides() {
                     }
                 }
             }
-            assert_eq!(cones, expected.len());
+            assert_eq!(cones, if explicit { 0 } else { expected.len() });
             drop(arena);
 
             for active in [0.0, 1.0] {
@@ -1974,6 +2024,12 @@ fn conic_quadratic_hull_is_exact_in_nested_and_enumerated_trees() {
             report.hull_quadratic_fallbacks
         );
         assert!(!report.hull_unshifted.is_empty());
+        assert!(report.hull_epigraphs.iter().all(|e| !e.cones.is_empty()));
+        assert_eq!(
+            report.hull_epigraphs.iter().map(|e| e.cones.len()).sum::<usize>(),
+            report.generated_soc_constraints.len()
+        );
+        assert_eq!(model.kind(), ModelKind::MISOCP);
 
         // Fallbacks list source rows only.
         let rows = model.constraints();
@@ -2008,6 +2064,119 @@ fn conic_quadratic_hull_is_exact_in_nested_and_enumerated_trees() {
                         [p, o, ia, ib]
                     );
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn an_algebraic_hull_ancestor_writes_child_cones_algebraically() {
+    for enumerate in [false, true] {
+        let model = Model::new("algebraic ancestor");
+
+        variable!(model, -5.0 <= x <= 5.0);
+        variable!(model, -5.0 <= w <= 5.0);
+        let parent = disjunct!(model, parent, |d| {
+            constraint!(d, x * x + w * w <= 9.0);
+        });
+        let other = disjunct!(model, other, |d| {
+            constraint!(d, x <= -4.0);
+        });
+        let a = disjunct!(model, a, |d| {
+            constraint!(d, (x - 1.0) * (x - 1.0) + (w - 1.0) * (w - 1.0) <= 1.0);
+        });
+        let b = disjunct!(model, b, |d| {
+            constraint!(d, (x + 1.0) * (x + 1.0) + w * w <= 0.5);
+        });
+        let top = if enumerate {
+            disjunction!(model, [parent, other], AtLeastOne)
+        } else {
+            disjunction!(model, [parent, other])
+        };
+        disjunction!(model, [a, b], parent = parent);
+
+        let algebraic = Hull::default()
+            .with_quadratic(HullQuadratic::Conic(HullConeForm::Algebraic))
+            .with_inclusive_policy(HullInclusivePolicy::Enumerate { max_patterns: 3 });
+        let report = model
+            .reformulate_gdp(GdpReformulationOptions::new(conic()).with_method(top, algebraic))
+            .unwrap();
+        assert!(report.hull_epigraphs.len() >= 3);
+        assert!(report.generated_soc_constraints.is_empty(), "enumerate={enumerate}: {report}");
+        assert_eq!(model.num_soc_constraints(), 0);
+        assert!(report.hull_epigraphs.iter().all(|e| {
+            !e.cones.is_empty()
+                && e.cones.iter().all(|c| matches!(c, GdpGeneratedConstraint::Algebraic(_)))
+        }));
+
+        let mut selections = vec![[1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0]];
+        if enumerate {
+            selections.extend([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 1.0]]);
+        }
+        for [p, o, ia, ib] in selections {
+            for x in [-5.0_f64, -4.0, -1.0, 0.0, 1.0, 2.0] {
+                for w in [-1.0_f64, 0.0, 1.0, 2.0] {
+                    let feasible = (p == 0.0 || x * x + w * w <= 9.0)
+                        && (o == 0.0 || x <= -4.0)
+                        && (ia == 0.0 || (x - 1.0).powi(2) + (w - 1.0).powi(2) <= 1.0)
+                        && (ib == 0.0 || (x + 1.0).powi(2) + w * w <= 0.5);
+                    let values = lift_with(&model, &report, &[x, w, p, o, ia, ib], |_, s| {
+                        s[0] * s[0] + s[1] * s[1]
+                    });
+                    assert_eq!(
+                        satisfied(&model, &values),
+                        feasible,
+                        "enumerate={enumerate} selection={:?} x={x} w={w}",
+                        [p, o, ia, ib]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_cones_stay_cones_under_a_big_m_parent() {
+    let model = Model::new("conic child of Big-M");
+
+    variable!(model, -3.0 <= x <= 3.0);
+    variable!(model, -3.0 <= w <= 3.0);
+    let parent = disjunct!(model, parent, |_d| {});
+    let other = disjunct!(model, other, |d| {
+        constraint!(d, x >= 2.5);
+    });
+    let a = disjunct!(model, a, |d| {
+        constraint!(d, (x - 1.0) * (x - 1.0) + w * w <= 1.0);
+    });
+    let b = disjunct!(model, b, |d| {
+        constraint!(d, x * x + (w + 1.0) * (w + 1.0) <= 0.5);
+    });
+    let top = disjunction!(model, [parent, other]);
+    disjunction!(model, [a, b], parent = parent);
+
+    let options = GdpReformulationOptions::new(conic()).with_method(top, BigM::default());
+    let report = model.reformulate_gdp(options).unwrap();
+    assert_eq!(report.hull_epigraphs.len(), 2);
+    assert!(report.hull_epigraphs.iter().all(|e| e.cones.len() == 1));
+    assert_eq!(report.generated_soc_constraints.len(), 2);
+
+    let squares = |id: DisjunctConstraintId, s: &[f64]| {
+        let _ = id;
+        s[0] * s[0] + s[1] * s[1]
+    };
+    for [p, o, ia, ib] in [[1.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0]] {
+        for x in [-1.0_f64, 0.0, 0.5, 1.0, 2.0, 3.0] {
+            for w in [-2.0_f64, -1.0, 0.0, 0.5, 1.0] {
+                let feasible = (o == 0.0 || x >= 2.5)
+                    && (ia == 0.0 || (x - 1.0).powi(2) + w * w <= 1.0)
+                    && (ib == 0.0 || x * x + (w + 1.0).powi(2) <= 0.5);
+                let values = lift_with(&model, &report, &[x, w, p, o, ia, ib], squares);
+                assert_eq!(
+                    satisfied(&model, &values),
+                    feasible,
+                    "{:?} x={x} w={w}",
+                    [p, o, ia, ib]
+                );
             }
         }
     }
@@ -2109,7 +2278,7 @@ fn quadratic_hull_fallbacks_report_their_reasons() {
 
 #[test]
 fn cancelled_quadratic_parts_keep_the_affine_hull() {
-    for quadratic in [HullQuadratic::Homogeneous, HullQuadratic::Conic] {
+    for quadratic in [HullQuadratic::Homogeneous, HullQuadratic::Conic(HullConeForm::Explicit)] {
         let model = Model::new("cancelled quadratic");
 
         variable!(model, -2.0 <= x <= 3.0);

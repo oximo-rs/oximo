@@ -1,6 +1,6 @@
 //! Explicit coordinates emitted by a reformulation.
 
-use crate::{ConstraintId, VarId};
+use crate::{ConstraintId, SocConstraintId, VarId};
 
 macro_rules! generated_id {
     ($name:ident, $raw:ty) => {
@@ -30,6 +30,7 @@ macro_rules! generated_id {
 
 generated_id!(GeneratedVarId, VarId);
 generated_id!(GeneratedConstraintId, ConstraintId);
+generated_id!(GeneratedSocConstraintId, SocConstraintId);
 
 /// A Hull mapping may refer to a source coordinate or another generated copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

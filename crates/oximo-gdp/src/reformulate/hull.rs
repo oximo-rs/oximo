@@ -17,7 +17,7 @@ use super::big_m::{BigMRowAnalysis, analyze_big_m_row, checked_big_m_row, row_m}
 use super::plan::{Linear, PlanBuilder};
 use super::{
     BigMValues, GdpError, GdpHullDomainContext, GdpHullScope, GdpMethod, GdpReformulationOptions,
-    GdpSizeLimits, Hull, HullInclusivePolicy, HullQuadratic,
+    GdpSizeLimits, Hull, HullConeForm, HullInclusivePolicy, HullQuadratic,
 };
 use crate::bounds::{BoundError, Bounder, Bounds};
 use oximo_core::gdp::{
@@ -28,11 +28,12 @@ use oximo_core::gdp::{
     GdpRowArtifacts, GdpSnapshot,
 };
 use oximo_core::{
-    Domain, ExprArena, ExprId, ExprNode, GeneratedConstraintId, GeneratedVarId, Model, VarId,
+    Domain, ExprArena, ExprId, ExprNode, GeneratedConstraintId, GeneratedSocConstraintId,
+    GeneratedVarId, Model, VarId,
 };
 use oximo_expr::{
-    AffineResidual, CurvatureError, EvalContext, LinearTerms, ParamId, QuadraticTerms, SignedExpr,
-    evaluate, extract_linear, split_affine, split_linear,
+    AffineResidual, CurvatureError, EvalContext, LinearTerms, ParamId, QuadraticFactor,
+    QuadraticTerms, SignedExpr, evaluate, extract_linear, split_affine, split_linear,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smol_str::SmolStr;
@@ -168,6 +169,7 @@ enum Origin {
     Disjunction(usize),
     Bounds(usize),
     Unshifted(usize),
+    Epigraph(usize),
 }
 
 /// Whether a coordinate is physical or local to a Boolean activation subtree.
@@ -220,10 +222,41 @@ struct AffineBody {
     support: Arc<[VarId]>,
 }
 
+/// Explicit rotated cone `||members||^2 <= 2 u v` with nonnegative heads.
+#[derive(Clone, Debug)]
+struct ConeBody {
+    members: Vec<Linear>,
+    u: Linear,
+    v: Linear,
+    expression: ExprId,
+}
+
 #[derive(Clone, Debug)]
 enum RowBody {
     Affine(Arc<AffineBody>),
     Expression(ExprId),
+    Cone(Arc<ConeBody>),
+}
+
+impl ConeBody {
+    /// `||L'u||^2 <= 2 (t/2) y` for `sign*u'Qu <= t*y` with `sign*Q = L L'`,
+    /// where `coordinates` maps the factor's variables to `u`.
+    fn epigraph(
+        factor: &QuadraticFactor,
+        coordinates: &FxHashMap<VarId, VarId>,
+        epigraph: VarId,
+        guard: &Linear,
+        expression: ExprId,
+    ) -> Self {
+        let members = factor
+            .rows()
+            .map(|f| Linear {
+                constant: 0.0,
+                terms: f.iter().map(|&(v, c)| (coordinates[&v], c)).collect(),
+            })
+            .collect();
+        Self { members, u: Linear::variable(epigraph).scaled(0.5), v: guard.clone(), expression }
+    }
 }
 
 impl RowBody {
@@ -241,6 +274,7 @@ impl RowBody {
                 (LinearTerms::borrowed(&body.linear.terms, body.linear.constant), Vec::new())
             }
             Self::Expression(root) => split_linear(arena, *root),
+            Self::Cone(cone) => split_linear(arena, cone.expression),
         }
     }
 }
@@ -257,6 +291,16 @@ struct Row {
     /// Roundoff allowance from source coefficients, propagated unchanged through
     /// transformations so large reference/M coefficients cannot inflate it.
     roundoff: f64,
+}
+
+impl Row {
+    /// With `algebraic`, an explicit cone written as its algebraic form.
+    fn with_algebraic_cone(mut self, algebraic: bool) -> Self {
+        if algebraic && let RowBody::Cone(cone) = &self.body {
+            self.body = RowBody::Expression(cone.expression);
+        }
+        self
+    }
 }
 
 struct PreparedSource {
@@ -926,11 +970,36 @@ impl Compiler<'_> {
                 {
                     blocks[parent.index()].push(row);
                 }
-                _ => self.emit(row)?,
+                _ => {
+                    let algebraic =
+                        matches!(row.body, RowBody::Cone(_)) && self.algebraic_cones_above(parent);
+                    self.emit(row.with_algebraic_cone(algebraic))?;
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Whether a Hull disjunction owning `branch` or one of its ancestors
+    /// writes cones algebraically.
+    fn algebraic_cones_above(&self, mut branch: Option<BooleanId>) -> bool {
+        while let Some(b) = branch {
+            let Some(owner) = self.data.booleans[b.index()].owner else {
+                return matches!(
+                    self.options.default_method,
+                    GdpMethod::Hull(hull) if hull.cone_form() == Some(HullConeForm::Algebraic)
+                );
+            };
+            if let GdpMethod::Hull(hull) = self.method(owner.index())
+                && hull.cone_form() == Some(HullConeForm::Algebraic)
+            {
+                return true;
+            }
+            branch = self.data.disjunctions[owner.index()].parent;
+        }
+
+        false
     }
 
     fn expression_support(&mut self, root: ExprId) -> Arc<[VarId]> {
@@ -941,6 +1010,7 @@ impl Compiler<'_> {
         match &row.body {
             RowBody::Affine(body) => Arc::clone(&body.support),
             RowBody::Expression(root) => self.expression_support(*root),
+            RowBody::Cone(cone) => self.expression_support(cone.expression),
         }
     }
 
@@ -960,6 +1030,22 @@ impl Compiler<'_> {
     }
 
     fn emit(&mut self, row: Row) -> Result<(), GdpError> {
+        if let RowBody::Cone(cone) = row.body {
+            let ConeBody { members, u, v, .. } = Arc::unwrap_or_clone(cone);
+            let generated =
+                GeneratedSocConstraintId::from_raw(self.plan.cone(self.model, members, u, v)?);
+            for origin in row.origins {
+                match origin {
+                    Origin::Numeric(i) => self.row_reports[i].constraints.push(generated.into()),
+                    Origin::Epigraph(i) => {
+                        self.plan.report.hull_epigraphs[i].cones.push(generated.into());
+                    }
+                    Origin::Disjunction(_) | Origin::Bounds(_) | Origin::Unshifted(_) => {}
+                }
+            }
+            return Ok(());
+        }
+
         let id = match row.body {
             RowBody::Affine(body) => self.plan.numeric_row(
                 self.model,
@@ -975,16 +1061,20 @@ impl Compiler<'_> {
                 row.lower,
                 row.upper,
             )?,
+            RowBody::Cone(_) => unreachable!("cones are emitted above"),
         };
 
         let generated = GeneratedConstraintId::from_raw(id);
         for origin in row.origins {
             match origin {
-                Origin::Numeric(i) => self.row_reports[i].constraints.push(generated),
+                Origin::Numeric(i) => self.row_reports[i].constraints.push(generated.into()),
                 Origin::Disjunction(i) => self.disjunction_reports[i].constraints.push(generated),
                 Origin::Bounds(i) => self.plan.report.hull_variables[i].constraints.push(generated),
                 Origin::Unshifted(i) => {
                     self.plan.report.hull_unshifted[i].constraints.push(generated);
+                }
+                Origin::Epigraph(i) => {
+                    self.plan.report.hull_epigraphs[i].cones.push(generated.into());
                 }
             }
         }
@@ -1256,6 +1346,7 @@ impl Compiler<'_> {
         local_coordinates: Option<&FxHashSet<VarId>>,
     ) -> Result<Vec<Row>, GdpError> {
         let disaggregate_local = local_coordinates.is_some();
+        let algebraic_cones = settings.cone_form() == Some(HullConeForm::Algebraic);
         let support = self.branch_supports(&inputs, disaggregate_local);
         let unused_guards = if disaggregate_local {
             FxHashMap::default()
@@ -1323,7 +1414,7 @@ impl Compiler<'_> {
 
             for row in rows {
                 if self.row_is_local_to(&row, branch) && !disaggregate_local {
-                    output.push(row);
+                    output.push(row.with_algebraic_cone(algebraic_cones));
                     continue;
                 }
 
@@ -1376,6 +1467,14 @@ impl Compiler<'_> {
         settings: Hull,
         substitution: &mut Substitution,
     ) -> Result<Vec<Row>, GdpError> {
+        if let RowBody::Cone(cone) = &row.body {
+            let cone = Arc::clone(cone);
+            let algebraic = settings.cone_form() == Some(HullConeForm::Algebraic);
+            return Ok(vec![
+                self.hull_cone(&row, &cone, substitution)?.with_algebraic_cone(algebraic),
+            ]);
+        }
+
         let mut output = Vec::new();
         let (terms, residual) = row.body.split(&self.arena);
         let terms = terms.into_owned();
@@ -1383,8 +1482,13 @@ impl Compiler<'_> {
         if settings.quadratic() != HullQuadratic::Perspective && !residual.is_empty() {
             match self.homogeneous_residual(&terms, &residual, substitution) {
                 Ok(quadratic) => {
-                    let conic = settings.quadratic() == HullQuadratic::Conic;
-                    return self.homogeneous_hull_row(row, &terms, &quadratic, substitution, conic);
+                    return self.homogeneous_hull_row(
+                        row,
+                        &terms,
+                        &quadratic,
+                        substitution,
+                        settings,
+                    );
                 }
                 Err(reason) => self.record_fallback(&row, None, reason),
             }
@@ -1510,16 +1614,16 @@ impl Compiler<'_> {
     /// polynomial in the copies `z` and the activation `y`.
     ///
     /// Each coordinate `z` becomes `u = z + r*y`.
-    /// With `conic`, any one-sided source row with a convex quadratic part
-    /// uses the conic epigraph instead.
+    /// Conic settings use the epigraph for convex one-sided source rows.
     fn homogeneous_hull_row(
         &mut self,
         row: Row,
         terms: &LinearTerms<'_>,
         residual: &QuadraticTerms,
         substitution: &Substitution,
-        conic: bool,
+        settings: Hull,
     ) -> Result<Vec<Row>, GdpError> {
+        let cone_form = settings.cone_form();
         let mut merged: Vec<_> = terms.coeffs.iter().chain(residual.linear()).copied().collect();
         merged.sort_unstable_by_key(|(v, _)| v.index());
         merged.dedup_by(|later, kept| {
@@ -1562,8 +1666,8 @@ impl Compiler<'_> {
             quadratic.quadratic.push((a, b, c));
         }
 
-        let source = row.kind.source_constraint().filter(|_| conic);
-        let mut curvature = Curvature::new(residual);
+        let source = row.kind.source_constraint().filter(|_| cone_form.is_some());
+        let mut curvature = Curvature::new(residual, cone_form == Some(HullConeForm::Explicit));
 
         let mut output = Vec::new();
         for (bound, lower, upper) in sides(row.lower, row.upper) {
@@ -1587,12 +1691,12 @@ impl Compiler<'_> {
                     _ => None,
                 };
                 if let Some((source, sign)) = source.zip(sign) {
-                    let conic = match curvature.convex(sign) {
-                        Ok(()) => self.conic_side(
+                    let conic = match curvature.factor(sign) {
+                        Ok(factor) => self.conic_side(
                             &row,
                             (source, sign, side, bound),
                             terms,
-                            residual,
+                            (residual, factor.as_deref()),
                             &affine,
                             substitution,
                         )?,
@@ -1629,12 +1733,13 @@ impl Compiler<'_> {
     }
 
     /// Conic exact Hull of one convex side `sign * h(x) <= 0`.
+    /// With a nonempty `factor` of `sign*Q`, the cone is explicit.
     fn conic_side(
         &mut self,
         row: &Row,
         (source, sign, side, bound): (DisjunctConstraintId, f64, BoundSide, f64),
         terms: &LinearTerms<'_>,
-        residual: &QuadraticTerms,
+        (residual, factor): (&QuadraticTerms, Option<&QuadraticFactor>),
         affine: &Linear,
         substitution: &Substitution,
     ) -> Result<Result<Vec<Row>, GdpHullQuadraticFallbackReason>, GdpError> {
@@ -1664,6 +1769,7 @@ impl Compiler<'_> {
         let guard = &substitution.guard;
         let epigraph = self.auxiliary(0.0, upper, substitution.branch)?;
         let activation = self.activation_node(substitution.activation, guard)?;
+        let epigraph_index = self.plan.report.hull_epigraphs.len();
         self.plan.report.hull_epigraphs.push(GdpHullEpigraphMapping {
             source,
             side,
@@ -1679,6 +1785,7 @@ impl Compiler<'_> {
             activation,
             activation_kind: substitution.activation,
             upper,
+            cones: Vec::new(),
         });
 
         // Solvers usually recognize `s'Qs <= t * y` as a rotated cone only when `y`
@@ -1705,9 +1812,18 @@ impl Compiler<'_> {
             );
         }
         cone.multiply(&Linear::variable(epigraph), guard, -1.0);
+        let mut cone_body = cone.body(&mut self.arena)?;
+        if let (Some(factor), RowBody::Expression(expression)) = (factor, &cone_body)
+            && !factor.is_empty()
+        {
+            let cone = ConeBody::epigraph(factor, &coordinates, epigraph, guard, *expression);
+            cone_body = RowBody::Cone(Arc::new(cone));
+        }
 
+        let mut origins = row.origins.clone();
+        origins.push(Origin::Epigraph(epigraph_index));
         let rows = [
-            (cone.body(&mut self.arena)?, row.roundoff),
+            (cone_body, row.roundoff),
             (
                 self.arena
                     .affine_body(Linear::variable(epigraph).add(affine.clone().scaled(sign)))?,
@@ -1720,12 +1836,12 @@ impl Compiler<'_> {
             ),
         ];
 
-        output.extend(rows.into_iter().map(|(body, roundoff)| Row {
+        output.extend(rows.into_iter().enumerate().map(|(i, (body, roundoff))| Row {
             body,
             lower: f64::NEG_INFINITY,
             upper: 0.0,
             name: row.name.clone(),
-            origins: row.origins.clone(),
+            origins: if i == 0 { origins.clone() } else { row.origins.clone() },
             kind: RowKind::Reformulated,
             enforcement: RowEnforcement::Homogeneous { activation: substitution.activation },
             roundoff,
@@ -1785,6 +1901,49 @@ impl Compiler<'_> {
         });
 
         Ok(coordinate)
+    }
+
+    /// Exact Hull of a cone.
+    fn hull_cone(
+        &mut self,
+        row: &Row,
+        cone: &ConeBody,
+        substitution: &Substitution,
+    ) -> Result<Row, GdpError> {
+        self.plan.record_row_expansions(1)?;
+        let homogenized = |linear: &Linear| {
+            let mut result = substitution.guard.clone().scaled(linear.constant);
+            for &(v, c) in &linear.terms {
+                if substitution.copies.contains_key(&v) {
+                    result = result.add(lifted(substitution, v).scaled(c));
+                } else {
+                    result.terms.push((v, c));
+                }
+            }
+            result
+        };
+
+        let members: Vec<_> = cone.members.iter().map(homogenized).collect();
+        let (u, v) = (homogenized(&cone.u), homogenized(&cone.v));
+        let mut products = Products::default();
+        for member in &members {
+            products.multiply(member, member, 1.0);
+        }
+        products.multiply(&u, &v, -2.0);
+        let RowBody::Expression(expression) = products.body(&mut self.arena)? else {
+            unreachable!("products build expression bodies")
+        };
+
+        Ok(Row {
+            body: RowBody::Cone(Arc::new(ConeBody { members, u, v, expression })),
+            lower: f64::NEG_INFINITY,
+            upper: 0.0,
+            name: row.name.clone(),
+            origins: row.origins.clone(),
+            kind: RowKind::Reformulated,
+            enforcement: RowEnforcement::Homogeneous { activation: substitution.activation },
+            roundoff: row.roundoff,
+        })
     }
 
     fn perspective(
@@ -1883,6 +2042,12 @@ impl Compiler<'_> {
             RowBody::Expression(root) => analyze_big_m_row(
                 &mut Bounder::from_boxes(&self.arena.inner, &self.boxes),
                 *root,
+                &row.name,
+                &mut self.arena.coefficient_slots,
+            )?,
+            RowBody::Cone(cone) => analyze_big_m_row(
+                &mut Bounder::from_boxes(&self.arena.inner, &self.boxes),
+                cone.expression,
                 &row.name,
                 &mut self.arena.coefficient_slots,
             )?,
@@ -2511,33 +2676,46 @@ impl Products {
     }
 }
 
+/// Factor rows `L'` of `sign*Q = L L'`, when cones are explicit.
+type Factor = Option<Arc<QuadraticFactor>>;
+
 /// Convexity of `sign * x'Qx`, computed on demand once per sign.
 struct Curvature<'a> {
     terms: &'a QuadraticTerms,
+    /// Whether to factor `sign*Q`.
+    factor: bool,
     /// Results for the upper (`+Q`) and lower (`-Q`) sides.
-    cache: [Option<Result<(), GdpHullQuadraticFallbackReason>>; 2],
+    cache: [Option<Result<Factor, GdpHullQuadraticFallbackReason>>; 2],
 }
 
 impl<'a> Curvature<'a> {
-    fn new(terms: &'a QuadraticTerms) -> Self {
-        Self { terms, cache: [None, None] }
+    fn new(terms: &'a QuadraticTerms, factor: bool) -> Self {
+        Self { terms, factor, cache: [None, None] }
     }
 
-    /// Whether `sign * x'Qx` is convex.
-    fn convex(&mut self, sign: f64) -> Result<(), GdpHullQuadraticFallbackReason> {
+    /// Whether `sign * x'Qx` is convex, with a factor of `sign * Q` if requested.
+    fn factor(&mut self, sign: f64) -> Result<Factor, GdpHullQuadraticFallbackReason> {
         let slot = usize::from(sign < 0.0);
-        let terms = self.terms;
-        *self.cache[slot].get_or_insert_with(|| {
-            let convex = if sign < 0.0 { terms.is_concave() } else { terms.is_convex() };
-            match convex {
-                Ok(true) => Ok(()),
-                Err(CurvatureError::Dimension { .. }) => {
-                    Err(GdpHullQuadraticFallbackReason::CurvatureDimension)
+        let (terms, factor) = (self.terms, self.factor);
+        self.cache[slot]
+            .get_or_insert_with(|| {
+                let certified = match (sign < 0.0, factor) {
+                    (false, true) => terms.convex_factor().map(|f| f.map(|f| Some(Arc::new(f)))),
+                    (true, true) => terms.concave_factor().map(|f| f.map(|f| Some(Arc::new(f)))),
+                    (false, false) => terms.is_convex().map(|convex| convex.then_some(None)),
+                    (true, false) => terms.is_concave().map(|concave| concave.then_some(None)),
+                };
+                match certified {
+                    Ok(Some(factor)) => Ok(factor),
+                    Err(CurvatureError::Dimension { .. }) => {
+                        Err(GdpHullQuadraticFallbackReason::CurvatureDimension)
+                    }
+
+                    // Uncertified.
+                    Ok(None) | Err(_) => Err(GdpHullQuadraticFallbackReason::Nonconvex),
                 }
-                // Uncertified, including Hessians that overflow `f64`.
-                Ok(false) | Err(_) => Err(GdpHullQuadraticFallbackReason::Nonconvex),
-            }
-        })
+            })
+            .clone()
     }
 }
 

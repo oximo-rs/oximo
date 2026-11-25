@@ -80,6 +80,14 @@ impl fmt::Display for crate::gdp::GdpReformulationReport {
             self.hull_variables.len(),
             if self.hull_variables.len() == 1 { "copy" } else { "copies" }
         )?;
+        if !self.generated_soc_constraints.is_empty() {
+            write!(
+                f,
+                ", {} generated cone{}",
+                self.generated_soc_constraints.len(),
+                plural(self.generated_soc_constraints.len())
+            )?;
+        }
         if !self.hull_epigraphs.is_empty() {
             write!(
                 f,
@@ -129,7 +137,18 @@ impl fmt::Display for ReformulationDisplay<'_> {
                     report.generated_rows.clone().map(|index| {
                         ConstraintId(u32::try_from(index).expect("constraint ID fits u32"))
                     }),
-                )
+                )?;
+                if report.generated_soc_constraints.is_empty() {
+                    return Ok(());
+                }
+                writeln!(f, "cones")?;
+                for index in report.generated_soc_constraints.clone() {
+                    let id = crate::SocConstraintId(
+                        u32::try_from(index).expect("SOC constraint ID fits u32"),
+                    );
+                    writeln!(f, "  {}", model.display_soc(id))?;
+                }
+                Ok(())
             }
         }
     }

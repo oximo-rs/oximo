@@ -2,6 +2,6 @@
 
 use oximo_gdp::prelude::*;
 fn misuse(model: &Model, report: &GdpReformulationReportData) {
-    let _ = model.constraint_handle_from_id(report.rows[0].constraints[0]);
+    let _ = model.constraint_handle_from_id(report.rows[0].constraints[0].algebraic().unwrap());
 }
 fn main() {}

@@ -39,7 +39,7 @@ pub use captured::CapturedExpr;
 #[cfg(test)]
 pub use classify::ClassificationStats;
 pub use classify::{ExprClass, classify};
-pub use convexity::CurvatureError;
+pub use convexity::{CurvatureError, QuadraticFactor};
 pub use degree::{
     Affine, Constant, Degree, Dynamic, ExpressionDegree, LeafDegree, Nonlinear, ParameterDegree,
     Quadratic, VariableDegree,

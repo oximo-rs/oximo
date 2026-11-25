@@ -115,7 +115,7 @@ pub fn finalize_result_with_coordinates(
         &plan.retained,
         ProjectionCoordinates {
             rows: &plan.rows,
-            soc: coordinates.soc_constraints,
+            soc: &plan.socs,
             psd: coordinates.psd_constraints,
         },
     )
@@ -162,7 +162,7 @@ impl SourceIndices {
 #[derive(Clone, Copy)]
 struct ProjectionCoordinates<'a> {
     rows: &'a SourceIndices,
-    soc: usize,
+    soc: &'a SourceIndices,
     psd: usize,
 }
 
@@ -170,7 +170,7 @@ impl ProjectionCoordinates<'_> {
     fn includes_semantic(self, id: SemanticConstraintId) -> bool {
         match id {
             SemanticConstraintId::Algebraic(row) => self.rows.contains(row.index()),
-            SemanticConstraintId::SecondOrderCone(cone) => cone.index() < self.soc,
+            SemanticConstraintId::SecondOrderCone(cone) => self.soc.contains(cone.index()),
             SemanticConstraintId::PositiveSemidefinite(cone) => cone.index() < self.psd,
             SemanticConstraintId::SpecialOrderedSet(_) | SemanticConstraintId::Indicator(_) => true,
         }
@@ -497,7 +497,7 @@ fn normalize_projected_duals(
     keep_row: impl Fn(ConstraintId) -> bool,
 ) {
     result.dual.truncate(coordinates.rows.upper_bound());
-    result.soc_dual.truncate(coordinates.soc);
+    result.soc_dual.truncate(coordinates.soc.upper_bound());
     result.reduced_costs.truncate(source_variables.upper_bound());
     let keep_semantic = |id| match id {
         SemanticConstraintId::Algebraic(row) => keep_row(row),
@@ -526,7 +526,7 @@ fn normalize_projected_duals(
 
     result
         .soc_dual
-        .retain(|id, z| id.index() < coordinates.soc && z.iter().all(|value| value.is_finite()));
+        .retain(|id, z| coordinates.soc.contains(id.index()) && z.iter().all(|v| v.is_finite()));
     result.psd_dual.retain(|id, matrix| {
         id.index() < coordinates.psd && matrix.upper_triangle().iter().all(|v| v.is_finite())
     });
@@ -570,8 +570,9 @@ fn retain_valid_soc_duals(result: &mut SolverResult, model: &oximo_core::Model) 
 /// Entities appended by a reformulation have IDs at or above these bounds.
 /// For an in-place reformulation, capture this before modifying the model.
 /// Later source declarations can interleave with generated IDs; provide an
-/// explicit source sets through [`SourceProjection::with_source_variables`] and
-/// [`SourceProjection::with_source_rows`] in that case.
+/// explicit source sets through [`SourceProjection::with_source_variables`],
+/// [`SourceProjection::with_source_rows`] and
+/// [`SourceProjection::with_source_soc_constraints`] in that case.
 /// These counts do not include parameter declarations. Use
 /// [`SourceProjectionPlan::capture`] to freeze those at the same boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -683,6 +684,7 @@ pub struct SourceProjectionPlan {
     coordinates: SourceCoordinates,
     variables: SourceIndices,
     rows: SourceIndices,
+    socs: SourceIndices,
     retained: FxHashSet<VarId>,
     parameters: Option<ParameterDeclarations>,
 }
@@ -693,6 +695,7 @@ impl std::fmt::Debug for SourceProjectionPlan {
             .field("coordinates", &self.coordinates)
             .field("source_variables", &self.variables.len())
             .field("source_rows", &self.rows.len())
+            .field("source_soc_constraints", &self.socs.len())
             .field("retained_variables", &self.retained.len())
             .field("source_model", &self.parameters.as_ref().map(ParameterDeclarations::model_id))
             .field("parameter_count", &self.parameters.as_ref().map(|prefix| prefix.len()))
@@ -708,6 +711,7 @@ impl SourceProjectionPlan {
         Self {
             variables: SourceIndices::Prefix(coordinates.variables),
             rows: SourceIndices::Prefix(coordinates.algebraic_constraints),
+            socs: SourceIndices::Prefix(coordinates.soc_constraints),
             coordinates,
             retained: FxHashSet::default(),
             parameters: None,
@@ -741,6 +745,16 @@ impl SourceProjectionPlan {
         self
     }
 
+    /// Replace the source SOC-constraint prefix with exactly these IDs.
+    #[must_use]
+    pub fn with_source_soc_constraints(
+        mut self,
+        cones: impl IntoIterator<Item = SocConstraintId>,
+    ) -> Self {
+        self.set_socs(cones);
+        self
+    }
+
     /// Keep additional generated primal coordinates, without their reduced costs.
     #[must_use]
     pub fn retain_variables(
@@ -760,6 +774,11 @@ impl SourceProjectionPlan {
         self.rows = SourceIndices::explicit(rows.into_iter().map(ConstraintId::index));
         self.coordinates.algebraic_constraints = self.rows.len();
     }
+
+    fn set_socs(&mut self, cones: impl IntoIterator<Item = SocConstraintId>) {
+        self.socs = SourceIndices::explicit(cones.into_iter().map(SocConstraintId::index));
+        self.coordinates.soc_constraints = self.socs.len();
+    }
 }
 
 /// Projects a result produced on a transformed model back into the source
@@ -774,10 +793,11 @@ impl SourceProjectionPlan {
 ///   objective on each projected point;
 /// - applies [`finalize_result`] so the usual result contract holds.
 ///
-/// Source variables and algebraic rows are ID prefixes by default. Use
-/// [`Self::with_source_variables`] and [`Self::with_source_rows`] for interleaved
-/// source and generated IDs. Borrow a [`SourceProjectionPlan`] to reuse membership
-/// sets without cloning or rebuilding them, and reuse the projector across solves.
+/// Source variables, algebraic rows and SOC constraints are ID prefixes by
+/// default. Use [`Self::with_source_variables`], [`Self::with_source_rows`] and
+/// [`Self::with_source_soc_constraints`] for interleaved source and generated IDs.
+/// Borrow a [`SourceProjectionPlan`] to reuse membership  sets without cloning
+/// or rebuilding them, and reuse the projector across solves.
 ///
 /// Generated multipliers are dropped rather than reinterpreted in source
 /// coordinates. Semantic duals remain subject to the usual explicit-mapping
@@ -854,10 +874,23 @@ impl<'a> SourceProjection<'a> {
     /// Treat exactly these algebraic rows as source coordinates.
     ///
     /// Use when rows declared after an in-place reformulation interleave with
-    /// generated rows. SOC and PSD coordinates retain their captured prefixes.
+    /// generated rows.
     #[must_use]
     pub fn with_source_rows(mut self, rows: impl IntoIterator<Item = ConstraintId>) -> Self {
         self.plan.to_mut().set_rows(rows);
+        self
+    }
+
+    /// Treat exactly these SOC constraints as source coordinates.
+    ///
+    /// Use when cones declared after an in-place reformulation interleave
+    /// with generated cones.
+    #[must_use]
+    pub fn with_source_soc_constraints(
+        mut self,
+        cones: impl IntoIterator<Item = SocConstraintId>,
+    ) -> Self {
+        self.plan.to_mut().set_socs(cones);
         self
     }
 
@@ -979,11 +1012,7 @@ impl<'a> SourceProjection<'a> {
             for (kind, count, inherited) in [
                 ("variable", self.plan.variables.upper_bound(), inherited.variables),
                 ("algebraic row", self.plan.rows.upper_bound(), inherited.algebraic_constraints),
-                (
-                    "SOC constraint",
-                    self.plan.coordinates.soc_constraints,
-                    inherited.soc_constraints,
-                ),
+                ("SOC constraint", self.plan.socs.upper_bound(), inherited.soc_constraints),
                 (
                     "PSD constraint",
                     self.plan.coordinates.psd_constraints,
@@ -1048,7 +1077,12 @@ impl<'a> SourceProjection<'a> {
         self.validate(&result)?;
         let Self { source, plan, objective, reevaluate, parameter_count, .. } = self;
         let SourceProjectionPlan {
-            coordinates, variables: source_variables, rows, retained, ..
+            coordinates,
+            variables: source_variables,
+            rows,
+            socs,
+            retained,
+            ..
         } = plan.as_ref();
         // Restore objective units on the native certificate.
         result.best_bound = result.best_bound.and_then(|value| objective.restore(value));
@@ -1056,11 +1090,8 @@ impl<'a> SourceProjection<'a> {
             result.parameters = result.parameters.prefix(*parameter_count);
         }
         result.model_id = source.id();
-        let projection = ProjectionCoordinates {
-            rows,
-            soc: coordinates.soc_constraints,
-            psd: coordinates.psd_constraints,
-        };
+        let projection =
+            ProjectionCoordinates { rows, soc: socs, psd: coordinates.psd_constraints };
         let mut result = normalize_validated_result(
             ValidatedResult(result),
             source_variables,
@@ -1100,7 +1131,7 @@ fn check_source_coordinates(
     for (kind, count, available) in [
         ("variable", plan.variables.upper_bound(), model.num_variables()),
         ("algebraic row", plan.rows.upper_bound(), model.constraints().algebraic().len()),
-        ("SOC constraint", coordinates.soc_constraints, model.num_soc_constraints()),
+        ("SOC constraint", plan.socs.upper_bound(), model.num_soc_constraints()),
         ("PSD constraint", coordinates.psd_constraints, model.num_psd_constraints()),
     ] {
         if count > available {

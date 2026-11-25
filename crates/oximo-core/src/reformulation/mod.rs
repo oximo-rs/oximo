@@ -10,7 +10,9 @@ mod error;
 mod ids;
 pub(crate) mod inspection;
 mod provenance;
-pub use ids::{GeneratedConstraintId, GeneratedVarId, ReformulationVarId};
+pub use ids::{
+    GeneratedConstraintId, GeneratedSocConstraintId, GeneratedVarId, ReformulationVarId,
+};
 pub use provenance::ReformulationProvenance;
 pub(crate) mod helpers;
 mod indicator;

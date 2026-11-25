@@ -12,7 +12,7 @@ use oximo_core::gdp::{
 };
 use oximo_core::{
     Constraint, ConstraintId, Domain, Expr, ExprId, ExprNode, Interval, Model, ParamId,
-    ScalarDynamicFunction, UnaryOp, VarId,
+    ScalarAffineFunction, ScalarDynamicFunction, SocConstraintId, UnaryOp, VarId,
 };
 use oximo_expr::SignedExpr;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -99,10 +99,44 @@ struct Row {
     canonical: bool,
 }
 
+/// Rotated cone `||members||^2 <= 2 u v`, `u, v >= 0`.
+#[derive(Debug)]
+struct Cone {
+    name: String,
+    members: Vec<Linear>,
+    u: Linear,
+    v: Linear,
+}
+
+impl Cone {
+    fn components_mut(&mut self) -> impl Iterator<Item = &mut Linear> {
+        [&mut self.u, &mut self.v].into_iter().chain(&mut self.members)
+    }
+
+    /// Register the validated cone.
+    fn apply(self, model: &Model) {
+        let affine = |linear: Linear| {
+            let mut arena = model.__sum_context().borrow_mut();
+            let id = if linear.terms.is_empty() {
+                arena.constant(linear.constant)
+            } else {
+                arena.linear(linear.terms, linear.constant)
+            };
+            drop(arena);
+            ScalarAffineFunction::try_from(Expr::new(id, model.__sum_context()))
+                .expect("planned cone components are affine")
+        };
+        let Self { name, members, u, v } = self;
+        let members: Vec<_> = members.into_iter().map(affine).collect();
+        model.add_rotated_soc_constraint(name, members, affine(u), affine(v));
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct PlanBuilder {
     variables: Vec<(VarId, String, Domain, f64, f64)>,
     rows: Vec<Row>,
+    cones: Vec<Cone>,
     pub(super) report: GdpReformulationReportData,
     pub(super) locked_variables: FxHashSet<VarId>,
     pub(super) locked_parameters: FxHashSet<ParamId>,
@@ -112,6 +146,7 @@ pub(super) struct PlanBuilder {
     expression_nodes: usize,
     next_variable: usize,
     next_constraint: usize,
+    next_cone: usize,
     source_constraints: usize,
     size_limits: GdpSizeLimits,
     planning_limits: GdpPlanningLimits,
@@ -173,6 +208,7 @@ impl PlanBuilder {
         let mut plan = Self {
             variables: Vec::new(),
             rows: Vec::new(),
+            cones: Vec::new(),
             report: GdpReformulationReportData::default(),
             locked_variables: FxHashSet::default(),
             locked_parameters: FxHashSet::default(),
@@ -182,6 +218,7 @@ impl PlanBuilder {
             expression_nodes: 0,
             next_variable: model.num_variables(),
             next_constraint: model.constraints().algebraic().len(),
+            next_cone: model.num_soc_constraints(),
             source_constraints: model.num_constraints(),
             size_limits: options.size_limits,
             planning_limits: options.planning_limits,
@@ -295,6 +332,12 @@ impl PlanBuilder {
             }
         }
 
+        for cone in &mut self.cones {
+            for component in cone.components_mut() {
+                component.normalize(&mut coefficient_slots)?;
+            }
+        }
+
         let base_nodes = self
             .variables
             .len()
@@ -308,6 +351,11 @@ impl PlanBuilder {
                 })
                 .ok_or(GdpError::Capacity)
         })?;
+
+        self.expression_nodes =
+            self.cones.iter().try_fold(self.expression_nodes, |total, cone| {
+                total.checked_add(cone.members.len() + 2).ok_or(GdpError::Capacity)
+            })?;
         u32::try_from(arena_len.checked_add(self.expression_nodes).ok_or(GdpError::Capacity)?)
             .map_err(|_| GdpError::Capacity)?;
 
@@ -328,7 +376,8 @@ impl PlanBuilder {
 
         let variables =
             self.variables.len().checked_add(additional_variables).ok_or(GdpError::Capacity)?;
-        let rows = self.rows.len().checked_add(additional_rows).ok_or(GdpError::Capacity)?;
+        let rows =
+            self.constraint_count().checked_add(additional_rows).ok_or(GdpError::Capacity)?;
         let minimum_nodes = variables.checked_add(rows).ok_or(GdpError::Capacity)?;
 
         for (resource, initial, generated, limit) in [
@@ -379,7 +428,12 @@ impl PlanBuilder {
             self.report.hull_variables.len().checked_add(additional).ok_or(GdpError::Capacity)?;
         let rows = copies.checked_mul(2).ok_or(GdpError::Capacity)?;
 
-        self.check_size(additional, rows.saturating_sub(self.rows.len()), 0)
+        self.check_size(additional, rows.saturating_sub(self.constraint_count()), 0)
+    }
+
+    /// Planned algebraic rows and cones.
+    fn constraint_count(&self) -> usize {
+        self.rows.len() + self.cones.len()
     }
 
     /// Affine fast paths need no expression rewrites in the committed arena.
@@ -518,6 +572,37 @@ impl PlanBuilder {
         Ok(id)
     }
 
+    /// Plan the rotated cone `||members||^2 <= 2 u v`.
+    pub(super) fn cone(
+        &mut self,
+        model: &Model,
+        members: Vec<Linear>,
+        u: Linear,
+        v: Linear,
+    ) -> Result<SocConstraintId, GdpError> {
+        debug_assert!(!members.is_empty(), "a planned rotated cone needs a member");
+        self.check_size(0, 1, 0)?;
+        self.record_row_expansions(1)?;
+        let index = self.next_cone.checked_add(self.cones.len()).ok_or(GdpError::Capacity)?;
+        let id = SocConstraintId(u32::try_from(index).map_err(|_| GdpError::Capacity)?);
+        let mut name = format!("__oximo_gdp_cone{index}");
+
+        if model.soc_constraint_id(&name).is_some() {
+            let base = name;
+            let mut suffix = 1_u64;
+            name = format!("{base}_{suffix}");
+
+            while model.soc_constraint_id(&name).is_some() {
+                suffix += 1;
+                name = format!("{base}_{suffix}");
+            }
+        }
+
+        self.cones.push(Cone { name, members, u, v });
+
+        Ok(id)
+    }
+
     /// Numeric bodies are normalized before checked shifts append or update
     /// distinct indicator coefficients.
     pub(super) fn numeric_row(
@@ -598,7 +683,7 @@ impl ValidatedPlan {
         let plan = &self.0;
         let generated = GdpModelSize {
             variables: plan.variables.len(),
-            constraints: plan.rows.len(),
+            constraints: plan.constraint_count(),
             expression_nodes: plan.expression_nodes,
         };
 
@@ -620,6 +705,7 @@ impl ValidatedPlan {
         let PlanBuilder {
             variables,
             rows,
+            cones,
             report,
             locked_variables,
             locked_parameters,
@@ -629,12 +715,14 @@ impl ValidatedPlan {
             source_nodes,
             next_variable,
             next_constraint,
+            next_cone,
             ..
         } = plan;
 
         let mut report = report;
         report.generated_variables = next_variable..next_variable + variables.len();
         report.generated_rows = next_constraint..next_constraint + rows.len();
+        report.generated_soc_constraints = next_cone..next_cone + cones.len();
         let shift = variables.len();
         let remap = |id: ExprId| {
             if id.index() < source_nodes {
@@ -713,6 +801,10 @@ impl ValidatedPlan {
                     Interval { lower: row.lower, upper: row.upper },
                 ),
             );
+        }
+
+        for cone in cones {
+            cone.apply(model);
         }
 
         model.__gdp_finish(

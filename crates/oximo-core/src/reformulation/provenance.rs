@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use crate::{GeneratedVarId, Model, ReformulationVarId, VarId};
 
-/// A snapshot of generated variable and algebraic-row membership.
+/// A snapshot of generated variable, algebraic-row and SOC membership.
 ///
 /// Capture once per planning or projection pass.
 #[derive(Clone, Debug)]
@@ -12,16 +12,19 @@ pub struct ReformulationProvenance {
     captured_variables: usize,
     variables: Vec<Range<usize>>,
     rows: Vec<Range<usize>>,
+    soc_constraints: Vec<Range<usize>>,
 }
 
 impl ReformulationProvenance {
     pub fn capture(model: &Model) -> Self {
         let mut variables = Vec::new();
         let mut rows = Vec::new();
+        let mut soc_constraints = Vec::new();
         #[cfg(feature = "gdp")]
         for report in model.gdp_reformulations().iter() {
             variables.push(report.generated_variables.clone());
             rows.push(report.generated_rows.clone());
+            soc_constraints.push(report.generated_soc_constraints.clone());
         }
 
         for report in model.sos_reformulations().iter() {
@@ -35,8 +38,9 @@ impl ReformulationProvenance {
 
         normalize_ranges(&mut variables);
         normalize_ranges(&mut rows);
+        normalize_ranges(&mut soc_constraints);
 
-        Self { captured_variables: model.num_variables(), variables, rows }
+        Self { captured_variables: model.num_variables(), variables, rows, soc_constraints }
     }
 
     /// Sorted, disjoint generated variable-index ranges.
@@ -47,6 +51,11 @@ impl ReformulationProvenance {
     /// Sorted, disjoint generated algebraic-row-index ranges.
     pub fn row_ranges(&self) -> &[Range<usize>] {
         &self.rows
+    }
+
+    /// Sorted, disjoint generated SOC-constraint-index ranges.
+    pub fn soc_ranges(&self) -> &[Range<usize>] {
+        &self.soc_constraints
     }
 
     /// Classify a variable in this registry or an appended planning coordinate.
