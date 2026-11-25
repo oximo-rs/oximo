@@ -15,7 +15,8 @@
 use std::time::Duration;
 
 use oximo::gams::{
-    GamsConoptOptions, GamsCplexOptions, GamsHighsOptions, GamsHighsSolver, GamsSolverConfig,
+    GamsConoptOptions, GamsCplexOptions, GamsGurobiOptions, GamsHighsOptions, GamsHighsSolver,
+    GamsSolverConfig,
 };
 use oximo::prelude::*;
 use oximo::solvers::Gams;
@@ -380,6 +381,44 @@ fn gams_reads_cplex_solution_pool() {
         let obj = s.objective.expect("pool point has an objective");
         assert!(obj <= prev + 1e-9, "pool not ordered best-first");
         prev = obj;
+    }
+}
+
+#[test]
+fn gams_ge_detected_cones_solve_as_convex_qcp() {
+    let standard = || {
+        let m = Model::new("socp_detected_ge");
+        variable!(m, -10.0 <= x <= 10.0);
+        variable!(m, -10.0 <= y <= 10.0);
+        variable!(m, 0.0 <= t <= 10.0);
+        constraint!(m, cone, t * t >= x * x + y * y);
+        constraint!(m, link, x + y >= 1.0);
+        objective!(m, Min, t);
+        (m, std::f64::consts::FRAC_1_SQRT_2)
+    };
+    let rotated = || {
+        let m = Model::new("rsocp_detected_ge");
+        variable!(m, 2.0 <= x <= 10.0);
+        variable!(m, 0.0 <= u <= 10.0);
+        variable!(m, 0.0 <= v <= 10.0);
+        constraint!(m, cone, 2.0 * u * v >= x * x);
+        objective!(m, Min, u + v);
+        (m, 2.0 * std::f64::consts::SQRT_2)
+    };
+    let solvers = [
+        ("cplex", GamsSolverConfig::Cplex(GamsCplexOptions::default())),
+        ("gurobi", GamsSolverConfig::Gurobi(GamsGurobiOptions::default())),
+    ];
+    for (name, config) in solvers {
+        for build in [standard, rotated] {
+            let (m, optimum) = build();
+            assert_eq!(m.kind(), ModelKind::SOCP);
+            let opts = GamsOptions::default().solver(config.clone());
+            let r = Gams::new().solve(&m, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(r.termination, TerminationStatus::Optimal, "{name} {}", m.name);
+            let obj = r.objective().unwrap();
+            assert!((obj - optimum).abs() < 1e-4, "{name} {}: {obj}", m.name);
+        }
     }
 }
 

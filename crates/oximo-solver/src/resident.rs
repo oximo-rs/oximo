@@ -417,6 +417,63 @@ mod tests {
     }
 
     #[test]
+    fn selective_kind_cache_tracks_ge_zero_crossings() {
+        let m = Model::new("ge kind metadata");
+        param!(m, p = 1.0);
+        variable!(m, -1.0 <= x <= 1.0);
+        variable!(m, 0.0 <= t <= 2.0);
+        variable!(m, 0.0 <= u <= 2.0);
+        variable!(m, 0.0 <= v <= 2.0);
+        constraint!(m, standard, t * t >= p * x * x);
+        constraint!(m, rotated, 2.0 * u * v >= p * x * x);
+        objective!(m, Min, t + u + v);
+
+        let mut cache = PersistentPreparation::default();
+        for (value, cone) in [(1.0, true), (0.0, false), (-1.0, false), (2.0, true)] {
+            p.set_param_value(value).unwrap();
+            assert_eq!(m.kind() == ModelKind::SOCP, cone, "p={value}");
+
+            let prepared = cache.prepare(&m).unwrap();
+            assert_eq!(prepared.kind(), m.kind(), "p={value}");
+
+            drop(prepared);
+            cache.commit();
+        }
+    }
+
+    #[test]
+    fn selective_kind_cache_tracks_ge_cone_heads() {
+        let m = Model::new("resident ge kind");
+        param!(m, p = 1.0);
+        param!(m, lower = 0.0);
+        variable!(m, x);
+        variable!(m, t >= lower);
+        variable!(m, u >= lower);
+        variable!(m, v >= 0.0);
+        constraint!(m, standard, t * t >= p * x * x);
+        constraint!(m, rotated, 2.0 * u * v >= p * x * x);
+        objective!(m, Min, t + u + v);
+
+        let mut cache = PersistentPreparation::default();
+        for (p_value, lower_value, kind) in [
+            (1.0, 0.0, ModelKind::SOCP),
+            (2.0, 0.0, ModelKind::SOCP),
+            (2.0, -1.0, ModelKind::QCP),
+            (3.0, 0.0, ModelKind::SOCP),
+        ] {
+            p.set_param_value(p_value).unwrap();
+            lower.set_param_value(lower_value).unwrap();
+            assert_eq!(m.kind(), kind, "p={p_value}, lower={lower_value}");
+
+            let prepared = cache.prepare(&m).unwrap();
+            assert_eq!(prepared.kind(), kind, "p={p_value}, lower={lower_value}");
+
+            drop(prepared);
+            cache.commit();
+        }
+    }
+
+    #[test]
     fn selective_refresh_preserves_unaffected_terms_and_result_snapshots() {
         let m = Model::new("resident cache");
 

@@ -57,9 +57,10 @@ cargo run -p oximo --example gradostat_multiperiod_socp --features clarabel
 | `MILP`/`MIQP`/`MISOCP`                         | No, Clarabel has no integer support (returned as `UnsupportedKind`)                                                       |
 | `QCP`/`MIQCP`                                  | No, convex-QCP-to-SOC reformulation is not implemented. Write the constraint in SOC form instead.                         |
 
-A quadratic constraint that is already SOC-shaped (`sum p_i x_i^2 <= n t^2`,
-`t >= 0`) is detected as `SOCP` and solved, a general convex quadratic
-constraint is not.
+A quadratic constraint that is already SOC-shaped, `sum p_i x_i^2 <= n t^2`
+with `t >= 0` or the rotated `sum p_i x_i^2 <= c y z` with `y, z >= 0`, is
+detected as `SOCP` and solved whether written with `<=` or `>=` (e.g.
+`t^2 >= x^2 + y^2`). A general convex quadratic constraint is not.
 
 ## Persistent handle (repeated solves)
 

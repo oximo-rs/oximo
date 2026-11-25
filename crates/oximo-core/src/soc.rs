@@ -318,9 +318,48 @@ fn combine_heads(
     LinearTerms::owned(merged, (first.constant + sign * second.constant) * scale)
 }
 
-/// Structural shape of a recognized cone row.
-/// `sum p_i x_i^2 <= n t^2` for a standard head `t`, or
-/// `sum p_i x_i^2 <= c y z` for a rotated head `(y, z)`.
+/// Orientation of a single-sided row `lhs - rhs` relative to `<= 0`.
+#[derive(Clone, Copy)]
+enum SocOrientation {
+    /// `lhs <= rhs`, read as is.
+    Le,
+    /// `lhs >= rhs`, read as `-(lhs - rhs) <= 0`.
+    Ge,
+}
+
+impl SocOrientation {
+    /// A coefficient of `lhs - rhs` as a coefficient of the normalized `<= 0` form.
+    #[inline]
+    fn normalize(self, coefficient: f64) -> f64 {
+        match self {
+            Self::Le => coefficient,
+            Self::Ge => -coefficient,
+        }
+    }
+}
+
+/// A single-sided row's orientation and right-hand side.
+#[derive(Clone, Copy)]
+struct OrientedRow {
+    orientation: SocOrientation,
+    rhs: f64,
+}
+
+impl OrientedRow {
+    /// `None` for equalities and ranges.
+    fn of(c: &AlgebraicConstraint) -> Option<Self> {
+        let (orientation, rhs) = match c.as_single()? {
+            (Sense::Le, rhs) => (SocOrientation::Le, rhs),
+            (Sense::Ge, rhs) => (SocOrientation::Ge, rhs),
+            (Sense::Eq, _) => return None,
+        };
+        Some(Self { orientation, rhs })
+    }
+}
+
+/// Structural shape of a recognized cone row, after orientation:
+/// `sum p_i x_i^2 - n t^2 <= 0` for a standard head `t`, or
+/// `sum p_i x_i^2 - c y z <= 0` for a rotated head `(y, z)`.
 struct SocShape {
     head: SocHead<VarId>,
     /// `n` for a standard head, `c` for a rotated one.
@@ -329,23 +368,18 @@ struct SocShape {
 
 /// Extract and validate the quadratic form shared by SOC recognition
 /// and model-kind inference.
-fn soc_quadratic(
-    vars: &[Variable],
-    c: &AlgebraicConstraint,
-    q: &QuadraticTerms,
-) -> Option<SocShape> {
-    let shape = soc_quadratic_candidate(c, q)?;
+fn soc_quadratic(vars: &[Variable], row: OrientedRow, q: &QuadraticTerms) -> Option<SocShape> {
+    let shape = soc_quadratic_candidate(row, q)?;
     let nonnegative = shape.head.iter().all(|v| vars[v.index()].lb >= 0.0);
     nonnegative.then_some(shape)
 }
 
 /// One pass over the canonical entries, which are sorted by `(col, row)` with
 /// `row >= col`.
-fn soc_quadratic_candidate(c: &AlgebraicConstraint, q: &QuadraticTerms) -> Option<SocShape> {
-    let (sense, rhs) = c.as_single()?;
-    if sense != Sense::Le {
-        return None;
-    }
+fn soc_quadratic_candidate(
+    OrientedRow { orientation, rhs }: OrientedRow,
+    q: &QuadraticTerms,
+) -> Option<SocShape> {
     if !q.linear().is_empty() || q.constant() - rhs != 0.0 {
         return None;
     }
@@ -357,6 +391,7 @@ fn soc_quadratic_candidate(c: &AlgebraicConstraint, q: &QuadraticTerms) -> Optio
     // Whether the current column group started with a diagonal entry.
     let mut group: Option<(VarId, bool)> = None;
     for &(row, col, h) in q.quadratic() {
+        let h = orientation.normalize(h);
         if group.is_none_or(|(current, _)| current != col) {
             group = Some((col, row == col));
         }
@@ -405,10 +440,10 @@ pub(crate) fn is_detected_soc(
     vars: &[Variable],
     c: &AlgebraicConstraint,
 ) -> bool {
-    if !matches!(c.as_single(), Some((Sense::Le, _))) {
+    let Some(row) = OrientedRow::of(c) else {
         return false;
-    }
-    extract_quadratic(arena, c.lhs).is_some_and(|q| __is_detected_soc_from_quadratic(vars, c, &q))
+    };
+    extract_quadratic(arena, c.lhs).is_some_and(|q| soc_quadratic(vars, row, &q).is_some())
 }
 
 /// Test an already extracted quadratic for the supported detected-SOC shape.
@@ -418,19 +453,21 @@ pub fn __is_detected_soc_from_quadratic(
     c: &AlgebraicConstraint,
     q: &QuadraticTerms,
 ) -> bool {
-    soc_quadratic(vars, c, q).is_some()
+    OrientedRow::of(c).and_then(|row| soc_quadratic(vars, row, q)).is_some()
 }
 
 /// Head variables of a structurally eligible SOC row, ignoring their bounds:
 /// `t` for `sum p_i x_i^2 <= n t^2`,
-/// `(y, z)` for `sum p_i x_i^2 <= c y z`.
+/// `(y, z)` for `sum p_i x_i^2 <= c y z`, or the `>=` mirror of either.
 /// The row is a cone exactly when every head variable has `lb >= 0`.
 #[doc(hidden)]
 pub fn __soc_head_variables(
     row: &AlgebraicConstraint,
     terms: &QuadraticTerms,
 ) -> Option<SocHead<VarId>> {
-    soc_quadratic_candidate(row, terms).map(|shape| shape.head)
+    OrientedRow::of(row)
+        .and_then(|oriented| soc_quadratic_candidate(oriented, terms))
+        .map(|shape| shape.head)
 }
 
 // TODO: Here we are deliberately conservative and purely structural
@@ -439,9 +476,10 @@ pub fn __soc_head_variables(
 ///
 /// A constraint is recognized iff:
 ///
-/// - it is single-sided `lhs <= rhs` (no ranges, `>=`, or equalities),
+/// - it is single-sided `lhs <= rhs`, or `lhs >= rhs` read as
+///   `-(lhs - rhs) <= 0` (no ranges or equalities),
 /// - `lhs - rhs` is a pure quadratic form: no linear terms, no constant,
-/// - it has at least one positive diagonal entry `p_i` and either
+/// - after that orientation, it has at least one positive diagonal entry `p_i` and either
 ///   - exactly one negative diagonal entry `-n` (on the bound variable `t`)
 ///     and no cross terms, or
 ///   - exactly one negative cross term `-c y z` and no negative diagonal
@@ -462,7 +500,8 @@ pub fn __detect_soc_from_quadratic(
     c: &AlgebraicConstraint,
     q: &QuadraticTerms,
 ) -> Option<SocForm> {
-    let SocShape { head, scale } = soc_quadratic(vars, c, q)?;
+    let oriented = OrientedRow::of(c)?;
+    let SocShape { head, scale } = soc_quadratic(vars, oriented, q)?;
 
     // Standard rows normalize by `n` (`||sqrt(p/n) x|| <= t`);
     // rotated rows use `w_i = sqrt(p_i) x_i` with `u = (c/2) y`, `v = z`.
@@ -472,10 +511,12 @@ pub fn __detect_soc_from_quadratic(
     let terms = q
         .quadratic()
         .iter()
-        .filter(|&&(row, col, h)| row == col && h > 0.0)
-        .map(|&(row, _, h)| LinearTerms {
-            coeffs: vec![(row, (h / divisor).sqrt())].into(),
-            constant: 0.0,
+        .filter_map(|&(row, col, h)| {
+            let p = oriented.orientation.normalize(h);
+            (row == col && p > 0.0).then(|| LinearTerms {
+                coeffs: vec![(row, (p / divisor).sqrt())].into(),
+                constant: 0.0,
+            })
         })
         .collect();
     let single = |var: VarId, coefficient: f64| LinearTerms {

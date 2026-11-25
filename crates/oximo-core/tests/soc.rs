@@ -70,12 +70,193 @@ fn rejects_nonzero_constant() {
 }
 
 #[test]
-fn rejects_ge_sense() {
+fn detects_ge_standard_cone_like_its_le_mirror() {
+    let m = Model::new("soc");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    constraint!(m, c, 5.0 * t * t >= 2.0 * x * x + 3.0 * y * y);
+
+    let form = detect_first(&m).expect("should detect a `>=` SOC");
+    let coef_of = |name: &str| {
+        let id = m.variable_id(name).unwrap();
+        form.terms.iter().find(|lt| lt.coeffs[0].0 == id).map(|lt| lt.coeffs[0].1).unwrap()
+    };
+    assert_eq!(form.terms.len(), 2);
+    assert!((coef_of("x") - (2.0f64 / 5.0).sqrt()).abs() < 1e-12);
+    assert!((coef_of("y") - (3.0f64 / 5.0).sqrt()).abs() < 1e-12);
+    let bound = form.standard_bound().expect("standard head");
+    assert_eq!(bound.coeffs, vec![(m.variable_id("t").unwrap(), 1.0)]);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn ge_sense_head_is_the_negated_side() {
     let m = Model::new("soc");
     variable!(m, x);
     variable!(m, t >= 0.0);
     constraint!(m, c, x * x >= t * t);
     assert!(detect_first(&m).is_none());
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn ge_sense_detects_reversed_head_when_it_is_nonnegative() {
+    let m = Model::new("soc");
+    variable!(m, x >= 0.0);
+    variable!(m, t);
+    constraint!(m, c, x * x >= t * t);
+    let form = detect_first(&m).expect("`t^2 <= x^2` with `x >= 0`");
+    assert_eq!(form.standard_bound().unwrap().coeffs, vec![(m.variable_id("x").unwrap(), 1.0)]);
+    assert_eq!(form.terms.len(), 1);
+    assert_eq!(form.terms[0].coeffs.to_vec(), vec![(m.variable_id("t").unwrap(), 1.0)]);
+}
+
+#[test]
+fn ge_rejects_concave_side_of_a_cone() {
+    let m = Model::new("soc");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    constraint!(m, c, x * x + y * y >= t * t);
+    assert!(detect_first(&m).is_none());
+}
+
+#[test]
+fn rejects_equality_cone_shape() {
+    let m = Model::new("soc");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    constraint!(m, c, t * t == x * x);
+    assert!(detect_first(&m).is_none());
+}
+
+#[test]
+fn ge_rejects_nonzero_constant() {
+    let m = Model::new("soc");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    constraint!(m, c, t * t >= x * x + 1.0);
+    assert!(detect_first(&m).is_none());
+}
+
+#[test]
+fn rejects_ranged_cone_shape() {
+    let m = Model::new("soc");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    m.add_constraint(
+        "band",
+        Constraint::new((t * t - x * x).into_function(), Interval { lower: 0.0, upper: 1.0 }),
+    );
+    assert!(m.constraints().algebraic()[0].as_single().is_none());
+    assert!(detect_first(&m).is_none());
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn macro_split_quadratic_range_detects_only_its_cone_half() {
+    let m = Model::new("soc");
+    variable!(m, x);
+    variable!(m, t >= 0.0);
+    let RangeConstraintHandles::Split { lower, upper } =
+        constraint!(m, band, 0.0 <= t * t - x * x <= 1.0)
+    else {
+        panic!("quadratic macro ranges split");
+    };
+    let arena = m.arena();
+    let vars = m.resolved_variables();
+    let rows = m.constraints();
+    let detected = |id: ConstraintId| {
+        let row = &rows.algebraic()[id.index()];
+        let q = oximo_expr::extract_quadratic(&arena, row.lhs).unwrap();
+        oximo_core::__detect_soc_from_quadratic(&vars, row, &q)
+    };
+    let cone = detected(lower.row_id()).expect("lower half is a cone");
+    assert_eq!(cone.standard_bound().unwrap().coeffs, vec![(m.variable_id("t").unwrap(), 1.0)]);
+    assert!(detected(upper.row_id()).is_none());
+    drop((rows, vars, arena));
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+/// `(variable name, coefficient)` pairs of every component.
+fn form_signature(m: &Model, form: &SocForm) -> Vec<Vec<(String, f64)>> {
+    let names = m.resolved_variables();
+    let mut terms: Vec<_> = form
+        .terms
+        .iter()
+        .map(|t| t.coeffs.iter().map(|&(v, c)| (names[v.index()].name.to_string(), c)).collect())
+        .collect::<Vec<Vec<_>>>();
+    terms.sort_by(|a, b| a[0].0.cmp(&b[0].0));
+    let mut signature: Vec<Vec<_>> = form
+        .head
+        .iter()
+        .map(|h| {
+            assert_eq!(h.constant, 0.0);
+            h.coeffs.iter().map(|&(v, c)| (names[v.index()].name.to_string(), c)).collect()
+        })
+        .collect();
+    signature.extend(terms);
+    signature
+}
+
+#[test]
+fn le_row_and_ge_mirror_materialize_the_same_form() {
+    type Build = fn(&Model, bool);
+    let cases: [(&str, Build); 4] = [
+        ("standard", |m, ge| {
+            variable!(m, x);
+            variable!(m, y);
+            variable!(m, t >= 0.0);
+            if ge {
+                constraint!(m, c, 5.0 * t * t >= 2.0 * x * x + 3.0 * y * y);
+            } else {
+                constraint!(m, c, 2.0 * x * x + 3.0 * y * y <= 5.0 * t * t);
+            }
+        }),
+        ("standard with rhs", |m, ge| {
+            variable!(m, x);
+            variable!(m, t >= 0.0);
+            if ge {
+                constraint!(m, c, 4.0 - x * x + t * t >= 4.0);
+            } else {
+                constraint!(m, c, x * x - t * t + 4.0 <= 4.0);
+            }
+        }),
+        ("rotated", |m, ge| {
+            variable!(m, x);
+            variable!(m, y);
+            variable!(m, u >= 0.0);
+            variable!(m, v >= 0.0);
+            if ge {
+                constraint!(m, c, 6.0 * u * v >= x * x + 4.0 * y * y);
+            } else {
+                constraint!(m, c, x * x + 4.0 * y * y <= 6.0 * u * v);
+            }
+        }),
+        ("rotated reordered heads", |m, ge| {
+            variable!(m, v >= 0.0);
+            variable!(m, x);
+            variable!(m, u >= 0.0);
+            if ge {
+                constraint!(m, c, 4.0 * u * v >= x * x);
+            } else {
+                constraint!(m, c, x * x <= 4.0 * u * v);
+            }
+        }),
+    ];
+
+    for (name, build) in cases {
+        let le = Model::new("le");
+        build(&le, false);
+        let ge = Model::new("ge");
+        build(&ge, true);
+        let (le_form, ge_form) = (detect_first(&le), detect_first(&ge));
+        let (le_form, ge_form) = (le_form.expect(name), ge_form.expect(name));
+        assert_eq!(le_form.kind(), ge_form.kind(), "{name}");
+        assert_eq!(form_signature(&le, &le_form), form_signature(&ge, &ge_form), "{name}");
+        assert_eq!(le.kind(), ge.kind(), "{name}");
+    }
 }
 
 #[test]
@@ -133,6 +314,58 @@ fn detects_rotated_cone_from_cross_term() {
     assert_eq!(hv.coeffs, vec![(vi, 1.0)]);
     assert_eq!(form.terms.len(), 2);
     assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn detects_ge_rotated_cone_like_its_le_mirror() {
+    let m = Model::new("rsoc");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    constraint!(m, c, 6.0 * u * v >= x * x + 4.0 * y * y);
+
+    let form = detect_first(&m).expect("should detect a `>=` rotated cone");
+    let (hu, hv) = rotated_parts(&form);
+    let (ui, vi) = (m.variable_id("u").unwrap(), m.variable_id("v").unwrap());
+    assert_eq!(hu.coeffs, vec![(ui, 3.0)]);
+    assert_eq!(hv.coeffs, vec![(vi, 1.0)]);
+    let mut terms: Vec<_> = form.terms.iter().map(|t| t.coeffs[0]).collect();
+    terms.sort_by_key(|&(var, _)| var.0);
+    let (xi, yi) = (m.variable_id("x").unwrap(), m.variable_id("y").unwrap());
+    assert_eq!(terms, vec![(xi, 1.0), (yi, 2.0)]);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
+fn ge_rotated_detection_requires_nonnegative_heads() {
+    let m = Model::new("rsoc");
+    variable!(m, x);
+    variable!(m, u);
+    variable!(m, v >= 0.0);
+    constraint!(m, c, u * v >= x * x);
+    assert!(detect_first(&m).is_none());
+    assert_eq!(m.kind(), ModelKind::QCP);
+}
+
+#[test]
+fn ge_rotated_rejects_reverse_orientation() {
+    let m = Model::new("rsoc");
+    variable!(m, x);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    constraint!(m, c, x * x >= u * v);
+    assert!(detect_first(&m).is_none());
+}
+
+#[test]
+fn ge_rotated_rejects_squared_head() {
+    let m = Model::new("rsoc");
+    variable!(m, x);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    constraint!(m, c, u * v >= x * x + u * u);
+    assert!(detect_first(&m).is_none());
 }
 
 #[test]

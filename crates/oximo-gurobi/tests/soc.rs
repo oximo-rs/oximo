@@ -151,6 +151,34 @@ fn rotated_soc_is_recognized_as_convex_with_vector_dual() {
 }
 
 #[test]
+fn ge_detected_cones_solve_without_nonconvex() {
+    let m = Model::new("socp_detected_ge");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    constraint!(m, cone, t * t >= x * x + y * y);
+    constraint!(m, link, x + y >= 1.0);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let r = Gurobi.solve(&m, &GurobiOptions::default().non_convex(0)).expect("standard");
+    let obj = r.objective().expect("obj");
+    assert!(close(obj, std::f64::consts::FRAC_1_SQRT_2, 1e-5), "obj = {obj}");
+
+    let m = Model::new("rsocp_detected_ge");
+    variable!(m, x >= 2.0);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    constraint!(m, cone, 2.0 * u * v >= x * x);
+    objective!(m, Min, u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let r = Gurobi.solve(&m, &GurobiOptions::default().non_convex(0)).expect("rotated");
+    let obj = r.objective().expect("obj");
+    assert!(close(obj, 2.0 * std::f64::consts::SQRT_2, 1e-5), "obj = {obj}");
+}
+
+#[test]
 fn rotated_soc_detected_from_quadratic_solves() {
     let m = Model::new("rsocp_detected");
     variable!(m, x);

@@ -81,7 +81,9 @@ m.sos_constraint_id("choice") // Option<SosConstraintId>
 `m.constraints()` provides the built-in algebraic and conic views. Use
 `m.semantic_constraints_ref().iter()` to inspect the original function/set types,
 data, activity, and provenance of all registered declarations.
-SOC-shaped quadratic constraints declared with `constraint!` remain algebraic
+SOC-shaped quadratic constraints declared with `constraint!` (`sum p_i x_i^2 <= n t^2`
+or `sum p_i x_i^2 <= c y z` with nonnegative heads, written with `<=` or `>=`)
+classify the model as `SOCP` but remain algebraic
 entries; only constraints declared with `soc_constraint!` or
 `add_soc_constraint` appear in `second_order_cones()`.
 

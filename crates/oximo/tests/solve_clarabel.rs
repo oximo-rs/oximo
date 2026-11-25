@@ -102,6 +102,42 @@ fn rotated_soc_detected_from_quadratic_matches_explicit() {
 
 #[test]
 #[expect(clippy::many_single_char_names)]
+fn ge_rotated_soc_detected_matches_le_form() {
+    let m = Model::new("rsocp ge");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    m.fix(x, 1.0).unwrap();
+    m.fix(y, 1.0).unwrap();
+    constraint!(m, r, 2.0 * u * v >= x * x + y * y);
+    objective!(m, Min, u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let res = Clarabel.solve(&m, &ClarabelOptions::default()).expect("solve");
+    assert_eq!(res.termination, TerminationStatus::Optimal);
+    close_to(res.objective().unwrap(), 2.0);
+}
+
+#[test]
+fn ge_standard_soc_detected_matches_le_form() {
+    let m = Model::new("socp ge");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    m.fix(x, 3.0).unwrap();
+    m.fix(y, 4.0).unwrap();
+    constraint!(m, c, t * t >= x * x + y * y);
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let res = Clarabel.solve(&m, &ClarabelOptions::default()).expect("solve");
+    assert_eq!(res.termination, TerminationStatus::Optimal);
+    close_to(res.objective().unwrap(), 5.0);
+}
+
+#[test]
+#[expect(clippy::many_single_char_names)]
 fn rotated_soc_persistent_resolve_after_parameter_change() {
     let m = Model::new("rsocp param");
     variable!(m, x);
@@ -130,6 +166,27 @@ fn rotated_detected_persistent_after_parameter_change() {
     param!(m, p = 1.0);
     m.fix(x, 1.0).unwrap();
     constraint!(m, r, p * x * x <= 2.0 * u * v);
+    objective!(m, Min, u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let mut solver = Clarabel.persistent();
+    let first = solver.solve(&m, &ClarabelOptions::default()).expect("solve");
+    close_to(first.objective().unwrap(), 2.0 * 0.5f64.sqrt());
+    m.set_param(p, 2.0).unwrap();
+    let second = solver.solve(&m, &ClarabelOptions::default()).expect("resolve");
+    close_to(second.objective().unwrap(), 2.0);
+}
+
+#[test]
+#[expect(clippy::many_single_char_names)]
+fn ge_rotated_detected_persistent_after_parameter_change() {
+    let m = Model::new("rsocp detected ge param");
+    variable!(m, x);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    param!(m, p = 1.0);
+    m.fix(x, 1.0).unwrap();
+    constraint!(m, r, 2.0 * u * v >= p * x * x);
     objective!(m, Min, u + v);
     assert_eq!(m.kind(), ModelKind::SOCP);
 

@@ -164,6 +164,26 @@ fn soc_shaped_quadratic_constraint_classifies_socp() {
 }
 
 #[test]
+#[expect(clippy::many_single_char_names)]
+fn ge_soc_shaped_quadratic_constraints_classify_socp() {
+    let m = Model::new("socp_detected_ge");
+    variable!(m, x);
+    variable!(m, y);
+    variable!(m, t >= 0.0);
+    constraint!(m, c, t.powi(2) >= x.powi(2) + y.powi(2));
+    objective!(m, Min, t);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+
+    let m = Model::new("rsocp_detected_ge");
+    variable!(m, x);
+    variable!(m, u >= 0.0);
+    variable!(m, v >= 0.0);
+    constraint!(m, c, 2.0 * u * v >= x.powi(2));
+    objective!(m, Min, u + v);
+    assert_eq!(m.kind(), ModelKind::SOCP);
+}
+
+#[test]
 fn soc_detection_requires_nonnegative_bound_var() {
     let m = Model::new("qcp_signed");
     variable!(m, x);
